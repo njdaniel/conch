@@ -33,9 +33,13 @@ describe('credential handling', () => {
     expect(sending).toEqual(['./admin/AddAIAdmin.tsx', './platform/browser/http.ts']);
   });
 
-  it('is never logged: the page makes no console call', () => {
+  it('is never logged: the only console call is the fixed capture-stall diagnostic', () => {
+    // Issue #1903 requires one content-free diagnostic. Permit this literal
+    // call alone: no variable, context, credential or captured content.
+    const diagnostic = "console.warn('Screen capture stopped delivering frames (muted for 3 seconds).');";
+    expect(sources['./voice/sdk.ts']?.split(diagnostic)).toHaveLength(2);
     const logging = Object.entries(sources)
-      .filter(([, code]) => /\bconsole\s*\./.test(code))
+      .filter(([path, code]) => /\bconsole\s*\./.test(path === './voice/sdk.ts' ? code.replace(diagnostic, '') : code))
       .map(([path]) => path);
     expect(logging).toEqual([]);
   });
@@ -112,10 +116,10 @@ describe('local storage', () => {
     // callers name the notification and appearance preferences' keys, the setup
     // card's (a per-account mark that the card was put off), the channel
     // arrangement's (issue #1493), the voice mode and share quality, the call
-    // view's non-video filter (issue #1487) and the talk key's name (issue #1382).
+    // view's non-video filter (issue #1487), the talk key's name (issue #1382) and the push registration's id (issue #1826).
     const api = withoutComments(sources['./api.ts'] ?? '');
-    expect(api.match(/credentials\.(read|write)Preference\(\s*(?!notificationPreferencesKey\(|appearancePreferencesKey\(|arrangementKey\(|setupCardKey\(|voiceModeKey\b|shareQualityKey\b|hideNonVideoKey\b|talkKeyLabelKey\b)/g) ?? []).toEqual([]);
-    expect(api.match(/credentials\.(read|write)Preference\(/g)?.length).toBe(16);
+    expect(api.match(/credentials\.(read|write)Preference\(\s*(?!notificationPreferencesKey\(|appearancePreferencesKey\(|arrangementKey\(|setupCardKey\(|voiceModeKey\b|shareQualityKey\b|hideNonVideoKey\b|talkKeyLabelKey\b|pushRegistrationKey\()/g) ?? []).toEqual([]);
+    expect(api.match(/credentials\.(read|write)Preference\(/g)?.length).toBe(18);
   });
 
   it('is not missed by the rules: a bare test of each', () => {
@@ -436,7 +440,7 @@ describe('the history exception', () => {
 
 // The invite code (issue #440) is handled like a credential. It is held under
 // the name inviteCode, in the modules that must hold it, and nowhere else: it
-// is never stored, logged (no module logs at all), put in a URL other than the
+// is never stored, logged (the sole diagnostic is a fixed string), put in a URL other than the
 // creator's link, or rendered.
 const inviteHolders = ['./App.tsx', './Invite.tsx', './api.ts', './route.ts'];
 const inviteStored = /(setItem|getItem|removeItem)\([^)]*\binviteCode\b/;
@@ -623,8 +627,9 @@ describe('the diagnostic ring', () => {
       }
     }
     // Every recording site was seen: two failures, an open, a close, a
-    // reconnect, a voice state and a device error.
-    expect(calls).toBe(7);
+    // reconnect, a voice state and three device errors (a microphone refused,
+    // a level meter the browser would not start, and playback refused a tap).
+    expect(calls).toBe(9);
   });
 
   it('is not missed by the rules: a bare test of each', () => {
@@ -816,8 +821,9 @@ describe('the platform seam', () => {
     // Only the build-selected alias reaches the adapter; no source imports it.
     // A type-only import of the bridge contract is erased and is allowed (the
     // native-voice view types, issue #1375).
-    // The DOM-to-evdev table is pure data and imports nothing (issue #1382).
-    const typeOnlyBridge = /^import (type )?[^;]*from\s+'[^']*desktop\/(bridge|evdev)';?$/gm;
+    // The DOM-to-evdev table (#1382) and Windows binding translation (#777)
+    // are pure data; the latter imports only that same evdev table.
+    const typeOnlyBridge = /^import (type )?[^;]*from\s+'[^']*desktop\/(bridge|evdev|windows-keys)';?$/gm;
     const importing = Object.entries(sources)
       .filter(([path, code]) => !path.startsWith('./platform/desktop/') && /platform\/desktop|from\s+['"]\.\/desktop/.test(code.replace(typeOnlyBridge, '')))
       .map(([path]) => path);
@@ -850,5 +856,28 @@ describe('times and dates', () => {
       .filter(([path, code]) => path !== './time.ts' && /\.toLocale(Date|Time)?String\(|\bIntl\.DateTimeFormat\b/.test(withoutComments(code)))
       .map(([path]) => path);
     expect(formatting).toEqual([]);
+  });
+});
+
+// Windows' and macOS's filesystems ignore case, so './Identity' found
+// identity.ts there and the desktop build broke on Windows (issue #1801). No two
+// modules here may differ only in case once the extension is dropped.
+const allModules = Object.keys(import.meta.glob(['./**/*.ts', './**/*.tsx']));
+
+describe('module names', () => {
+  it('finds the modules', () => {
+    expect(allModules.length).toBeGreaterThan(5);
+  });
+
+  it('has no two that differ only in case', () => {
+    const seen = new Map<string, string>();
+    const clashes: string[] = [];
+    for (const path of allModules) {
+      const key = path.replace(/\.tsx?$/, '').toLowerCase();
+      const other = seen.get(key);
+      if (other !== undefined && other.replace(/\.tsx?$/, '') !== path.replace(/\.tsx?$/, '')) clashes.push(`${other} and ${path}`);
+      seen.set(key, path);
+    }
+    expect(clashes).toEqual([]);
   });
 });

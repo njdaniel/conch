@@ -17,9 +17,9 @@ interface Props {
   // Whether the active profile's client is on the page; false on the
   // "unsupported release" page (./Compat).
   readonly clientMounted?: boolean;
-  // A conch:// link that reached the app, checked by main, for the invite
-  // choice below (issue #1592). Undefined: the choice asks for it itself.
-  readonly arrival?: Extract<InviteCheck, { ok: true }> | null;
+  // Main's check of a conch:// link for the invite section below (issue #1592).
+  // Undefined: the section asks for it itself.
+  readonly arrival?: InviteCheck | null;
   readonly onArrivalTaken?: () => void;
 }
 

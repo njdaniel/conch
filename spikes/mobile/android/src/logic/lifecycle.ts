@@ -4,7 +4,8 @@
 // and audio focus.
 //
 // Background, the iOS inactive state (Control Center, a call banner), screen
-// lock and an audio interruption each shut the gate in both modes with no
+// lock, an audio interruption and, on Android, the activity being stopped
+// (#1758: leaving the app, which AppState does not report) each shut the gate in both modes with no
 // tail and stop the camera, released naming its claim. When the last of them
 // ends the blocks lift, and nothing opens: the gate needs a new press or, in
 // open mode, quiet and then an onset (the resume latch); the camera needs the
@@ -12,7 +13,7 @@
 import type { CameraClient } from './camera';
 import type { TransmitGate } from './gate';
 
-export type LifecycleReason = 'background' | 'inactive' | 'lock' | 'interruption';
+export type LifecycleReason = 'background' | 'inactive' | 'lock' | 'interruption' | 'stopped';
 
 export type AppState = 'active' | 'background' | 'inactive';
 
@@ -44,6 +45,14 @@ export class Lifecycle {
 
   screenLocked(locked: boolean): void {
     this.set('lock', locked);
+  }
+
+  // activityStopped is Android's onActivityStopped (true) and onActivityStarted
+  // (false). A dialog only pauses the activity, so only leaving sets it. It is
+  // its own reason, so a stop while the camera permission prompt is up is
+  // never mistaken for the prompt's own 'background'.
+  activityStopped(stopped: boolean): void {
+    this.set('stopped', stopped);
   }
 
   // interrupted is an audio interruption (a call, the assistant, another app

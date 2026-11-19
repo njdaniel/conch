@@ -56,6 +56,15 @@ export const SHARE_CAPTURE_MS = 10_000;
 // Share grant) is not the grant that took the use and moves nothing.
 export const SHARE_CONFIRM_MS = 15_000;
 
+// How long after main granted the capture (display-capture answered the
+// portal's pick with a source) the sound use of the same arm may still be
+// taken (issue #1854): the claim and the publish, which the page waits for
+// before it asks main to add the share's sound. A third use of the one Share
+// click, made available only by grantCapture: a pick that was cancelled,
+// refused or never answered with a source leaves it locked, because without
+// that capture there is nothing to add sound to.
+export const SHARE_SOUND_MS = 5 * 60_000;
+
 interface Held {
   readonly contents: object;
   readonly document: number;
@@ -66,6 +75,12 @@ interface Held {
   capture: boolean;
   // When main confirmed the grant issued from this allowance, or null.
   issuedAt: number | null;
+  // When the capture use was spent (the pick started), or null.
+  captureTakenAt: number | null;
+  // When main granted the capture this arm's pick started (grantCapture), or
+  // null: the sound use is good from then, once, for SHARE_SOUND_MS.
+  capturedAt: number | null;
+  sound: boolean;
 }
 
 export interface ShareAllowanceDeps {
@@ -86,7 +101,7 @@ export class ShareAllowance {
   // document. The caller has checked who is calling and taken the act.
   arm(contents: object | null): boolean {
     if (contents === null) return false;
-    this.#held = { contents, document: this.#deps.generation(), at: this.#deps.now(), grant: true, grantTakenAt: null, capture: true, issuedAt: null };
+    this.#held = { contents, document: this.#deps.generation(), at: this.#deps.now(), grant: true, grantTakenAt: null, capture: true, issuedAt: null, captureTakenAt: null, capturedAt: null, sound: true };
     return true;
   }
 
@@ -152,6 +167,29 @@ export class ShareAllowance {
     const held = this.#live(contents);
     if (!this.#captureGood(held)) return false;
     held.capture = false;
+    held.captureTakenAt = this.#deps.now();
+    return true;
+  }
+
+  // grantCapture records that main answered this arm's pick with a source
+  // (display-capture.ts): the capture is granted. Nothing happens unless the
+  // arm's capture use was spent, for the same contents and document.
+  grantCapture(contents: object | null): void {
+    const held = this.#live(contents);
+    if (held === null || held.captureTakenAt === null || held.capturedAt !== null) return;
+    held.capturedAt = this.#deps.now();
+  }
+
+  // takeSound uses up the sound use: for shareSoundStart, which asks main to
+  // add the share's sound to the share this Share click began. Good only after
+  // main granted the capture of this arm's pick (grantCapture), once, for
+  // SHARE_SOUND_MS, and for the same contents and document.
+  takeSound(contents: object | null): boolean {
+    const held = this.#live(contents);
+    if (held === null || !held.sound || held.capturedAt === null) return false;
+    const age = this.#deps.now() - held.capturedAt;
+    if (age < 0 || age > SHARE_SOUND_MS) return false;
+    held.sound = false;
     return true;
   }
 }

@@ -28,8 +28,10 @@ export interface Activation {
   // The credential and server for a voice start (Session.voiceCredential), at
   // Join time only; null when signed out. The caller keeps no copy.
   voiceCredential(): { readonly origin: string; readonly token: string; readonly generation: number } | null;
-  // Whether the identity a voice credential was read under (its generation)
-  // is still in force in this activation: false once the session has been
+  // Token-free session fence for configuration; null when signed out.
+  voiceGeneration(): number | null;
+  // Whether a voice credential or configuration generation is still in
+  // force in this activation: false once the session has been
   // bumped (sign-out, a 401) or the activation is over.
   voiceCurrent(generation: number): boolean;
   // Asks the server who the credential in force is. lasting: a member's, which

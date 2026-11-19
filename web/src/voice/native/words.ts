@@ -10,7 +10,7 @@ import type {
   VoiceControlPTTProblem,
   VoiceControlReason,
 } from '../../schema/generated';
-import type { CompanionGrantError, CompanionShareUnavailable, NativeVoiceStatus, NativeVoiceView } from '../../platform/desktop/bridge';
+import type { CompanionGrantError, CompanionShareUnavailable, NativeShareAudio, NativeVoiceStatus, NativeVoiceView, ShareSoundReason } from '../../platform/desktop/bridge';
 import { companionRefusals } from '../connection';
 import { endedNote, type ShareCause, type ShareEnd, type ShareState } from '../share';
 
@@ -109,6 +109,22 @@ function problemText(problem: string | undefined): string | undefined {
   return has(reasonWords, problem) ? reasonWords[problem] : 'something went wrong with voice';
 }
 
+// The short reason the strip gives beside "not available here", by the kind
+// of refusal main reports (a closed set; any other kind says nothing more).
+// An untrusted helper whose folder other users can change says so (issue
+// #1850); the folder's name stays in main's log.
+const unavailableReasonWords: Readonly<Record<string, string>> = {
+  'not-installed': "the voice helper isn't installed",
+  untrusted: "the voice helper isn't trusted",
+  'profile-dir-unsafe': "the voice runtime folder isn't safe",
+};
+const folderWritableWords = "the voice helper's folder can be changed by other users";
+
+function unavailableReason(view: NativeVoiceView): string | undefined {
+  if (view.problem === 'untrusted' && view.cause === 'folder-writable') return folderWritableWords;
+  return has(unavailableReasonWords, view.problem) ? unavailableReasonWords[view.problem] : undefined;
+}
+
 function where(view: NativeVoiceView): string {
   return view.channel === null ? '' : ` #${view.channel}`;
 }
@@ -133,9 +149,13 @@ export function words(view: NativeVoiceView, binding?: string): VoiceWords {
     case 'unavailable':
     case 'stopping':
     case 'ended': {
-      const reason = view.status === 'idle' || view.status === 'stopping' ? undefined : problemText(view.problem);
       const base = statusWords[view.status];
-      return { text: reason === undefined || view.status === 'unavailable' ? base : `${base}: ${reason}`, retry: false };
+      if (view.status === 'unavailable') {
+        const why = unavailableReason(view);
+        return { text: why === undefined ? base : `${base}: ${why}`, retry: false };
+      }
+      const reason = view.status === 'idle' || view.status === 'stopping' ? undefined : problemText(view.problem);
+      return { text: reason === undefined ? base : `${base}: ${reason}`, retry: false };
     }
     case 'failed':
     case 'lost': {
@@ -268,12 +288,71 @@ export function shareNote(share: ShareState, refusal: CompanionGrantError | null
   return endedNote(share.ended);
 }
 
-// The quality choices (Q-D4-3): 720p30, the default, and 1080p30.
-export const shareQualityWords: Readonly<Record<'720p' | '1080p', string>> = {
-  '720p': '720p, 30 fps',
-  '1080p': '1080p, 30 fps',
-};
+// What each of the desktop's quality choices is called (Q-D4-3, #1772), by
+// resolution and frame rate; the estimate beside it and the Source at 60 fps
+// caution are the browser's (ShareQualityMenu).
+export function shareQualityWords(quality: { readonly resolution: string; readonly frameRate: number }): string {
+  const resolution = quality.resolution === 'source' ? 'Source (up to 4K)' : quality.resolution;
+  return `${resolution}, ${String(quality.frameRate)} fps`;
+}
 
 export function indicatorWords(channel: string): string {
   return `Sharing your screen in #${channel}`;
 }
+
+// ---- the Linux share's sound (issue #1854; linux-share-audio.md §9, §11)
+//
+// Said only when main's switch is on (the view carries a share sound); with it
+// off every word above stands as it was. None names a token, a room, a path, a
+// device or an application: the reasons are a closed set, a count is a number.
+
+// The toggle before the picker (and during a share): "Share with sound", on
+// by default; off is "Share without sound", one click away.
+export const shareWithSoundLabel = 'Share with sound';
+export const shareWithoutSoundNote = 'Your screen will be shared without sound.';
+
+// Why the screen's sound is not offered or not carried, in words (§11), and
+// the toggle's reason when it is disabled. The helper that has no route (it
+// does not speak v3) and a process tree that could not be read share the
+// generic line; the detail of the second is main's log, by reason only.
+const cantShareNow = "Your screen's sound can't be shared right now.";
+const couldntAdd = "Sound couldn't be added to this share; try Share again.";
+
+export const shareSoundWords: Readonly<Record<ShareSoundReason, string>> = {
+  'old-helper': cantShareNow,
+  'old-server': "This server can't record a sound consent for the Linux app yet. Your screen is shared without sound.",
+  'consent-failed': couldntAdd,
+  'no-pipewire': "Your screen's sound can't be shared right now: the sound system isn't reachable.",
+  'no-process-tree': cantShareNow,
+  'publish-refused': couldntAdd,
+  unavailable: cantShareNow,
+};
+
+// The reasons that leave no route at all, so the toggle is disabled with them
+// (before the picker or during a share). Any other reason is a failure of the
+// share's sound, said beside it, and the toggle stays usable to try again.
+export const noSoundRoute: ReadonlySet<ShareSoundReason> = new Set<ShareSoundReason>(['old-helper', 'old-server']);
+
+export function soundFromWords(sources: number): string {
+  return `sound from ${String(sources)} ${sources === 1 ? 'app' : 'apps'}`;
+}
+
+// The indicator with the share's sound on: "with sound" ONLY when the helper
+// said on (audio is its confirmed state; nothing is optimistic). On with
+// nothing playing says so; a muted track says so; otherwise the count.
+export function soundIndicatorWords(channel: string, audio: NativeShareAudio | undefined): string {
+  if (audio?.state !== 'on') return `Sharing your screen without sound in #${channel}`;
+  const base = `Sharing your screen and its sound in #${channel}`;
+  const notes = [audio.muted ? 'sound muted' : null, audio.sources === 0 ? 'nothing is playing' : soundFromWords(audio.sources)].filter((n): n is string => n !== null);
+  return `${base} (${notes.join(', ')})`;
+}
+
+// The share-sound mute beside Stop, labelled so that it is not the
+// microphone's: the microphone's is "Mute", this one says whose sound it is.
+export function shareSoundMuteLabel(muted: boolean): string {
+  return muted ? 'Unmute share sound' : 'Mute share sound';
+}
+
+// A call that did not take (the page's own "no": nothing was kept or muted).
+export const shareSoundNotKept = "That choice couldn't be saved.";
+export const shareSoundMuteFailed = "The share's sound could not be muted.";

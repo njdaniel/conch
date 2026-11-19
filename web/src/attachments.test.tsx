@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { SPOILER_FILE_PREFIX } from './schema/file';
 
+// See openChat: the bound on the app's first boot, under the 5 s test timeout.
+const bootMs = 4000;
 const origin = 'http://127.0.0.1:8080';
 const secret = 'conch_secret_token_value';
 const ticket = 'conch_wst_TICKETTICKETTICKETTICKETTICKETTICKETTICKET';
@@ -159,11 +161,20 @@ async function openChat(onRender?: (view: ReturnType<typeof render>) => void, st
   window.location.hash = '';
   const view = render(strictMode ? <StrictMode><App origin={origin} /></StrictMode> : <App origin={origin} />);
   onRender?.(view);
-  await screen.findByRole('log', { name: 'Messages' });
-  await waitFor(() => { expect(FakeSocket.all.length).toBeGreaterThan(0); });
+  // By label, not role: a role query walks the whole page's accessibility
+  // tree on every poll, and under a loaded machine that polling competes with
+  // the render it waits for (issue #1780).
+  // The wait is the app's first boot: whoami, channels and history, each a
+  // real fetch Response whose body resolves on macrotasks that neither fake
+  // timers nor a flushed microtask queue can order. Its bound is therefore a
+  // hang detector, not a measure: just under the 5 s test timeout, so a real
+  // hang still names the missing element instead of timing the test out.
+  const log = await screen.findByLabelText('Messages', undefined, { timeout: bootMs });
+  expect(log.getAttribute('role')).toBe('log');
+  await waitFor(() => { expect(FakeSocket.all.length).toBeGreaterThan(0); }, { timeout: bootMs });
   const socket = FakeSocket.all.at(-1) as FakeSocket;
   socket.open();
-  await waitFor(() => { expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').disabled).toBe(false); });
+  await waitFor(() => { expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').disabled).toBe(false); }, { timeout: bootMs });
   return socket;
 }
 
@@ -172,7 +183,11 @@ function choose(...files: File[]) {
 }
 
 function clickSend() {
-  fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+  // The button's label, then its enclosing button, which is clicked: no role
+  // query (issue #1780).
+  const button = screen.getByText('Send').closest('button');
+  expect(button).not.toBeNull();
+  fireEvent.click(button as HTMLButtonElement);
 }
 
 beforeEach(() => {

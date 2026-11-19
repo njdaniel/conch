@@ -23,10 +23,14 @@ const unique = (label: string) => `a8-${label}-${String(Date.now())}`;
 // The channels' own buttons, not the ⋯ of a row's menu (issue #1135).
 const channelButtons = (page: Page) => page.getByRole('navigation', { name: 'Channels' }).getByRole('button', { name: /^(?!Actions for |Browse channels$|New channel$)/ });
 
-// join chooses a name and a password on the landing page (issue #713: the
-// invite makes an account through POST /v2/invites/redeem) and waits for the
-// lobby.
+// join chooses to make an account, then a name and password (issue #713:
+// the invite makes an account through POST /v2/invites/redeem), and waits
+// for the lobby. A retry keeps the form already open.
 async function join(page: Page, name: string): Promise<void> {
+  await expect(page.getByRole('button', { name: 'Create an account', exact: true }).or(page.getByLabel('Your name'))).toBeVisible();
+  if (await page.getByRole('button', { name: 'Create an account', exact: true }).isVisible()) {
+    await page.getByRole('button', { name: 'Create an account', exact: true }).click();
+  }
   await fillAccount(page, name);
   await expect(statusLine(page)).toContainText(name);
   await expect(statusLine(page)).toContainText('Connected');
@@ -163,6 +167,7 @@ test('F5 a name with an invisible character gets a plain line on the name field'
   const made = await makeMemberLink(world, world.tokens.operator);
   const { page } = await meet({ viewport: { width: 1440, height: 900 } });
   await page.goto(inviteUrl(world, made.code));
+  await page.getByRole('button', { name: 'Create an account', exact: true }).click();
   await fillAccount(page, 'ali​ce');
   await expect(page.getByText('A name cannot contain invisible characters.')).toBeVisible();
   await expect(page.getByLabel('Your name')).toBeFocused();
@@ -243,6 +248,7 @@ test('A8 a joiner makes a link that another browser redeems, sees who joined, th
     const joiner = await meet(phone);
     await joiner.page.goto(link);
     await expect(joiner.page.getByLabel('What the invite gives')).toContainText(inviterName);
+    await joiner.page.getByRole('button', { name: 'Create an account', exact: true }).click();
     await fillAccount(joiner.page, inviterName);
     await expect(joiner.page.getByRole('alert')).toHaveText('That name is taken. Choose another.');
     await expect(joiner.page.getByLabel('Your name')).toHaveValue(inviterName);
@@ -441,6 +447,7 @@ test('F19 the invite landing’s version badge covers no text, and the name hint
   const made = await makeMemberLink(world, world.tokens.operator);
   const { page } = await meet({ viewport: { width: 1440, height: 900 } });
   await page.goto(inviteUrl(world, made.code));
+  await page.getByRole('button', { name: 'Create an account', exact: true }).click();
   await expect(page.getByLabel('Your name')).toBeVisible();
   const badge = page.locator('.version').first();
   await expect(badge).toBeVisible();

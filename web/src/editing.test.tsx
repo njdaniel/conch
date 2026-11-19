@@ -6,6 +6,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from './api';
+import { platform } from './platform';
 import { Conversation } from './Conversation';
 import { editWindowMs, when } from './MessageEdit';
 import { longPressMs } from './MessageMenu';
@@ -28,6 +29,8 @@ function chat(messages: readonly MessageV2[], pending: readonly PendingSend[] = 
 }
 
 interface Options {
+  readonly highlightedId?: number;
+  readonly held?: ChannelChat;
   readonly onEdited?: (message: MessageV2) => void;
   readonly kind?: Person['kind'];
   readonly pending?: readonly PendingSend[];
@@ -37,12 +40,13 @@ interface Options {
   readonly onLoadOlder?: () => void;
 }
 
-function conversation(messages: readonly MessageV2[], { onEdited = vi.fn(), kind = 'human', pending = [], edits = true, channelId, exhausted = true, onLoadOlder = () => undefined }: Options = {}) {
+function conversation(messages: readonly MessageV2[], { highlightedId, held, onEdited = vi.fn(), kind = 'human', pending = [], edits = true, channelId, exhausted = true, onLoadOlder = () => undefined }: Options = {}) {
   return (
     <Conversation
       {...(channelId === undefined ? {} : { channelId })}
+      highlightedId={highlightedId}
       channel="general"
-      chat={chat(messages, pending, exhausted)}
+      chat={held ?? chat(messages, pending, exhausted)}
       live="open"
       people={people(kind)}
       nets={new Map()}
@@ -67,11 +71,11 @@ function conversation(messages: readonly MessageV2[], { onEdited = vi.fn(), kind
 // Controls are named by author and time, never by id (issue #1040), and two
 // messages made a moment apart may fall in different minutes: each is found
 // inside its own item, by the shape of its name.
-const item = (id: number) => document.querySelector<HTMLElement>(`[data-message-id="${String(id)}"]`);
+const item = (id: number) => document.querySelector<HTMLElement>(`.log > .messages > [data-message-id="${String(id)}"]`);
 const within1 = (id: number) => within(item(id) ?? document.body);
 const moreName = /^More actions for ada's message, \d\d:\d\d$/;
 const editName = /^Edit ada's message, \d\d:\d\d$/;
-const more = (id: number) => within1(id).queryByRole('button', { name: moreName });
+const more = (id: number) => within1(id).queryByRole('button', { name: /^More actions for/ });
 const box = (id: number) => within1(id).getByRole('textbox', { name: editName });
 const noBox = (id: number) => within1(id).queryByRole('textbox', { name: editName });
 
@@ -81,6 +85,17 @@ function openEditor(id: number): HTMLTextAreaElement {
   fireEvent.click(button);
   fireEvent.click(within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Edit' }));
   return box(id) as HTMLTextAreaElement;
+}
+
+// Copy actions remain even when Edit is unavailable (#1833).
+function expectNoEdit(id: number) {
+  const button = more(id);
+  expect(button).not.toBeNull();
+  if (button === null) throw new Error('no copy menu');
+  fireEvent.click(button);
+  expect(screen.queryByRole('menuitem', { name: 'Edit' })).toBeNull();
+  expect(screen.getByRole('menuitem', { name: 'Copy link' })).toBeTruthy();
+  fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
 }
 
 beforeEach(() => {
@@ -108,19 +123,19 @@ describe('which messages offer Edit', () => {
     render(conversation([own, attachment, others, approval, old], { pending: [pending] }));
     expect(more(1)).not.toBeNull();
     expect(more(2)).not.toBeNull();
-    expect(more(3)).toBeNull();
-    expect(more(4)).toBeNull();
-    expect(more(5)).toBeNull();
+    expectNoEdit(3);
+    expectNoEdit(4);
+    expectNoEdit(5);
     // A failed send has Retry and Dismiss, and no menu.
-    expect(screen.getAllByRole('button', { name: /^More actions/ })).toHaveLength(2);
+    expect(screen.getAllByRole('button', { name: /^More actions/ })).toHaveLength(5);
   });
 
-  it('none for an agent, nor where the page cannot save an edit', () => {
+  it('keeps copying for an agent and where the page cannot save an edit', () => {
     const { unmount } = render(conversation([msg(1)], { kind: 'agent' }));
-    expect(more(1)).toBeNull();
+    expectNoEdit(1);
     unmount();
     render(conversation([msg(1)], { edits: false }));
-    expect(more(1)).toBeNull();
+    expectNoEdit(1);
   });
 });
 
@@ -135,7 +150,7 @@ describe('the actions menu', () => {
     const menu = screen.getByRole('menu', { name: moreName });
     expect(document.activeElement).toBe(within(menu).getByRole('menuitem', { name: 'Edit' }));
     fireEvent.keyDown(menu, { key: 'ArrowDown' });
-    expect(document.activeElement).toBe(within(menu).getByRole('menuitem', { name: 'Edit' }));
+    expect(document.activeElement).toBe(within(menu).getByRole('menuitem', { name: 'Copy link' }));
     fireEvent.keyDown(menu, { key: 'Escape' });
     expect(screen.queryByRole('menu')).toBeNull();
     expect(document.activeElement).toBe(button);
@@ -149,9 +164,10 @@ describe('the actions menu', () => {
     expect(fireEvent.contextMenu(within(own).getByText('text 1'))).toBe(false);
     expect(screen.getByRole('menu', { name: moreName })).toBeTruthy();
     fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
-    // Nothing to offer on someone else's message: the browser keeps its menu.
-    expect(fireEvent.contextMenu(within(others).getByText('text 3'))).toBe(true);
-    expect(screen.queryByRole('menu')).toBeNull();
+    // Someone else's message offers copying, while Edit stays absent.
+    expect(fireEvent.contextMenu(within(others).getByText('text 3'))).toBe(false);
+    expect(screen.queryByRole('menuitem', { name: 'Edit' })).toBeNull();
+    expect(screen.getByRole('menuitem', { name: 'Copy text' })).toBeTruthy();
   });
 
   it('opens on a long press, and not on a tap or a scroll', () => {
@@ -362,7 +378,7 @@ describe('refusals', () => {
     });
     // The open editor is the person's; the other message stops offering Edit.
     expect(box(1)).toHaveProperty('value', 'too late');
-    expect(more(2)).toBeNull();
+    expectNoEdit(2);
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await act(async () => {
       await Promise.resolve();
@@ -371,9 +387,9 @@ describe('refusals', () => {
     expect(screen.getByRole('alert').textContent).toBe('This message can no longer be edited: it is more than an hour old.');
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(noBox(1)).toBeNull();
-    expect(more(1)).toBeNull();
-    // Focus goes to the message, which no longer has a ⋯.
-    expect(document.activeElement).toBe(item(1));
+    // Focus returns to the copy menu after Edit disappears.
+    expect(document.activeElement).toBe(more(1));
+    expectNoEdit(1);
   });
 });
 
@@ -412,7 +428,7 @@ describe('the edit limit', () => {
     expect(more(1)).not.toBeNull();
     unmount();
     render(rendered(known(10)));
-    expect(more(1)).toBeNull();
+    expectNoEdit(1);
   });
 
   it('a page opened after the edits, knowing none, still offers Edit', () => {
@@ -422,7 +438,7 @@ describe('the edit limit', () => {
 
   it('a message marked final is not offered Edit', () => {
     render(rendered({ ...chat([msg(1)]), final: new Set([1]) }));
-    expect(more(1)).toBeNull();
+    expectNoEdit(1);
   });
 
   it.each(['message_edit_limit_reached', 'message_edit_window_closed'])('%s tells the page the message is final, keeping the text', async (code) => {
@@ -639,5 +655,224 @@ describe('an open edit across a reload (issue #1039)', () => {
     render(conversation([msg(1, { body: 'helo' })], { channelId: 7 }));
     fireEvent.change(openEditor(1), { target: { value: 'fixed' } });
     expect((box(1) as HTMLTextAreaElement).value).toBe('fixed');
+  });
+});
+
+describe('Up from the composer', () => {
+  const composer = () => screen.getByRole('textbox', { name: 'Message #general' });
+  it('edits the newest own message regardless of map order, then Escape returns to the composer', () => {
+    render(conversation([msg(4, { author_id: 3 }), msg(2), msg(1)]));
+    composer().focus();
+    fireEvent.keyDown(composer(), { key: 'ArrowUp' });
+    expect(document.activeElement).toBe(box(2));
+    expect(noBox(1)).toBeNull();
+    fireEvent.keyDown(box(2), { key: 'Escape' });
+    expect(noBox(2)).toBeNull();
+    expect(document.activeElement).toBe(composer());
+  });
+
+  it.each([
+    ['no messages', []],
+    ['only another author', [msg(1, { author_id: 3 })]],
+    ['newest outside the window', [msg(1), msg(2, { created_at: ago(editWindowMs + minute) })]],
+    ['removed newest', [msg(1), msg(2, { removed: true })]],
+  ] as const)('leaves Up alone with %s, without falling back', (_name, messages) => {
+    render(conversation(messages));
+    expect(fireEvent.keyDown(composer(), { key: 'ArrowUp' })).toBe(true);
+    expect(screen.queryByRole('textbox', { name: editName })).toBeNull();
+  });
+
+  it.each(['ten edits', 'final refusal'])('does not skip a newest message with %s', (reason) => {
+    const held = { ...chat([msg(1), msg(2)]),
+      edits: new Map([[2, new Set(Array.from({ length: 10 }, (_, i) => String(i)))]]),
+      final: new Set(reason === 'final refusal' ? [2] : []),
+    };
+    if (reason === 'final refusal') held.edits.clear();
+    render(conversation([], { held }));
+    expect(fireEvent.keyDown(composer(), { key: 'ArrowUp' })).toBe(true);
+    expect(screen.queryByRole('textbox', { name: editName })).toBeNull();
+  });
+
+  it('refocuses an existing edit without replacing unsaved text', () => {
+    render(conversation([msg(1)]));
+    const editor = openEditor(1);
+    fireEvent.change(editor, { target: { value: 'unsaved' } });
+    composer().focus();
+    expect(fireEvent.keyDown(composer(), { key: 'ArrowUp' })).toBe(false);
+    expect(box(1)).toBe(editor);
+    expect(editor.value).toBe('unsaved');
+    expect(document.activeElement).toBe(editor);
+  });
+
+  it.each(['close button', 'thread_not_found'])('asks before closing a dirty thread edit through %s, then allows channel editing', async (reason) => {
+    const root = msg(1, { author_id: 3 });
+    const reply = msg(2, { thread_root_id: 1 });
+    vi.spyOn(api, 'loadThread').mockResolvedValueOnce({ ok: true, value: { messages: [root, reply], next_after: 2 } })
+      .mockResolvedValue({ ok: false, failure: 'invalid', code: 'thread_not_found' });
+    render(conversation([root, msg(3)]));
+    fireEvent.click(screen.getByRole('button', { name: /^Reply to bea/ }));
+    const thread = screen.getByRole('region', { name: /^Thread around/ });
+    await within(thread).findByText('text 2');
+    fireEvent.keyDown(within(thread).getByRole('textbox', { name: 'Reply to bea' }), { key: 'ArrowUp' });
+    fireEvent.change(within(thread).getByRole('textbox', { name: editName }), { target: { value: 'unsaved' } });
+    const close = () => fireEvent.click(within(thread).getByRole('button', { name: reason === 'close button' ? 'Close thread' : 'Load more replies' }));
+    close();
+    await within(thread).findByRole('alertdialog', { name: 'Discard your edit?' });
+    fireEvent.click(within(thread).getByRole('button', { name: 'Keep editing' }));
+    expect(within(thread).getByRole('textbox', { name: editName })).toHaveProperty('value', 'unsaved');
+    close();
+    await within(thread).findByRole('alertdialog', { name: 'Discard your edit?' });
+    fireEvent.click(within(thread).getByRole('button', { name: 'Discard' }));
+    expect(screen.queryByRole('region', { name: /^Thread around/ })).toBeNull();
+    expect(openEditor(3).value).toBe('text 3');
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+  });
+
+  it('keeps a thread edit and its origin when the same message is requested from the channel', async () => {
+    const root = msg(1, { author_id: 3 });
+    const reply = msg(2, { thread_root_id: 1 });
+    vi.spyOn(api, 'loadThread').mockResolvedValue({ ok: true, value: { messages: [root, reply] } });
+    render(conversation([root, reply]));
+    fireEvent.click(screen.getByRole('button', { name: /^Reply to bea/ }));
+    const thread = screen.getByRole('region', { name: /^Thread around/ });
+    await within(thread).findByText('text 2');
+    const replyBox = within(thread).getByRole('textbox', { name: 'Reply to bea' });
+    fireEvent.keyDown(replyBox, { key: 'ArrowUp' });
+    const editor = within(thread).getByRole('textbox', { name: editName });
+    fireEvent.change(editor, { target: { value: 'unsaved' } });
+    fireEvent.click(within1(2).getByRole('button', { name: moreName }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit' }));
+    expect(within(thread).getByRole('textbox', { name: editName })).toBe(editor);
+    expect(editor).toHaveProperty('value', 'unsaved');
+    expect(document.activeElement).toBe(editor);
+    composer().focus();
+    fireEvent.keyDown(composer(), { key: 'ArrowUp' });
+    expect(within(thread).getByRole('textbox', { name: editName })).toBe(editor);
+    expect(editor).toHaveProperty('value', 'unsaved');
+    fireEvent.keyDown(editor, { key: 'Escape' });
+    expect(document.activeElement).toBe(replyBox);
+  });
+
+  it('keeps the current surface while another edit request awaits discard confirmation', async () => {
+    const root = msg(1, { author_id: 3 });
+    const reply = msg(2, { thread_root_id: 1 });
+    vi.spyOn(api, 'loadThread').mockResolvedValue({ ok: true, value: { messages: [root, reply] } });
+    render(conversation([root, msg(3)]));
+    const editor = openEditor(3);
+    fireEvent.change(editor, { target: { value: 'unsaved channel text' } });
+    fireEvent.click(screen.getByRole('button', { name: /^Reply to bea/ }));
+    const thread = screen.getByRole('region', { name: /^Thread around/ });
+    await within(thread).findByText('text 2');
+    const replyBox = within(thread).getByRole('textbox', { name: 'Reply to bea' });
+    fireEvent.keyDown(replyBox, { key: 'ArrowUp' });
+    expect(box(3)).toBe(editor);
+    expect(within(thread).queryByRole('textbox', { name: editName })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Keep editing' }));
+    expect(document.activeElement).toBe(editor);
+    fireEvent.keyDown(replyBox, { key: 'ArrowUp' });
+    fireEvent.click(screen.getByRole('button', { name: 'Discard' }));
+    const threadEditor = within(thread).getByRole('textbox', { name: editName });
+    expect(document.activeElement).toBe(threadEditor);
+    fireEvent.keyDown(threadEditor, { key: 'Escape' });
+    expect(document.activeElement).toBe(replyBox);
+  });
+
+  it.each(['message_not_found', 'channel_not_found'])('shows %s after a failed edit of a reply outside channel history', async (code) => {
+    const root = msg(1, { author_id: 3 });
+    const reply = msg(2, { thread_root_id: 1 });
+    vi.spyOn(api, 'loadThread').mockResolvedValue({ ok: true, value: { messages: [root, reply] } });
+    vi.spyOn(api, 'editMessage').mockResolvedValue({ ok: false, failure: 'refused', code });
+    render(conversation([root]));
+    fireEvent.click(screen.getByRole('button', { name: /^Reply to bea/ }));
+    const thread = screen.getByRole('region', { name: /^Thread around/ });
+    await within(thread).findByText('text 2');
+    fireEvent.keyDown(within(thread).getByRole('textbox', { name: 'Reply to bea' }), { key: 'ArrowUp' });
+    fireEvent.change(within(thread).getByRole('textbox', { name: editName }), { target: { value: 'fixed' } });
+    fireEvent.click(within(thread).getByRole('button', { name: 'Save' }));
+    await waitFor(() => { expect(within(thread).queryByRole('textbox', { name: editName })).toBeNull(); });
+    expect(within(thread).getByText('This message is no longer available to you.')).toBeTruthy();
+  });
+
+  it('edits the newest own message in the open thread, including replies outside channel history', async () => {
+    const root = msg(1, { author_id: 3 });
+    const reply = msg(2, { thread_root_id: 1 });
+    vi.spyOn(api, 'loadThread').mockResolvedValue({ ok: true, value: { messages: [root, reply] } });
+    const onEdited = vi.fn();
+    vi.spyOn(api, 'editMessage').mockResolvedValue({ ok: true, message: { ...reply, body: 'fixed', edited_at: new Date().toISOString() } });
+    render(conversation([root, msg(3)], { onEdited }));
+    fireEvent.click(screen.getByRole('button', { name: /^Reply to bea/ }));
+    const thread = screen.getByRole('region', { name: /^Thread around/ });
+    await within(thread).findByText('text 2');
+    const replyBox = within(thread).getByRole('textbox', { name: 'Reply to bea' });
+    fireEvent.keyDown(replyBox, { key: 'ArrowUp' });
+    const editor = within(thread).getByRole('textbox', { name: editName });
+    expect(document.activeElement).toBe(editor);
+    expect(noBox(3)).toBeNull();
+    fireEvent.keyDown(editor, { key: 'Escape' });
+    expect(document.activeElement).toBe(replyBox);
+    fireEvent.keyDown(replyBox, { key: 'ArrowUp' });
+    fireEvent.change(within(thread).getByRole('textbox', { name: editName }), { target: { value: 'fixed' } });
+    fireEvent.click(within(thread).getByRole('button', { name: 'Save' }));
+    await waitFor(() => { expect(onEdited).toHaveBeenCalledWith(expect.objectContaining({ id: 2, body: 'fixed' })); });
+    expect(within(thread).getByText('fixed')).toBeTruthy();
+    expect(within(thread).queryByRole('textbox', { name: editName })).toBeNull();
+  });
+});
+
+
+describe('message link and clipboard focus', () => {
+  it('keeps focus on a recent linked reply when its older root arrives', async () => {
+    const root = msg(1, { author_id: 3 });
+    const reply = msg(110, { thread_root_id: 1 });
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    vi.spyOn(api, 'loadThread').mockImplementation(async () => {
+      await gate;
+      return { ok: true, value: { messages: [root, reply] } };
+    });
+    render(conversation([reply], { highlightedId: reply.id }));
+    const thread = screen.getByRole('region', { name: 'Thread' });
+    const linked = thread.querySelector('[data-message-id="110"]');
+    expect(document.activeElement).toBe(linked);
+    expect(within(thread).queryByRole('textbox')).toBeNull();
+    await act(async () => { release(); await gate; });
+    await within(thread).findByRole('textbox', { name: 'Reply to bea' });
+    expect(document.activeElement).toBe(linked);
+  });
+
+  it.each(['Copy link', 'Copy text'])('returns focus to the menu button after %s succeeds', async (action) => {
+    vi.spyOn(platform.services, 'copyText').mockResolvedValue();
+    render(conversation([msg(1)], { edits: false }));
+    const button = more(1);
+    if (button === null) throw new Error('no copy menu');
+    button.focus();
+    fireEvent.click(button);
+    const entry = screen.getByRole('menuitem', { name: action });
+    entry.focus();
+    fireEvent.click(entry);
+    await screen.findByText(action === 'Copy link' ? 'Link copied.' : 'Text copied.');
+    expect(document.activeElement).toBe(button);
+  });
+
+  it.each([false, true])('removes manual copy content on a tombstone (late clipboard failure: %s)', async (late) => {
+    let refuse: () => void = () => undefined;
+    const gate = new Promise<void>((_resolve, reject) => { refuse = () => { reject(new Error('refused')); }; });
+    const copy = vi.spyOn(platform.services, 'copyText').mockReturnValue(gate);
+    const original = msg(1, { body: 'secret removed text' });
+    const view = render(conversation([original], { edits: false }));
+    fireEvent.click(more(1) as HTMLElement);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy text' }));
+    await waitFor(() => { expect(copy).toHaveBeenCalledWith(original.body); });
+    if (!late) {
+      await act(async () => { refuse(); await Promise.resolve(); });
+      const field = await screen.findByLabelText<HTMLTextAreaElement>('Copy manually');
+      expect(field.value).toBe(original.body);
+      expect(document.activeElement).toBe(field);
+    }
+    view.rerender(conversation([{ ...original, body: 'This message was removed by a moderator.', removed: true }], { edits: false }));
+    if (late) await act(async () => { refuse(); await Promise.resolve(); });
+    expect(screen.queryByLabelText('Copy manually')).toBeNull();
+    expect(screen.queryByText('Clipboard unavailable. Copy the selected text.')).toBeNull();
+    expect(document.body.textContent).not.toContain(original.body);
   });
 });

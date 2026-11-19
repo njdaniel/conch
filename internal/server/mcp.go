@@ -29,14 +29,28 @@ type mcpAudience struct {
 	PrincipalIDs []int64 `json:"principal_ids,omitempty" jsonschema:"the recipients, for kind principals; the author is added by the server"`
 }
 
+// mcpAttachmentInput is one image an agent posts with a message (issue
+// #1798): the attachments argument of post_message. The bytes travel in the
+// call, base64-encoded; the server uploads them and attaches them to the
+// message it posts. The bounds are in pkg/schema (file.go) and the rules in
+// agent_uploads.go.
+type mcpAttachmentInput struct {
+	Name       string `json:"name" jsonschema:"the file's name as people will see it: 1 to 255 bytes, with no path separator and no control character"`
+	MediaType  string `json:"media_type" jsonschema:"image/png, image/jpeg or image/webp, exactly; the bytes must be a file of that type"`
+	DataBase64 string `json:"data_base64" jsonschema:"the file's bytes in standard base64 with padding (RFC 4648 section 4)"`
+}
+
 type mcpPostMessageInput struct {
 	Channel  string           `json:"channel" jsonschema:"channel name"`
 	Body     string           `json:"body" jsonschema:"rendered human-readable message body"`
-	Payload  *mcpPayloadInput `json:"payload,omitempty" jsonschema:"optional typed machine payload"`
+	Payload  *mcpPayloadInput `json:"payload,omitempty" jsonschema:"optional typed machine payload; not together with attachments"`
 	Audience *mcpAudience     `json:"audience,omitempty" jsonschema:"optional audience; omit to post to the whole channel. To reply in kind, reuse the audience of the message being answered"`
 	// ThreadRootID replies in a thread. A reply takes its root's audience, so
 	// it cannot be combined with audience.
 	ThreadRootID int64 `json:"thread_root_id,omitempty" jsonschema:"optional id of the message to reply to; the reply takes that message's audience, so do not also give an audience. Threads are one level deep: the id must be a message that is not itself a reply"`
+	// Attachments are images the message carries (issue #1798). The server
+	// uploads them and posts one message that attaches them, or does neither.
+	Attachments []mcpAttachmentInput `json:"attachments,omitempty" jsonschema:"optional images to post with the message, at most 4. Needs the manifest capability files.upload and the channel permission attach in this channel, besides what the post itself needs; without them the call is refused. Only image/png, image/jpeg and image/webp, each checked against its first bytes. The decoded sizes of all the items together may be at most the server's upload limit (10 MiB unless the operator changed it). All or nothing: if any item is refused, nothing is uploaded and nothing is posted. Cannot be combined with payload. Each file counts against the agent's upload budget (20 an hour unless the operator changed it)"`
 }
 
 type mcpReadChannelInput struct {
@@ -162,7 +176,7 @@ func addAgentTool[In, Out any](s *Server, server *mcp.Server, identity mcpIdenti
 // mcpServerFor builds the MCP server for one authenticated request.
 func (s *Server) mcpServerFor(identity mcpIdentity) *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{Name: "conchd", Version: s.cfg.Version}, nil)
-	addAgentTool(s, server, identity, &mcp.Tool{Name: "post_message", Description: "Post a message to a Conch channel as the authenticated agent. Without an audience it goes to the whole channel; with one it goes only to a net or to the listed principals. With thread_root_id it is a reply in that message's thread, to the root's audience."},
+	addAgentTool(s, server, identity, &mcp.Tool{Name: "post_message", Description: "Post a message to a Conch channel as the authenticated agent. Without an audience it goes to the whole channel; with one it goes only to a net or to the listed principals. With thread_root_id it is a reply in that message's thread, to the root's audience. With attachments it carries up to 4 images (image/png, image/jpeg or image/webp, base64-encoded, within the server's upload limit in total): the agent's manifest must grant the capability files.upload and the channel permission attach in the channel, and the images and the message are stored together or not at all. An agent cannot fetch files, its own included."},
 		func(ctx context.Context, scope *agentScope, in mcpPostMessageInput) (*mcp.CallToolResult, mcpPostMessageOutput, error) {
 			out, serr := s.postMessageMCP(ctx, scope, in)
 			if serr != nil {
@@ -292,6 +306,21 @@ func (s *Server) postMessageMCP(ctx context.Context, scope *agentScope, in mcpPo
 	if strings.TrimSpace(in.Body) == "" {
 		return schema.PostMessageResponseV2{}, &schema.Error{Code: "invalid_request", Message: "body must not be empty"}
 	}
+	// Attachments (issue #1798): what is malformed whatever the channel and
+	// the agent's grants are is refused here, before anything is looked up.
+	// A request that carries attachments may be larger than
+	// MaxPostRequestBytes (mcp_auth.go), so the text is held to that bound
+	// here: the message it becomes must stay one every client will read.
+	if len(in.Attachments) > 0 {
+		switch {
+		case in.Payload != nil:
+			return schema.PostMessageResponseV2{}, &schema.Error{Code: "invalid_request", Message: "attachments cannot be combined with payload"}
+		case len(in.Attachments) > schema.MaxAgentAttachments:
+			return schema.PostMessageResponseV2{}, &schema.Error{Code: "invalid_request", Message: fmt.Sprintf("a message carries at most %d attachments", schema.MaxAgentAttachments)}
+		case len(in.Body) > schema.MaxPostRequestBytes:
+			return schema.PostMessageResponseV2{}, &schema.Error{Code: "invalid_request", Message: "body is too large"}
+		}
+	}
 	var schemaPayload *schema.Payload
 	if in.Payload != nil {
 		dataBytes, marshalErr := json.Marshal(in.Payload.Data)
@@ -323,24 +352,45 @@ func (s *Server) postMessageMCP(ctx context.Context, scope *agentScope, in mcpPo
 	if err := req.Validate(); err != nil {
 		return schema.PostMessageResponseV2{}, &schema.Error{Code: "invalid_request", Message: err.Error()}
 	}
+	// The images the message carries are checked, paid for and staged before
+	// the post, and stored with it: the grant for files comes before the
+	// grant for the post, and whichever way the post ends, finish leaves
+	// nothing behind that the post did not keep.
+	var uploads *pendingUploads
+	if len(in.Attachments) > 0 {
+		var serr *schema.Error
+		if uploads, serr = scope.prepareUploads(ctx, in.Channel, in.Attachments); serr != nil {
+			return schema.PostMessageResponseV2{}, serr
+		}
+		defer uploads.finish()
+	}
 	if in.ThreadRootID > 0 {
-		return s.postReplyMCP(ctx, scope, in.Channel, in.ThreadRootID, in.Body, schemaPayload)
+		return s.postReplyMCP(ctx, scope, in.Channel, in.ThreadRootID, in.Body, schemaPayload, uploads)
 	}
 	if audience != nil {
-		return s.postScopedMessageMCP(ctx, scope, in.Channel, in.Body, schemaPayload, audience.Normalize(authorID))
+		return s.postScopedMessageMCP(ctx, scope, in.Channel, in.Body, schemaPayload, audience.Normalize(authorID), uploads)
 	}
 	channel, serr := scope.channelByName(ctx, in.Channel, schema.ChannelPermissionPost)
 	if serr != nil {
 		return schema.PostMessageResponseV2{}, serr
 	}
-	stored, err := channel.insertMessage(ctx, in.Body, schemaPayload)
+	// Files the agent uploaded earlier and names in a payload take the grant
+	// to upload, now, as on the REST post (issue #1798).
+	if serr := channel.attachRefusal(ctx, schemaPayload); serr != nil {
+		return schema.PostMessageResponseV2{}, serr
+	}
+	stored, err := channel.insertMessage(ctx, in.Body, schemaPayload, uploads)
 	if errors.Is(err, errAttachmentRefused) {
 		// The caller's mistake, not ours: nothing was stored, and the answer
 		// is the one the REST post routes and the scoped path give (issue
-		// #240). An agent cannot upload, so its attachment can never be
-		// honoured; as a server failure this was an error line in the log
+		// #240). A file an agent names in a payload must be one it uploaded
+		// itself, under the grant of issue #1798; any other can never be
+		// honoured, and as a server failure this was an error line in the log
 		// that any agent with the post grant could write at will.
 		return schema.PostMessageResponseV2{}, errInvalidFileAttachment
+	}
+	if errors.Is(err, errMembershipRefused) {
+		return schema.PostMessageResponseV2{}, errChannelNotFound
 	}
 	if errors.Is(err, errReservedPayloadRefused) {
 		return schema.PostMessageResponseV2{}, errReservedPayload
@@ -365,12 +415,15 @@ func (s *Server) postMessageMCP(ctx context.Context, scope *agentScope, in mcpPo
 // it returns carries the audience, so what is stored is what was authorized.
 // The message goes to its recipients' v2 sockets only: never to the v0 or v1
 // broadcasts or the Broadcaster seam, which cannot carry an audience.
-func (s *Server) postScopedMessageMCP(ctx context.Context, scope *agentScope, channelName, body string, payload *schema.Payload, audience schema.Audience) (schema.PostMessageResponseV2, *schema.Error) {
+func (s *Server) postScopedMessageMCP(ctx context.Context, scope *agentScope, channelName, body string, payload *schema.Payload, audience schema.Audience, uploads *pendingUploads) (schema.PostMessageResponseV2, *schema.Error) {
 	channel, serr := scope.channelForAudience(ctx, channelName, audience)
 	if serr != nil {
 		return schema.PostMessageResponseV2{}, serr
 	}
-	message, recipients, serr := channel.insertScopedMessage(ctx, body, payload)
+	if serr := channel.attachRefusal(ctx, payload); serr != nil {
+		return schema.PostMessageResponseV2{}, serr
+	}
+	message, recipients, serr := channel.insertScopedMessage(ctx, body, payload, uploads)
 	if serr != nil {
 		return schema.PostMessageResponseV2{}, serr
 	}

@@ -17,10 +17,11 @@ import { initialChannels } from '../state/channels';
 import type { Person } from '../useLiveChannel';
 import { VoiceClient, type Room, type RoomEvents, type ShareSink } from './connection';
 import { FakeClock, noCamera, settle } from './fakes';
-import type { Captured, KeptScreen, ShareFeatures, ShareQuality, ShareSample } from './share';
+import { resumeLimit, settleQuality, type Captured, type KeptScreen, type SettledQuality, type ShareFeatures, type ShareQuality, type ShareSample } from './share';
 import { ShareReadout, ShareView } from './ShareView';
 import type { Snapshot, VoiceControl } from './useVoice';
 import { VoicePanel } from './VoicePanel';
+import { watchScreenCapture } from './sdk';
 
 class StubRoom implements Room {
   events: RoomEvents | null = null;
@@ -38,6 +39,7 @@ class StubRoom implements Room {
   };
   setSending = (): Promise<void> => Promise.resolve();
   setDeafened = (): void => undefined;
+  startAudio = (): Promise<void> => Promise.resolve();
   setVolume = (): void => undefined;
   level = (): number => 0;
   close = (): Promise<void> => Promise.resolve();
@@ -60,6 +62,9 @@ class StubRoom implements Room {
   };
   qualities: ShareQuality[] = [];
   sample: ShareSample | null = null;
+  // The size of the screen captured, for Auto to settle against.
+  capture: { width: number; height: number } = { width: 1920, height: 1080 };
+  settled = (quality: ShareQuality): SettledQuality => settleQuality(quality, this.capture);
   setShareQuality = (quality: ShareQuality): Promise<void> => {
     this.qualities.push(quality);
     return Promise.resolve();
@@ -69,7 +74,7 @@ class StubRoom implements Room {
     this.calls.push('publish');
     return Promise.resolve();
   };
-  stopScreen = (): Promise<void> => Promise.resolve();
+  stopScreen = (): Promise<void> => { this.calls.push('stop'); return Promise.resolve(); };
   keepScreen = (): KeptScreen | null => ({ audio: true, live: () => true, onEnded: null, stop: () => undefined });
   adoptScreen = (): void => undefined;
   setMicrophone = (): void => undefined;
@@ -139,8 +144,9 @@ const chrome: ShareFeatures = { canShare: true, chromium: true, platform: 'linux
 // wrap puts the panel where the page puts it, for a test of the layout.
 function setup(claims: ShareClaimResult[] = [], features: ShareFeatures = chrome, wrap?: (panel: ReactNode) => ReactNode, viewed = 'general', channels: readonly { id: number; name: string; created_at: string; manages?: boolean }[] = []) {
   const rooms: StubRoom[] = [];
+  const clock = new FakeClock();
   const client = new VoiceClient({
-    clock: new FakeClock(),
+    clock,
     mode: { get: () => 'ptt', set: () => undefined },
     random: () => 0.5,
     createSession: () => Promise.resolve(session),
@@ -193,7 +199,7 @@ function setup(claims: ShareClaimResult[] = [], features: ShareFeatures = chrome
     });
     view.rerender(tree());
   };
-  return { client, rooms, joins, seen, view };
+  return { client, clock, rooms, joins, seen, view };
 }
 
 vi.mock('../api', async (original) => ({ ...await original<typeof import('../api')>(), moderate: vi.fn() }));
@@ -255,6 +261,184 @@ describe('watching', () => {
     return t;
   }
 
+  describe('picture-in-picture', () => {
+    let current: Element | null = null;
+    let exit: ReturnType<typeof vi.fn>;
+    const enable = () => {
+      Object.defineProperty(document, 'pictureInPictureEnabled', { configurable: true, value: true });
+      Object.defineProperty(document, 'pictureInPictureElement', { configurable: true, get: () => current });
+      Object.defineProperty(HTMLVideoElement.prototype, 'requestPictureInPicture', { configurable: true, value: vi.fn(function (this: HTMLVideoElement) {
+        current = document.querySelector('video');
+        this.dispatchEvent(new Event('enterpictureinpicture'));
+        return Promise.resolve({});
+      }) });
+      exit = vi.fn(() => {
+        const old = current;
+        current = null;
+        old?.dispatchEvent(new Event('leavepictureinpicture'));
+        return Promise.resolve();
+      });
+      Object.defineProperty(document, 'exitPictureInPicture', { configurable: true, value: exit });
+    };
+    afterEach(() => {
+      cleanup();
+      current = null;
+      Reflect.deleteProperty(document, 'pictureInPictureEnabled');
+      Reflect.deleteProperty(document, 'pictureInPictureElement');
+      Reflect.deleteProperty(document, 'exitPictureInPicture');
+      Reflect.deleteProperty(HTMLVideoElement.prototype, 'requestPictureInPicture');
+    });
+
+    it('hides Pop out without the API or when disabled', async () => {
+      await watching();
+      expect(screen.queryByRole('button', { name: 'Pop out' })).toBeNull();
+      cleanup();
+      enable();
+      Reflect.deleteProperty(HTMLVideoElement.prototype, 'requestPictureInPicture');
+      await watching();
+      expect(screen.queryByRole('button', { name: 'Pop out' })).toBeNull();
+      cleanup();
+      enable();
+      Object.defineProperty(document, 'pictureInPictureEnabled', { configurable: true, value: false });
+      await watching();
+      expect(screen.queryByRole('button', { name: 'Pop out' })).toBeNull();
+    });
+
+    it('follows browser enter and leave, keeping the same video, sound and destination', async () => {
+      enable();
+      const t = await watching();
+      const sink = t.rooms[0]?.sink;
+      const before = t.client.snapshot();
+      fireEvent.change(screen.getByLabelText('Share volume'), { target: { value: '0.3' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Mute share' }));
+      const button = screen.getByRole('button', { name: 'Pop out', pressed: false });
+      button.focus();
+      expect(document.activeElement).toBe(button);
+      fireEvent.click(button);
+      await act(settle);
+      expect(current).toBe(sink?.video);
+      expect(screen.getByRole('button', { name: 'Return to stage', pressed: true })).toBeTruthy();
+      expect(sink?.audio.volume).toBeCloseTo(0.3);
+      expect(sink?.audio.muted).toBe(true);
+      expect(sink?.video.muted).toBe(true);
+      expect(t.client.snapshot().channel).toBe(before.channel);
+      expect(t.rooms[0]?.calls).toEqual([]);
+      await act(async () => { await document.exitPictureInPicture(); });
+      expect(screen.getByRole('button', { name: 'Pop out', pressed: false })).toBeTruthy();
+      expect(t.rooms[0]?.sink).toBe(sink);
+    });
+
+    it.each(['stop watching', 'share ends', 'leave voice'] as const)('closes when %s', async (action) => {
+      enable();
+      const t = await watching();
+      fireEvent.click(screen.getByRole('button', { name: 'Pop out' }));
+      await act(settle);
+      expect(current).not.toBeNull();
+      if (action === 'stop watching') fireEvent.click(screen.getByRole('button', { name: 'Stop watching' }));
+      else if (action === 'share ends') t.seen(presence(null));
+      else await act(async () => { await t.client.leave(); });
+      await act(settle);
+      expect(exit).toHaveBeenCalledOnce();
+      expect(current).toBeNull();
+    });
+
+    // A renewed room (#1947 holds the watch): presence lists nobody, then
+    // LiveKit deletes the room, then the share resumes in the next one. The
+    // browser enters PiP only from a tap, so the view, and its video element,
+    // stay through the wait and the next room plays into that same element.
+    const renewed = { ...presence(null), rooms: [{ participants: [] }] };
+    it('stays open through a renewal: empty presence, room deleted, the share resumed, in the same element', async () => {
+      enable();
+      const t = await watching();
+      act(() => { t.rooms[0]?.events?.onStreamTracks(8, { video: true, audio: true }); });
+      fireEvent.click(screen.getByRole('button', { name: 'Pop out' }));
+      await act(settle);
+      const video = t.rooms[0]?.streamSinks.get(8)?.video;
+      expect(video).toBeDefined();
+      expect(current).toBe(video);
+      t.seen(renewed);
+      expect(screen.getByRole('region', { name: 'Shared screen' }).textContent).toContain('bea · Reconnecting');
+      expect(document.querySelector('video')).toBe(video);
+      act(() => { t.rooms[0]?.events?.onDisconnected('room_deleted'); });
+      await act(settle);
+      expect(t.rooms).toHaveLength(2);
+      expect(t.rooms[1]?.streamSinks.get(8)?.video).toBe(video);
+      expect(screen.getByText('Waiting for the stream to come back')).toBeTruthy();
+      expect(document.querySelector('video')).toBe(video);
+      t.seen(presence(8, true));
+      act(() => { t.rooms[1]?.events?.onStreamTracks(8, { video: true, audio: true }); });
+      await act(settle);
+      expect(streamView('bea')).toBeTruthy();
+      expect(document.querySelector('video')).toBe(video);
+      expect(t.rooms[1]?.streamSinks.get(8)?.video).toBe(video);
+      expect(exit).not.toHaveBeenCalled();
+      expect(current).toBe(video);
+      expect(screen.getByRole('button', { name: 'Return to stage', pressed: true })).toBeTruthy();
+    });
+
+    it.each(['the wait runs out', 'stop watching'] as const)('closes when a renewal was waited for and %s', async (end) => {
+      enable();
+      const t = await watching();
+      fireEvent.click(screen.getByRole('button', { name: 'Pop out' }));
+      await act(settle);
+      t.seen(renewed);
+      act(() => { t.rooms[0]?.events?.onDisconnected('room_deleted'); });
+      await act(settle);
+      expect(exit).not.toHaveBeenCalled();
+      if (end === 'stop watching') fireEvent.click(screen.getByRole('button', { name: 'Stop watching' }));
+      else act(() => { t.clock.advance(resumeLimit); });
+      await act(settle);
+      expect(exit).toHaveBeenCalledOnce();
+      expect(current).toBeNull();
+      expect(screen.queryByRole('region', { name: 'Shared screen' })).toBeNull();
+    });
+
+    it('closes a request that finishes after Stop watching removed its tile', async () => {
+      enable();
+      const t = await watching();
+      const video = t.rooms[0]?.sink?.video;
+      if (video === undefined) throw new Error('no video');
+      let finish = () => { /* Replaced when the request starts. */ };
+      Object.defineProperty(HTMLVideoElement.prototype, 'requestPictureInPicture', { configurable: true, value: () => new Promise((resolve) => {
+        finish = () => {
+          current = video;
+          video.dispatchEvent(new Event('enterpictureinpicture'));
+          resolve({});
+        };
+      }) });
+      fireEvent.click(screen.getByRole('button', { name: 'Pop out' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Stop watching' }));
+      await act(async () => { finish(); await settle(); });
+      expect(exit).toHaveBeenCalledOnce();
+      expect(current).toBeNull();
+    });
+
+    // On the picture's corner, so the controls row keeps one line on a
+    // phone; in compact the thumbnail is too small, and the row (which
+    // scrolls, not wraps) carries it.
+    it('puts Pop out on the picture, or in the compact row', () => {
+      enable();
+      const t = setup();
+      const { rerender } = render(<ShareView client={t.client} state={t.client.snapshot()} principal={8} name="bea" audio={false} />);
+      const pop = () => screen.getByRole('button', { name: 'Pop out' });
+      expect(pop().closest('.share-frame')).not.toBeNull();
+      expect(pop().closest('.share-controls')).toBeNull();
+      rerender(<ShareView client={t.client} state={t.client.snapshot()} principal={8} name="bea" audio={false} compact onToggleLayout={vi.fn()} />);
+      expect(pop().closest('.share-controls')).not.toBeNull();
+      expect(pop().closest('.share-frame')).toBeNull();
+    });
+
+    it('reports a refused request without a false active state', async () => {
+      enable();
+      await watching();
+      Object.defineProperty(HTMLVideoElement.prototype, 'requestPictureInPicture', { configurable: true, value: vi.fn().mockRejectedValue(new Error('refused')) });
+      fireEvent.click(screen.getByRole('button', { name: 'Pop out' }));
+      await act(settle);
+      expect(screen.getByRole('button', { name: 'Pop out', pressed: false })).toBeTruthy();
+      expect(screen.getByText(/Picture-in-picture could not open/)).toBeTruthy();
+    });
+  });
+
   it('subscribes on Watch and plays into an inline video and an unmuted audio element of its own', async () => {
     const t = await watching();
     const view = await screen.findByRole('region', { name: 'Shared screen' });
@@ -291,6 +475,25 @@ describe('watching', () => {
     });
     expect(screen.getAllByRole('region', { name: 'Shared screen' })).toHaveLength(1);
     expect(within(streamView('bea')).queryByText('Waiting for the picture')).toBeNull();
+  });
+
+  // The SDK's startAudio (the tap) unmutes every element it plays, the share's
+  // sound included, and then the playback event comes.
+  it('keeps a muted share muted after the tap that starts playback', async () => {
+    const t = await watching();
+    const view = await screen.findByRole('region', { name: 'Shared screen' });
+    const audio = t.rooms[0]?.streamSinks.get(8)?.audio;
+    if (audio === undefined) throw new Error('no sink');
+    act(() => {
+      t.rooms[0]?.events?.onPlayback(false);
+    });
+    fireEvent.click(within(view).getByRole('button', { name: 'Mute share' }));
+    expect(audio.muted).toBe(true);
+    audio.muted = false;
+    act(() => {
+      t.rooms[0]?.events?.onPlayback(true);
+    });
+    expect(audio.muted).toBe(true);
   });
 
   it("keeps the tile's mute and volume when the SDK attaches its sound again, which unmutes the element", async () => {
@@ -411,7 +614,8 @@ describe('watching', () => {
     expect(screen.queryByRole('button', { name: 'Tap to play sound' })).toBeNull();
   });
 
-  it('goes full screen on request', async () => {
+  it('goes full screen on the share frame in the phone layout', async () => {
+    windowOf(true);
     await watching();
     const view = await screen.findByRole('region', { name: 'Shared screen' });
     Object.defineProperty(document, 'fullscreenEnabled', { value: true, configurable: true });
@@ -510,6 +714,45 @@ describe('sharing', () => {
     fireEvent.click(within(voice()).getByRole('button', { name: 'Stop sharing' }));
     await act(settle);
     expect(await within(voice()).findByText('You stopped sharing.')).toBeTruthy();
+  });
+
+  it('shows a capture stalled for 3 seconds, clears on unmute, and restarts only on a click', async () => {
+    const t = setup();
+    t.client.join('general');
+    await act(settle);
+    fireEvent.click(within(voice()).getByRole('button', { name: 'Share screen' }));
+    await act(settle);
+    const room = t.rooms[0];
+    if (room === undefined) throw new Error('no room');
+    class Capture extends EventTarget {
+      muted = false;
+      readyState = 'live';
+      mute() { this.muted = true; this.dispatchEvent(new Event('mute')); }
+      unmute() { this.muted = false; this.dispatchEvent(new Event('unmute')); }
+    }
+    const capture = new Capture();
+    const log = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.useFakeTimers();
+    const off = watchScreenCapture(capture as unknown as MediaStreamTrack, (stalled) => room.events?.onScreenStalled?.(stalled));
+    try {
+      act(() => { capture.mute(); vi.advanceTimersByTime(2999); });
+      expect(screen.queryByRole('button', { name: 'Restart share' })).toBeNull();
+      act(() => { vi.advanceTimersByTime(1); });
+      expect(within(voice()).getByText(/Screen capture stopped delivering frames/)).toBeTruthy();
+      expect(within(voice()).getByRole('button', { name: 'Restart share' })).toBeTruthy();
+      expect(room.calls).toEqual(['pick', 'publish']);
+      expect(log).toHaveBeenCalledTimes(1);
+      act(() => { capture.unmute(); });
+      expect(screen.queryByRole('button', { name: 'Restart share' })).toBeNull();
+      act(() => { capture.mute(); vi.advanceTimersByTime(3000); });
+      fireEvent.click(within(voice()).getByRole('button', { name: 'Restart share' }));
+      await act(settle);
+      expect(room.calls).toEqual(['pick', 'publish', 'stop', 'pick', 'publish']);
+      expect(screen.queryByRole('button', { name: 'Restart share' })).toBeNull();
+    } finally {
+      act(off);
+      vi.useRealTimers();
+    }
   });
 
   it('tells the sharer when the capture has no sound track, in words for the browser', async () => {
@@ -779,7 +1022,7 @@ describe('ShareReadout over time', () => {
     vi.useFakeTimers();
     let clock = 0;
     const samples: { current: ShareSample | null } = { current: { width: 1920, height: 1080, fps: 31, limitation: 'cpu' } };
-    const asked: ShareQuality = { resolution: '1080p', frameRate: 60 };
+    const asked: SettledQuality = { resolution: '1080p', frameRate: 60 };
     const view = render(<ShareReadout client={client(samples)} direction="sent" prefix="Sending: " asked={asked} now={() => clock} />);
     // A second at a time, as the readout samples, the clock moving with it.
     const tick = async (ms: number) => {

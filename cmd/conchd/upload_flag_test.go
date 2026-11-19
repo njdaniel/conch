@@ -37,3 +37,35 @@ func TestParseServeArgsMaxUploadBytes(t *testing.T) {
 		})
 	}
 }
+
+func TestParseServeArgsAgentUploadsPerHour(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		env     string
+		want    int
+		wantErr bool
+	}{
+		{"default", nil, "", server.DefaultAgentUploadsPerHour, false},
+		{"flag", []string{"--agent-uploads-per-hour", "5"}, "", 5, false},
+		{"env", nil, "60", 60, false},
+		{"flag beats env", []string{"--agent-uploads-per-hour=3"}, "60", 3, false},
+		{"zero lets no agent upload", []string{"--agent-uploads-per-hour", "0"}, "", 0, false},
+		{"env zero", nil, "0", 0, false},
+		{"negative flag", []string{"--agent-uploads-per-hour", "-1"}, "", 0, true},
+		{"negative env", nil, "-1", 0, true},
+		{"garbage env", nil, "twenty", 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("CONCHD_AGENT_UPLOADS_PER_HOUR", tt.env)
+			opts, err := parseServeArgs(append([]string{"--data", t.TempDir()}, tt.args...))
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if err == nil && opts.agentUploads != tt.want {
+				t.Errorf("agentUploads = %d, want %d", opts.agentUploads, tt.want)
+			}
+		})
+	}
+}

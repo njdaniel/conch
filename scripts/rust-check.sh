@@ -32,6 +32,15 @@ echo "rust-check: dependency gate"
 ./scripts/voice-depgate.sh
 ./scripts/voice-gates-test.sh
 
+# winit (Windows only, issue #1781) uses `tracing`, which must never gain its `log` feature: it
+# would send winit's own messages to the `log` facade this program's logger handles. The
+# features are those of the whole graph (every target), so a change that turns it on fails here.
+echo "rust-check: tracing has no log feature"
+if (cd voice && cargo tree --locked --target all -p conch-voice -e features -i tracing) | grep -q 'tracing feature "log"'; then
+    echo "rust-check: FAIL: tracing has its \`log\` feature enabled; winit's messages would reach the log facade (docs/design/windows-desktop.md section 4.6)"
+    exit 1
+fi
+
 echo "rust-check: cargo deny (sources, licences, bans)"
 (cd voice && cargo deny --locked check sources licenses bans)
 

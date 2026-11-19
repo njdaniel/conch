@@ -139,10 +139,18 @@ async fn the_calls_a_child_process_makes_with_proxy_variables_set() {
     let closed = closed_port().await;
     let secure = closed.url().replace("http://", "https://");
     let client = client_for(&secure, Duration::from_secs(2));
+    // Windows retries a refused loopback connect for about two seconds, and macOS can
+    // leave it to time out, so against the 2 s bound the refusal can surface as `Timeout`
+    // there (#890, #1737). Either way nothing was tunnelled, and the parent's count of
+    // connections to the proxy is what proves it.
+    let refused = |result: &Result<(), Error>| {
+        matches!(result, Err(Error::Connect { .. }))
+            || (cfg!(any(windows, target_os = "macos")) && matches!(result, Err(Error::Timeout)))
+    };
     let rest = client.presence("general").await.map(|_| ());
-    assert!(matches!(rest, Err(Error::Connect { .. })), "{rest:?}");
+    assert!(refused(&rest), "{rest:?}");
     let socket = client.presence_stream("general").await.map(|_| ());
-    assert!(matches!(socket, Err(Error::Connect { .. })), "{socket:?}");
+    assert!(refused(&socket), "{socket:?}");
 
     println!("{CHILD_DONE}");
 }

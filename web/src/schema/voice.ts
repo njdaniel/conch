@@ -35,6 +35,7 @@ export {
   type VoiceShareEnded,
   type VoiceShareQuality,
   type VoiceShareRequestV1,
+  type VoiceShareResolution,
   type VoiceShareV1,
   type VoiceShareV2,
   type VoiceTransmitReportV1,

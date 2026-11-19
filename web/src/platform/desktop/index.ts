@@ -20,6 +20,7 @@ import { credentials } from './credentials';
 import { http } from './http';
 import { DesktopShell } from './Shell';
 import { sockets } from './sockets';
+import { DesktopSoundSink } from './sounds';
 import { nativeVoice } from './voice';
 import { serverOrigin } from './state';
 import type { ConchDesktopBridge } from './bridge';
@@ -76,6 +77,7 @@ export const platform: Platform = {
   credentials,
   services: {
     origin: serverOrigin,
+    sounds: new DesktopSoundSink(),
     copyText,
     saveFile: async (id) => {
       const b = bridge();

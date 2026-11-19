@@ -6,7 +6,9 @@
 // Input: the bytes of one line (no line feed) from the helper's events
 // connection, and the commands the supervisor wants written. Output: a typed
 // event or the refusal code the Go reader would give (ParseVoiceControlEvent,
-// ParseVoiceControlEventV2, ParseVoiceControlPipeAttached); command lines.
+// ParseVoiceControlEventV2, ParseVoiceControlEventV3 (issue #1854; offered
+// only with the Linux share-sound switch on), ParseVoiceControlPipeAttached);
+// command lines.
 // Owns: the framing rules (4096 bytes, valid UTF-8, exactly one JSON object,
 // no key twice, no lone surrogate escape, exact field names, unknown fields
 // ignored), each event's consistency rules, the version negotiation, and the
@@ -29,68 +31,112 @@ import {
   voiceControlAckV1,
   voiceControlAckV1Schema,
   voiceControlAckV2,
+  voiceControlAckV3,
   voiceControlGetStateV1,
   voiceControlGetStateV1Schema,
   voiceControlGetStateV2,
   voiceControlGetStateV2Schema,
+  voiceControlGetStateV3,
+  voiceControlGetStateV3Schema,
   voiceControlHelloV1,
   voiceControlLeaveV1,
   voiceControlLeaveV2,
+  voiceControlLeaveV3,
   voiceControlPipeAttachedV1,
   voiceControlPipeAttachedV1Schema,
   voiceControlProtocolErrorV1,
   voiceControlProtocolErrorV2,
+  voiceControlProtocolErrorV3,
   voiceControlSetDeafenV1,
   voiceControlSetDeafenV2,
+  voiceControlSetDeafenV3,
   voiceControlSetDevicesV2,
+  voiceControlSetDevicesV3,
   voiceControlSetMuteV1,
   voiceControlSetMuteV2,
+  voiceControlSetMuteV3,
+  voiceControlSetShareAudioMuteV3,
+  voiceControlSetShareAudioV3,
   voiceControlSetTalkModeV2,
+  voiceControlSetTalkModeV3,
   voiceControlStartV1,
   voiceControlStartV2,
   voiceControlStartV2Schema,
+  voiceControlStartV3,
+  voiceControlStartV3Schema,
   voiceControlStateV1,
   voiceControlStateV2,
+  voiceControlStateV3,
   type VoiceControlAckV1,
   type VoiceControlAckV2,
+  type VoiceControlAckV3,
   type VoiceControlBlock,
   type VoiceControlCapture,
   type VoiceControlErrorCode,
   type VoiceControlEventKind,
   type VoiceControlGetStateV1,
   type VoiceControlGetStateV2,
+  type VoiceControlGetStateV3,
   type VoiceControlHelloV1,
   type VoiceControlLeaveV1,
   type VoiceControlLeaveV2,
+  type VoiceControlLeaveV3,
   type VoiceControlPhase,
   type VoiceControlPipeAttachedV1,
   type VoiceControlPlayback,
   type VoiceControlProtocolErrorV1,
   type VoiceControlProtocolErrorV2,
+  type VoiceControlProtocolErrorV3,
   type VoiceControlPTT,
   type VoiceControlPTTProblem,
   type VoiceControlReason,
   type VoiceControlSetDeafenV1,
   type VoiceControlSetDeafenV2,
+  type VoiceControlSetDeafenV3,
   type VoiceControlSetDevicesV2,
+  type VoiceControlSetDevicesV3,
   type VoiceControlSetMuteV1,
   type VoiceControlSetMuteV2,
+  type VoiceControlSetMuteV3,
+  type VoiceControlSetShareAudioMuteV3,
+  type VoiceControlSetShareAudioV3,
   type VoiceControlSetTalkModeV2,
+  type VoiceControlSetTalkModeV3,
+  type VoiceControlShareAudio,
+  type VoiceControlShareAudioProblem,
   type VoiceControlStartV1,
   type VoiceControlStartV2,
+  type VoiceControlStartV3,
   type VoiceControlStateV1,
   type VoiceControlStateV2,
+  type VoiceControlStateV3,
   type VoiceControlTalkMode,
+  type VoiceShareAudioScope,
 } from '../../../web/src/schema/generated.ts';
 import type { Validator } from '../../../web/src/schema/validate.ts';
 
 export const SCHEMA_V1 = voiceControlAckV1Schema;
 export const SCHEMA_V2 = voiceControlStartV2Schema;
+export const SCHEMA_V3 = voiceControlStartV3Schema;
 export const PIPE_SCHEMA_V1 = voiceControlPipeAttachedV1Schema;
 
 // The versions this owner implements, best first.
-export type Version = typeof SCHEMA_V1 | typeof SCHEMA_V2;
+export type Version = typeof SCHEMA_V1 | typeof SCHEMA_V2 | typeof SCHEMA_V3;
+// What the owner offers by default, and always when the Linux share-sound
+// switch is off (issue #1854): v3 is not among them, so the app negotiates
+// exactly what it did before the route existed.
 export const OWNER_VERSIONS: readonly Version[] = [SCHEMA_V2, SCHEMA_V1];
+// What it offers with the switch on: v3 first, then the fallback (v2 silent).
+export const OWNER_VERSIONS_SHARE_AUDIO: readonly Version[] = [SCHEMA_V3, SCHEMA_V2, SCHEMA_V1];
+
+// set_share_audio's application_name bound and the largest share_audio_sources
+// a state may count (linux-share-audio.md §7; pkg/schema/voice_control_v3.go).
+export const MAX_APPLICATION_NAME_BYTES = 128;
+const VOICE_CONTROL_MAX_SHARE_AUDIO_SOURCES = 1024;
+
+// The scope this owner asks for on Linux, and the only one it ever writes:
+// the application scope is a valid command which this owner never sends.
+export const LINUX_SHARE_AUDIO_SCOPE = 'system_excluding_call' as const satisfies VoiceShareAudioScope;
 
 // ---------------------------------------------------------------- framing
 
@@ -346,12 +392,12 @@ export function decodeObject(line: Uint8Array): { readonly ok: true; readonly fi
 
 // ----------------------------------------------------------- field readers
 
-const INTEGER = /^-?(?:0|[1-9][0-9]*)$/;
+const INTEGER = /^(?:0|-?[1-9][0-9]*)$/;
 const INT64_MIN = -(2n ** 63n);
 const INT64_MAX = 2n ** 63n - 1n;
 
-// asInt reads a number as encoding/json reads it into an int64: integer text
-// in range, or nothing. Values past VOICE_CONTROL_MAX_ID are clamped to one
+// asInt reads integer text in int64 range, refusing negative zero as the Go
+// and Rust protocol readers do. Values past VOICE_CONTROL_MAX_ID are clamped to one
 // past it, which every caller refuses.
 function asInt(v: Json | undefined): number | undefined {
   if (v?.t !== 'num' || !INTEGER.test(v.raw)) return undefined;
@@ -611,6 +657,32 @@ function stateProblem(s: StateCore, v2?: { playback: VoiceControlPlayback; talk_
   return null;
 }
 
+// shareAudioProblem is VoiceControlStateV3.Validate's four rules about the
+// share's sound, over the rules of v2 that stateProblem has already applied:
+// off in starting and the final phases; a problem exactly when unavailable
+// (no_sources never, for it), and no_sources beside on and nothing else;
+// sources 0 unless on, and with on 0 exactly when no_sources.
+function shareAudioProblem(s: VoiceControlStateV3): string | null {
+  const off = s.share_audio === 'off';
+  if (!off && (s.phase === 'starting' || finalPhase(s.phase))) return 'state in this phase must have share_audio off';
+  if (s.share_audio_sources < 0 || s.share_audio_sources > VOICE_CONTROL_MAX_SHARE_AUDIO_SOURCES) return 'share_audio_sources out of range';
+  const problem = s.share_audio_problem;
+  switch (s.share_audio) {
+    case 'off':
+      if (problem !== undefined) return 'share_audio off takes no share_audio_problem';
+      break;
+    case 'unavailable':
+      if (problem === undefined || problem === 'no_sources') return 'share_audio unavailable needs a problem other than no_sources';
+      break;
+    case 'on':
+      if (problem !== undefined && problem !== 'no_sources') return 'share_audio on takes no problem but no_sources';
+      if ((problem === 'no_sources') !== (s.share_audio_sources === 0)) return 'no_sources must agree with share_audio_sources being 0';
+      break;
+  }
+  if (s.share_audio !== 'on' && s.share_audio_sources !== 0) return 'share_audio_sources must be 0 unless share_audio is on';
+  return null;
+}
+
 // ------------------------------------------------------------------ events
 
 export type EventV1 =
@@ -624,6 +696,12 @@ export type EventV2 =
   | { readonly kind: 'ack'; readonly seq: number; readonly ack: VoiceControlAckV2 }
   | { readonly kind: 'state'; readonly seq: number; readonly state: VoiceControlStateV2 }
   | { readonly kind: 'protocol_error'; readonly seq: number; readonly error: VoiceControlProtocolErrorV2 }
+  | { readonly kind: 'unknown'; readonly seq: number };
+
+export type EventV3 =
+  | { readonly kind: 'ack'; readonly seq: number; readonly ack: VoiceControlAckV3 }
+  | { readonly kind: 'state'; readonly seq: number; readonly state: VoiceControlStateV3 }
+  | { readonly kind: 'protocol_error'; readonly seq: number; readonly error: VoiceControlProtocolErrorV3 }
   | { readonly kind: 'unknown'; readonly seq: number };
 
 export type Parsed<T> = ({ readonly ok: true } & T) | Refusal;
@@ -756,6 +834,50 @@ export function parseEventV2(line: Uint8Array): Parsed<{ event: EventV2 }> {
   }
 }
 
+// parseEventV3 is ParseVoiceControlEventV3: every event of a v3 session after
+// the hello. A v3 state is v2's, every rule unchanged, and four fields about
+// the share's sound that are always written; a v1 or v2 line is
+// unknown_schema, and a hello in v3 is invalid (it is v1's, read before the
+// version is chosen).
+export function parseEventV3(line: Uint8Array): Parsed<{ event: EventV3 }> {
+  const h = eventHead(line, SCHEMA_V3);
+  if (!h.ok) return h;
+  const { fields, seq, kind } = h.head;
+  if (kind === null) return { ok: true, event: { kind: 'unknown', seq } };
+  const r = new FieldReader(fields);
+  switch (kind) {
+    case 'hello':
+      return refuse('invalid', 'a hello is written in v1 only');
+    case 'ack': {
+      const ack: VoiceControlAckV3 = { schema: SCHEMA_V3, kind, seq, id: r.int('id'), ok: r.bool('ok') };
+      const error = r.optWord('error');
+      if (error !== undefined) ack.error = error as VoiceControlErrorCode;
+      return done(r, r.missing === '' ? (ackProblem(ack) ?? checked(voiceControlAckV3, ack)) : null, { event: { kind, seq, ack } });
+    }
+    case 'state': {
+      const v1 = readStateV1(r, seq);
+      const state: VoiceControlStateV3 = {
+        ...v1,
+        schema: SCHEMA_V3,
+        playback: r.str('playback') as VoiceControlPlayback,
+        talk_mode: r.str('talk_mode') as VoiceControlTalkMode,
+        share_audio: r.str('share_audio') as VoiceControlShareAudio,
+        share_audio_muted: r.bool('share_audio_muted'),
+        share_audio_sources: r.int('share_audio_sources'),
+      };
+      const problem = r.optWord('share_audio_problem');
+      if (problem !== undefined) state.share_audio_problem = problem as VoiceControlShareAudioProblem;
+      const why = r.missing === '' ? (stateProblem(state, state) ?? shareAudioProblem(state) ?? checked(voiceControlStateV3, state)) : null;
+      return done(r, why, { event: { kind, seq, state } });
+    }
+    case 'protocol_error': {
+      const error: VoiceControlProtocolErrorV3 = { schema: SCHEMA_V3, kind, seq, code: r.str('code') as VoiceControlErrorCode };
+      const problem = FATAL.includes(error.code) ? checked(voiceControlProtocolErrorV3, error) : 'protocol_error code does not end the session';
+      return done(r, r.missing === '' ? problem : null, { event: { kind, seq, error } });
+    }
+  }
+}
+
 // ------------------------------------------------------------ attach line
 
 const BASE64URL = /^[A-Za-z0-9_-]*$/;
@@ -807,7 +929,16 @@ export type Command =
   | VoiceControlLeaveV1
   | VoiceControlLeaveV2
   | VoiceControlSetDevicesV2
-  | VoiceControlSetTalkModeV2;
+  | VoiceControlSetTalkModeV2
+  | VoiceControlStartV3
+  | VoiceControlSetMuteV3
+  | VoiceControlSetDeafenV3
+  | VoiceControlGetStateV3
+  | VoiceControlLeaveV3
+  | VoiceControlSetDevicesV3
+  | VoiceControlSetTalkModeV3
+  | VoiceControlSetShareAudioV3
+  | VoiceControlSetShareAudioMuteV3;
 
 // The owner's wishes, before the version and the id are known.
 export type Want =
@@ -816,7 +947,12 @@ export type Want =
   | { readonly kind: 'get_state' }
   | { readonly kind: 'leave' }
   | { readonly kind: 'set_devices'; readonly input?: string; readonly output?: string }
-  | { readonly kind: 'set_talk_mode'; readonly talkMode: VoiceControlTalkMode };
+  | { readonly kind: 'set_talk_mode'; readonly talkMode: VoiceControlTalkMode }
+  // v3's. The scope is the one literal this owner writes on Linux: it cannot
+  // be built with the application scope, and nothing a page says reaches it.
+  | { readonly kind: 'set_share_audio'; readonly capturing: false }
+  | { readonly kind: 'set_share_audio'; readonly capturing: true; readonly scope: typeof LINUX_SHARE_AUDIO_SCOPE; readonly applicationName: string }
+  | { readonly kind: 'set_share_audio_mute'; readonly muted: boolean };
 
 const CONTROL = /\p{Cc}/u;
 const LONE_SURROGATE = /\p{Cs}/u;
@@ -864,71 +1000,119 @@ export function validDeviceName(name: string): boolean {
 
 // startCommand is the start, always with credential env: the desktop owner
 // hands the token over in CONCH_TOKEN (linux-desktop.md §4.1).
-export function startCommand(version: Version, id: number, p: StartParams): VoiceControlStartV1 | VoiceControlStartV2 {
+export function startCommand(version: Version, id: number, p: StartParams): VoiceControlStartV1 | VoiceControlStartV2 | VoiceControlStartV3 {
   const body = { kind: 'start' as const, id, server: p.server, channel: p.channel, principal_id: p.principalId, credential: 'env' as const, muted: p.muted, deafened: p.deafened };
+  if (version === SCHEMA_V3) return { schema: SCHEMA_V3, ...body };
   return version === SCHEMA_V2 ? { schema: SCHEMA_V2, ...body } : { schema: SCHEMA_V1, ...body };
 }
 
 // command builds a later command in the session's version, or null when
-// that version has no such command (set_devices and set_talk_mode are v2's).
+// that version has no such command (set_devices and set_talk_mode are v2's
+// and v3's; the two share-audio commands are v3's alone).
 export function command(version: Version, id: number, want: Want): Command | null {
   const v2 = version === SCHEMA_V2;
+  const v3 = version === SCHEMA_V3;
   switch (want.kind) {
     case 'set_mute':
+      if (v3) return { schema: SCHEMA_V3, kind: 'set_mute', id, muted: want.muted };
       return v2 ? { schema: SCHEMA_V2, kind: 'set_mute', id, muted: want.muted } : { schema: SCHEMA_V1, kind: 'set_mute', id, muted: want.muted };
     case 'set_deafen':
+      if (v3) return { schema: SCHEMA_V3, kind: 'set_deafen', id, deafened: want.deafened };
       return v2
         ? { schema: SCHEMA_V2, kind: 'set_deafen', id, deafened: want.deafened }
         : { schema: SCHEMA_V1, kind: 'set_deafen', id, deafened: want.deafened };
     case 'get_state':
+      if (v3) return { schema: voiceControlGetStateV3Schema, kind: 'get_state', id };
       return v2 ? { schema: voiceControlGetStateV2Schema, kind: 'get_state', id } : { schema: voiceControlGetStateV1Schema, kind: 'get_state', id };
     case 'leave':
+      if (v3) return { schema: SCHEMA_V3, kind: 'leave', id };
       return v2 ? { schema: SCHEMA_V2, kind: 'leave', id } : { schema: SCHEMA_V1, kind: 'leave', id };
     case 'set_devices': {
-      if (!v2) return null;
-      const c: VoiceControlSetDevicesV2 = { schema: SCHEMA_V2, kind: 'set_devices', id };
+      if (!v2 && !v3) return null;
+      const c: VoiceControlSetDevicesV2 | VoiceControlSetDevicesV3 = v3 ? { schema: SCHEMA_V3, kind: 'set_devices', id } : { schema: SCHEMA_V2, kind: 'set_devices', id };
       if (want.input !== undefined) c.input = want.input;
       if (want.output !== undefined) c.output = want.output;
       return c;
     }
     case 'set_talk_mode':
+      if (v3) return { schema: SCHEMA_V3, kind: 'set_talk_mode', id, talk_mode: want.talkMode };
       return v2 ? { schema: SCHEMA_V2, kind: 'set_talk_mode', id, talk_mode: want.talkMode } : null;
+    case 'set_share_audio':
+      if (!v3) return null;
+      // A stop carries no scope and no name, so none left over is read as a consent.
+      return want.capturing
+        ? { schema: SCHEMA_V3, kind: 'set_share_audio', id, capturing: true, scope: want.scope, application_name: want.applicationName }
+        : { schema: SCHEMA_V3, kind: 'set_share_audio', id, capturing: false };
+    case 'set_share_audio_mute':
+      return v3 ? { schema: SCHEMA_V3, kind: 'set_share_audio_mute', id, muted: want.muted } : null;
   }
+}
+
+// validApplicationName is the rule of set_share_audio's application_name: 1 to
+// 128 bytes of printable ASCII.
+export function validApplicationName(name: string): boolean {
+  return name.length >= 1 && name.length <= MAX_APPLICATION_NAME_BYTES && /^[\x20-\x7e]+$/.test(name);
+}
+
+function shareAudioCommandProblem(c: VoiceControlSetShareAudioV3): string | null {
+  if (c.capturing) {
+    // Never the application scope: this owner asks for everything but the
+    // call, and the page cannot ask for anything else.
+    if (c.scope !== LINUX_SHARE_AUDIO_SCOPE) return 'set_share_audio capturing needs the system_excluding_call scope';
+    if (c.application_name === undefined || !validApplicationName(c.application_name)) return 'set_share_audio needs an application_name of printable ASCII';
+  } else if (c.scope !== undefined || c.application_name !== undefined) {
+    return 'set_share_audio with capturing false carries no scope and no application_name';
+  }
+  return checked(voiceControlSetShareAudioV3, c);
 }
 
 function commandProblem(c: Command): string | null {
   if (!validId(c.id)) return 'id out of range';
   const v2 = c.schema === SCHEMA_V2;
+  const v3 = c.schema === SCHEMA_V3;
   // The generated kind field is the whole vocabulary, so it does not narrow
   // the union; each command was built by this module for its kind.
   switch (c.kind) {
     case 'start': {
-      const s = c as VoiceControlStartV1 | VoiceControlStartV2;
+      const s = c as VoiceControlStartV1 | VoiceControlStartV2 | VoiceControlStartV3;
       if (!validServer(s.server)) return 'the server address is not one a start may carry';
       if (!validChannel(s.channel)) return 'the channel is not one a start may carry';
       if (!Number.isSafeInteger(s.principal_id) || s.principal_id <= 0) return 'principal_id must be positive';
-      return checked<VoiceControlStartV1 | VoiceControlStartV2>(v2 ? voiceControlStartV2 : voiceControlStartV1, s);
+      return checked<VoiceControlStartV1 | VoiceControlStartV2 | VoiceControlStartV3>(v3 ? voiceControlStartV3 : v2 ? voiceControlStartV2 : voiceControlStartV1, s);
     }
     case 'set_mute':
-      return checked<VoiceControlSetMuteV1 | VoiceControlSetMuteV2>(v2 ? voiceControlSetMuteV2 : voiceControlSetMuteV1, c as VoiceControlSetMuteV1 | VoiceControlSetMuteV2);
+      return checked<VoiceControlSetMuteV1 | VoiceControlSetMuteV2 | VoiceControlSetMuteV3>(
+        v3 ? voiceControlSetMuteV3 : v2 ? voiceControlSetMuteV2 : voiceControlSetMuteV1,
+        c as VoiceControlSetMuteV1 | VoiceControlSetMuteV2 | VoiceControlSetMuteV3,
+      );
     case 'set_deafen':
-      return checked<VoiceControlSetDeafenV1 | VoiceControlSetDeafenV2>(
-        v2 ? voiceControlSetDeafenV2 : voiceControlSetDeafenV1,
-        c as VoiceControlSetDeafenV1 | VoiceControlSetDeafenV2,
+      return checked<VoiceControlSetDeafenV1 | VoiceControlSetDeafenV2 | VoiceControlSetDeafenV3>(
+        v3 ? voiceControlSetDeafenV3 : v2 ? voiceControlSetDeafenV2 : voiceControlSetDeafenV1,
+        c as VoiceControlSetDeafenV1 | VoiceControlSetDeafenV2 | VoiceControlSetDeafenV3,
       );
     case 'get_state':
-      return checked<VoiceControlGetStateV1 | VoiceControlGetStateV2>(v2 ? voiceControlGetStateV2 : voiceControlGetStateV1, c);
+      return checked<VoiceControlGetStateV1 | VoiceControlGetStateV2 | VoiceControlGetStateV3>(
+        v3 ? voiceControlGetStateV3 : v2 ? voiceControlGetStateV2 : voiceControlGetStateV1,
+        c,
+      );
     case 'leave':
-      return checked<VoiceControlLeaveV1 | VoiceControlLeaveV2>(v2 ? voiceControlLeaveV2 : voiceControlLeaveV1, c);
+      return checked<VoiceControlLeaveV1 | VoiceControlLeaveV2 | VoiceControlLeaveV3>(v3 ? voiceControlLeaveV3 : v2 ? voiceControlLeaveV2 : voiceControlLeaveV1, c);
     case 'set_devices': {
-      const d = c as VoiceControlSetDevicesV2;
+      const d = c as VoiceControlSetDevicesV2 | VoiceControlSetDevicesV3;
       if (d.input === undefined && d.output === undefined) return 'set_devices must name a side';
       if (d.input !== undefined && !validDeviceName(d.input)) return 'set_devices input is not a device name';
       if (d.output !== undefined && !validDeviceName(d.output)) return 'set_devices output is not a device name';
-      return checked(voiceControlSetDevicesV2, d);
+      return checked<VoiceControlSetDevicesV2 | VoiceControlSetDevicesV3>(v3 ? voiceControlSetDevicesV3 : voiceControlSetDevicesV2, d);
     }
     case 'set_talk_mode':
-      return checked(voiceControlSetTalkModeV2, c as VoiceControlSetTalkModeV2);
+      return checked<VoiceControlSetTalkModeV2 | VoiceControlSetTalkModeV3>(
+        v3 ? voiceControlSetTalkModeV3 : voiceControlSetTalkModeV2,
+        c as VoiceControlSetTalkModeV2 | VoiceControlSetTalkModeV3,
+      );
+    case 'set_share_audio':
+      return v3 ? shareAudioCommandProblem(c as VoiceControlSetShareAudioV3) : 'set_share_audio is a command of v3';
+    case 'set_share_audio_mute':
+      return v3 ? checked(voiceControlSetShareAudioMuteV3, c as VoiceControlSetShareAudioMuteV3) : 'set_share_audio_mute is a command of v3';
     default:
       return 'not a command';
   }
@@ -948,9 +1132,12 @@ export function encodeCommand(c: Command): Buffer {
 // ------------------------------------------------------------- negotiation
 
 // negotiate picks the highest version both sides implement, or null: then the
-// owner writes nothing at all and closes standard input.
-export function negotiate(hello: VoiceControlHelloV1): Version | null {
-  return OWNER_VERSIONS.find((v) => hello.versions.includes(v)) ?? null;
+// owner writes nothing at all and closes standard input. offered is what this
+// owner offers, best first: OWNER_VERSIONS unless the Linux share-sound switch
+// is on (OWNER_VERSIONS_SHARE_AUDIO), so a v3 helper is spoken to in v2 and
+// silent with the switch off.
+export function negotiate(hello: VoiceControlHelloV1, offered: readonly Version[] = OWNER_VERSIONS): Version | null {
+  return offered.find((v) => hello.versions.includes(v)) ?? null;
 }
 
 // ------------------------------------------------------------------ lines
@@ -995,7 +1182,7 @@ export class LineSplitter {
 
 // ---------------------------------------------------------------- tracker
 
-export type Event = EventV1 | EventV2;
+export type Event = EventV1 | EventV2 | EventV3;
 
 export interface Reading {
   readonly event: Event;
@@ -1031,7 +1218,8 @@ export class Tracker {
 
   read(line: Buffer | 'too_long'): TrackResult {
     if (line === 'too_long') return { ok: false, detail: 'too_long' };
-    const parsed = this.version === SCHEMA_V2 && this.hello !== null ? parseEventV2(line) : parseEventV1(line);
+    const started = this.hello !== null;
+    const parsed = started && this.version === SCHEMA_V3 ? parseEventV3(line) : started && this.version === SCHEMA_V2 ? parseEventV2(line) : parseEventV1(line);
     if (!parsed.ok) return { ok: false, detail: parsed.code };
     const ev = parsed.event;
     if (this.final) return { ok: false, detail: 'an event after the final state' };

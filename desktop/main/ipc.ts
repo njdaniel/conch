@@ -15,6 +15,7 @@
 // (registerNotificationSupport), which Electron's ipcMain.on answers through
 // event.returnValue. notificationSupported() runs the same caller, rate and
 // shape checks and returns an Envelope too.
+import { windowsKey } from '../../web/src/platform/desktop/windows-keys.ts';
 import type { IpcMain } from 'electron';
 
 import type { BridgeReply, BridgeRequest, FeedRequest, IntegrationsView, InviteTarget, NotifyRequest, SettingsChange, SignInOutcome, VoiceDeviceKey } from '../../web/src/platform/desktop/bridge.ts';
@@ -27,9 +28,9 @@ import { isProfileId } from './profiles/ids.ts';
 import type { Invites } from './invites.ts';
 import { MISMATCH, type ProfilesService } from './profiles/service.ts';
 import { parseFeedRequest, type Feeds } from './api/feeds.ts';
-import { targetOf, isOperationId } from './api/target.ts';
+import { targetOf, isOperationId, paramOk } from './api/target.ts';
 import { previewable } from './api/target.ts';
-import { invocable, type ReplaceStep, type Service, type SignInStep } from './api/service.ts';
+import { invocable, type DisplayStep, type ReplaceStep, type Service, type SignInStep } from './api/service.ts';
 import { isFileId, parseUpload, MAX_UPLOAD_BYTES, type Files } from './files.ts';
 import { LINK_GESTURE_MS, type Gestures } from './gestures.ts';
 import type { DocumentGate } from './document.ts';
@@ -39,6 +40,7 @@ import type { Installed } from './installed.ts';
 import type { VoiceService } from './voice/service.ts';
 import type { SettingsService } from './settings.ts';
 import type { Companion } from './voice/companion.ts';
+import type { ShareSound } from './voice/share-audio.ts';
 import type { ShareAllowance } from './share-allowance.ts';
 
 export interface FrameLike {
@@ -58,7 +60,7 @@ export interface InvokeEvent {
   readonly senderFrame: FrameLike | null;
 }
 
-export type Refusal = 'sender' | 'destroyed' | 'frame' | 'subframe' | 'origin' | 'generation' | 'name' | 'rate' | 'size' | 'shape' | 'gesture' | 'error';
+export type Refusal = 'sender' | 'destroyed' | 'frame' | 'subframe' | 'origin' | 'generation' | 'name' | 'rate' | 'size' | 'shape' | 'gesture' | 'disabled' | 'error';
 
 export interface IpcDeps {
   // The one web contents that may call main.
@@ -89,7 +91,11 @@ export interface IpcDeps {
   readonly companion?: CompanionApi;
   // The share allowance (share-allowance.ts). Absent: shareArm arms nothing
   // and a grant needs its own fresh act.
-  readonly share?: Pick<ShareAllowance, 'arm' | 'takeGrant'>;
+  readonly share?: Pick<ShareAllowance, 'arm' | 'takeGrant'> & Partial<Pick<ShareAllowance, 'takeSound'>>;
+  // The Linux screen share's sound (issue #1854). Absent unless main's own
+  // switch is on: then none of the four share-sound functions answers, and
+  // every call is refused (the page cannot turn the switch on).
+  readonly shareSound?: ShareSoundApi;
   readonly now: () => number;
   readonly log: (line: string) => void;
 }
@@ -110,6 +116,7 @@ export interface IntegrationsApi {
   view(): Promise<IntegrationsView>;
 }
 export type CompanionApi = Pick<Companion, 'grant' | 'stop' | 'end'>;
+export type ShareSoundApi = Pick<ShareSound, 'start' | 'choose' | 'mute' | 'end' | 'shareEnded'>;
 
 const NO_INTEGRATIONS: IntegrationsApi = { view: () => Promise.resolve({ rows: [] }) };
 
@@ -198,6 +205,14 @@ interface Spec {
   // True for a function whose act may instead be the share allowance's grant
   // use (companionGrant: Share armed it, Watch has a fresh act of its own).
   readonly shareGrant?: true;
+  // True for a function whose only act is the share allowance's sound use
+  // (shareSoundStart: the Share click's arm, once main granted the capture of
+  // its pick). A fresh click is not taken for it: a click is not the person
+  // choosing a screen to share.
+  readonly shareSound?: true;
+  // True for the share-sound family: refused outright, before any act is
+  // taken, unless main's own switch gave it a handler.
+  readonly soundFamily?: true;
 }
 
 // What a function runs against: the services, the activation, and the document
@@ -214,6 +229,8 @@ interface Handlers {
   readonly settings: SettingsApi;
   readonly integrations: IntegrationsApi;
   readonly companion: CompanionApi;
+  // Absent (the switch off): a share-sound function never reaches its run.
+  readonly shareSound: ShareSoundApi | null;
   readonly document: number;
   readonly arm: () => boolean;
 }
@@ -237,6 +254,51 @@ function signIn(step: SignInStep): Spec {
     },
     run: async ({ service, profiles }, [body]) =>
       profiles.signInPermitted() ? bound(profiles, await service.signIn(step, body as Record<string, unknown>)) : INCOMPATIBLE,
+  };
+}
+
+// display is the spec of a function that makes one of the six operations whose
+// answer holds a secret for someone else (issue #1768) and hands the page the
+// server's reply once. The body is checked against the operation's own request
+// validator; the operation is fixed by the function, never named by the page.
+// Rated as the sign-in steps are, since each makes something that grants
+// access, and the person's act alone (gesture: true): three of them mint a
+// bearer-equivalent for the signed-in account (a sign-in link for another
+// device, a script credential, a sign-in link for any person, one's own
+// included), so a script in the page cannot call them without a click or key in
+// the window just before. Every UI caller follows a click. On a server the app may not sign in to, nothing is sent.
+function display(step: DisplayStep): Spec {
+  return {
+    limit: 30,
+    maxBytes: 16 * 1024,
+    parse: (args) => {
+      const [body] = args;
+      return args.length === 1 && isRecord(body) && operations[step].request?.(body).length === 0 ? [body] : null;
+    },
+    run: ({ service, profiles }, [body]) => (profiles.signInPermitted() ? service.display(step, undefined, body) : INCOMPATIBLE_REPLY),
+    gesture: true,
+  };
+}
+
+// displayFor is display for the two admin operations on another person: the
+// request is exactly { id, body }, the id a principal's number.
+function displayFor(step: DisplayStep): Spec {
+  return {
+    limit: 30,
+    maxBytes: 16 * 1024,
+    parse: (args) => {
+      const [request] = args;
+      if (args.length !== 1 || !isRecord(request) || !hasExactKeys(request, ['id', 'body'])) return null;
+      const { id, body } = request;
+      if (typeof id !== 'number' || !paramOk(id) || !isRecord(body) || operations[step].request?.(body).length !== 0) return null;
+      return [{ id, body }];
+    },
+    run: ({ service, profiles }, [request]) => {
+      if (!profiles.signInPermitted()) return INCOMPATIBLE_REPLY;
+      const { id, body } = request as { id: number; body: unknown };
+      return service.display(step, { id }, body);
+    },
+    gesture: true,
   };
 }
 
@@ -365,9 +427,15 @@ function parseSaveDevice(args: readonly unknown[]): readonly unknown[] | null {
 
 // A talk binding is exactly an id from the last listing (an opaque string, no
 // longer than a UUID plus a margin; the service looks it up) and a key code.
+// Windows accepts only an allowlisted physical code and a voice generation.
 function parseTalkBinding(args: readonly unknown[]): readonly unknown[] | null {
   const [request] = args;
-  if (args.length !== 1 || !isRecord(request) || !hasExactKeys(request, ['deviceId', 'code'])) return null;
+  if (args.length !== 1 || !isRecord(request)) return null;
+  if (hasExactKeys(request, ['windowsCode', 'generation'])) {
+    const { windowsCode, generation } = request;
+    return typeof windowsCode === 'string' && windowsKey(windowsCode) !== null && typeof generation === 'number' && Number.isSafeInteger(generation) && generation >= 0 ? [{ windowsCode, generation }] : null;
+  }
+  if (!hasExactKeys(request, ['deviceId', 'code'])) return null;
   const { deviceId, code } = request;
   if (typeof deviceId !== 'string' || !/^[A-Za-z0-9-]{1,64}$/u.test(deviceId) || keyCodeText(code) === null) return null;
   return [{ deviceId, code }];
@@ -380,6 +448,23 @@ function parseCompanionGrant(args: readonly unknown[]): readonly unknown[] | nul
   if (args.length !== 1 || !isRecord(request) || !hasExactKeys(request, ['channel'])) return null;
   const { channel } = request;
   return isChannel(channel) ? [{ channel }] : null;
+}
+
+// The share sound's choice is exactly one of the two words of its vocabulary:
+// no scope, application or name rides with it (main builds those).
+function parseShareSoundChoose(args: readonly unknown[]): readonly unknown[] | null {
+  const [request] = args;
+  if (args.length !== 1 || !isRecord(request) || !hasExactKeys(request, ['choice'])) return null;
+  const { choice } = request;
+  return choice === 'system_excluding_call' || choice === 'none' ? [{ choice }] : null;
+}
+
+// An end names a share by the number main gave the page for it.
+function parseShareSoundEnd(args: readonly unknown[]): readonly unknown[] | null {
+  const [request] = args;
+  if (args.length !== 1 || !isRecord(request) || !hasExactKeys(request, ['share'])) return null;
+  const { share } = request;
+  return typeof share === 'number' && Number.isSafeInteger(share) && share > 0 ? [{ share }] : null;
 }
 
 // At least one of input and output; each a printable device name.
@@ -465,6 +550,20 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
       return bound(profiles, await service.replaceCredential(operation, body));
     },
   },
+  // The secrets made for someone else (issue #1768): one function each, the
+  // server's reply back once for display and copy, nothing kept in main.
+  createMemberLink: display('createMemberLink'),
+  createSignInLink: display('createSignInLink'),
+  totpEnroll: {
+    limit: 30,
+    maxBytes: 0,
+    parse: none,
+    run: ({ service, profiles }) => (profiles.signInPermitted() ? service.display('totpEnroll', undefined, undefined) : INCOMPATIBLE_REPLY),
+    gesture: true,
+  },
+  createPrincipalSignInLink: displayFor('createPrincipalSignInLink'),
+  createPrincipalCredential: displayFor('createPrincipalCredential'),
+  createHook: display('createHook'),
   // The saved server profiles (issue #945). Ids are 32 hex characters; a
   // label is plain text of at most 64 characters (main trims and checks it).
   profiles: { limit: 120, maxBytes: 0, parse: none, run: ({ profiles }) => profiles.view() },
@@ -608,7 +707,7 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
     limit: 10,
     maxBytes: 256,
     parse: parseTalkBinding,
-    run: ({ voice }, [request]) => voice.saveTalkBinding(request as { deviceId: string; code: number }),
+    run: ({ voice }, [request]) => voice.saveTalkBinding(request as import('../../web/src/platform/desktop/bridge.ts').VoiceTalkBindingRequest),
     gesture: true,
   },
   // The update family (issue #1600). Restart is the person's act alone: it
@@ -681,7 +780,66 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
   // It carries no argument: nothing the page says is trusted.
   shareArm: { limit: 20, maxBytes: 0, parse: none, run: ({ arm }) => arm(), gesture: true },
   companionEnd: { limit: 60, maxBytes: 0, parse: none, run: ({ companion }) => companion.stop() },
+  // The Linux screen share's sound (issue #1854). Each is refused outright
+  // unless main's own switch is on. None carries a scope, an application, a
+  // process, a device or a gesture flag: main builds the first four, and the
+  // person's act is taken from main's own record of the window's input, never
+  // from a word in a payload.
+  //
+  // Start follows the Share click: its one act is the click's arm (the sound
+  // use of the allowance, available only once main granted the capture of
+  // that click's pick). Choose is the person's click on the toggle: a fresh
+  // act only. A mute and an end only reduce what is shared and need none (as
+  // voiceSetMute and companionEnd need none); an unmute resumes what is
+  // shared, so it is the person's act (as voiceSetTalkMode's open mic is).
+  shareSoundStart: {
+    limit: 20,
+    maxBytes: 0,
+    parse: none,
+    run: ({ shareSound, document }) => requireSound(shareSound).start(document),
+    shareSound: true,
+    soundFamily: true,
+  },
+  shareSoundChoose: {
+    limit: 30,
+    maxBytes: 128,
+    parse: parseShareSoundChoose,
+    run: ({ shareSound, document }, [request]) => requireSound(shareSound).choose((request as { choice: 'system_excluding_call' | 'none' }).choice, document),
+    gesture: true,
+    soundFamily: true,
+  },
+  shareSoundMute: {
+    limit: 120,
+    maxBytes: 16,
+    parse: oneBoolean,
+    run: ({ shareSound, document }, [muted]) => requireSound(shareSound).mute(muted as boolean, document),
+    gesture: (args) => args[0] === false,
+    soundFamily: true,
+  },
+  shareSoundEnd: {
+    limit: 60,
+    maxBytes: 64,
+    parse: parseShareSoundEnd,
+    run: ({ shareSound }, [request]) => requireSound(shareSound).end((request as { share: number }).share),
+    soundFamily: true,
+  },
+  // The page's share ended, whether or not its sound was ever asked: no token,
+  // no act, no argument. It only takes away (the capture's record of a share,
+  // and any sound of a share in the caller's document), for the caller's own
+  // document.
+  shareSoundShareEnded: {
+    limit: 60,
+    maxBytes: 0,
+    parse: none,
+    run: ({ shareSound, document }) => requireSound(shareSound).shareEnded(document),
+    soundFamily: true,
+  },
 };
+
+function requireSound(sound: ShareSoundApi | null): ShareSoundApi {
+  if (sound === null) throw new Error('no share sound');
+  return sound;
+}
 
 export class Ipc {
   readonly #deps: IpcDeps;
@@ -716,12 +874,19 @@ export class Ipc {
     const owned = this.#deps.owned();
     const parsed = spec.parse(args);
     if (parsed === null) return this.#refuse('shape');
+    // The share sound's family answers only where main's switch gave it a
+    // handler; nothing is taken, and nothing runs, otherwise.
+    if (spec.soundFamily === true && this.#deps.shareSound === undefined) return this.#refuse('disabled');
     const needsGesture = spec.gesture === true || (typeof spec.gesture === 'function' && spec.gesture(parsed));
-    // A fresh act first, so a Watch click is never answered from a Share
-    // allowance and keeps it; a grant with none falls back to the allowance's
-    // grant use (consumed), the cold Share path.
-    if (needsGesture && this.#deps.gestures.take(owned, LINK_GESTURE_MS) === null) {
-      if (spec.shareGrant !== true || this.#deps.share?.takeGrant(owned) !== true) return this.#refuse('gesture');
+    // A share sound's start takes the allowance's sound use and nothing else:
+    // a fresh click is not a granted capture.
+    if (spec.shareSound === true) {
+      if (this.#deps.share?.takeSound?.(owned) !== true) return this.#refuse('gesture');
+    } else if (needsGesture && this.#deps.gestures.take(owned, LINK_GESTURE_MS) === null) {
+      // A fresh act first, so a Watch click is never answered from a Share
+      // allowance and keeps it; a grant with none falls back to the
+      // allowance's grant use (consumed), the cold Share path.
+      if (!(spec.shareGrant === true && this.#deps.share?.takeGrant(owned) === true)) return this.#refuse('gesture');
     }
     try {
       const to: Handlers = {
@@ -736,6 +901,7 @@ export class Ipc {
         settings: this.#deps.settings,
         integrations: this.#deps.integrations ?? NO_INTEGRATIONS,
         companion: this.#deps.companion ?? NO_COMPANION,
+        shareSound: this.#deps.shareSound ?? null,
         document: this.#deps.gate.generation,
         arm: () => this.#deps.share?.arm(owned) ?? false,
       };

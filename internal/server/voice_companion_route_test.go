@@ -939,3 +939,131 @@ func TestVoiceCompanionPublishOnlyKeepsItsGrant(t *testing.T) {
 		}
 	}
 }
+
+// TestVoiceCompanionNamesTheChannel: the grant names the channel by id (issue
+// #1883), the id of the channel the route's name resolved to. The route is
+// addressed by name and a name can be given to another channel, so the id is
+// what lets the holder of a grant tell which channel a later answer is from:
+// a rename keeps it, and a channel created under the old name answers with
+// its own.
+func TestVoiceCompanionNamesTheChannel(t *testing.T) {
+	f, _ := newShareFixture(t)
+	want := f.ops.ID
+
+	screen := f.companion(t, "ann", "ops", companionScreen)
+	if got := decodeCompanion(t, screen).ChannelID; got != want {
+		t.Fatalf("the screen companion's channel_id = %d, want %d, the id of ops", got, want)
+	}
+	if field := fmt.Sprintf(`"channel_id":%d`, want); !strings.Contains(screen.body, field) {
+		t.Errorf("the answer does not carry %s: %s", field, screen.body)
+	}
+	if got := decodeCompanion(t, f.companion(t, "ann", "ops", companionViewerBody)).ChannelID; got != want {
+		t.Errorf("the viewer's channel_id = %d, want %d", got, want)
+	}
+
+	// Renamed: the old name is nobody's, and the new name answers with the
+	// id the first grant named.
+	f.renameChannel(t, want, "ops", "war-room")
+	if res := f.companion(t, "ann", "ops", companionViewerBody); res.status != http.StatusNotFound || errCode(t, res.body) != "channel_not_found" || strings.Contains(res.body, "channel_id") {
+		t.Fatalf("under the old name: %d %s, want 404 channel_not_found naming no channel", res.status, res.body)
+	}
+	if got := decodeCompanion(t, f.companion(t, "ann", "war-room", companionViewerBody)).ChannelID; got != want {
+		t.Errorf("after the rename the viewer's channel_id = %d, want %d still", got, want)
+	}
+	f.at(2_000) // past the pass gap in which the first screen token counts as a companion
+	f.pass(t)
+	if got := decodeCompanion(t, f.companion(t, "ann", "war-room", companionScreen)).ChannelID; got != want {
+		t.Errorf("after the rename the screen companion's channel_id = %d, want %d still", got, want)
+	}
+
+	// The old name given to another channel: a grant under it is for that
+	// channel, and says so.
+	ctx := context.Background()
+	taken, err := f.srv.store.CreateChannel(ctx, "ops")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.srv.store.AddChannelMember(ctx, "system", taken.ID, f.ids["ann"], 0); err != nil {
+		t.Fatal(err)
+	}
+	decodeSession(t, f.session(t, "ann", "ops")) // a room someone holds a session for
+	if got := decodeCompanion(t, f.companion(t, "ann", "ops", companionViewerBody)).ChannelID; got != taken.ID || got == want {
+		t.Errorf("under the old name, now another channel's: channel_id = %d, want %d and not %d", got, taken.ID, want)
+	}
+}
+
+// Every name-addressed companion operation checks the id before any effect.
+func TestVoiceCompanionChannelPrecondition(t *testing.T) {
+	for _, route := range []struct {
+		method, suffix, body string
+		status               int
+	}{
+		{http.MethodPost, "", companionViewerBody, 200},
+		{http.MethodDelete, "", "", 204},
+		{http.MethodPut, "/audio", audioSystemPerson, 200},
+		{http.MethodDelete, "/audio", "", 204},
+	} {
+		for _, query := range []string{"", "match", "mismatch", "empty", "0", "-1", "x", "1&channel_id=2"} {
+			t.Run(route.method+route.suffix+query, func(t *testing.T) {
+				f, _ := shareWithCompanion(t)
+				f.mustClaim(t, "ann")
+				want := route.status
+				switch query {
+				case "match":
+					query = fmt.Sprint(f.ops.ID)
+				case "mismatch":
+					query = fmt.Sprint(f.ops.ID + 100)
+					want = 409
+				case "":
+				default:
+					want = 400
+				}
+				path := "/v1/channels/ops/voice/companion" + route.suffix
+				if query != "" {
+					if query == "empty" {
+						query = ""
+					}
+					path += "?channel_id=" + query
+				}
+				beforeRows, beforeCreates, beforeRemoves, beforeUpdates := len(f.audit(t)), f.lk.count("CreateRoom"), f.lk.count("RemoveParticipant"), f.lk.count("UpdateParticipant")
+				res := f.callREST(t, route.method, path, f.tokens["ann"], route.body)
+				if res.status != want {
+					t.Fatalf("got %d %s, want %d", res.status, res.body, want)
+				}
+				if want == 409 && errCode(t, res.body) != schema.ErrorCodeChannelMismatch {
+					t.Fatal(res.body)
+				}
+				if want >= 400 && (len(f.audit(t)) != beforeRows || f.lk.count("CreateRoom") != beforeCreates || f.lk.count("RemoveParticipant") != beforeRemoves || f.lk.count("UpdateParticipant") != beforeUpdates) {
+					t.Fatal("refusal had an effect")
+				}
+			})
+		}
+	}
+}
+
+func TestVoiceCompanionPreconditionRenameAndRetake(t *testing.T) {
+	for _, suffix := range []string{"", "/audio"} {
+		t.Run("companion"+suffix, func(t *testing.T) {
+			f, room := newShareFixture(t)
+			grant := decodeCompanion(t, f.companion(t, "ann", "ops", companionScreen))
+			f.companionConnects(t, room)
+			f.mustClaim(t, "ann")
+			decodeConsent(t, f.companionAudio(t, "ann", audioApplication))
+			f.renameChannel(t, f.ops.ID, "ops", "war-room")
+			f.renameChannel(t, f.ops2.ID, "ops2", "ops")
+			path := "/voice/companion" + suffix + fmt.Sprintf("?channel_id=%d", grant.ChannelID)
+			rows, removes, updates := len(f.audit(t)), f.lk.count("RemoveParticipant"), f.lk.count("UpdateParticipant")
+			res := f.callREST(t, http.MethodDelete, "/v1/channels/ops"+path, f.tokens["ann"], "")
+			if res.status != 409 || errCode(t, res.body) != schema.ErrorCodeChannelMismatch {
+				t.Fatalf("retaken name: %d %s", res.status, res.body)
+			}
+			if len(f.audit(t)) != rows || f.lk.count("RemoveParticipant") != removes || f.lk.count("UpdateParticipant") != updates || !f.lk.in(room, f.screenID("ann")) {
+				t.Fatal("mismatch affected the live companion or consent")
+			}
+			res = f.callREST(t, http.MethodDelete, "/v1/channels/war-room"+path, f.tokens["ann"], "")
+			if res.status != 204 {
+				t.Fatalf("followed id: %d %s", res.status, res.body)
+			}
+		})
+	}
+}

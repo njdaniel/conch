@@ -69,6 +69,8 @@ export function storageLine(storage: StorageStatus, platform: string): string {
 }
 
 export const noticeLines: Readonly<Record<ProfileNotice, string>> = {
+  'operator-window-only':
+    'Operator sign-ins aren’t remembered on this computer. They’re kept for this window only, and the server ends them after 12 hours or an hour idle. Use a member account for everyday use.',
   'sign-in-again': 'The saved sign-in for this server could not be used. Sign in again.',
   'could-not-verify':
     'The saved sign-in for this server could not be checked because the server did not answer, so it was not used. Switch to the server again when it can be reached.',

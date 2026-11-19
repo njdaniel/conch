@@ -10,6 +10,15 @@
 //!
 //! No test here needs a microphone, PipeWire, a keyboard or LiveKit: the microphone is a
 //! tone, the speakers count, the keyboard is a named pipe, and LiveKit is the fake.
+//!
+//! **On Windows** (#1766) the same tests run against a real named pipe: the rig holds the
+//! owner's end of `--events-pipe` as a tokio `NamedPipeServer`, and the helper reaches it
+//! through `channel::attach`, so what is checked is what crosses the pipe. The keyboard
+//! (#1791) is a named pipe too, the rig's end of it a one-way `NamedPipeServer`, read by the
+//! helper's key source through the hidden `--test-key-device` (`keys_windows`'s
+//! `PipeSource`, gated as Linux's option is) in place of Raw Input: the key-driven tests and
+//! every transcript, `ptt` `ready` and `lost` included, run there with the bytes Linux
+//! expects.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -26,7 +35,7 @@ use conch_voice_api::{
     VOICE_CONTROL_EVENT_QUEUE_LINES, VOICE_CONTROL_LEAVE_EXIT_MS, VOICE_CONTROL_OWNER_LOSS_EXIT_MS,
     VoiceControlCommand, VoiceControlCommandKind, VoiceControlErrorCode, VoiceControlEvent,
     VoiceControlHelloV1, VoiceControlPhase, VoiceControlReason, VoiceControlStateV1, parse_command,
-    parse_command_v2, parse_event, parse_event_v2,
+    parse_command_v2, parse_event, parse_event_v2, parse_event_v3,
 };
 use serde_json::{Value, json};
 use tokio::sync::Notify;
@@ -308,6 +317,11 @@ async fn drive(rig: &mut ManagedRig, name: &str) -> (Vec<Logged>, i32) {
                 let mut message = step["message"].clone();
                 if message["kind"] == "start" {
                     message["server"] = json!(rig.conchd.url());
+                    // F13: Windows owners pass the login in the environment.
+                    #[cfg(windows)]
+                    {
+                        message["credential"] = json!("env");
+                    }
                 }
                 let line = message.to_string();
                 rig.line(line.as_bytes());
@@ -1060,6 +1074,13 @@ async fn the_login_comes_from_where_the_start_says_and_nowhere_else() {
         ),
     ];
     for (login, credential, fails) in cases {
+        // F13 refuses every Windows stored start, even if CONCH_TOKEN is also set.
+        #[cfg(windows)]
+        let fails = if credential == "stored" {
+            Some(VoiceControlReason::NotSignedIn)
+        } else {
+            fails
+        };
         let setup = ManagedSetup {
             login,
             ..ManagedSetup::default()
@@ -1158,33 +1179,15 @@ async fn without_a_key_device_hold_to_talk_is_not_configured_and_the_rest_works(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_slow_owner_loses_events_sees_the_gap_and_resynchronises() {
-    const STRIKES: i64 = 400;
     let mut rig = ManagedRig::start().await;
     rig.send_start();
     rig.ready().await;
     let base = rig.read().last().unwrap().seq();
-    let track_muted = rig.sdk.count(Call::Mute);
-    // The owner stops reading; meanwhile the mute key is struck far more often than the
-    // queue holds states. Each strike is one change, and so one state, and one seq.
-    rig.reader.stop(true);
-    for _ in 0..STRIKES {
-        rig.strike_mute();
-    }
-    rig.until("the writer waiting on the owner", |rig| {
-        rig.reader.is_waited_for()
-    })
-    .await;
-    // The owner reads again only once the helper has taken the strikes, all but perhaps
-    // the last: each strike that mutes mutes the track as well. That is more states than
-    // the helper holds for an owner who does not read, so some were dropped.
-    rig.until("the strikes taken", |rig| {
-        rig.sdk.count(Call::Mute) >= track_muted + STRIKES as usize / 2
-    })
-    .await;
+    let strikes = rig.overflow_events().await;
     rig.reader.stop(false);
 
-    // The owner reads first what the helper held for it: the event in its writer's hands
-    // and a full queue. Only then does it ask, as `conch` asks only once it has read an
+    // The owner first drains the transport's buffers, the event in the helper writer's
+    // hands and a full queue. Only then does it ask, as `conch` asks once it has read an
     // event after the gap. (Asked sooner, the answer waits behind the full queue and still
     // comes: the test after this one.)
     rig.until("the events held for the owner", |rig| {
@@ -1209,7 +1212,7 @@ async fn a_slow_owner_loses_events_sees_the_gap_and_resynchronises() {
             VoiceControlEvent::State(state) => state.clone(),
             other => panic!("get_state answered without a state just before: {other:?}"),
         };
-        if state.seq > base + STRIKES {
+        if state.seq > base + strikes {
             break state;
         }
         id += 1;
@@ -1234,24 +1237,15 @@ async fn a_slow_owner_loses_events_sees_the_gap_and_resynchronises() {
 /// answers `get_state`, are never dropped (§5, rules 8 and 10; #571).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn commands_sent_to_an_owner_that_is_not_reading_are_answered_once_it_reads() {
-    // Odd, so that the last strike mutes and the track says when it has been taken.
-    const STRIKES: i64 = 401;
     let mut rig = ManagedRig::start().await;
     rig.send_start();
     rig.ready().await;
     let track_muted = rig.sdk.count(Call::Mute);
-    // The owner stops reading, and the mute key is struck far more often than the queue
-    // holds states: when every strike has been taken, the queue is full.
-    rig.reader.stop(true);
-    for _ in 0..STRIKES {
-        rig.strike_mute();
-    }
-    rig.until("the writer waiting on the owner", |rig| {
-        rig.reader.is_waited_for()
-    })
-    .await;
+    let strikes = rig.overflow_events().await + 1;
+    // Odd, so that the final strike mutes and the SDK proves it was processed.
+    rig.strike_mute();
     rig.until("every strike taken", |rig| {
-        rig.sdk.count(Call::Mute) >= track_muted + (STRIKES as usize).div_ceil(2)
+        rig.sdk.count(Call::Mute) >= track_muted + (strikes as usize).div_ceil(2)
     })
     .await;
 
@@ -1262,7 +1256,7 @@ async fn commands_sent_to_an_owner_that_is_not_reading_are_answered_once_it_read
     rig.send(&ManagedRig::command("set_mute", 3, json!({"muted": false})));
     rig.send(&ManagedRig::command("set_mute", 4, json!({"muted": true})));
     rig.until("the last command taken", |rig| {
-        rig.sdk.count(Call::Mute) > track_muted + (STRIKES as usize).div_ceil(2)
+        rig.sdk.count(Call::Mute) > track_muted + (strikes as usize).div_ceil(2)
     })
     .await;
     rig.reader.stop(false);
@@ -1625,6 +1619,15 @@ fn fixture_v2(name: &str) -> Value {
     serde_json::from_str(&text).unwrap()
 }
 
+/// A golden of `pkg/schema/testdata/voice-control-v3`, read in place.
+fn fixture_v3(name: &str) -> Value {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../pkg/schema/testdata/voice-control-v3")
+        .join(name);
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    serde_json::from_str(&text).unwrap()
+}
+
 /// `open_hang_ms` in the v2 tests' `voice.toml`, the least there is, in frames: a hang of
 /// quiet is waited for as frames read, so a test does not wait longer than it must.
 const HANG_FRAMES: u64 = 10;
@@ -1657,6 +1660,7 @@ fn helper_values(rig: &ManagedRig, version: Option<Version>) -> Vec<Value> {
             let read = match (at, version) {
                 (0, _) | (_, None | Some(Version::V1)) => parse_event(line.as_bytes()).map(|_| ()),
                 (_, Some(Version::V2)) => parse_event_v2(line.as_bytes()).map(|_| ()),
+                (_, Some(Version::V3)) => parse_event_v3(line.as_bytes()).map(|_| ()),
             };
             read.unwrap_or_else(|refusal| panic!("the owner refuses {line}: {refusal}"));
             serde_json::from_str(line).unwrap()
@@ -1808,6 +1812,11 @@ async fn drive_v2(
                 let mut message = step["message"].clone();
                 if message["kind"] == "start" {
                     message["server"] = json!(rig.conchd.url());
+                    // F13: Windows owners pass the login in the environment.
+                    #[cfg(windows)]
+                    {
+                        message["credential"] = json!("env");
+                    }
                     if version.is_none() {
                         version = Some(match message["schema"].as_str() {
                             Some("conch.voice_control.v2") => Version::V2,
@@ -1921,6 +1930,9 @@ fn read_owner_line(line: &str, version: Option<Version>) -> Read {
     match version {
         Some(Version::V1) => v1(line),
         Some(Version::V2) => v2(line),
+        // The v3 transcripts have their own driver (`tests/share_audio.rs`): no v2
+        // transcript starts a v3 session.
+        Some(Version::V3) => panic!("a v2 transcript started a v3 session: {line}"),
         None => match v2(line) {
             Read {
                 refusal: Some(VoiceControlErrorCode::UnknownSchema),
@@ -2033,10 +2045,17 @@ fn check_rules_v2(log: &[Step], exit: i32) {
                         .iter()
                         .map(|v| v.as_str().unwrap())
                         .collect();
+                    // The production hello offers v3 as well since #1586
+                    // (`event-hello-v1-v2-and-v3.json`); the v2 transcripts' own hello line
+                    // is matched by kind alone, and a v2 owner picks v2 from it all the same.
                     assert_eq!(
                         offers,
-                        ["conch.voice_control.v1", "conch.voice_control.v2"],
-                        "step {i}: the hello offers both versions"
+                        [
+                            "conch.voice_control.v1",
+                            "conch.voice_control.v2",
+                            "conch.voice_control.v3"
+                        ],
+                        "step {i}: the hello offers every version"
                     );
                     hello = true;
                     previous_was_state = false;
@@ -2323,17 +2342,44 @@ fn every_v2_transcript_is_driven_here() {
     }
 }
 
-/// The hello is v1's frozen shape, offering exactly v1 and v2, whichever the owner then
-/// chooses; the start fixes the version, and every event after it is in it.
+/// Windows: a rig that is dropped leaves no thread of its owner's pipe behind: the reader of
+/// the owner's end and the watcher of the helper's end each hold the other's pipe handle
+/// until the owner lets go (#1789).
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dropped_rig_leaves_no_thread_of_its_pipe_behind() {
+    let mut rig = ManagedRig::start().await;
+    rig.send_start();
+    rig.ready().await;
+    rig.send(&ManagedRig::command("leave", 2, json!({})));
+    rig.close();
+    assert_eq!(rig.exit_code().await, 0);
+    let threads = rig.owner_threads();
+    assert_eq!(threads.load(std::sync::atomic::Ordering::SeqCst), 2);
+    drop(rig);
+    let until = Instant::now() + Duration::from_secs(10);
+    while threads.load(std::sync::atomic::Ordering::SeqCst) != 0 {
+        assert!(
+            Instant::now() < until,
+            "a thread of the pipe outlived its rig"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// The hello is v1's frozen shape, offering exactly v1, v2 and v3 since #1586 (the signed v3
+/// golden, `event-hello-v1-v2-and-v3.json`; it offered v1 and v2 before), whichever the owner
+/// then chooses; the start fixes the version, and every event after it is in it. A v1 or v2
+/// owner's session never carries a share field.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_hello_offers_both_and_the_start_chooses_the_version_of_every_event_after_it() {
     for v2 in [false, true] {
         let mut rig = ManagedRig::start().await;
         rig.until("the hello", |rig| !rig.lines().is_empty()).await;
         let hello: Value = serde_json::from_str(&rig.lines()[0]).unwrap();
-        let mut golden = fixture_v2("event-hello-v1-and-v2.json");
+        let mut golden = fixture_v3("event-hello-v1-v2-and-v3.json");
         golden["helper_version"] = hello["helper_version"].clone();
-        assert_eq!(hello, golden, "the frozen shape, offering both");
+        assert_eq!(hello, golden, "the frozen shape, offering every version");
         if v2 {
             rig.send_start_v2();
         } else {
@@ -2365,6 +2411,7 @@ async fn the_hello_offers_both_and_the_start_chooses_the_version_of_every_event_
                 v2 && event["kind"] == "state",
                 "{line}"
             );
+            assert!(!line.contains("share_audio"), "{line}");
         }
         if v2 {
             // Read by v2's reader, whose Validate is Go's.
@@ -2462,6 +2509,11 @@ async fn a_microphone_switch_during_a_transmission_ends_it_and_a_fresh_press_is_
     })
     .await;
     world.frames_pass(20).await;
+    // The fake microphone's frames and the stub's HTTP reports advance independently.
+    rig.until("started and stopped reported", |rig| {
+        rig.conchd.reported().len() >= 2
+    })
+    .await;
     assert_eq!(rig.sdk.frames(), at_ack, "nothing after the switch");
     assert!(
         sent_levels(&rig, 0)

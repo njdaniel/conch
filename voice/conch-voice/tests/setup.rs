@@ -7,11 +7,16 @@
 //! opens or lists anything under `/dev/input`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+// Unix only: They read Unix file modes and make a named pipe with mkfifo. Windows runs the
+// unit tests in `src/`, which include the answers a non-Unix platform gives, and the tests
+// in this directory that need none of this (#1309).
+#![cfg(unix)]
 
 mod support;
 
 use std::ffi::OsStr;
 use std::io::Write;
+#[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -192,9 +197,6 @@ const HOSTILE: [&str; 12] = [
     "usb-Accent\u{e9}-event-kbd",
 ];
 
-/// A name that is not text at all.
-const NOT_TEXT: &[u8] = b"usb-Bytes\xff\xfe-event-kbd";
-
 /// A directory standing in for `/dev/input/by-id`: two keyboards, one of them unreadable,
 /// and a mouse.
 fn by_id() -> tempfile::TempDir {
@@ -213,7 +215,13 @@ fn by_id_with_hostile_names() -> tempfile::TempDir {
     for name in HOSTILE {
         std::fs::write(dir.path().join(name), press(97)).unwrap();
     }
-    std::fs::write(dir.path().join(OsStr::from_bytes(NOT_TEXT)), press(97)).unwrap();
+    // Linux can store a name that is not text at all. APFS requires valid UTF-8,
+    // so use another name outside udev's allowed alphabet on other Unix targets.
+    #[cfg(target_os = "linux")]
+    let bytes_name = OsStr::from_bytes(b"usb-Bytes\xff\xfe-event-kbd");
+    #[cfg(not(target_os = "linux"))]
+    let bytes_name = OsStr::new("usb-Bytes\u{fffd}-event-kbd");
+    std::fs::write(dir.path().join(bytes_name), press(97)).unwrap();
     dir
 }
 

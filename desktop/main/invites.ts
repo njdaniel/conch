@@ -19,11 +19,11 @@
 // hands to the same router. A scheme URL reaches the app as an argument, at a
 // first launch or in a second one (the single-instance lock); schemeLinkFrom
 // picks at most one such argument, parseSchemeLink maps it onto
-// parseInviteLink's rules, and arrive() keeps it behind nothing but a timer
-// until the page asks (arrived()), when it goes through exactly the checks of
-// a pasted link and the same choice of profile. Nothing is contacted, added
-// or switched by a URL, and an argument that is not one well-formed URL of the
-// scheme is ignored, a flag never read as one. argv is never logged.
+// parseInviteLink's rules, and arrive() keeps the result until the page asks
+// (arrived()) or the timer expires. The page shows the same profile choice as
+// a pasted link, or a message for a refusal. Nothing is contacted, added or
+// switched by a URL. A refused scheme link yields only its refusal reason,
+// and a flag is never read as a link. argv is never logged.
 import { randomBytes } from 'node:crypto';
 
 import type { DocumentGate } from './document.ts';
@@ -144,10 +144,28 @@ const SERVER_ORIGIN = /^https?:\/\/[^/?#@\\\s]+$/iu;
 const MAX_ARGV = 64;
 const SCHEME = 'conch:';
 
+export interface InviteProtocolApp {
+  readonly isPackaged: boolean;
+  isDefaultProtocolClient(scheme: string): boolean;
+  setAsDefaultProtocolClient(scheme: string): boolean;
+}
+
+// Windows' per-user protocol registration (issue #1944). Repeated starts
+// leave an existing registration alone. Linux keeps its desktop-file
+// registration; no command line, invite code or shell is involved here.
+// Only a packaged app registers: an unpackaged run (electron .) would
+// register bare electron.exe and replace the installed app's handler.
+export function registerInviteProtocol(app: InviteProtocolApp, platform: NodeJS.Platform = process.platform): boolean {
+  if (platform !== 'win32' || !app.isPackaged) return true;
+  return app.isDefaultProtocolClient('conch') || app.setAsDefaultProtocolClient('conch');
+}
+
 // schemeLinkFrom picks the one argument that is a link of the scheme: the
 // first that is a string, does not start with "-" (a switch, however it
 // continues), and starts with "conch:" in any case. Later ones are not
 // considered, whether or not the first parses. Index 0 is the executable.
+// Windows supplies the URL last on a cold start and in second-instance;
+// the same selection rule handles both, without unquoting or splitting argv.
 export function schemeLinkFrom(argv: unknown): string | null {
   if (!Array.isArray(argv)) return null;
   for (const arg of argv.slice(1, MAX_ARGV) as unknown[]) {
@@ -157,19 +175,20 @@ export function schemeLinkFrom(argv: unknown): string | null {
   return null;
 }
 
-// parseSchemeLink accepts exactly conch://invite?server=<percent-encoded
-// origin>&code=<code>, the two parameters once each in either order, and then
-// holds the result to parseInviteLink's rules by building the https link it
-// names. Anything else is one refusal naming the rule, never repeating the
-// input. No trimming and no repair: the text is one argument as given.
+// parseSchemeLink accepts conch://invite?server=<percent-encoded origin>&code=<code>
+// and allows the single slash before '?' that Windows adds. The two parameters
+// appear once each in either order. It holds the result to parseInviteLink's
+// rules by building the web link it names. Anything else is one refusal naming
+// the rule, never repeating the input. No trimming and no repair: the text is
+// one argument as given.
 export function parseSchemeLink(input: unknown): InviteParse {
   if (typeof input !== 'string') return refuse('type');
   if (input.length === 0 || input.length > MAX_INVITE_LINK_LENGTH) return refuse('length');
   if (hasUnsafeCharacter(input) || /[\s\\]/u.test(input)) return refuse('characters');
   if (input.slice(0, SCHEME.length).toLowerCase() !== SCHEME) return refuse('scheme');
-  const rest = input.slice(SCHEME.length);
-  if (!rest.startsWith('//invite?')) return refuse('malformed');
-  const query = rest.slice('//invite?'.length);
+  const prefix = /^\/\/invite\/?\?/u.exec(input.slice(SCHEME.length))?.[0];
+  if (prefix === undefined) return refuse('malformed');
+  const query = input.slice(SCHEME.length + prefix.length);
   if (query.includes('#')) return refuse('fragment');
   const parts = query.split('&');
   if (parts.length !== 2) return refuse('malformed');
@@ -234,16 +253,15 @@ type AcceptRefusal = Extract<InviteAccept, { ok: false }>['refusal'];
 const ADD_REFUSALS: readonly AcceptRefusal[] = ['full', 'unreachable', 'certificate', 'not-conch'];
 
 interface Arrival {
-  readonly origin: string;
-  readonly code: string;
+  readonly parsed: InviteParse;
   readonly timer: ReturnType<typeof setTimeout>;
 }
 
 export class Invites {
   readonly #deps: InvitesDeps;
   readonly #pending = new Map<string, Pending>();
-  // The one scheme link waiting for the page to ask for it; a newer link
-  // replaces it.
+  // The one scheme link result waiting for the page to ask for it; a newer
+  // valid link replaces it. A refusal can only replace another refusal.
   #arrival: Arrival | null = null;
   #staged: Staged | null = null;
   #stagedTimer: ReturnType<typeof setTimeout> | null = null;
@@ -265,35 +283,37 @@ export class Invites {
   }
 
   // arrive is a launch's arguments: a first launch's, or a second one's while
-  // this process holds the lock. It keeps the one scheme link in them, if it
-  // is well-formed, until arrived() takes it (or PENDING_MS passes). It
-  // contacts nothing and answers whether a link was kept, which is the cue to
+  // this process holds the lock. It keeps the parsed scheme link or its
+  // refusal until arrived() takes it (or PENDING_MS passes). A refusal is
+  // logged but cannot displace a valid link waiting for the page. It contacts
+  // nothing and answers whether a new result was kept, which is the cue to
   // tell the page.
   arrive(argv: unknown): boolean {
     const link = schemeLinkFrom(argv);
     if (link === null) return false;
     const parsed = parseSchemeLink(link);
-    if (!parsed.ok) {
-      this.#deps.log(`conch-desktop: refused a conch: link (${parsed.refusal})`);
-      return false;
-    }
+    this.#deps.log(parsed.ok ? 'conch-desktop: a conch: invite link arrived' : `conch-desktop: refused a conch: link (${parsed.refusal})`);
+    if (!parsed.ok && this.#arrival?.parsed.ok === true) return false;
     this.#dropArrival();
     const timer = setTimeout(() => {
       this.#arrival = null;
     }, PENDING_MS);
     timer.unref();
-    this.#arrival = { origin: parsed.origin, code: parsed.code, timer };
-    this.#deps.log('conch-desktop: a conch: invite link arrived');
+    this.#arrival = { parsed, timer };
     return true;
   }
 
   // arrived hands the page what arrive kept, once, as a check of a pasted
-  // link is handed: a handle, the server and its profiles, never the code.
+  // link is handed: a refusal, or a handle with the server and its profiles.
+  // The code is never handed to the page here. A delivered refusal clears
+  // the panel's choice, so main spends any earlier handles too.
   arrived(): InviteCheck | null {
     const kept = this.#arrival;
     this.#dropArrival();
     if (kept === null) return null;
-    return this.#register({ origin: kept.origin, code: kept.code }, true);
+    if (kept.parsed.ok) return this.#register(kept.parsed, true);
+    for (const handle of this.#pending.keys()) this.#spend(handle);
+    return kept.parsed;
   }
 
   #dropArrival(): void {
@@ -419,8 +439,8 @@ export interface InviteArrivalTarget {
 }
 
 // deliverInvite tells the owned page, once its current document has committed,
-// that a scheme link is waiting. The message holds nothing of the link. A page
-// that is not there yet asks for it when it mounts.
+// that the result of checking a scheme link is waiting. The message holds
+// nothing of the link. A page that is not there yet asks when it mounts.
 export function deliverInvite(target: InviteArrivalTarget): void {
   const contents = target.contents();
   const gate = target.gate();

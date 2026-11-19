@@ -1,7 +1,8 @@
-import { Component, type ReactNode } from 'react';
+import { Component, useState, type ReactNode } from 'react';
 import { Spoiler } from './Spoiler';
 import { Glyph } from './Icons';
 import { linkify } from './linkify';
+import { platform } from './platform';
 
 function SafeLink({ text, href }: { readonly text: string; readonly href: string }) {
   const canonical = new URL(href).href;
@@ -76,9 +77,9 @@ function closing(next: NextMarkers, marker: InlineMarker, from: number): number 
 // close stay literal, and inline code never parses its contents.
 //
 // A closed spoiler may span lines within one block, but not a quote or a code
-// block, so the toolbar wraps each line of a selection in its own. An unclosed
-// || stays literal, as in Discord.
-function inline(text: string, prefix: string, depth: number, budget: Budget): ReactNode[] {
+// block, list or heading, so the toolbar wraps each line of a selection in
+// its own. An unclosed || stays literal, as in Discord.
+function inline(text: string, prefix: string, depth: number, budget: Budget, plainText = false): ReactNode[] {
   const next = nextMarkers(text);
   const out: ReactNode[] = [];
   let literal = 0;
@@ -113,12 +114,12 @@ function inline(text: string, prefix: string, depth: number, budget: Budget): Re
   while (at < text.length) {
     if (text[at] === '\\' && at + 1 < text.length && /[*`~|[\]\\]/.test(text[at + 1] ?? '')) {
       flush(at);
-      add(budget.preview ? text.slice(at, at + 2) : text[at + 1]);
+      add(budget.preview || plainText ? text.slice(at, at + 2) : text[at + 1]);
       at += 2;
       literal = at;
       continue;
     }
-    if (text[at] === '`') {
+    if (!plainText && text[at] === '`') {
       const end = closing(next, '`', at + 1);
       if (end >= 0) {
         flush(at);
@@ -138,7 +139,7 @@ function inline(text: string, prefix: string, depth: number, budget: Budget): Re
           add('[spoiler]');
         } else {
           budget.spoilers += 1;
-          const content = depth < maxInlineDepth ? inline(inner, `${prefix}-${String(at)}`, depth + 1, budget) : inner;
+          const content = depth < maxInlineDepth ? inline(inner, `${prefix}-${String(at)}`, depth + 1, budget, plainText) : inner;
           out.push(<Spoiler key={`${prefix}-${String(at)}`}>{content}</Spoiler>);
         }
         at = end + 2;
@@ -146,7 +147,7 @@ function inline(text: string, prefix: string, depth: number, budget: Budget): Re
         continue;
       }
     }
-    if (text.startsWith('***', at)) {
+    if (!plainText && text.startsWith('***', at)) {
       const end = closing(next, '***', at + 3);
       if (end >= 0 && depth < maxInlineDepth) {
         flush(at);
@@ -158,11 +159,91 @@ function inline(text: string, prefix: string, depth: number, budget: Budget): Re
         continue;
       }
     }
-    if (wrap('**', 'strong') || wrap('~~', 's') || wrap('*', 'em')) continue;
+    if (!plainText && (wrap('**', 'strong') || wrap('~~', 's') || wrap('*', 'em'))) continue;
     at += 1;
   }
   flush(text.length);
   return out;
+}
+
+// Native buttons participate in the message log's existing roving Tab order.
+// No key handler is needed: Enter and Space activate the same copy operation.
+function CodeBlock({ text }: { readonly text: string }) {
+  const [status, setStatus] = useState('');
+  async function copy() {
+    try {
+      await platform.services.copyText(text);
+      setStatus('Copied');
+    } catch {
+      setStatus('Could not copy. Try again.');
+    }
+  }
+  return (
+    <div className="markdown-code-block">
+      <div className="markdown-code-actions">
+        <button type="button" aria-label="Copy code" onClick={() => { void copy(); }}>Copy</button>
+        <span role="status">{status}</span>
+      </div>
+      <pre><code>{text}</code></pre>
+    </div>
+  );
+}
+
+const maxListDepth = 3;
+// Share one per-message budget across block kinds: near-1 MiB bodies can
+// otherwise create hundreds of thousands of elements and stateful Copy controls.
+const maxStructuralElements = 500;
+interface ListLine {
+  readonly depth: number;
+  readonly ordered: boolean;
+  readonly body: string;
+}
+
+function listLine(line: string): ListLine | null {
+  const match = /^( *)([-*]|1\.) (.*)$/.exec(line);
+  if (match === null) return null;
+  return {
+    depth: Math.min(maxListDepth - 1, Math.floor((match[1]?.length ?? 0) / 2)),
+    ordered: match[2] === '1.',
+    body: match[3] ?? '',
+  };
+}
+
+interface MarkdownList {
+  readonly ordered: boolean;
+  readonly items: { readonly body: string; readonly children: MarkdownList[] }[];
+}
+
+// Build iteratively, flattening indentation jumps and levels beyond three.
+// Rendering only recurses through that fixed depth; the shared structural cap
+// leaves excess lines as source text instead of making unbounded DOM nodes.
+function lists(lines: readonly ListLine[], prefix: string, budget: Budget): ReactNode {
+  if (budget.preview) return lines.map((line) => text_(inline(line.body, prefix, 0, budget))).join('\n');
+  const roots: MarkdownList[] = [];
+  const stack: MarkdownList[] = [];
+  for (const line of lines) {
+    const depth = Math.min(line.depth, stack.length);
+    stack.length = Math.min(stack.length, depth + 1);
+    const parent = stack[depth - 1]?.items.at(-1);
+    const siblings = parent?.children ?? roots;
+    let group = stack[depth];
+    if (group === undefined || group.ordered !== line.ordered) {
+      group = { ordered: line.ordered, items: [] };
+      siblings.push(group);
+      stack[depth] = group;
+    }
+    group.items.push({ body: line.body, children: [] });
+  }
+  function renderGroups(groups: readonly MarkdownList[], key: string): ReactNode[] {
+    return groups.map((group, index) => {
+      const id = `${key}-${String(index)}`;
+      const Tag = group.ordered ? 'ol' : 'ul';
+      return <Tag className="markdown-list" key={id}>{group.items.map((item, n) => (
+        <li key={n}>{inline(item.body, `${id}-${String(n)}`, 0, budget)}{renderGroups(item.children, `${id}-${String(n)}`)}</li>
+      ))}</Tag>;
+    });
+  }
+  return renderGroups(roots, prefix);
 }
 
 function blocks(text: string, preview = false): ReactNode[] {
@@ -170,6 +251,7 @@ function blocks(text: string, preview = false): ReactNode[] {
   const lines = text.split('\n');
   const out: ReactNode[] = [];
   let ordinary: string[] = [];
+  let structuralElements = 0;
   const flush = () => {
     if (ordinary.length === 0) return;
     const body = ordinary.join('\n');
@@ -179,8 +261,17 @@ function blocks(text: string, preview = false): ReactNode[] {
   };
 
   for (let at = 0; at < lines.length;) {
+    if (structuralElements >= maxStructuralElements) {
+      flush();
+      // Preserve all remaining source in one block. Only links and bounded
+      // spoilers become components; Markdown markers stay readable as text.
+      const nodes = inline(lines.slice(at).join('\n'), 'overflow', 0, budget, true);
+      out.push(preview ? text_(nodes) : <span key="overflow">{nodes}</span>);
+      break;
+    }
     const line = lines[at] ?? '';
     if (line.startsWith('```')) {
+      structuralElements += 1;
       flush();
       const fence = at;
       at += 1;
@@ -191,10 +282,11 @@ function blocks(text: string, preview = false): ReactNode[] {
       }
       if (at < lines.length) at += 1;
       if (preview) out.push(lines.slice(fence, at).join('\n'));
-      else out.push(<pre key={`code-${String(out.length)}`}><code>{code.join('\n')}</code></pre>);
+      else out.push(<CodeBlock key={`code-${String(out.length)}`} text={code.join('\n')} />);
       continue;
     }
     if (line === '>' || line.startsWith('> ')) {
+      structuralElements += 1;
       flush();
       const quote: string[] = [];
       while (at < lines.length) {
@@ -206,6 +298,30 @@ function blocks(text: string, preview = false): ReactNode[] {
       const nodes = inline(quote.join('\n'), `quote-${String(out.length)}`, 0, budget);
       if (preview) out.push(text_(nodes).split('\n').map((part) => `> ${part}`).join('\n'));
       else out.push(<blockquote key={`quote-${String(out.length)}`}>{nodes}</blockquote>);
+      continue;
+    }
+    const heading = /^(#{1,2}) (.*)$/.exec(line);
+    if (heading !== null) {
+      structuralElements += 1;
+      flush();
+      const nodes = inline(heading[2] ?? '', `heading-${String(out.length)}`, 0, budget);
+      // Message text must not enter the page's screen-reader heading outline.
+      out.push(preview ? text_(nodes) : <div className={`markdown-heading markdown-heading-${String(heading[1]?.length)}`} key={`heading-${String(out.length)}`}>{nodes}</div>);
+      at += 1;
+      continue;
+    }
+    if (listLine(line) !== null) {
+      flush();
+      const items: ListLine[] = [];
+      while (at < lines.length && structuralElements < maxStructuralElements) {
+        const item = listLine(lines[at] ?? '');
+        if (item === null) break;
+        items.push(item);
+        structuralElements += 1;
+        at += 1;
+      }
+      const nodes = lists(items, `list-${String(out.length)}`, budget);
+      out.push(preview ? nodes : <div className="markdown-lists" key={`list-${String(out.length)}`}>{nodes}</div>);
       continue;
     }
     ordinary.push(line);
@@ -249,7 +365,10 @@ export function Linkified({ text }: { readonly text: string }) {
 // with every spoiler the message view would hide replaced by "[spoiler]". It
 // runs the renderer's tokenizer, so escapes, inline code, code blocks and
 // nesting decide what is a spoiler exactly as they do there; an unclosed ||
-// stays literal. Other markup is kept as typed.
+// stays literal. Recognized list and heading markers are removed; other
+// markup (including markers inside code) is kept as typed.
+// Conversation.excerptOf calls this directly; notification previews use it
+// through messagePreview. SearchPanel uses Linkified and the same blocks parser.
 export function previewText(body: string): string {
   return blocks(body, true).map(text_).join('\n');
 }

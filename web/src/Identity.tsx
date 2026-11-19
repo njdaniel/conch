@@ -1,4 +1,4 @@
-import { identityMarks, identityText, type IdentityInput, type IdentityKey } from './identity';
+import { identityMarks, identityText, type IdentityInput, type IdentityKey } from './identityMarks';
 
 export function IdentityMarks({ only, textForm = false, ...input }: IdentityInput & { readonly only?: readonly IdentityKey[]; readonly textForm?: boolean }) {
   return identityMarks(input)

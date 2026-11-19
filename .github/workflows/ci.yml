@@ -4,6 +4,11 @@ on:
   pull_request:
   push:
     branches: [main]
+  # A manual run of the whole workflow on a branch. Its one purpose is to run
+  # the desktop-deb job (below) on a branch before merge, since that job is
+  # otherwise only for pushes to main (#1652). It adds no trigger for pull
+  # requests or pushes.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -265,8 +270,10 @@ jobs:
 
       # The toolchain script fetches one pinned clang, cargo-deny and
       # libwebrtc and verifies each against the SHA-256 in
-      # scripts/voice-pins.sh, which is therefore the cache key. rustup, on
-      # the runner, installs the Rust version voice/rust-toolchain.toml names.
+      # scripts/voice-pins.sh, which is therefore part of the cache key. The
+      # v2 cache retains the verified cargo-deny archive. Reuse the existing
+      # clang and libwebrtc from v1 when populating it. rustup installs the
+      # Rust version voice/rust-toolchain.toml names.
       - name: rust toolchain cache
         uses: actions/cache@v4
         with:
@@ -274,7 +281,9 @@ jobs:
             ~/.cache/conch/llvm-*
             ~/.cache/conch/cargo-deny-*
             ~/.cache/conch/webrtc-*
-          key: voice-toolchain-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
+          key: voice-toolchain-v2-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
+          restore-keys: |
+            voice-toolchain-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
 
       # -lt: built with line tables (above), so never mixed with a cache of
       # full-debug builds.
@@ -347,6 +356,187 @@ jobs:
         if: always()
         run: df -h / && du -sh voice/target 2>/dev/null || true
 
+  # The Rust voice client's Windows build (#890, docs/design/windows-desktop.md
+  # section 1): x86_64-pc-windows-msvc on a hosted runner, with the pinned
+  # libwebrtc win-x64 build verified by scripts/voice-toolchain.sh. MSVC and the
+  # Windows SDK are on the runner image; cc-rs finds them through vswhere, so no
+  # Action installs them. Hosted only: there is no self-hosted Windows runner.
+  # Required (#1309): the check job waits on it, as on the rust job, now that
+  # conch-voice builds, tests and lints here.
+  voice-windows:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      # Line tables, not full debug info, as the rust job builds.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      # The static C runtime flag for libwebrtc's /MT build is in voice/.cargo/config.toml,
+      # not in RUSTFLAGS here, which would replace it.
+    steps:
+      - uses: actions/checkout@v4
+
+      # Keyed on the pins file, as the Linux job's cache is. Windows' own key
+      # (runner.os) keeps the two apart. Only the downloaded zip is kept, and
+      # voice-toolchain.sh hashes it against its pin on every run before
+      # unpacking it, so a cached tree is never linked unread.
+      - name: rust toolchain cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/conch/webrtc-*/webrtc-win-x64-release.zip
+          key: voice-toolchain-zip-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
+
+      - name: rust build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            voice/target
+          key: voice-build-lt-${{ runner.os }}-${{ hashFiles('voice/Cargo.lock', 'voice/rust-toolchain.toml', 'scripts/voice-pins.sh') }}
+          restore-keys: |
+            voice-build-lt-${{ runner.os }}-
+
+      - name: rust toolchain
+        run: ./scripts/voice-toolchain.sh
+
+      # E1 (design section 1): what the runner has, recorded in the log.
+      - name: msvc and windows sdk on the runner
+        run: |
+          vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+          "$vswhere" -latest -products '*' -property installationVersion
+          "$vswhere" -latest -products '*' -property installationPath
+          ls "/c/Program Files (x86)/Windows Kits/10/Include" || true
+          rustc -Vv
+
+      # The SDK's C++ glue against the verified libwebrtc: the part this job
+      # exists to prove. -vv records the compiler it runs (E1). It does
+      # not reach conch-voice's own source.
+      - name: build webrtc-sys (E1)
+        run: |
+          . scripts/voice-pins.sh
+          # The verified tree must be there: without it webrtc-sys downloads
+          # its own copy unchecked (as voice-env.sh refuses on Linux).
+          webrtc="$(cygpath -m "$HOME/.cache/conch/$CONCH_WEBRTC_TAG/win-x64-release")"
+          test -f "$webrtc/webrtc.ninja"
+          export LK_CUSTOM_WEBRTC="$webrtc"
+          cd voice
+          # cc-rs prints each compiler command it runs when asked to.
+          export CC_ENABLE_DEBUG_OUTPUT=1
+          # The build's own status decides the step. The grep only shows the
+          # compiler lines (and may match nothing), so it can never hide a
+          # failed build: with "|| true" after a pipe, PIPESTATUS would be
+          # true's, and the step would pass.
+          status=0
+          cargo build --locked -vv -p webrtc-sys > "$RUNNER_TEMP/webrtc-sys.log" 2>&1 || status=$?
+          grep -E "^\[webrtc-sys [0-9.]+\] (running|OPT_LEVEL|CXX|CC|compiler)|Compiling webrtc-sys|Finished|^error" "$RUNNER_TEMP/webrtc-sys.log" | cut -c1-400 || true
+          if [ "$status" -ne 0 ]; then tail -n 80 "$RUNNER_TEMP/webrtc-sys.log"; fi
+          exit "$status"
+
+      # The whole voice workspace, conch-voice included (#1309): its Unix-only
+      # code (fd 3, the evdev key devices) answers a typed "not supported on
+      # this platform" error here; `--events-pipe` is a real named pipe on
+      # Windows, and `tests/managed.rs` runs against one (#1766), with its
+      # key-device tests ignored there, each with its reason. The configuration layer runs
+      # (#904): voice.toml is read and written, and the Windows rules for
+      # discovery and for links are tested. Its integration tests that need
+      # Unix (named pipes, shells, /proc, file modes) or PipeWire are gated
+      # off Windows by `cfg` at the top of the file, each with its reason;
+      # the unit tests all run. On CI a test that cannot create a symbolic
+      # link fails instead of skipping.
+      - name: cargo build, test and clippy (workspace)
+        run: |
+          . scripts/voice-pins.sh
+          # The verified tree must be there: without it webrtc-sys downloads
+          # its own copy unchecked (as voice-env.sh refuses on Linux).
+          webrtc="$(cygpath -m "$HOME/.cache/conch/$CONCH_WEBRTC_TAG/win-x64-release")"
+          test -f "$webrtc/webrtc.ninja"
+          export LK_CUSTOM_WEBRTC="$webrtc"
+          cd voice
+          cargo build --locked --workspace
+          cargo test --locked --no-fail-fast --workspace
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      # The Go client's side of the Windows configuration directory rule (#904):
+      # conch and conch-voice must look in the same directory from the same
+      # environment. The Rust side of the same vectors ran above.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: config directory vectors (Go)
+        run: go test ./internal/cli -run TestConfigDirSharedVectorsWindows -count=1 -v
+
+  # MF1 (#1737, docs/design/macos-desktop.md section 1): build the voice
+  # workspace on Apple silicon with the hosted image's Xcode and SDK.
+  voice-macos:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: macos-15
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      MACOSX_DEPLOYMENT_TARGET: "15.0"
+      TMPDIR: ${{ github.workspace }}/.tmp
+    steps:
+      - uses: actions/checkout@v4
+
+      # Cache Cargo downloads. Fetch the two native archives each run so
+      # their hashes are checked before delivering any binaries to the build.
+      - name: rust dependency cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+          key: voice-deps-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('voice/Cargo.lock') }}
+
+      - name: Xcode and macOS SDK on the runner (ME1)
+        run: |
+          mkdir -p "$TMPDIR"
+          test "$(uname -m)" = arm64
+          sw_vers
+          xcodebuild -version
+          xcrun --sdk macosx --show-sdk-version
+          xcrun clang --version
+          (cd voice && rustc -Vv)
+
+      - name: rust toolchain
+        run: ./scripts/voice-toolchain.sh
+
+      - name: cargo build and deployment targets (ME1)
+        run: |
+          . scripts/voice-env.sh
+          cd voice
+          time cargo build --locked --workspace --target aarch64-apple-darwin
+          bin=target/aarch64-apple-darwin/debug/conch-voice
+          "$bin" --version
+          ls -lh "$bin"
+          xcrun otool -L "$bin"
+          xcrun vtool -show-build "$bin"
+          # Report the distinct minimum versions across libwebrtc's objects.
+          xcrun otool -l "$LK_CUSTOM_WEBRTC/lib/libwebrtc.a" |
+            awk '/cmd LC_VERSION_MIN_MACOSX$/ { legacy = 1 }
+                 $1 == "version" && legacy { print "LC_VERSION_MIN_MACOSX " $2; legacy = 0 }
+                 $1 == "minos" { print "LC_BUILD_VERSION minos " $2 }' |
+            sort -u
+
+      - name: cargo test, clippy and deny (workspace)
+        run: |
+          . scripts/voice-env.sh
+          cd voice
+          cargo test --locked --no-fail-fast --workspace --target aarch64-apple-darwin
+          cargo clippy --locked --workspace --all-targets --target aarch64-apple-darwin -- -D warnings
+          cargo deny --locked check sources licenses bans
+
   # The web client under web/ (ADR-007). setup-node installs exactly the
   # Node web/.nvmrc pins and caches npm's download cache by the lockfile.
   # web-check installs with npm ci only, and downloads no browser.
@@ -388,15 +578,286 @@ jobs:
       - name: desktop check
         run: make desktop-check
 
+  # The desktop shell's Windows leg (#1785, docs/design/windows-desktop.md
+  # section 3): the owner of conch-voice on a named pipe. typecheck, lint and
+  # the unit tests written to hold on Windows (desktop/vitest.windows.config.ts),
+  # among them a real Node named pipe. Electron-to-helper interop on a Windows
+  # machine is E2 (#903), not this job. Hosted only; no new Action.
+  #
+  # Then the installer (#900, section 9.3): the release conch-voice.exe, the
+  # Windows Electron (checked against the electron package's checksums.json),
+  # and the unsigned per-user NSIS installer around them
+  # (desktop/build/electron-builder.config.json, desktop/build/installer.nsh).
+  # It is uploaded as the artifact Conch-<version>-unsigned-preview-setup, then
+  # installed silently on this runner, its files and the conch:// key checked,
+  # and uninstalled, with a seeded profile left as it was. It does not start
+  # the app: that is #903 on a real machine. The helper's release build is most
+  # of the time, as voice-windows' build is of its own, hence its 60 minutes.
+  desktop-windows:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      # web/ too: the installer's UI is web's own build.
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: desktop/.nvmrc
+          cache: npm
+          cache-dependency-path: |
+            web/package-lock.json
+            desktop/package-lock.json
+
+      - name: npm ci
+        working-directory: desktop
+        run: npm ci --no-audit
+
+      - name: typecheck
+        working-directory: desktop
+        run: npm run typecheck
+
+      - name: lint
+        working-directory: desktop
+        run: npm run lint
+
+      - name: unit tests on Windows
+        working-directory: desktop
+        run: npm run test:windows
+
+      # The verified libwebrtc zip, as voice-windows keeps it (same key).
+      - name: rust toolchain cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/conch/webrtc-*/webrtc-win-x64-release.zip
+          key: voice-toolchain-zip-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
+
+      # The release build's own cache: voice-windows' holds a debug target.
+      - name: rust release build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            voice/target
+          key: voice-release-${{ runner.os }}-${{ hashFiles('voice/Cargo.lock', 'voice/rust-toolchain.toml', 'scripts/voice-pins.sh') }}
+          restore-keys: |
+            voice-release-${{ runner.os }}-
+
+      - name: rust toolchain
+        run: ./scripts/voice-toolchain.sh
+
+      # The helper the installer bundles, as the issue names it: `cargo build
+      # --release -p conch-voice`. --version must run (scripts/desktop-voice-helper.sh
+      # asks the same of the Linux copy): a truncated or wrong-architecture file
+      # would otherwise ship.
+      - name: build the voice helper (release)
+        run: |
+          . scripts/voice-pins.sh
+          # The verified tree must be there: without it webrtc-sys downloads
+          # its own copy unchecked (as voice-env.sh refuses on Linux).
+          webrtc="$(cygpath -m "$HOME/.cache/conch/$CONCH_WEBRTC_TAG/win-x64-release")"
+          test -f "$webrtc/webrtc.ninja"
+          export LK_CUSTOM_WEBRTC="$webrtc"
+          cd voice
+          cargo build --locked --release -p conch-voice
+          ./target/release/conch-voice.exe --version
+
+      # The Windows Electron of the pinned version, for electronDist, so that
+      # electron-builder downloads no Electron itself. It is kept only if its
+      # SHA-256 equals the hash in desktop/node_modules/electron/checksums.json,
+      # which npm ci verified against desktop/package-lock.json, the second of
+      # the two hashes scripts/desktop-electron.sh checks on Linux.
+      # scripts/desktop-pins.sh has no Windows hash: adding one is a pin change
+      # (Nick's sign-off). Unpacked with Python's zipfile, as
+      # voice-toolchain.sh unpacks libwebrtc here.
+      - name: windows electron
+        run: |
+          . scripts/desktop-pins.sh
+          have=$(node -p "require('./desktop/package.json').devDependencies.electron")
+          if [ "$have" != "$CONCH_ELECTRON_VERSION" ]; then
+            echo "desktop/package.json pins electron $have but scripts/desktop-pins.sh pins $CONCH_ELECTRON_VERSION"; exit 1
+          fi
+          archive="electron-v${CONCH_ELECTRON_VERSION}-win32-x64.zip"
+          want=$(node -p "require('./desktop/node_modules/electron/checksums.json')['$archive'] || ''")
+          if ! [[ "$want" =~ ^[0-9a-f]{64}$ ]]; then echo "checksums.json has no SHA-256 for $archive"; exit 1; fi
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            --output "$RUNNER_TEMP/$archive" "https://github.com/electron/electron/releases/download/v${CONCH_ELECTRON_VERSION}/$archive"
+          # From standard input: Git Bash's sha256sum prefixes the hash with a
+          # backslash when the file name holds one, as $RUNNER_TEMP does.
+          got=$(sha256sum < "$RUNNER_TEMP/$archive" | cut -d' ' -f1)
+          if [ "$got" != "$want" ]; then echo "SHA-256 of $archive is $got, but checksums.json says $want; nothing was unpacked"; exit 1; fi
+          rm -rf desktop/out/electron-dist-win
+          py=python3
+          command -v python3 >/dev/null 2>&1 || py=python
+          "$py" -I -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$RUNNER_TEMP/$archive" desktop/out/electron-dist-win
+          test -f desktop/out/electron-dist-win/electron.exe
+          echo "Electron $CONCH_ELECTRON_VERSION (win32-x64, $got) unpacked into desktop/out/electron-dist-win"
+
+      # The steps of scripts/desktop-build.sh that are not Linux's, in its
+      # order: web's own Vite build into desktop/out/ui, main and the preload,
+      # the manifest (and out/compat.json, the development list), then
+      # electron-builder around the Electron above. A development build:
+      # version 0.0.0-dev+<short sha>. The helper and the installed stamp
+      # (main/installed.ts) go in through win.extraResources, from
+      # out/win-resources, because the installer is packed by electron-builder
+      # itself. MSYS_NO_PATHCONV keeps Git Bash from turning `--base /` into a
+      # Windows path; every path passed is already one (cygpath -m).
+      - name: build the installer
+        id: installer
+        run: |
+          . scripts/desktop-pins.sh
+          root=$(cygpath -m "$PWD")
+          version="0.0.0-dev+$(git rev-parse --short HEAD)"
+          (cd web && npm ci --no-audit)
+          (cd web && MSYS_NO_PATHCONV=1 ./node_modules/.bin/vite build --mode desktop --base / --outDir "$root/desktop/out/ui" --emptyOutDir)
+          (cd desktop && npm run bundle && node build/manifest.ts)
+          rm -rf desktop/out/win-resources desktop/dist
+          mkdir -p desktop/out/win-resources
+          cp voice/target/release/conch-voice.exe desktop/out/win-resources/conch-voice.exe
+          printf '%s\n' "$version" >desktop/out/win-resources/version
+          # CI=true keeps electron-builder from asking the registry for a
+          # newer electron-builder; dist:win passes --publish never.
+          (cd desktop && CI=true npm run dist:win -- \
+            "-c.electronDist=$root/desktop/out/electron-dist-win" "-c.electronVersion=$CONCH_ELECTRON_VERSION" \
+            "-c.extraMetadata.version=$version")
+          setups=(desktop/dist/*-unsigned-preview-setup.exe)
+          if [ "${#setups[@]}" -ne 1 ] || [ ! -f "${setups[0]}" ]; then
+            echo "expected one *-unsigned-preview-setup.exe in desktop/dist:"; ls -la desktop/dist; exit 1
+          fi
+          echo "installer: ${setups[0]} (version $version)"
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+
+      # Uploaded before the install test, so that a failing check still leaves
+      # the installer to look at. It is unsigned and says so in its name.
+      - name: upload the installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: Conch-${{ steps.installer.outputs.version }}-unsigned-preview-setup
+          path: desktop/dist/*-unsigned-preview-setup.exe
+          retention-days: 30
+          if-no-files-found: error
+
+      # /S is NSIS's silent install. The per-user directory is NSIS's
+      # $LocalAppData\Programs\<product> (multiUser.nsh in electron-builder's
+      # templates; UserProgramFiles, %LOCALAPPDATA%\Programs by default). This
+      # runner's user is an administrator: an install that still lands
+      # per-user, writes no HKLM key and asks for nothing is the per-user rule
+      # of installer.nsh working where an all-users install was possible.
+      - name: install silently
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = @(Get-ChildItem -LiteralPath desktop/dist -Filter '*-unsigned-preview-setup.exe')
+          if ($setup.Count -ne 1) { throw "expected one installer, found $($setup.Count)" }
+          # /allusers is the path installer.nsh's customInit closes: the
+          # checks below (per-user folder, no HKLM key) prove it held. The
+          # second run is an upgrade over the first: the old uninstaller
+          # removes the conch:// key and customInstall writes it again.
+          foreach ($run in @('install', 'upgrade')) {
+            $p = Start-Process -FilePath $setup[0].FullName -ArgumentList '/S', '/allusers' -Wait -PassThru
+            if ($null -eq $p.ExitCode -or $p.ExitCode -ne 0) { throw "the installer ($run) exited $($p.ExitCode)" }
+          }
+
+      # What the install must have left: the app, conch-voice.exe in its
+      # resources (the one path main/voice/spawn.ts findHelper runs on
+      # Windows), the uninstaller, the version in the executable's resource
+      # (the app has no window-less version flag) and in the uninstall entry,
+      # the conch:// handler under HKCU only, and nothing per-machine.
+      - name: check the installed files
+        shell: pwsh
+        env:
+          APP_VERSION: ${{ steps.installer.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:LOCALAPPDATA 'Programs\Conch'
+          $exe = Join-Path $dir 'Conch.exe'
+          $helper = Join-Path $dir 'resources\conch-voice.exe'
+          foreach ($f in @($exe, $helper, (Join-Path $dir 'resources\app.asar'), (Join-Path $dir 'resources\version'), (Join-Path $dir 'Uninstall Conch.exe'))) {
+            if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { throw "missing $f" }
+          }
+          if (Test-Path -LiteralPath (Join-Path $dir 'resources\elevate.exe')) { throw 'elevate.exe was installed (packElevateHelper is false)' }
+          foreach ($d in @("$env:ProgramFiles\Conch", "${env:ProgramFiles(x86)}\Conch")) {
+            if (Test-Path -LiteralPath $d) { throw "a per-machine install exists at $d" }
+          }
+          $stamp = (Get-Content -LiteralPath (Join-Path $dir 'resources\version') -Raw).Trim()
+          if ($stamp -ne $env:APP_VERSION) { throw "resources\version says '$stamp', not '$env:APP_VERSION'" }
+          $vi = (Get-Item -LiteralPath $exe).VersionInfo
+          Write-Output "Conch.exe: ProductName '$($vi.ProductName)', FileVersion '$($vi.FileVersion)'"
+          if ($vi.ProductName -ne 'Conch') { throw "Conch.exe's ProductName is '$($vi.ProductName)'" }
+          if ($vi.FileVersion -ne $env:APP_VERSION) { throw "Conch.exe's FileVersion is '$($vi.FileVersion)', not '$env:APP_VERSION'" }
+          & $helper --version
+          if ($LASTEXITCODE -ne 0) { throw "the installed conch-voice.exe --version exited $LASTEXITCODE" }
+          $key = 'HKCU:\Software\Classes\conch'
+          if (-not (Test-Path -LiteralPath $key)) { throw "$key is missing" }
+          if ((Get-Item -LiteralPath $key).GetValueNames() -notcontains 'URL Protocol') { throw "$key has no 'URL Protocol' value" }
+          $command = (Get-Item -LiteralPath "$key\shell\open\command").GetValue('')
+          $want = '"' + $exe + '" "%1"'
+          if ($command -ne $want) { throw "conch:// opens '$command', not '$want'" }
+          if (Test-Path -LiteralPath 'HKLM:\Software\Classes\conch') { throw 'a per-machine conch:// key exists' }
+          $entries = @(Get-ChildItem -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' | Get-ItemProperty | Where-Object { $_.DisplayName -like 'Conch *' })
+          if ($entries.Count -ne 1) { throw "expected one per-user uninstall entry, found $($entries.Count)" }
+          if ($entries[0].DisplayVersion -ne $env:APP_VERSION) { throw "the uninstall entry says '$($entries[0].DisplayVersion)'" }
+          $link = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Conch.lnk'
+          if (-not (Test-Path -LiteralPath $link)) { throw "no per-user Start menu shortcut at $link" }
+          Write-Output "installed per-user at $dir, conch:// -> $command"
+
+      # A user's data, seeded where the app keeps it: Electron's userData,
+      # %APPDATA%\<package name> (conch-desktop, from desktop/package.json, as
+      # ~/.config/conch-desktop on Linux), and %APPDATA%\Conch, the product
+      # name's directory, which the uninstaller removes only when asked to
+      # delete app data. deleteAppDataOnUninstall is false, so both stay. The
+      # uninstaller copies itself to %TEMP% and returns before that copy has
+      # finished, so the step waits for the program and its uninstall entry to
+      # go, for at most three minutes.
+      - name: uninstall silently, keeping the user's data
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:LOCALAPPDATA 'Programs\Conch'
+          $seeded = @{}
+          foreach ($name in @('conch-desktop', 'Conch')) {
+            $data = Join-Path $env:APPDATA $name
+            New-Item -ItemType Directory -Force -Path (Join-Path $data 'profiles\0123456789abcdef0123456789abcdef') | Out-Null
+            Set-Content -LiteralPath (Join-Path $data 'profiles.json') -Value "{`"seeded`":`"#900 $name`"}" -NoNewline
+            Set-Content -LiteralPath (Join-Path $data 'settings.json') -Value '{"closeToTray":false}' -NoNewline
+            foreach ($f in Get-ChildItem -LiteralPath $data -Recurse -File) { $seeded[$f.FullName] = (Get-FileHash -LiteralPath $f.FullName).Hash }
+          }
+          if ($seeded.Count -ne 4) { throw "expected 4 seeded files, seeded $($seeded.Count)" }
+          $p = Start-Process -FilePath (Join-Path $dir 'Uninstall Conch.exe') -ArgumentList '/S' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "the uninstaller exited $($p.ExitCode)" }
+          $uninstall = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
+          $deadline = (Get-Date).AddMinutes(3)
+          do {
+            $left = @(Get-ChildItem -LiteralPath $uninstall | Get-ItemProperty | Where-Object { $_.DisplayName -like 'Conch *' })
+            $done = -not (Test-Path -LiteralPath $dir) -and $left.Count -eq 0
+            if (-not $done) { Start-Sleep -Seconds 2 }
+          } until ($done -or (Get-Date) -gt $deadline)
+          if (Test-Path -LiteralPath $dir) { throw "$dir is still there" }
+          if ($left.Count -ne 0) { throw 'the uninstall entry is still there' }
+          if (Test-Path -LiteralPath 'HKCU:\Software\Classes\conch') { throw 'HKCU\Software\Classes\conch is still there' }
+          $link = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Conch.lnk'
+          if (Test-Path -LiteralPath $link) { throw "$link is still there" }
+          foreach ($f in $seeded.Keys) {
+            if (-not (Test-Path -LiteralPath $f)) { throw "the user's $f was removed" }
+            if ((Get-FileHash -LiteralPath $f).Hash -ne $seeded[$f]) { throw "the user's $f was changed" }
+          }
+          Write-Output "uninstalled: $dir, the conch:// key and the shortcut are gone; $($seeded.Count) seeded files are unchanged"
+
   # The required status check. It runs the text checks every pull request
-  # gets, docs-only ones included, then passes only if every job above that
-  # should have run succeeded: skipped is accepted only for a docs-only
+  # gets, docs-only ones included, then passes only if every job it needs
+  # that should have run succeeded: skipped is accepted only for a docs-only
   # change (changes said code=false). It runs even when one of them failed,
   # so the failure is reported here rather than as a skipped check. changes
   # itself is not judged: if it fails, code is unset and every job runs in
-  # full, so a pass here still means every check ran and passed.
+  # full. voice-macos reports separately, as required by MF1
+  # (docs/design/macos-desktop.md section 13, "never a gate on Linux work").
   check:
-    needs: [changes, go, go-test-server, go-test, rust, web, desktop]
+    needs: [changes, go, go-test-server, go-test, rust, voice-windows, web, desktop, desktop-windows]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -427,6 +888,157 @@ jobs:
             | "\(.key): \(.value.result)"' <<<"$NEEDS")
           if [ -n "$bad" ]; then echo "not every check passed:"; echo "$bad"; exit 1; fi
           echo "every check passed (docs only: $DOCS_ONLY)"
+
+  # Does a push to main touch what the desktop .deb is made of (#1598)? The
+  # .deb job below builds the Rust voice helper, the web client and the
+  # desktop app, so it does not run on every pull request or push: only when
+  # desktop/, voice/, web/, scripts/desktop-* or the helper's toolchain pins
+  # changed. (A release builds it anyway: release.yml.) The compare API lists
+  # at most 300 files; a list that long builds.
+  desktop-deb-touched:
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      build: ${{ steps.touched.outputs.build }}
+    steps:
+      - name: touched?
+        id: touched
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          set -eu
+          build=true
+          if [ "$BEFORE" != 0000000000000000000000000000000000000000 ] &&
+             files=$(gh api "repos/$GITHUB_REPOSITORY/compare/$BEFORE...$AFTER" --jq '.files[].filename'); then
+            n=$(printf '%s\n' "$files" | grep -c . || true)
+            if [ "$n" -lt 300 ] &&
+               ! printf '%s\n' "$files" | grep -Eq '^(desktop/|voice/|web/|scripts/desktop-|scripts/voice-pins\.sh|scripts/ci-voice-apt\.sh|Makefile$)'; then
+              build=false
+            fi
+          fi
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "build the desktop .deb: $build"
+
+  # The desktop .deb with the real voice helper, on pushes to main that touch
+  # its inputs (above): a development package (no tag), built and checked by
+  # scripts/desktop-deb-test.sh in full mode. Not on pull requests, because of
+  # the Rust build's cost (the lifecycle test below adds a container and an
+  # apt run to it: no reason to put either on every PR); not in `check`'s
+  # needs, because it is often skipped. A manual run (workflow_dispatch)
+  # always builds, to test a branch. A passing run is a build check, not
+  # acceptance (#1603).
+  desktop-deb:
+    needs: desktop-deb-touched
+    if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || needs.desktop-deb-touched.outputs.build == 'true') }}
+    # Not ubuntu-latest (#1652): that is Ubuntu 26.04 now, and dpkg-shlibdeps
+    # on it made the package Depend on libc6 (>= 2.43) and libxcomposite1
+    # (>= 1:0.4.6), which Ubuntu 24.04 (the lifecycle test's container, and
+    # the oldest system the package should install on, scripts/desktop-deb.sh)
+    # does not have. Build on the oldest supported system.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      DESKTOP_REQUIRE_VOICE: "1"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v4
+
+      # As in the rust job: the image's unused tool trees go only when less
+      # than 30 GB is free (3½ minutes to remove, #1352). This job's Rust,
+      # web and desktop builds and the package need about 15 GB.
+      - name: free disk
+        run: |
+          df -h /
+          avail=$(df --output=avail -BG / | tail -n1 | tr -dc 0-9)
+          if [ "$avail" -ge 30 ]; then echo "free disk: ${avail} GB free, nothing removed"; exit 0; fi
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          docker image prune -af >/dev/null 2>&1 || true
+          df -h /
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: runner image
+        id: image
+        run: |
+          echo "os=$ImageOS" >> "$GITHUB_OUTPUT"
+          echo "version=$ImageVersion" >> "$GITHUB_OUTPUT"
+
+      - name: rust toolchain cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/conch/llvm-*
+            ~/.cache/conch/cargo-deny-*
+            ~/.cache/conch/webrtc-*
+          key: voice-toolchain-v2-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
+          restore-keys: |
+            voice-toolchain-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
+
+      - name: rust system packages cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/conch-apt
+          key: voice-apt-${{ runner.os }}-${{ hashFiles('scripts/ci-voice-apt.sh') }}-${{ steps.image.outputs.os }}-${{ steps.image.outputs.version }}
+          restore-keys: |
+            voice-apt-${{ runner.os }}-${{ hashFiles('scripts/ci-voice-apt.sh') }}-${{ steps.image.outputs.os }}-
+
+      - name: rust system packages
+        run: ./scripts/ci-voice-apt.sh ~/.cache/conch-apt
+
+      - name: rust toolchain
+        run: ./scripts/voice-toolchain.sh
+
+      - name: packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends dpkg-dev desktop-file-utils
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: desktop/.nvmrc
+          cache: npm
+          cache-dependency-path: |
+            web/package-lock.json
+            desktop/package-lock.json
+
+      - name: electron cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/conch/electron
+          key: desktop-electron-${{ runner.os }}-${{ hashFiles('scripts/desktop-pins.sh') }}
+
+      - name: build conch-voice
+        run: make rust-build
+
+      # build, .deb and the package test in full mode
+      - name: build the .deb
+        run: make desktop-deb
+
+      # The lifecycle test (#1599) on this very package: install, upgrade,
+      # remove and purge in a clean ubuntu:24.04 container, with the ldd and
+      # helper checks on the real Electron executable and conch-voice. CI is
+      # set, so a missing Docker fails and does not skip. The old package is
+      # this one with the Debian version <version>~older: a main build has one
+      # version and desktop-deb.sh will not stamp a helper of another one, and
+      # no release has published a .deb to download (scripts/desktop-deb-older.sh
+      # says more). Pulls the digest-pinned image and apt fetches the Depends.
+      - name: lifecycle test on the real .deb
+        run: |
+          set -eu
+          new=$(ls desktop/dist/conch-desktop_*_amd64.deb)
+          ./scripts/desktop-deb-older.sh "$new" "$RUNNER_TEMP/old/old.deb"
+          ./scripts/desktop-deb-lifecycle.sh "$RUNNER_TEMP/old/old.deb" "$new"
+
+      - name: disk after the build
+        if: always()
+        run: |
+          df -h /
+          du -sh voice/target 2>/dev/null || true
 
   desktop-smoke:
     needs: changes
@@ -504,6 +1116,15 @@ jobs:
 
       - name: smoke test
         run: xvfb-run -a make desktop-smoke
+
+      # A release build with a stand-in helper (#1598): a made-up tag must
+      # become the app's, the package's and the compat list's version, and a
+      # helper of another version must fail the build. Nothing else exercised
+      # CONCH_RELEASE_VERSION before a tag. It rebuilds the app, so it runs
+      # after the smoke test has used the build above. dpkg-dev is on the
+      # image; desktop-file-validate is optional (the test says so).
+      - name: release build with a stand-in helper
+        run: ./scripts/desktop-release-build-test.sh
 
   web-embedded:
     needs: changes
@@ -913,7 +1534,9 @@ jobs:
             ~/.cache/conch/llvm-*
             ~/.cache/conch/cargo-deny-*
             ~/.cache/conch/webrtc-*
-          key: voice-toolchain-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
+          key: voice-toolchain-v2-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
+          restore-keys: |
+            voice-toolchain-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
 
       - name: rust build cache
         uses: actions/cache/restore@v4
@@ -1021,7 +1644,9 @@ jobs:
             ~/.cache/conch/llvm-*
             ~/.cache/conch/cargo-deny-*
             ~/.cache/conch/webrtc-*
-          key: voice-toolchain-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
+          key: voice-toolchain-v2-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
+          restore-keys: |
+            voice-toolchain-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
 
       - name: rust build cache
         uses: actions/cache/restore@v4

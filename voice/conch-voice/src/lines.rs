@@ -288,7 +288,8 @@ fn write_all(mut out: Box<dyn Write + Send>, items: &Receiver<Item>, waiting: &A
         waiting.fetch_sub(1, Ordering::SeqCst);
         match item {
             Item::Line(mut line) => {
-                // The line and its end in one write, so that a reader never sees half.
+                // Include the line's end and retry short writes. A stream reader can
+                // still receive fragments and must wait for the newline before parsing.
                 line.push('\n');
                 let _ = out.write_all(line.as_bytes());
                 let _ = out.flush();
@@ -348,31 +349,45 @@ pub fn exit(code: i32) -> ! {
 }
 
 /// [`exit`] with its parts given: `ordinary` is tried, and if the process is still there
-/// after `grace` it is replaced by a shell that does nothing but exit with `code`. Replacing
+/// after `grace` it is replaced by a shell that does nothing but exit with `code` (on a platform with no `exec`, aborted instead). Replacing
 /// the process ends every thread where it stands and runs no exit handler; it is the one
 /// way to do that from safe code. Without a shell the process is aborted: it ends, though
 /// not with its code.
 pub fn exit_or_replace(code: i32, grace: Duration, ordinary: impl FnOnce(i32)) -> ! {
-    use std::os::unix::process::CommandExt;
-    use std::process::{Command, Stdio};
-
     std::thread::spawn(move || {
         std::thread::sleep(grace);
-        // The shell gets none of this process's environment and none of its streams.
-        let _no_shell = Command::new("/bin/sh")
-            .args(["-c", &format!("exit {code}")])
-            .env_clear()
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .exec();
-        std::process::abort();
+        replace_or_abort(code);
     });
     ordinary(code);
     // Only an `ordinary` that returned without ending the process gets here.
     loop {
         std::thread::park();
     }
+}
+
+/// Ends the process where it stands, with `code`, by replacing it with a shell that does
+/// nothing but exit; if there is none, aborts. Never returns.
+#[cfg(unix)]
+fn replace_or_abort(code: i32) -> ! {
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    // The shell gets none of this process's environment and none of its streams.
+    let _no_shell = Command::new("/bin/sh")
+        .args(["-c", &format!("exit {code}")])
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .exec();
+    std::process::abort();
+}
+
+/// Where there is no `exec` to replace the process with, the only way `std` has to end it
+/// without running anything is to abort, so it ends, though not with its code.
+#[cfg(not(unix))]
+fn replace_or_abort(_code: i32) -> ! {
+    std::process::abort();
 }
 
 #[cfg(test)]
@@ -781,6 +796,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_process_whose_ordinary_exit_hangs_is_ended_with_its_code_all_the_same() {
         let (code, took) = exiting_child("hangs");

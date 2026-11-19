@@ -111,10 +111,13 @@ pub enum Error {
     #[error(transparent)]
     Audio(#[from] conch_voice_audio::AudioError),
 
-    /// PipeWire could not be reached, or refused a stream. The detail is `dmn-audio`'s own
-    /// words and holds nothing from the server or the login.
+    /// The platform's audio system (PipeWire on Linux, WASAPI on Windows,
+    /// `docs/design/windows-desktop.md` §2) could not be reached, or refused a stream. The
+    /// detail is `dmn-audio`'s own words on Linux; on Windows it is this program's own words,
+    /// or the name of a Windows setting that is blocking the microphone. It holds nothing from
+    /// the server or the login, nor anything the system said about a device.
     #[error("cannot {doing}: {detail}")]
-    PipeWire {
+    AudioSystem {
         /// What was being done.
         doing: &'static str,
         /// Why not.
@@ -173,15 +176,40 @@ pub enum Error {
     #[error("managed: events endpoint: {0}; conch-voice managed is started by conch, not by hand")]
     Attach(&'static str),
 
+    /// A facility that has no implementation on this platform yet was asked for: the Unix
+    /// control channel, the inherited event pipe, the key devices. The name is this program's own and holds nothing that was read. Windows has
+    /// its own equivalents, which are separate issues (`docs/design/windows-desktop.md`).
+    ///
+    /// `what` is this program's own words and stays static; `path` is the file it was asked
+    /// to read, when there is one, and the message then says how to go on without it.
+    #[error("{what} is not supported on this platform{}", unsupported_note(.path))]
+    Unsupported {
+        /// The facility.
+        what: &'static str,
+        /// The configuration file that cannot be read here, if that is the facility.
+        path: Option<PathBuf>,
+    },
+
     /// `managed` failed for a reason it told its owner, as a failed state, and that no
     /// other error here describes. The sentence is this program's own.
     #[error("managed: {0}")]
     Managed(&'static str),
 }
 
+/// What follows an unsupported facility's name: nothing, or for a file the remedy.
+fn unsupported_note(path: &Option<PathBuf>) -> String {
+    match path {
+        Some(path) => format!(
+            ": {path:?} is not read on this platform yet; remove it, or name the server with \
+             CONCH_SERVER or --server"
+        ),
+        None => String::new(),
+    }
+}
+
 impl Error {
-    /// The exit code `main` ends with: 2 for a mistake on the command line or a `managed`
-    /// with no event pipe, the policy's code for a stop, and 1 otherwise.
+    /// The exit code `main` ends with: 2 for a mistake on the command line, a `managed`
+    /// with no event pipe or a facility the platform lacks, the policy's code for a stop, and 1 otherwise.
     #[must_use]
     pub fn exit_code(&self) -> u8 {
         match self {
@@ -189,9 +217,49 @@ impl Error {
             | Error::NoChannel
             | Error::NotATerminal
             | Error::EventPipe(_)
-            | Error::Attach(_) => 2,
+            | Error::Attach(_)
+            | Error::Unsupported { .. } => 2,
             Error::Stopped { exit_code, .. } => *exit_code,
             _ => EXIT_STOPPED,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_names_the_facility_and_exits_as_a_usage_mistake_does() {
+        for (facility, line) in [
+            (
+                "the events endpoint",
+                "the events endpoint is not supported on this platform",
+            ),
+            (
+                "the key devices",
+                "the key devices is not supported on this platform",
+            ),
+        ] {
+            let error = Error::Unsupported {
+                what: facility,
+                path: None,
+            };
+            assert_eq!(error.to_string(), line);
+            assert_eq!(error.exit_code(), 2);
+        }
+    }
+
+    #[test]
+    fn an_audio_system_refusal_says_what_was_being_done_and_why_and_is_not_a_usage_mistake() {
+        let error = Error::AudioSystem {
+            doing: "open the microphone",
+            detail: "Windows is not letting programs use the microphone".to_owned(),
+        };
+        assert_eq!(
+            error.to_string(),
+            "cannot open the microphone: Windows is not letting programs use the microphone"
+        );
+        assert_eq!(error.exit_code(), EXIT_STOPPED);
     }
 }

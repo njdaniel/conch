@@ -35,13 +35,12 @@ func (f *presenceFixture) stopCompanionAudio(t *testing.T, who string) wireResul
 	return f.callREST(t, http.MethodDelete, "/v1/channels/ops/voice/companion/audio", f.tokens[who], "")
 }
 
-// mustConsent asks for the share's sound as ann with body and requires it
-// granted, with the scope the body named and the started_at of share.
-func (f *presenceFixture) mustConsent(t *testing.T, body string, share schema.VoiceShareV1) schema.VoiceCompanionAudioV1 {
+// decodeConsent requires a 200 and decodes its body, strictly, as a consent
+// answer that validates.
+func decodeConsent(t *testing.T, res wireResult) schema.VoiceCompanionAudioV1 {
 	t.Helper()
-	res := f.companionAudio(t, "ann", body)
 	if res.status != http.StatusOK {
-		t.Fatalf("ann consents to share audio: %d %s, want 200", res.status, res.body)
+		t.Fatalf("consent to share audio: %d %s, want 200", res.status, res.body)
 	}
 	dec := json.NewDecoder(strings.NewReader(res.body))
 	dec.DisallowUnknownFields()
@@ -52,10 +51,31 @@ func (f *presenceFixture) mustConsent(t *testing.T, body string, share schema.Vo
 	if err := audio.Validate(); err != nil {
 		t.Fatalf("answer %s does not validate: %v", res.body, err)
 	}
+	return audio
+}
+
+// mustConsent asks for the share's sound as ann with body and requires it
+// granted, with the scope the body named, the started_at of share and the id
+// of ops, the channel asked in (issue #1883).
+func (f *presenceFixture) mustConsent(t *testing.T, body string, share schema.VoiceShareV1) schema.VoiceCompanionAudioV1 {
+	t.Helper()
+	audio := decodeConsent(t, f.companionAudio(t, "ann", body))
 	if !strings.Contains(body, string(audio.Scope)) || !audio.StartedAt.Time().Equal(share.StartedAt.Time()) {
 		t.Fatalf("answer = %+v, want the scope of %s and the share's started_at %s", audio, body, share.StartedAt.Time())
 	}
+	if audio.ChannelID != f.ops.ID {
+		t.Fatalf("answer = %+v, want channel_id %d, the id of ops", audio, f.ops.ID)
+	}
 	return audio
+}
+
+// renameChannel renames the channel with this id, as the operator.
+func (f *presenceFixture) renameChannel(t *testing.T, id int64, from, to string) {
+	t.Helper()
+	body := fmt.Sprintf(`{"from":%q,"name":%q}`, from, to)
+	if res := f.callREST(t, http.MethodPut, fmt.Sprintf("/v1/channels/%d/name", id), f.rootTok, body); res.status != http.StatusOK {
+		t.Fatalf("rename %s to %s: %d %s, want 200", from, to, res.status, res.body)
+	}
 }
 
 // lastCompanionUpdate is the permission LiveKit was last asked to set on
@@ -778,5 +798,35 @@ func TestVoiceCompanionAudioShareEndsMidGrant(t *testing.T) {
 	f.stopCompanionAudio(t, "ann")
 	if got := f.shareRows(t); !slices.Equal(got, want) {
 		t.Errorf("after another pass share rows %q, want %q", got, want)
+	}
+}
+
+// TestVoiceCompanionAudioNamesTheChannel: the consent's answer names the
+// channel by id (issue #1883), the id of the channel the route's name
+// resolved to: on the grant, on a repeated request and on a change of scope
+// and of publisher (mustConsent requires the id of ops on each), and, after a
+// rename, the same id under the new name.
+func TestVoiceCompanionAudioNamesTheChannel(t *testing.T) {
+	f, _ := shareWithCompanion(t)
+	f.at(1_000)
+	share := f.mustClaim(t, "ann")
+	want := f.ops.ID
+	for _, body := range []string{audioApplication, audioApplication, audioSystem, audioSystemPerson} {
+		f.mustConsent(t, body, share)
+	}
+	if body, field := f.consentBody(t, audioSystemPerson), fmt.Sprintf(`"channel_id":%d`, want); !strings.Contains(body, field) {
+		t.Errorf("the answer does not carry %s: %s", field, body)
+	}
+
+	f.renameChannel(t, want, "ops", "war-room")
+	if res := f.companionAudio(t, "ann", audioSystemPerson); res.status != http.StatusNotFound || errCode(t, res.body) != "channel_not_found" || strings.Contains(res.body, "channel_id") {
+		t.Fatalf("under the old name: %d %s, want 404 channel_not_found naming no channel", res.status, res.body)
+	}
+	// The consent as recorded, then a change of it.
+	for _, body := range []string{audioSystemPerson, audioApplication} {
+		audio := decodeConsent(t, f.callREST(t, http.MethodPut, "/v1/channels/war-room/voice/companion/audio", f.tokens["ann"], body))
+		if audio.ChannelID != want || !audio.StartedAt.Time().Equal(share.StartedAt.Time()) {
+			t.Errorf("after the rename, %s: answer = %+v, want channel_id %d still and the share's started_at", body, audio, want)
+		}
 	}
 }

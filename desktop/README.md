@@ -11,7 +11,7 @@ credential held in main's memory only (restart means signing in again), and
 live feeds that main opens and holds for the page (issue #943, D2-4). **What it
 does not do yet:** saved profiles and persistence (#944, #945), attachments, clipboard, notifications and
 links (#947, #773), the operations whose answers hold a credential the renderer
-may not see (re-authentication, password change, invite and device-link codes),
+may not see (re-authentication, password change),
 voice in the UI (#771: the supervisor that runs `conch-voice` exists, in
 `main/voice/`, but nothing starts it yet), tray, installer. Later children of
 #770 add those.
@@ -31,16 +31,17 @@ voice in the UI (#771: the supervisor that runs `conch-voice` exists, in
 | `main/api/target.ts` | an operation id plus values to a request target; refuses anything that is not a call of the table |
 | `main/api/client.ts` | the one request executor: bearer only for bearer operations, no Origin or Cookie, no redirects, size cap, response validation, generation check |
 | `main/api/session.ts` | the in-memory credential, the server address and the generation; holds the operator code-step challenge behind a handle |
-| `main/api/service.ts` | what each bridge function does: the sign-in sequence, sign-out, restore |
+| `main/api/service.ts` | what each bridge function does: the sign-in sequence, sign-out, restore, and the six secrets made for someone else (`display`) |
 | `main/api/feeds.ts` | the live feeds: subscriptions, frame validation, the bounded queue, the held-socket count and cap, and teardown at unsubscribe, reload, crash and sign-out |
 | `main/api/socket.ts` | the feed socket: Node's `WebSocket` with the bearer header, through undici's `Agent` for the frame-size cap and a connection main can destroy |
 | `main/api/trust.ts` | adds the system trust store to Node's roots; classifies a certificate failure |
 | `main/ipc.ts` | the one registry of IPC handlers and the caller check every invocation passes |
 | `main/voice/protocol.ts` | the voice-control protocol as the owner speaks it: Go's framing and event rules over the types generated into `web/src/schema`, version negotiation, the stream tracker (#948) |
-| `main/voice/endpoint.ts` | the helper's Linux events endpoint: the verified `$XDG_RUNTIME_DIR`, `conch/<profile-id>` (0700), the stale sweep, the `sun_path` budget, the socket and the attach (#948) |
-| `main/voice/spawn.ts` | the bundled `conch-voice` and its trusted-path checks, the environment built from empty by an allowlist, the spawn options (#948) |
-| `main/voice/supervisor.ts` | one helper per instance: start, commands and acks, the stop escalation and the reap, helper loss as one typed state (#948) |
+| `main/voice/endpoint.ts` | the helper's Linux events endpoint: the verified `$XDG_RUNTIME_DIR`, `conch/<profile-id>` (0700), the stale sweep, the `sun_path` budget, the socket and the attach (#948); on Windows the owner's named pipe `\\.\pipe\conch-voice-<id>` and the same attach (#1785) |
+| `main/voice/spawn.ts` | the bundled `conch-voice` and its trusted-path checks, the environment built from empty by an allowlist, the spawn options (#948); on Windows `conch-voice.exe`, the case-insensitive allowlist and `%SystemRoot%` as its directory (#1785) |
+| `main/voice/supervisor.ts` | one helper per instance: start, commands and acks, the stop escalation and the reap, helper loss as one typed state (#948); on Windows the nonce is spent at the attach and the stop has no SIGTERM step (#1785) |
 | `main/instance.ts` | one instance per data root (`requestSingleInstanceLock`), and the data root made 0700 with its ancestors checked (#945) |
+| `main/data-root.ts` | on Windows, a `--user-data-dir` must be under `%USERPROFILE%`, `%APPDATA%` or `%LOCALAPPDATA%`, or the app does not start; `--allow-shared-user-data-dir` overrides it with a warning (#1788) |
 | `main/profiles/store.ts`, `files.ts`, `ids.ts` | the saved servers: random 128-bit ids, the (origin, principal) binding rule, `profiles.json` (non-secret, 0600, atomic) and the profile directories (#945) |
 | `main/profiles/switch.ts`, `hooks.ts` | the switch sequence (media hooks, sockets, requests, renderer, helper hooks, then the next profile, each bounded) and the hook interface #771 and #772 register on (#945) |
 | `main/profiles/service.ts` | which profile is active, where its credential lives (the vault, or main's memory when storage is not protected), sign-out and remove; the compatibility gate of #946 is in `tokenFor`, before the vault is read or the server is asked about a credential (#945, #946) |
@@ -49,10 +50,12 @@ voice in the UI (#771: the supervisor that runs `conch-voice` exists, in
 | `main/vault/electron-storage.ts` | the one adapter from Electron's `safeStorage` to the vault (#945) |
 | `main/document.ts` | which frame shows the current document (the document generation) |
 | `main/app.ts`, `main/main.ts` | startup |
+| `main/app-user-model.ts` | the Windows AppUserModelID (the app id), set by `main.ts` before `start()` can make a window or a notification (#900) |
 | `preload/bridge.ts`, `preload/index.ts` | `window.conchDesktop`: a frozen object whose keys are exactly the functions of `web/src/platform/desktop/bridge.ts`; the page-side copy is not frozen, so nothing may rely on that |
 | `shared/bridge-names.ts` | the function names and channels, shared by the preload and main |
 | `build/manifest.ts` | writes `out/ui-manifest.json` (path, SHA-256, content type) |
-| `build/electron-builder.config.json` | the Linux `dir` target, asar and the fuses |
+| `build/electron-builder.config.json` | the Linux `dir` target, the Windows NSIS target (#900), asar and the fuses |
+| `build/installer.nsh` | the Windows installer's own steps: per-user only, and the `conch://` key under HKCU (#900) |
 | `tests/unit/` | Vitest, no Electron runtime, no display, no network |
 | `tests/fixtures/fake-helper.ts` | a stand-in `conch-voice` that replays `pkg/schema/testdata/voice-control*/` transcripts |
 | `tests/integration/` | the supervisor with the real `conch-voice` and a stub conchd (`make desktop-voice-it`) |
@@ -197,25 +200,154 @@ but `/usr/bin/conch-desktop`.
 package's lifecycle test: in an `ubuntu:24.04` container (pinned by digest) it installs
 an older build with `apt install ./old.deb` (apt resolves `Depends` from the archive, so
 it needs Docker and network), checks the files, owners and modes, the launcher link, the
-desktop file and `xdg-mime query default x-scheme-handler/conch`, seeds a test user's
-`~/.config/Conch/profiles.json` and `settings.json`, upgrades to a higher version
-(those files stay byte-identical, and `/opt/conch-desktop` is `diff -r`-identical to the
+desktop file and `xdg-mime query default x-scheme-handler/conch`, seeds six files in a
+test user's `~/.config/conch-desktop`, where the app keeps its data (`profiles.json`,
+`settings.json`, files under `profiles/p1/` and `Local Storage/leveldb/`), upgrades to a higher version
+(every seeded file keeps its SHA-256 and none is added, and `/opt/conch-desktop` is `diff -r`-identical to the
 new `.deb`'s own tree, as it was to the old one after the install), checks that `ldd`
 resolves every library of every ELF file (a `.so` may name a sibling in the tree; real
 packages must have `conch-desktop` and `conch-voice` among them) and
 that `resources/conch-voice` passes `findHelper`'s trust rules, then removes and purges
 (nothing of the package left in `/opt`, `/usr` or `/etc`; the conffile goes at purge; the
-user's `~/.config/Conch` stays). `postinst` must succeed with no AppArmor in the
+user's seeded files are checked the same way after each). The folder's name is not
+assumed: it is Electron's `userData`, `~/.config/<productName or name>` of the
+`package.json` packed in `resources/app.asar`, which the script reads from each `.deb`
+(with `python3`). Both packages must name the same folder and it must be `conch-desktop`
+(docs/desktop/linux.md), so a rename fails the test instead of moving every user's data.
+The fixture packages carry a small `app.asar` with `desktop/package.json` in it, as
+electron-builder packs it (`extraMetadata` over it). `postinst` must succeed with no AppArmor in the
 container. With no argument it builds two fixture packages (`v0.1.0-alpha.1` and
 `.2`); `make desktop-deb-lifecycle DEB_OLD=<a.deb> DEB_NEW=<b.deb>` takes real ones.
 `scripts/desktop-deb-lifecycle.sh --broken` is the test of the test: the fixture packages
 without `Depends` must fail at the `ldd` check, and `--broken=userdata` (a `postinst` that
-writes under `~/.config/Conch`) must fail at the user-data check. The fixture run needs a
+appends to the seeded `settings.json`) must fail at the user-data check. The fixture run needs a
 host no newer than Ubuntu 24.04 with `curl` installed (its ELF stand-in). A container is not a clean machine (no
 display, portal, keyring or PipeWire; Chromium's sandbox under Docker's seccomp is not
 representative), so the script never runs the app: the app on a real machine is #1602
 (D6-08). Without Docker it prints `SKIPPED`; with `CI` set it fails. It is not part of
 `make check` or `make desktop-check`, and has no CI job yet (it follows #1598's `.deb` job).
+
+### The Windows installer (issue #900): an unsigned preview
+
+**Unsigned.** It is a preview for testing on Nick's own PC (#903), not a release. Signing
+is #780 (decision record: [docs/design/windows-signing.md](../docs/design/windows-signing.md)),
+updates are deferred ([windows-desktop.md](../docs/design/windows-desktop.md) §9.5), and no
+release carries it. Its name says so: `Conch-<version>-unsigned-preview-setup.exe`, and the
+`desktop-windows` CI job keeps it as the artifact of the same name. Using it:
+[docs/manual.md](../docs/manual.md#the-desktop-app-on-windows-unsigned-preview).
+
+It is electron-builder's NSIS target (§9.3), the same `electron-builder` 26.17.0 that packs
+the Linux tree; no dependency was added. The options, each read in that version's
+`app-builder-lib/out/targets/nsis/nsisOptions.d.ts` and `NsisTarget.js` (§9.3 had them from
+memory):
+
+- `oneClick: false` (its default is `true`): the assisted installer, which may show the
+  folder page; `allowToChangeInstallationDirectory: true` turns that page on (default
+  `false`, assisted only).
+- `perMachine: false` (the default): per-user. On an assisted installer that alone still
+  shows a page offering "all users" too, which an administrator could pick, and
+  `/allusers` on the command line asks for elevation whatever `allowElevation` says
+  (`templates/nsis/multiUserUi.nsh`, `assistedInstaller.nsh`). `build/installer.nsh`
+  therefore makes every install the current user's, `/allusers` included, and the page
+  is never shown. One gap remains: the uninstaller, started by hand with `/allusers`,
+  asks for elevation before any hook runs, and then still removes only the current
+  user's install.
+- `allowElevation: false` (default `true`, assisted only) and `packElevateHelper: false`
+  (default `true`; it exists for electron-updater's per-machine updates): no elevation is
+  asked for and no `elevate.exe` is shipped.
+- `deleteAppDataOnUninstall: false` (the default; the type says one-click only, but
+  `uninstaller.nsh` honours it either way). The uninstaller removes the program, its
+  shortcuts, its uninstall entry and the `conch://` key, and leaves `%APPDATA%`. The app's
+  data is Electron's `userData`, `%APPDATA%\conch-desktop` (the package name, as
+  `~/.config/conch-desktop` on Linux). Only `Uninstall Conch.exe --delete-app-data`, which
+  someone must type, removes it.
+- `artifactName` puts `unsigned-preview` in the file name.
+
+The `conch://` handler: electron-builder's `protocols` is macOS only
+(`out/options/PlatformSpecificBuildOptions.d.ts`), so `build/installer.nsh` writes
+`HKCU\Software\Classes\conch` (`URL Protocol`, and `shell\open\command` =
+`"<install dir>\Conch.exe" "%1"`), as the `.deb`'s `MimeType=x-scheme-handler/conch;` does on
+Linux, and its uninstall step deletes it. The link reaches the app on its command line, which
+`main/instance.ts` and `main/invites.ts` read on every platform.
+
+The install goes to NSIS's per-user `$LocalAppData\Programs\Conch` (the `UserProgramFiles`
+known folder, `%LOCALAPPDATA%\Programs` by default): `Conch.exe`, and `resources\` with
+`app.asar`, `conch-voice.exe` (the one path `findHelper` runs on Windows,
+`main/voice/spawn.ts`) and `version` (the installed stamp, `main/installed.ts`). The executable
+keeps electron-builder's Windows name, `Conch.exe`: the Linux name `conch-desktop` avoids the
+CLI's `conch` on `PATH`, and the per-user install folder is not on `PATH`. The Start menu and
+desktop shortcuts carry the AppUserModelID `chat.conch.desktop`, the `appId`, which
+`main/app-user-model.ts` also sets in the app.
+
+**It is built on Windows only.** On Linux, electron-builder 26.17.0 packs everything and then
+runs the uninstaller it has just compiled under `wine` to extract it (`NsisTarget.js`,
+`computeScriptAndSignUninstaller`): tried on 2026-11-12, it fails there with `spawn wine
+ENOENT`. The repository installs no wine, so there is no Make target. `npm run dist:win` is the
+build step, and CI's `desktop-windows` job runs it after the steps of
+`scripts/desktop-build.sh` that are not Linux's: the release `conch-voice.exe` (`cargo build
+--release -p conch-voice`), the Windows Electron, web's Vite build, the bundles and the
+manifest. It stages the helper and the stamp in `out/win-resources/` (`win.extraResources`),
+because electron-builder packs the installer itself. With a compile-only stand-in for `wine`,
+both halves of the script compiled on Linux under `makensis -WX`. That installer was never run.
+
+What electron-builder downloads for it, each checked against a SHA-256 written in its own
+source before it is unpacked (`downloadBuilderToolset` in `out/util/electronGet.js` passes the
+hash to `@electron/get` 5.1.0, whose `validateArtifact` refuses a mismatch), from
+`electron-userland/electron-builder-binaries`: `nsis-3.0.4.1.7z` and `nsis-resources-3.4.1.7z`
+(the default `toolsets.nsis` "0.0.0"; `out/toolsets/windows.js`), `7zip-win-x64.tar.gz`
+(`out/toolsets/7zip.js`) and `icons-bundle.tar.gz` (the icon from `build/icons/`,
+`out/toolsets/icons.js`). The version resource is edited in JavaScript (`resedit`), so no
+`rcedit` and no `winCodeSign` is fetched, and nothing is signed. Electron itself is not
+downloaded by electron-builder: the job fetches `electron-v<version>-win32-x64.zip` from
+Electron's GitHub release and unpacks it only if its SHA-256 equals the hash in
+`node_modules/electron/checksums.json`, which `npm ci` verified against the lockfile, then
+passes it as `electronDist`. That is one of the two hashes `scripts/desktop-electron.sh` checks
+on Linux. `scripts/desktop-pins.sh` has no Windows hash, and adding one is a pin change.
+
+CI installs it with `/S` on `windows-latest` and checks the files, `Conch.exe`'s version
+resource (the app has no window-less version check), the HKCU `conch` key and uninstall
+entry, the Start menu shortcut, and that nothing went to `Program Files` or `HKLM`. It then
+seeds `%APPDATA%\conch-desktop` and `%APPDATA%\Conch`, uninstalls with `/S`, and waits for the
+copy the uninstaller runs from `%TEMP%` to finish. The program, the key, the entry and the
+shortcut must be gone, and every seeded file must be unchanged. The job does not start the app.
+Electron and `conch-voice` together on a Windows machine is #903.
+
+### A data root of your own on Windows (`--user-data-dir`, issue #1788)
+
+Chromium's `--user-data-dir=<dir>` moves the data root (`app.getPath('userData')`, by default
+`%APPDATA%\conch-desktop`): `profiles.json`, `settings.json`, the vault, each profile's
+`voice.toml` for the helper, and Chromium's own files. On Linux and macOS `main/instance.ts`
+judges it by its mode bits and its ancestors' (0700, no group- or other-writable parent). Windows
+has no mode bits: the data is private only because the folder it is in is. `%USERPROFILE%`,
+`%APPDATA%` and `%LOCALAPPDATA%` are, under their default ACL (you, SYSTEM and
+Administrators), but a folder made under a drive root (`C:\conch-data`) gives Authenticated
+Users Modify by default, so any other local account could write `profiles\<id>\voice.toml`
+there and choose the helper's devices and keys (not its server or login: in the app those come
+from the owner's `start` command), or change the app's other files.
+
+So on Windows, when `--user-data-dir` is given, `main/data-root.ts` checks where it resolved to
+before the single-instance lock writes anything into it. The root must be inside `%USERPROFILE%`,
+`%APPDATA%` or `%LOCALAPPDATA%` (each as written and resolved) twice over: as given, and with
+junctions and symbolic links resolved by `fs.realpathSync.native` (through its nearest existing
+ancestor when it does not exist yet). The path as given counts because the app goes on using it: a
+junction at a shared place such as `C:\conch-data` that leads into the profile is refused, since
+whoever owns that junction could point it elsewhere later. Paths are compared case-insensitively on
+whole path segments, so `C:\Users\nickx` is not inside `C:\Users\nick`. A relative, drive-relative
+(`C:foo`) or root-relative (`\foo`) path is refused, as are a root that cannot be resolved, a
+dangling link on its path, and a base variable that names a volume or share root (`C:\`,
+`\\server\share`). Refused, the app prints one line saying the data root must be
+under your user profile and exits. `--allow-shared-user-data-dir` is the deliberate way past it: the
+app starts and prints a warning that other local accounts may be able to change its files, the
+voice helper's settings among them. Without `--user-data-dir` nothing is checked, and Linux and
+macOS are unchanged.
+
+**Why by path, not by ACL:** Node has no API that reads a Windows ACL; one would need a native
+module (or a new dependency that ships one), which this app does not take. So the check is a
+guard against a mistaken launch, not proof: a profile folder whose ACL someone has widened passes,
+and a user who passes the override flag is trusted to mean it, as is anything else running as that
+user. The standalone helper has the same residual for a `CONCH_CONFIG_DIR` under a drive root
+([windows-desktop.md](../docs/design/windows-desktop.md) §2.7, #904); it is documented there and not
+checked.
 
 ### The smoke test
 
@@ -297,6 +429,22 @@ operation signs the window out. Sign-in steps (password, operator code,
 invite, sign-in link, setup token, reset, guest, account, pasted credential)
 are bridge functions of their own: main consumes the token and returns the
 account; the operator's code-step challenge stays in main behind a handle.
+
+Six operations make a secret for someone or something else, which the person
+has to read or copy (issue #1768): an invite's link (`createMemberLink`), a
+sign-in link for another device (`createSignInLink`), the authenticator's seed
+(`totpEnroll`), an administrator's sign-in link for a person
+(`createPrincipalSignInLink`), a script credential (`createPrincipalCredential`)
+and a hook's secret (`createHook`). They are not the app's own credentials, so
+unlike a bearer the page may hold them for display. Each is a bridge function of
+its own (`Service.display` in `main/api/service.ts`, never a generic
+pass-through): main makes the request with its bearer, exactly as the page
+would, and the server's validated reply goes back once, in that call's result.
+Main does not log it (a line names the operation and a reason, never a body),
+store it or keep it after returning. The operations stay `renderer: false`, so
+the generic `request` still refuses all six. The page shows and copies the
+secret, and keeps it in no URL, title or log; a copy button goes through main's
+clipboard write in the click handler, as AddDevice and the invite panel do.
 
 Every IPC invocation is checked in `main/ipc.ts` before anything else: the
 sender is the owned web contents and is not destroyed; the frame is its live
