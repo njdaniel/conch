@@ -108,6 +108,7 @@ use conch_voice_control::{
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, MissedTickBehavior};
 
+use crate::echo::EchoCanceller;
 use crate::error::Error;
 use crate::keydev::DeviceState;
 use crate::livekit::{ShareAudioOwner, Subscription};
@@ -380,6 +381,10 @@ pub struct Settings {
     /// The limit of one push-to-talk press: `max_transmit`, or less where the managed
     /// owner passed `--transmit-ceiling-secs`. Open mode uses `max_transmit` alone.
     pub push_to_talk_max: Duration,
+    /// `audio.echo_cancellation` as it is in force (issue #186): whether captured frames go
+    /// through the echo canceller, with the speakers' mix as its reference, before the gate.
+    /// Off, no canceller is made.
+    pub echo_cancellation: bool,
     /// What opens the gate: `audio.talk_mode` for `join`. A managed helper speaking
     /// `conch.voice_control.v1` is given push-to-talk whatever the file says; one speaking
     /// v2, the file's mode, or the one its owner set while it was starting.
@@ -411,9 +416,12 @@ pub const MAX_TRACKS: usize = 64;
 /// publishes many tracks would use up [`MAX_TRACKS`] and nobody else would be heard.
 pub const MAX_TRACKS_PER_SPEAKER: usize = 2;
 
-/// What `join` says once when it starts in open mode: echo cancellation does not work yet
-/// (#186, #566), so on speakers the open microphone sends the others' voices back to them.
-pub const OPEN_MIC_WARNING: &str = "open microphone: what the microphone hears is sent when it is loud enough; use headphones (no echo cancellation yet)";
+/// What `join` says once when it starts in open mode: on speakers the open microphone can
+/// send the others' voices back to them (#566). Echo cancellation (`audio.echo_cancellation`,
+/// #186) is off by default and how well it works has not been measured, so the advice is
+/// headphones either way.
+pub const OPEN_MIC_WARNING: &str =
+    "open microphone: what the microphone hears is sent when it is loud enough; use headphones";
 
 /// How long a session request or the opening of the presence socket may take.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -998,6 +1006,7 @@ impl<T: Transport> Session<T> {
             release_tail_ms,
             max_transmit,
             push_to_talk_max,
+            echo_cancellation,
             talk_mode,
             level,
             key_device,
@@ -1006,11 +1015,16 @@ impl<T: Transport> Session<T> {
             share_audio,
             timings,
         } = settings;
+        // With `audio.echo_cancellation` on, one canceller for the session: the mix task gives
+        // it what the speakers play, and the transmit task runs each captured frame through
+        // it before the gate. Off, there is none.
+        let echo = EchoCanceller::if_enabled(echo_cancellation);
         let transmitter = transmit::spawn_with_press_cap(
             transmit::gate_config(release_tail_ms, max_transmit),
             Some(transmit::press_cap_ms(max_transmit, push_to_talk_max)),
             level,
             timings.transmit_clock.clone(),
+            echo.clone(),
         )?;
         let output = Device::configured(output.as_deref());
         let speakers = match output.opened_as() {
@@ -1022,7 +1036,7 @@ impl<T: Transport> Session<T> {
         } else {
             Playback::Unavailable
         };
-        let receiver = receive::spawn(&sink_tones, speakers)?;
+        let receiver = receive::spawn_with_echo(&sink_tones, speakers, echo)?;
         let reports = Reports::spawn(
             conchd.report_client,
             channel.clone(),
@@ -2511,6 +2525,7 @@ mod tests {
             release_tail_ms: 0,
             max_transmit: Duration::from_secs(120),
             push_to_talk_max: Duration::from_secs(120),
+            echo_cancellation: false,
             talk_mode: TalkMode::PushToTalk,
             level: transmit::level_config(-40, 400),
             key_device: None,

@@ -76,8 +76,12 @@ pub struct AudioConfig {
     pub input: Option<String>,
     /// `output`: the speakers, by PipeWire name. `None` is PipeWire's default.
     pub output: Option<String>,
-    /// `echo_cancellation`: off unless set (the note's decision 8).
-    pub echo_cancellation: bool,
+    /// `echo_cancellation` (issue #186): whether captured frames go through the SDK's audio
+    /// processing, with the speakers' mix as its reference, before the transmit gate. `None`
+    /// when the key is not written: then the program's default decides
+    /// ([`AudioConfig::echo_cancellation_or`]), which is off (the note's decision 8) except in
+    /// a managed helper whose owner passed `--echo-cancellation-default` (the desktop app).
+    pub echo_cancellation: Option<bool>,
     /// `release_tail_ms`: see [`DEFAULT_RELEASE_TAIL_MS`]. The gate applies it.
     pub release_tail_ms: u32,
     /// `max_transmit_secs`: see [`DEFAULT_MAX_TRANSMIT_SECS`]. At least 1. The push-to-talk
@@ -98,7 +102,7 @@ impl Default for AudioConfig {
         Self {
             input: None,
             output: None,
-            echo_cancellation: false,
+            echo_cancellation: None,
             release_tail_ms: DEFAULT_RELEASE_TAIL_MS,
             max_transmit_secs: DEFAULT_MAX_TRANSMIT_SECS,
             talk_mode: TalkMode::PushToTalk,
@@ -210,10 +214,7 @@ impl Config {
         let audio = AudioConfig {
             input: raw.audio.input,
             output: raw.audio.output,
-            echo_cancellation: raw
-                .audio
-                .echo_cancellation
-                .unwrap_or(defaults.echo_cancellation),
+            echo_cancellation: raw.audio.echo_cancellation,
             release_tail_ms: raw
                 .audio
                 .release_tail_ms
@@ -239,7 +240,7 @@ impl Config {
         Ok(config)
     }
 
-    /// Checks the values that have a range, and refuses `audio.echo_cancellation = true`. [`Config::parse`] and [`Config::apply`] both end
+    /// Checks the values that have a range. [`Config::parse`] and [`Config::apply`] both end
     /// here, so no layer can put in what another would have refused. `source` is the name
     /// errors give for where the values came from.
     ///
@@ -272,14 +273,6 @@ impl Config {
             {
                 return Err(invalid(key, DEVICE_NAME_MUST_BE.to_owned()));
             }
-        }
-        // Echo cancellation (#186) is not built, so `true` would claim a protection nothing
-        // provides. Refused until it ships.
-        if self.audio.echo_cancellation {
-            return Err(invalid(
-                "audio.echo_cancellation",
-                ECHO_CANCELLATION_UNAVAILABLE.to_owned(),
-            ));
         }
         if self.audio.release_tail_ms > MAX_RELEASE_TAIL_MS {
             return Err(invalid(
@@ -388,7 +381,7 @@ impl Config {
         put(&mut self.audio.input, overrides.input);
         put(&mut self.audio.output, overrides.output);
         if let Some(value) = overrides.echo_cancellation {
-            self.audio.echo_cancellation = value;
+            self.audio.echo_cancellation = Some(value);
         }
         if let Some(value) = overrides.release_tail_ms {
             self.audio.release_tail_ms = value;
@@ -439,6 +432,13 @@ impl Config {
 }
 
 impl AudioConfig {
+    /// Whether echo cancellation is on: `echo_cancellation` where it is written, else
+    /// `default`, the program's (off for `join`; see [`AudioConfig::echo_cancellation`]).
+    #[must_use]
+    pub fn echo_cancellation_or(&self, default: bool) -> bool {
+        self.echo_cancellation.unwrap_or(default)
+    }
+
     /// `release_tail_ms` as a duration, for the gate.
     #[must_use]
     pub fn release_tail(&self) -> Duration {
@@ -1038,10 +1038,6 @@ impl<'de> Deserialize<'de> for RawKey {
     }
 }
 
-/// Why `audio.echo_cancellation = true` is refused.
-const ECHO_CANCELLATION_UNAVAILABLE: &str =
-    "echo cancellation is not available yet (issue #186); leave it false or remove the key";
-
 /// How serde words a key that `deny_unknown_fields` refused. The error carries no kind, only
 /// this text; `an_unknown_key_is_an_error_naming_the_key_and_the_file` fails if it changes.
 const UNKNOWN_FIELD: &str = "unknown field ";
@@ -1156,7 +1152,7 @@ open_hang_ms = 650
             audio: AudioConfig {
                 input: Some("alsa_input.example-mic".to_owned()),
                 output: Some("alsa_output.example-headset".to_owned()),
-                echo_cancellation: false,
+                echo_cancellation: Some(false),
                 release_tail_ms: 250,
                 max_transmit_secs: 45,
                 talk_mode: TalkMode::Open,
@@ -1185,7 +1181,7 @@ open_hang_ms = 650
             audio: AudioConfig {
                 input: None,
                 output: None,
-                echo_cancellation: false,
+                echo_cancellation: None,
                 release_tail_ms: 100,
                 max_transmit_secs: 120,
                 talk_mode: TalkMode::PushToTalk,
@@ -1209,7 +1205,8 @@ open_hang_ms = 650
         let config = Config::parse("[audio]\nrelease_tail_ms = 0\n", FILE).unwrap();
         assert_eq!(config.audio.release_tail_ms, 0);
         assert_eq!(config.audio.max_transmit_secs, DEFAULT_MAX_TRANSMIT_SECS);
-        assert!(!config.audio.echo_cancellation);
+        assert_eq!(config.audio.echo_cancellation, None);
+        assert!(!config.audio.echo_cancellation_or(false));
     }
 
     #[test]
@@ -1532,38 +1529,52 @@ open_hang_ms = 650
     }
 
     #[test]
-    fn echo_cancellation_true_is_refused_from_the_file_and_from_an_override() {
-        // (text of the file, override, whether it is accepted)
-        let cases: [(&str, Option<bool>, bool); 8] = [
-            ("", None, true),
-            ("[audio]\necho_cancellation = false\n", None, true),
-            ("[audio]\necho_cancellation = true\n", None, false),
-            ("", Some(false), true),
-            ("", Some(true), false),
-            ("[audio]\necho_cancellation = true\n", Some(false), false),
-            ("[audio]\necho_cancellation = false\n", Some(true), false),
-            ("[audio]\necho_cancellation = false\n", Some(false), true),
+    fn echo_cancellation_is_read_from_the_file_and_an_override_and_the_default_fills_a_gap() {
+        // (text of the file, override, the program's default, what is in force)
+        let cases: [(&str, Option<bool>, bool, bool); 10] = [
+            ("", None, false, false),
+            ("", None, true, true),
+            ("[audio]\necho_cancellation = false\n", None, true, false),
+            ("[audio]\necho_cancellation = true\n", None, false, true),
+            ("", Some(false), true, false),
+            ("", Some(true), false, true),
+            (
+                "[audio]\necho_cancellation = true\n",
+                Some(false),
+                true,
+                false,
+            ),
+            (
+                "[audio]\necho_cancellation = false\n",
+                Some(true),
+                false,
+                true,
+            ),
+            (
+                "[audio]\necho_cancellation = false\n",
+                Some(false),
+                true,
+                false,
+            ),
+            (
+                "[audio]\necho_cancellation = true\n",
+                Some(true),
+                false,
+                true,
+            ),
         ];
-        for (text, over, accepted) in cases {
+        for (text, over, default, want) in cases {
             let overrides = ConfigOverrides {
                 echo_cancellation: over,
                 ..ConfigOverrides::default()
             };
-            let result = Config::parse(text, FILE).and_then(|mut config| {
-                config.apply(overrides, SOURCE)?;
-                Ok(config)
-            });
-            match (accepted, result) {
-                (true, Ok(config)) => assert!(!config.audio.echo_cancellation, "{text:?} {over:?}"),
-                (false, Err(Error::InvalidConfigValue { key, message, .. })) => {
-                    assert_eq!(key, "audio.echo_cancellation", "{text:?} {over:?}");
-                    assert!(message.contains("not available yet"), "{message}");
-                    assert!(message.contains("#186"), "{message}");
-                }
-                (accepted, other) => {
-                    panic!("{text:?} {over:?}: accepted={accepted}, got {other:?}")
-                }
-            }
+            let mut config = Config::parse(text, FILE).unwrap();
+            config.apply(overrides, SOURCE).unwrap();
+            assert_eq!(
+                config.audio.echo_cancellation_or(default),
+                want,
+                "{text:?} {over:?} {default}"
+            );
         }
     }
 

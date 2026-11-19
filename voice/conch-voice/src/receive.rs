@@ -16,6 +16,10 @@
 //! the speakers inside a session: `docs/design/tui-voice.md` §20.5): the old one is dropped,
 //! which closes its stream, and the mix goes to the new one only. The task says whether the
 //! speakers it plays to are playing ([`Playing`]), so that the session can tell its owner.
+//! With `audio.echo_cancellation` on (issue #186) each frame handed to the speakers is also
+//! handed to the echo canceller as its reference ([`crate::echo`]), so that it can take that
+//! audio out of what the microphone captures; while the speakers are not playing it is given
+//! silence, which is what they play.
 //! What `--json` reports as `stats` is counted and
 //! measured by this task, per speaker and for the mix, and what this task keeps per speaker
 //! has a bound: a speaker is kept while a track of theirs is mixed, and the last
@@ -31,6 +35,7 @@ use conch_voice_audio::{
 };
 use tokio::sync::mpsc;
 
+use crate::echo::EchoCanceller;
 use crate::pace::Pace;
 
 /// The most frames one look mixes for a sink paced by its ring. A sink asks for what its
@@ -250,6 +255,9 @@ struct Task {
     mix_window: Window,
     /// A meter that has measured nothing, copied for each new window.
     blank: SignalMeter,
+    /// The echo canceller, with `audio.echo_cancellation` on: given each frame the speakers
+    /// are given.
+    echo: Option<EchoCanceller>,
 }
 
 /// Speakers that can be moved into the task.
@@ -263,6 +271,20 @@ pub type BoxedSink = Box<dyn Speakers + Send>;
 /// [`AudioError::InvalidSetting`] if the meter refuses the tones (see
 /// [`SignalMeter::new`]).
 pub fn spawn(tones: &[f32], sink: BoxedSink) -> Result<Receiver, AudioError> {
+    spawn_with_echo(tones, sink, None)
+}
+
+/// As [`spawn`], handing each frame the speakers are given to `echo` as well, the echo
+/// canceller's reference (`audio.echo_cancellation`, issue #186).
+///
+/// # Errors
+///
+/// As [`spawn`].
+pub fn spawn_with_echo(
+    tones: &[f32],
+    sink: BoxedSink,
+    echo: Option<EchoCanceller>,
+) -> Result<Receiver, AudioError> {
     let blank = SignalMeter::new(tones)?;
     let (commands, command_rx) = mpsc::unbounded_channel();
     let (stats_tx, stats) = mpsc::unbounded_channel();
@@ -284,6 +306,7 @@ pub fn spawn(tones: &[f32], sink: BoxedSink) -> Result<Receiver, AudioError> {
             audible: 0,
         },
         blank,
+        echo,
     };
     tokio::spawn(task.run());
     Ok(Receiver {
@@ -423,6 +446,11 @@ impl Task {
         }
         self.mixer.finish(&mut frame);
         self.sink.play(&frame);
+        if let Some(echo) = &self.echo {
+            // What the speakers play is what the microphone can pick up again; speakers
+            // that are not playing play nothing.
+            echo.played(if self.playing { &frame } else { &SILENCE });
+        }
         self.mix_window.push(&frame);
     }
 

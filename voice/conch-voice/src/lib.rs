@@ -45,7 +45,9 @@
 //! Owns: the connection to the channel's voice room, for as long as `join` runs; the
 //! process's logger ([`logger`]); and the tasks that hold the transmit gate ([`transmit`]),
 //! the mix ([`receive`]), the report queue ([`reports`]) and the presence socket
-//! ([`presence`]); the connection to PipeWire and the microphone and speaker streams
+//! ([`presence`]); with `audio.echo_cancellation` on, the SDK's echo canceller, which the
+//! mix hands what the speakers play and the transmit task runs each captured frame
+//! through before the gate, and which opens no device and sends nothing ([`echo`]); the connection to PipeWire and the microphone and speaker streams
 //! opened through it ([`audio`]), the microphone's from the moment a session first allows
 //! publishing until the session ends, the speakers' for the whole session. A switch of
 //! either to another device inside the session closes the old stream and opens one for the
@@ -85,6 +87,7 @@ pub mod channel;
 pub mod cli;
 pub mod config_cmd;
 pub mod devices;
+pub mod echo;
 pub mod error;
 pub mod input;
 pub mod keydev;
@@ -279,6 +282,8 @@ pub fn join(
         release_tail_ms: resolved.config.audio.release_tail_ms,
         max_transmit: Duration::from_secs(u64::from(resolved.config.audio.max_transmit_secs)),
         push_to_talk_max: Duration::from_secs(u64::from(resolved.config.audio.max_transmit_secs)),
+        // Off unless `voice.toml` turns it on (issue #186; the note's decision 8).
+        echo_cancellation: resolved.config.audio.echo_cancellation_or(false),
         // `join` honours the configured mode; `down` and `up` then do nothing in open mode.
         talk_mode: resolved.config.audio.talk_mode,
         level: transmit::level_config(
@@ -401,6 +406,7 @@ pub fn managed(
         );
         host.transmit_ceiling_secs = args.transmit_ceiling_secs;
         host.no_mute_key = args.no_mute_key;
+        host.echo_cancellation_default = args.echo_cancellation_default;
         managed::signals(inputs.clone(), host.watchdog.clone()).map_err(Error::Runtime)?;
         // Windows has no parent to watch (`parent_id` is 0 there, ids are reused): its owner
         // is noticed by the events pipe ending or failing to be written (#938).

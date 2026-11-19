@@ -63,8 +63,16 @@ export const SHARE_AUDIO_ARGS: readonly string[] = ['--share-audio-owner', 'comp
 // it). The TUI passes nothing and keeps its mute key.
 export const MUTE_OWNER_ARGS: readonly string[] = ['--no-mute-key'];
 
+// Echo cancellation is on for the desktop app (#186): on open speakers the
+// microphone picks up the others' voices, and without it they hear
+// themselves. The helper runs captured audio through the SDK's echo canceller,
+// with what it plays as the reference, before the transmit gate, which still
+// decides what is sent. `audio.echo_cancellation = false` in voice.toml turns
+// it off; the TUI and `join` pass nothing and keep it off unless the file says.
+export const ECHO_ARGS: readonly string[] = ['--echo-cancellation-default'];
+
 // Every option a start carries, the ceiling last.
-export const HELPER_ARGS: readonly string[] = [...SHARE_AUDIO_ARGS, ...MUTE_OWNER_ARGS, ...CEILING_ARGS];
+export const HELPER_ARGS: readonly string[] = [...SHARE_AUDIO_ARGS, ...MUTE_OWNER_ARGS, ...ECHO_ARGS, ...CEILING_ARGS];
 
 // The part of the Supervisor this service uses; a test stands in for it.
 export interface VoiceSupervisor {
