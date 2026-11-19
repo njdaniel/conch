@@ -2,6 +2,7 @@
 
 - **Status:** **Accepted by Nick, 2026-11-13** ("yes to recommendations"): D-1 to D-5 as recommended in §15; D-6 to D-8 accepted by the principal under Nick's delegation.
 - **History:** Proposed, for Nick's sign-off, 2026-11-09, by the protocol-designer (issue [#1585](https://github.com/njdaniel/conch/issues/1585), D4-08; parent #772). It answers the Linux half of [#1552](https://github.com/njdaniel/conch/issues/1552) (Nick, 2026-11-07: a desktop share carries the screen's sound by default, scope `system_excluding_call`, where a route exists). Nothing here is implemented; no code, dependency, schema version or migration lands with this note. What needs Nick is in §15; the rest is a recommendation with its reason, made under the principal's delegation.
+- **Proposed amendment (#1999, 2026-11-19):** §19, after a live call returned the call through the share and Nick widened the scope to per-application sound. §19 is a proposal; nothing above it is changed by it.
 - **Changes to accepted text:** made in the PR that accepted this note (#1606), on Nick's yes, as §17 lists them: model B's "share audio is the companion's" ([linux-desktop.md](linux-desktop.md) §6 and §8) and "main never calls the route on Linux" ([voice-control-plane.md](voice-control-plane.md) §13), with the smaller ones of §17. As proposed, this note changed none of them and listed each for his yes. Until the implementation of §16 ships and L-S6 passes (§14.4), the Linux share is silent and says so (#1582, D4-05).
 - **Reads:** [linux-desktop.md](linux-desktop.md) §1, §6, §8, §9, §10 (model B, the §8 safety rules, the threat table); [voice-control-plane.md](voice-control-plane.md) §12–13 (the claim, the companion, its share audio by consent); [voice-multi-share.md](voice-multi-share.md) §5.4, §7.3–7.4 (audio per sharer; the helper under B2 plays none of it); [windows-desktop.md](windows-desktop.md) §8 (the three scopes; exclusion by process tree); [conch-voice.md](conch-voice.md) §13 row 7 (why the helper owns PipeWire in its process); [tui-voice.md](tui-voice.md) and `pkg/schema/voice_control*.go` (the control channel, v1 and v2); the capability report [linux-desktop-capabilities.md](../reviews/linux-desktop-capabilities.md) rows L-S5, L-S6 and experiment LE8.
 - **Current-code baseline:** `main` at `aaea4d11` (alpha.18), inspected 2026-11-09, in the worktree of this issue. Evidence markers: a claim checked in source or a document today is cited; a claim from memory says **(memory)**; a claim nobody has run says **(unverified)**.
@@ -360,3 +361,133 @@ Repository (`aaea4d11`, 2026-11-09): `docs/design/linux-desktop.md`, `voice-cont
 External, fetched 2026-11-09: [Electron 45.1.0 `session`](https://raw.githubusercontent.com/electron/electron/v45.1.0/docs/api/session.md) (`setDisplayMediaRequestHandler` audio, `setPermissionRequestHandler` media details, `setDevicePermissionHandler` device types) · [pipewire-props(7)](https://docs.pipewire.org/page_man_pipewire-props_7.html) (`target.object`, `node.autoconnect`, `pipewire.sec.pid`, client properties are advisory) · `dmn-audio` rev `39e7748` (`src/lib.rs`, `src/capture.rs`, `src/pipewire.rs`, `Cargo.toml`) · `livekit` 0.9.4 (`src/room/options.rs`, `TrackPublishOptions.source`). [OBS PipeWire audio capture](https://github.com/dimtpap/obs-pipewire-audio-capture) was fetched; its page states three sources and PipeWire 0.3.62, not the linking mechanism, which stays **(memory)**.
 
 From memory, marked so in the text: Chromium's `getDisplayMedia` audio on Linux; Chromium reaching PipeWire through the PulseAudio API; LiveKit's unpublish on a permission revocation and its within-participant sync; the ScreenCast portal's `Start` result carrying no pid; the OBS plugin's explicit-links mechanism; `Core::create_object` for links in the `pipewire` crate.
+
+## 19. Per-application share sound, and the #1999 leak (Proposed)
+
+- **Status:** **Proposed**, 2026-11-19, for issue [#1999](https://github.com/njdaniel/conch/issues/1999), phase 1 (find the leak, design). Nothing here is implemented. It changes no decided section above; where it would, §19.8 lists the change for Nick. Share sound stays **off by default** (`CONCH_LINUX_SHARE_AUDIO` must be `1`, `desktop/main/voice/share-audio.ts:89`) until what this section proposes ships and L-S6 passes on Nick's machine. Turning it back on is Nick's call.
+- **Why:** on 2026-11-19, with share sound on (#1952), a person in a call heard herself while Nick shared a Firefox window. Stopping the share stopped it. That is the failure L-S6 (§14.4) exists to catch. Nick then widened the scope: "the screen sharing was sharing all the sounds not just the firefox i was sharing". **A window share carries only the sound of the application whose window was picked.** A whole-screen share may stay "everything on this computer except the call" if it says so before the share starts.
+- **Evidence markers** are as in the header: cited from source; **(memory)**; **(unverified)**. Upstream PipeWire, portal and Chromium sources could not be fetched for this section, so every upstream claim not checked against an installed man page is marked. Nothing here was measured: no PipeWire graph on any machine was inspected. Every claim the fix depends on has a by-hand check in §19.7.
+
+### 19.1 How the call can reach the share's track: the hypotheses, ranked
+
+**What the route takes** (`voice/conch-voice/src/share_capture.rs:548–622`, `share_capture_linux.rs:69–92`): every `Stream/Output/Audio` node in `dmn-audio`'s table that `share_eligibility::judge` (`share_eligibility.rs:353–378`) calls eligible, each captured by `object.serial` with `stream.capture.sink=false`, `node.dont-fallback`, `node.dont-reconnect` and `node.dont-move` (set by `dmn-audio`). The capture cannot fall back to a sink or a monitor. It captures exactly the streams the rule lets through. So the leak is a stream the rule lets through that carries the call.
+
+**What the rule excludes** (`share_eligibility.rs:353–378`): (1) the owning client's `pipewire.sec.pid` (read from the client object only, by `dmn-audio`) equal to the helper's pid; (2) that pid or the stream's `application.process.id` in the tree of the helper's parent (Electron main) read from `/proc`; (3) `application.name` equal to `app.name` as main sends it (`desktop/main/app.ts:571`, `share-audio.ts:93–100`). A stream whose client pid is unknown waits (Deferred). A stream with no application pid waits up to `APP_PID_GRACE` (150 ms, `share_capture.rs:83`, `:581–599`). Every registry change and every second re-judges every stream, and a capture whose stream stops being eligible is closed (`:570–580`). The start-up race (a stream judged before its properties arrive) is covered and is not the leak.
+
+**What the rule assumes and never checks:** that every `Stream/Output/Audio` node is *an application's own sound*. §5.2's last paragraph says so: "Everything else is eligible: a browser, a game, a music player, a notification sound, whatever sink it plays to." That assumption is false for one whole class of node.
+
+| Rank | Hypothesis | Evidence from code and docs | Why the exclusion misses it | How a by-hand run tells it apart (§19.7, step D) |
+| --- | --- | --- | --- | --- |
+| **H1 (most likely)** | **A re-player stream**: the playback half of a virtual sink or filter (PipeWire `module-loopback`, `module-filter-chain`, `module-echo-cancel`, `module-combine-stream`; `pipewire-pulse`'s `module-virtual-sink`, `module-remap-sink`, `module-ladspa-sink`, `module-combine-sink`, `module-echo-cancel`, `module-loopback`, tunnels; an effects application). The helper plays the call into a sink, and a stream re-plays everything that sink receives to the hardware. | `libpipewire-module-loopback(7)` (installed, PipeWire 1.6.8): a virtual sink is a loopback whose capture half is `media.class = "Audio/Sink"` and whose playback half is a stream (`playback.props`, no class given, so `Stream/Output/Audio`), with `node.link.group` and `node.virtual` among its options and a default `node.name` of `loopback-PID-MODULEID`. The same shape is documented for echo-cancel and filter-chain (their man pages are installed beside it). `dmn-audio` lists every `Stream/Output/Audio` node as an app stream and does not read `node.link.group`, `node.virtual`, `node.group` or a module id. | Its owning client is the PipeWire daemon, WirePlumber, `pipewire-pulse` or the effects application: none is in the Conch tree. Its `application.name` is that process's, not Conch's. It is eligible under §5.2, and it carries the call. **The exclusion is correct for every stream it judges; the stream that leaks is the sink's re-player, which the rule treats as an application.** | The node linked into a `dmn.stream-capture` input (the capture node `dmn-audio` names) has `node.link.group` or `node.virtual`, a module id, or a client named `pipewire`, `wireplumber`, `pipewire-pulse` or an effects application. Its input side is linked from a sink the helper's playback stream feeds. In step 1 (nothing playing) the helper's state already shows `share_audio_sources` ≥ 1. |
+| H2 | **Another application plays the call**: a browser tab in the call (the Conch web client or another meeting page in Firefox), or a recorder or monitor app that captures the sink's monitor and plays it back. | Nick shared a **Firefox** window. The rule captures every third-party application by design (§5.2). | Not a miss: a third-party stream is eligible on purpose. Per-application sound (§19.3) narrows it to the picked application but cannot exclude the call when the picked application itself is playing it. | The leaking node's `application.name` is that application's. Quitting it, or muting its tab, stops the leak. Nick can say whether Firefox had a call page open. |
+| H3 | **Conch's own Chromium streams escape all three rules.** Chromium plays through the PulseAudio API from its audio service, a sandboxed utility process. Under B2 the companion plays watched shares' sound (§3), and the page may play notification sounds. | `dmn-audio`'s documentation: for a PulseAudio client, `pipewire.sec.pid` is `pipewire-pulse`'s pid, so rule 1 and rule 2's client-pid half cannot match. `application.process.id` is libpulse's `getpid()` in the audio process **(memory)**. Under Chromium's namespace sandbox that is a pid inside a new PID namespace, not the host pid `/proc` lists **(memory; unverified for the pinned Electron and Nick's kernel)**, so rule 2's application-pid half misses too. Rule 3 then rests on Chromium's PulseAudio `application.name` equalling `app.name` (`conch-desktop`, `desktop/package.json:2`). Chromium names its PulseAudio context from `AudioManager::GetGlobalAppName()`, which the embedder sets; whether Electron sets it, and to what, is **unverified** (`share-audio.ts:93`'s comment assumes it). | If the name differs and the pid is namespaced, the stream is eligible. **It does not explain "she heard herself"**: the companion never subscribes to anyone's microphone (`web/src/voice/sdk.ts:202–206`, `voice: false` for the companion), so her voice reaches this machine only through the helper. It is a real escape for L-S6 step 3 (a watched share's sound) all the same. | The leaking node's `application.process.binary` is `conch-desktop` or `electron`. Its `application.name` is `Chromium`, `Electron` or the product name, and is not `conch-desktop`. Its `application.process.id` is absent from `/proc` or is not in main's tree. |
+| H4 (unlikely) | **The helper's own playback is misjudged**: the helper is not main's child, or the pid PipeWire records is not `std::process::id()`. | The helper is spawned directly by main, not detached, no shell, no wrapper (`desktop/main/voice/spawn.ts:308–315`, `:351`). Its playback is `dmn-audio`'s `Playback` on the helper's own connection (`audio_linux.rs:94`, `:162`), so the client's `pipewire.sec.pid` is the helper's (`SO_PEERCRED`, set by the protocol). The rule and the engine are unit-tested for exactly this (`share_capture.rs:1063`). | Only through a bug the tests do not model. | The leaking node's client `pipewire.sec.pid` equals the helper's pid. |
+
+**Ranking reason.** The symptom is the remote person's own voice. On this machine that voice exists only in the helper's playback (H3 cannot carry it; the companion does not subscribe to microphones). The helper's playback is excluded by a protocol-set pid, which is tested (H4 is unlikely). So her voice reached the share through a node that **re-plays** the helper's playback (H1) or through a third-party application that plays the call (H2). H1 needs nothing unusual: any virtual sink, filter, echo canceller or effects chain between the helper and the speakers does it, and stopping the share stops it. No user-level PipeWire or WirePlumber configuration exists on this machine, and no EasyEffects binary is on `PATH` (checked by file listing only, no graph inspected). So if H1 holds, the re-player comes from a system default, the desktop's own sound settings, a module an application loaded at run time (`pactl load-module`), or a Bluetooth or network sink. Step D of §19.7 names it.
+
+**The fix H1 needs.** The exclusion is a deny-list over applications, and re-players are not applications. A stream that is the playback half of a sink, a filter or a loopback must never be eligible, whoever owns it:
+
+- **R-1:** a `Stream/Output/Audio` node with `node.link.group` set, or `node.virtual = true`, or created by a module (`module.id` or `pulse.module.id` set on the node or its client), is **never captured**. It is reported in the count as excluded. It is not dropped silently, so a "sound from 0 apps" state can be explained in the log by reason.
+- **R-2:** whole-screen sound (§19.5) is the set of **application** streams (those R-1 leaves) minus the Conch tree, never "every output stream".
+- R-1 needs `dmn-audio` to report `node.link.group`, `node.virtual`, `node.group` and the module ids of each stream (today it reads only the owner keys). That is a `dmn-audio` change and a rev bump, a dependency change for Nick (§13, D-4). **So no fix lands in this repository from phase 1**: the cause is not proven until step D runs, and the smallest fix is in Nick's crate.
+
+H3 is fixed by §19.3's matching, which never relies on Chromium's name or pid for exclusion. The Conch tree is matched by `application.process.binary` as well, and a Conch window share is refused (§19.4).
+
+### 19.2 What the share's sound contains, by what was picked
+
+| Picked in the portal | Sound | Said |
+| --- | --- | --- |
+| A window | **only the streams of that window's application** (§19.3), never the call, never Conch, never a re-player | "Sound: only Firefox" (the application's label), or "Sound: none, Firefox isn't playing anything" |
+| A whole screen (a monitor) | **everything on this computer except the call**: every application stream R-1 and the Conch rules leave | "Sound: everything on this computer except the call" |
+| Conch's own window | none | "Sound: none. Conch's own sound is the call." |
+| Can't tell window from screen | none until the person chooses | the chooser of §19.4 |
+
+The share's picture never waits for its sound. A sound that cannot be resolved leaves the share silent and says why. It never falls back to "everything".
+
+### 19.3 Mapping a window to its application's streams
+
+**What the picker tells Conch about a window.** Nothing that names an application:
+
+- **The ScreenCast portal.** `Start` returns, per stream, a PipeWire node id and a dictionary of `id`, `position`, `size`, `source_type` and (newer versions) `mapping_id`. None is a pid or an app id (§4's "A's limit"; **memory**, unverified against the portal version on Nick's machine). The `restore_data` the portal returns is a backend-specific opaque value. Some backends serialise a window as its app id and title **(memory, for xdg-desktop-portal-gnome; unknown for xdg-desktop-portal-cosmic)**. Chromium runs the portal session itself and hands Electron no restore data **(memory)**, so main never sees it.
+- **Electron's `desktopCapturer`.** Main gets exactly one source, the portal's pick (`desktop/main/display-capture.ts:45–49`), as `{id, name}`. Under the PipeWire capturer the name is not known to be the window's title or application **(unverified)**. Whether the id's `window:`/`screen:` prefix follows the portal's `source_type` when both types are asked (`CAPTURE_SOURCES`, `display-capture.ts:145`) is **unverified**.
+- **The compositor's video node.** The picked window's picture is a PipeWire video node made by the portal backend. Whether that node's properties name the window's application is **unknown**. The helper could read them on its own connection if it were told the node id. Main is not told the node id today (**unverified** whether Chromium's source id carries it).
+- **X11** (`_NET_WM_PID`) is not on the portal path and not on COSMIC's Wayland session. The Windows route (#905, `desktop/main/voice/application-audio.ts`) resolves window → pid natively. Linux has no equivalent through public APIs.
+
+**So the identity comes from one of two places**, in this order:
+
+1. **Automatic, where the picker names the application.** If step A of §19.7 shows that the source name, the video node or the backend states the window's app id or binary, main maps that to an application key (below) and preselects it. It never captures on a guess the person was not shown.
+2. **The person names it.** Right after the portal returns a window, with sound on, Conch shows a small **"Sound from"** chooser. It lists the applications playing now, each by its label and grouped by key (below), with the preselection from step 1 when there is one, and with **"No sound"** always there. The picture is published at once. Sound joins when the person chooses, and the chooser shows nothing of a stream but its application's label. With one application playing, that application is preselected, and the share still names it ("Sound: only Firefox") before any sound is published.
+
+**The application key** (what "the same application" means), from each stream and its client, first that is present:
+
+1. `pipewire.access.portal.app_id`, on a sandboxed (Flatpak) client: the sandbox's app id, set for the client by PipeWire's access or portal module rather than by the application **(memory; to verify in step B)**.
+2. `application.process.binary`'s base name (`firefox`, `chrome`, `code`): what the process says it runs. Chromium's audio-service process and its browser process share a binary, so a browser's separate audio process **groups with its browser without needing its pid**. Firefox's audio comes from the parent or a utility process of the same binary **(memory)**.
+3. `application.name` (`Firefox`, `Chromium`), case-folded.
+
+A stream matches the chosen application when its key equals the chosen key. **Pids are not used for matching**: a pulse client's `pipewire.sec.pid` is `pipewire-pulse`'s, and a sandboxed audio service's `application.process.id` may be namespace-local (H3). They remain in use for **exclusion**, where a false match can only make the share quieter.
+
+**Exclusions win over a match**, always, in this order: the helper's own playback (`pipewire.sec.pid`); the Conch tree by pid; the Conch binary (`application.process.binary` equal to the helper's parent's `/proc/<pid>/exe` base name, closing H3 without trusting Chromium's name); `application.name` as today; R-1's re-players. A chosen key that equals Conch's key (a developer sharing another `electron` app from a dev build of Conch) yields no sound and says so. It never captures Conch.
+
+**Re-evaluation.** As today, on every registry change: a stream of the chosen application that starts during the share is captured within one registry round trip; one that ends drops out. The key, not the serial, is what is held, so Firefox starting a new stream for the next video is followed.
+
+**When nothing matches.** The share is silent, `share_audio` is `on` with `no_sources` (§7's existing vocabulary), and the strip says "Sound: none, Firefox isn't playing anything". It is not an error. It keeps following the key.
+
+**What per-application cannot do** (said in the chooser's help, not hidden): an application that plays the call itself (H2: a call page in the shared browser) shares the call. A browser's sound is the whole browser's, every tab, not the tab whose window was picked. A sandboxed application with no binary property is matched by its app id or name only.
+
+### 19.4 What the person sees
+
+- **Before the picker** (UX-15): the toggle stays "Share with sound" / "Share without sound" (`web/src/voice/native/words.ts:314–315`), with a line under it: "A window shares only its app's sound. A whole screen shares everything on this computer except the call." This is the "says what a share's sound will contain before it starts" of #1999, and it is shown while share sound is offered at all.
+- **After the picker, before any sound is published:** the strip names the scope ("Sound: only Firefox", "Sound: everything on this computer except the call", or a "none" line from §19.2), with **"Share without sound"** one click away. Sound is published only after this line is on screen (confirmed state, §10).
+- **While sharing:** the indicator keeps the scope ("Sharing Firefox and its sound in #name"), the share-sound mute (§9) and Stop.
+- Words live in `words.ts` and are tested there, as §9 says.
+
+### 19.5 Whole-screen shares
+
+A whole-screen share keeps §5's route with R-1 and R-2 added: every application stream except the Conch tree, the Conch binary and every re-player. A per-application route for a whole screen does not exist (no window was picked). Whether whole-screen sound is offered at all before step D has run and R-1 is in is Nick's call (§19.8, Q-4). The recommendation is that it is **not** offered before then: H1 makes "everything except the call" unsafe on any machine with a virtual sink.
+
+### 19.6 Wire, dependency and decision changes this needs
+
+Each is Nick's sign-off. None is made by this section.
+
+| Change | Why | Kind |
+| --- | --- | --- |
+| `dmn-audio`: report `node.link.group`, `node.virtual`, `node.group`, `module.id` / `pulse.module.id`, `application.process.binary` and the client's `pipewire.access.portal.app_id` in the metadata it reports for each stream; a rev bump in `voice/conch-voice/Cargo.toml` | R-1 and the application key | dependency change (D-4's kind); Nick's repository |
+| `set_share_audio` carries the chosen application key with scope `application`, and the state carries the list of playing applications (key and label) for the chooser | the helper owns PipeWire; main never reads it (§6). v3 has no field for either; v3 decoders are closed (`pkg/schema/voice_control_v3.go`), so this is **`conch.voice_control.v4`** under the `schema-change` skill. The label is the first **free text from the helper to main** (§7 avoided it): bounded, printable, never logged, shown only in main's chooser | schema version (D-2's kind) |
+| Consent scope `application` on the Linux desktop | `VoiceShareAudioScope` already has `application` (`pkg/schema/vocabularies.go:134`), and `publisher: person` already exists. The **server is unchanged** | none on the wire |
+| D-6 ("this application" unsupported on Linux) reversed | Nick's scope change on #1999 asks for it | decision (D-6 was delegated; Nick's own words now decide it) |
+| No ADR changes | model B and ADR-006 hold: the helper still captures and publishes; the renderer still has no audio | — |
+
+### 19.7 By-hand checks: L-S6a, before any of this is built
+
+Nick at the keyboard, with a second machine speaking and the §14.4 measurement listener. The diagnostics read the graph on Nick's machine, which only Nick runs. Receipts go in the capability report without application titles, window contents or conversation content.
+
+| Step | Do | Records |
+| --- | --- | --- |
+| **D** (the leak) | Launch with `CONCH_LINUX_SHARE_AUDIO=1`. Share a window with sound while nothing plays locally, and the second machine speaks. While the listener hears the speech on the share's track, run `pw-dump > share.json` and `pw-link -l > links.txt`, then stop the share. | The node(s) linked into a `dmn.stream-capture` input: `media.class`, `application.name`, `application.process.binary`, `application.process.id`, its client's `pipewire.sec.pid` and `application.name`, `node.link.group`, `node.virtual`, `node.group`, `module.id`, `pulse.module.id`; and what feeds that node's input side. **H1** if it is a re-player fed by the helper's sink; **H2** if it is a third-party application; **H3** if its binary is Conch's; **H4** if its client pid is the helper's. Also the helper's logged source count in step 1 of §14.4 (≥ 1 with nothing playing points to H1 or H3) |
+| **A** (window identity) | Pick a Firefox window, then a whole screen, logging main's `desktopCapturer` source `{id, name}` (a debug line, not shipped) and, with `pw-dump`, the portal's video node's properties | whether the source name or the video node names the application (§19.3 step 1 is possible), and whether the id prefix tells a window from a screen |
+| **B** (application keys) | Play sound in Firefox, Chromium, a Chromium-based app (VS Code or Slack), a Flatpak application and a native player. Play a watched share in Conch (B2) and a Conch notification. `pw-dump` each | each stream's `application.name`, `application.process.binary`, `application.process.id` (and whether `/proc` has it), the client's `pipewire.sec.pid` and `pipewire.access.portal.app_id`. **Confirms or refutes H3's two assumptions** (Chromium's PulseAudio name; a namespace-local pid) and the key order of §19.3 |
+| **C** (re-players) | With a virtual sink made by `pactl load-module module-null-sink` plus `module-loopback` to the speakers, and the helper's speakers set to it | the loopback's playback stream carries `node.link.group` (R-1's signal) |
+| 1–3 of §14.4, per scope | after the fix: a window share of a silent application, then of a playing one; a whole-screen share | the share's track stays below −80 dBFS for the remote speech in every window, through the virtual sink of step C as well |
+
+### 19.8 Tests the implementation ships with (fake graph, no PipeWire)
+
+In `share_eligibility.rs` and `share_capture.rs`, table-driven over `StreamFacts` extended with the new properties:
+
+- a loopback playback stream fed by the helper (owned by the daemon, `node.link.group` set) is never captured, in whole-screen or window mode: **the #1999 regression**;
+- in window mode with key `firefox`, only Firefox's streams are captured. Another application, the helper's playback, a Chromium stream with Conch's binary and a foreign `application.name`, and Conch's renderer by pid are never captured. A Chromium audio-service stream with the browser's binary and a namespace-local pid groups with its browser;
+- a chosen key equal to Conch's yields `no_sources` and no capture;
+- the chosen application stopping and starting again is followed by key, not serial;
+- nothing matching gives `on` with `no_sources` and a silent mix;
+- the existing exclusions and fail-closed cases are unchanged.
+
+Desktop: the chooser's words, "Share without sound" one click from every scope line, and no command sent before the scope line is shown.
+
+### 19.9 Open questions for Nick
+
+| # | Question | Recommendation |
+| --- | --- | --- |
+| Q-1 | When the picker does not name the window's application: a "Sound from" chooser after the picker (§19.3 step 2), or a silent window share until an automatic route exists? | the chooser, preselected when only one application is playing |
+| Q-2 | v4 of the control channel, with application labels from the helper as bounded free text | yes; there is no other way for main to show what is playing without reading PipeWire itself |
+| Q-3 | The `dmn-audio` change and rev bump of §19.6 | yes; R-1 cannot be built without it |
+| Q-4 | Whole-screen sound before step D and R-1: offered or not? | not offered; a whole screen shares without sound and says so until R-1 is in and L-S6 passes |
+| Q-5 | A browser shares every tab's sound, not the tab in the picked window: acceptable, said in the chooser's help? | acceptable, and said |
