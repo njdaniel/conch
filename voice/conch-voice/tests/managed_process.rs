@@ -1279,7 +1279,7 @@ async fn an_attach_line_that_cannot_be_written_is_exit_2_having_done_nothing_els
                 &NO_DEVICES,
             );
             let deadline = Instant::now() + Duration::from_secs(10);
-            let _held = loop {
+            let _held: Option<UnixStream> = loop {
                 match owner.listener.accept() {
                     Ok((stream, _)) => {
                         // Linux fails a write into a socket its peer shut for reading
