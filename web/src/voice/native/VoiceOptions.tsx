@@ -1,7 +1,7 @@
 // Microphone, speakers and talk mode in the desktop's Voice options (issue
 // #1379, D3-8 of #771). The device list is the helper's (NativeVoice.devices);
-// a choice is kept for the next session (saveDevice, `config set`) and, in a
-// v2 session, applied now (setDevices, setTalkMode). Rules (UX-11,
+// a choice is kept for the next session (`config set`) and can be applied
+// now. Live talk-mode choices switch and save in one request. Rules (UX-11,
 // tui-voice.md section 20.5): the page shows the helper's confirmed capture
 // and playback, never what it asked for; a device that is gone is shown as
 // gone, with no automatic alternative; and the open microphone is only ever
@@ -17,7 +17,7 @@
 // own isolate (an isolating mark pair inside an option, a bdi elsewhere), so
 // one name cannot reorder the words around it.
 import { useCallback, useContext, useEffect, useRef, useState } from 'react';
-import type { NativeVoiceDevicesResult, NativeVoiceView, VoiceDeviceKey, VoiceOneShotError } from '../../platform/desktop/bridge';
+import type { NativeVoiceDevicesResult, NativeVoiceView, VoiceDeviceKey, VoiceOneShotError, VoiceSaveResult } from '../../platform/desktop/bridge';
 import { DesktopOS } from '../../platform/os';
 import type { NativeVoice } from '../../platform/types';
 import { updatePendingWords } from './words';
@@ -126,8 +126,9 @@ export function VoiceOptions({
 
   const h = view.helper;
   const session = h !== undefined && view.status === 'running';
-  // set_devices and set_talk_mode are v2; a v1 helper takes a choice next time.
   const live = session && h.version === 2;
+  // Live talk-mode changes are available from v2 onward.
+  const liveTalk = session && h.version >= 2;
   const saveNote = 'Could not keep that choice for next time.';
 
   const choose = async (side: Side, value: string) => {
@@ -155,17 +156,20 @@ export function VoiceOptions({
     setConfirmOpen(false);
     setBusy('talk');
     try {
-      if (live) {
-        const out = await source.setTalkMode(mode);
+      let saved: VoiceSaveResult | undefined;
+      if (liveTalk) {
+        const out = await source.setTalkMode(mode, true);
         if (!out.ok) {
           setNote('Voice could not switch; try again.');
           return;
         }
+        saved = out.saved;
+      } else {
+        saved = await source.saveDevice({ key: 'audio.talk_mode', value: mode });
       }
-      const saved = await source.saveDevice({ key: 'audio.talk_mode', value: mode });
       if (!alive.current) return;
       setChosen((c) => ({ ...c, talk: mode }));
-      if (!saved.ok) setNote(saveNote);
+      if (!saved?.ok) setNote(saveNote);
     } finally {
       if (alive.current) setBusy(null);
     }
@@ -173,7 +177,7 @@ export function VoiceOptions({
 
   const mic = live && h.capture === 'unavailable';
   const speakers = live && h.playback === 'unavailable';
-  const talk: VoiceControlTalkMode | undefined = live ? (h.talkMode ?? chosen.talk) : chosen.talk;
+  const talk: VoiceControlTalkMode | undefined = liveTalk ? (h.talkMode ?? chosen.talk) : chosen.talk;
   const lists = devices.kind === 'ok' ? devices : null;
 
   return (
@@ -215,7 +219,7 @@ export function VoiceOptions({
           </p>
         </>
       )}
-      {session && !live && lists !== null ? <p className="hint">Devices and talk mode {nextTime}.</p> : null}
+      {session && !live && lists !== null ? <p className="hint">Your device selection {nextTime}.</p> : null}
       <fieldset className="voice-mode" disabled={busy !== null}>
         <legend>Talk mode</legend>
         <label>
@@ -244,8 +248,8 @@ export function VoiceOptions({
             <button type="button" onClick={() => { setConfirmOpen(false); }}>Cancel</button>
           </p>
         ) : null}
-        {talk === undefined ? <span className="hint">Choose a talk mode{live ? '' : `; it ${nextTime}`}.</span> : null}
-        {session && !live ? <span className="hint">Talk mode {nextTime}.</span> : null}
+        {talk === undefined ? <span className="hint">Choose a talk mode{liveTalk ? '' : `; it ${nextTime}`}.</span> : null}
+        {session && !liveTalk ? <span className="hint">Talk mode {nextTime}.</span> : null}
       </fieldset>
       {note === null ? null : <p role="status" className="hint">{note}</p>}
     </div>

@@ -36,6 +36,7 @@ import type {
   VoiceDeviceKey,
   VoiceKeyDevicesResult,
   VoiceSaveResult,
+  VoiceTalkModeResult,
   VoiceTalkBindingResult,
   VoiceTalkBindingRequest,
 } from '../../../web/src/platform/desktop/bridge.ts';
@@ -224,6 +225,7 @@ export class VoiceService {
   // dropped at teardown.
   private listing = new Map<string, string>();
   private bindingSave = false;
+  private talkModeSave = false;
   // Set when main muted the person at a screen lock (issue #1588): the view
   // says so until they unmute or leave.
   private lockMuted = false;
@@ -654,5 +656,22 @@ export class VoiceService {
 
   setTalkMode(mode: VoiceControlTalkMode): Promise<VoiceCommandResult> {
     return this.deps.supervisor.setTalkMode(mode);
+  }
+
+  // Both acts were authorized at IPC entry. Save only after the helper's ack
+  // and keep the save in the activation that received the live command.
+  async setAndSaveTalkMode(mode: VoiceControlTalkMode): Promise<VoiceTalkModeResult> {
+    if (this.talkModeSave) return { ok: false, error: 'busy' };
+    this.talkModeSave = true;
+    const begun = this.teardowns;
+    try {
+      const applied = await this.setTalkMode(mode);
+      if (!applied.ok) return applied;
+      if (begun !== this.teardowns) return { ok: true, saved: { ok: false, error: 'cancelled' } };
+      const saved = await this.saveDevice({ key: 'audio.talk_mode', value: mode });
+      return { ok: true, saved };
+    } finally {
+      this.talkModeSave = false;
+    }
   }
 }

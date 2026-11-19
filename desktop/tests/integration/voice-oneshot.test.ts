@@ -8,10 +8,12 @@
 import { chmodSync, copyFileSync, existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { OneShot } from '../../main/voice/oneshot.ts';
+import { VoiceService } from '../../main/voice/service.ts';
 import { HELPER_NAME } from '../../main/voice/spawn.ts';
+import { Supervisor } from '../../main/voice/supervisor.ts';
 import { FAKE_TOKEN, scratch, type Scratch } from '../unit/voice-support.ts';
 
 const binary = process.env['CONCH_VOICE_BIN'] ?? resolve(import.meta.dirname, '../../../bin/conch-voice');
@@ -63,6 +65,35 @@ describe.runIf(have)('the one-shot runs with the real conch-voice', () => {
     expect(readdirSync(s.config).sort()).toEqual(['voice.toml']);
     // The token went nowhere.
     expect(text).not.toContain(FAKE_TOKEN);
+  });
+
+  it('a live switch to open microphone also updates the profile’s voice.toml', async () => {
+    writeFileSync(voiceToml(), '[audio]\ntalk_mode = "push_to_talk"\n', { mode: 0o600 });
+    const log = (line: string): void => { logs.push(line); };
+    const supervisor = new Supervisor({ resources: s.resources, env: {}, log });
+    // Stand in for the call and the live helper's ack. The config command
+    // goes to the real helper, without opening an audio device.
+    const initial = {
+      status: 'running', generation: 1,
+      helper: { version: 2, helperVersion: 'test', phase: 'connected', capture: 'on', playback: 'on', transmitting: false, muted: false, deafened: false, blocked: [], talkMode: 'push_to_talk', ptt: 'ready' },
+    } as const;
+    const state = vi.spyOn(supervisor, 'state', 'get').mockReturnValue(initial);
+    const apply = vi.spyOn(supervisor, 'setTalkMode').mockImplementation((talkMode) => {
+      state.mockReturnValue({ ...initial, helper: { ...initial.helper, talkMode } });
+      return Promise.resolve({ ok: true });
+    });
+    const voice = new VoiceService({
+      supervisor, oneShot: oneshot, locked: () => false, log,
+      identity: () => Promise.resolve({
+        profileId: 'p1', principalId: 7, configDir: s.config,
+        credential: () => null, current: () => true,
+      }),
+    });
+    expect(voice.state()).toMatchObject({ status: 'running', helper: { talkMode: 'push_to_talk' } });
+    expect(await voice.setAndSaveTalkMode('open')).toEqual({ ok: true, saved: { ok: true } });
+    expect(apply).toHaveBeenCalledWith('open');
+    expect(voice.state().helper?.talkMode).toBe('open');
+    expect(readFileSync(voiceToml(), 'utf8')).toContain('talk_mode = "open"');
   });
 
   it('a name that begins with a dash is saved as a name: `--` is accepted by the real parser, and is not read as help', async () => {

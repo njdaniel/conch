@@ -485,6 +485,11 @@ export type VoiceDeviceKey = 'audio.input' | 'audio.output' | 'audio.talk_mode';
 
 export type VoiceSaveResult = { readonly ok: true } | { readonly ok: false; readonly error: VoiceOneShotError };
 
+// A successful live switch carries the separate save result when requested.
+export type VoiceTalkModeResult =
+  | { readonly ok: true; readonly saved?: VoiceSaveResult }
+  | Extract<VoiceCommandResult, { readonly ok: false }>;
+
 // The keys main also saves, but only from the talk-key setup below: the page
 // never names them (issue #1381, D3-10). keys.mute and keys.deafen are not
 // set from here.
@@ -541,7 +546,7 @@ export interface DesktopVoiceBridge {
   voiceSetMute(muted: boolean): Promise<VoiceCommandResult>;
   voiceSetDeafen(deafened: boolean): Promise<VoiceCommandResult>;
   voiceSetDevices(devices: { readonly input?: string; readonly output?: string }): Promise<VoiceCommandResult>;
-  voiceSetTalkMode(mode: VoiceControlTalkMode): Promise<VoiceCommandResult>;
+  voiceSetTalkMode(mode: VoiceControlTalkMode, save?: true): Promise<VoiceTalkModeResult>;
   voiceDevices(): Promise<NativeVoiceDevicesResult>;
   voiceSaveDevice(request: { readonly key: VoiceDeviceKey; readonly value: string }): Promise<VoiceSaveResult>;
   voiceKeyDevices(): Promise<VoiceKeyDevicesResult>;
