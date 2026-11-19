@@ -86,7 +86,7 @@ import { afterDisconnect, afterRefusal, afterViewerRefusal, cameraAfter, retryDe
 import { clampTail, defaultTail, TransmitGate, type GateMode, type GateOptions } from './gate';
 import { cameraHolders, occupants, personOf, principalOf, sharers } from './presence';
 import { ReportQueue, type ReportEvent } from './reports';
-import { defaultShareQuality, idleShare, qualityLaterNote, resumeLimit, ScreenShare, type ScreenEnd, type ShareDirection, type ShareQuality, type ShareRoom, type ShareSample, type ShareState } from './share';
+import { autoFrameRate, defaultShareQuality, idleShare, qualityLaterNote, resumeLimit, ScreenShare, type ScreenEnd, type SettledQuality, type ShareDirection, type ShareQuality, type ShareRoom, type ShareSample, type ShareState } from './share';
 import { record } from '../diagnostics';
 
 // The names a browser gives the failures of a microphone it was asked for
@@ -201,11 +201,23 @@ export interface RoomEvents {
   readonly onSpeakers: (principals: readonly number[]) => void;
   // This page's published share is gone (share.ts).
   readonly onScreenEnded: (cause: ScreenEnd) => void;
+  // The held screen capture has been muted for 3 s, or has recovered.
+  readonly onScreenStalled?: (stalled: boolean) => void;
   // Which of one publisher's watched stream tracks have arrived (#1509).
   readonly onStreamTracks: (principal: number, tracks: ShareTracks) => void;
   // The microphone was lost: its capture ended, or the device chosen is no
   // longer listed. The room has stopped the capture.
   readonly onMicrophoneLost: () => void;
+  // Whether the level meter (the tap on the microphone) works. Without it
+  // the open microphone cannot hear speech, so its gate stays shut.
+  // When it does not, name is the browser's error name, if it gave one.
+  readonly onMeter: (available: boolean, name?: string) => void;
+  // Whether this page may play audio now: the room's canPlaybackAudio, and no
+  // voice element the browser holds paused (#1823). Told after the join and
+  // whenever it changes. A browser such as iOS Safari
+  // plays nothing until the page has been tapped; Room.startAudio, called
+  // from the tap, lets it.
+  readonly onPlayback: (canPlay: boolean) => void;
   // The browser's devices changed: microphones came or went.
   readonly onDevicesChanged: () => void;
   // The output in use went, and the SDK moved every voice to this one.
@@ -240,10 +252,18 @@ export interface Room extends ShareRoom, CameraRoom {
   // Resolves once the room is joined and, when publish is set, the
   // microphone track is published and muted. It rejects if any of that fails
   // (a microphone refused included).
-  connect: (url: string, token: string, roomName: string, publish: boolean, events: RoomEvents) => Promise<void>;
+  //
+  // audio is the audio context the level meter listens with (issue #1794),
+  // made and resumed inside the Join gesture, which is the only place iOS
+  // lets one run. The room uses it and never closes it: the client does, once,
+  // when the person leaves or a join fails for good. Absent, or already
+  // closed, the room makes its own.
+  connect: (url: string, token: string, roomName: string, publish: boolean, events: RoomEvents, audio?: AudioContext | null) => Promise<void>;
   // Captures and publishes the microphone, muted, on a connection made
   // without it (watch only).
-  publishMicrophone: () => Promise<void>;
+  // audio is the meter's context made in the click that asked for it (issue
+  // #1794), as at connect.
+  publishMicrophone: (audio?: AudioContext | null) => Promise<void>;
   // The microphone to capture: a device by id, captured exactly or not at
   // all, or null for the system default. Set before connecting.
   setMicrophone: (choice: string | null) => void;
@@ -286,6 +306,9 @@ export interface Room extends ShareRoom, CameraRoom {
   // Opens or closes the track: unmute or mute. Muted again after any republish.
   setSending: (on: boolean) => Promise<void>;
   setDeafened: (on: boolean) => void;
+  // Lets the browser play the room's audio. It must be called from the
+  // gesture itself (a tap): the promise rejects if the browser still refuses.
+  startAudio: () => Promise<void>;
   // How loud this page plays one person's microphone, by principal, 0 to 1:
   // now and whenever their microphone arrives later on this connection.
   // Deafen silences everyone whatever their volume.
@@ -350,6 +373,8 @@ export interface VoiceState {
   readonly speaking: ReadonlySet<number>;
   readonly reportNote: 'retrying' | 'rate_limited' | null;
   readonly share: ShareState;
+  // Capture starvation, independently of the connection and share sound.
+  readonly shareCaptureStalled: boolean;
   // The capture and top-layer caps chosen by the sharer, kept locally.
   readonly shareQuality: ShareQuality;
   // Which shares this page watches by publisher, which one is focused (the
@@ -373,6 +398,14 @@ export interface VoiceState {
   // The microphone was lost, or a switch failed: nothing is captured and the
   // gate is blocked until the person chooses a microphone.
   readonly missing: boolean;
+  // Whether the microphone's level can be read: false when the browser
+  // refused the audio context that reads it. The open microphone needs it;
+  // push to talk does not.
+  readonly meter: boolean;
+  // Whether this page may play the channel's audio: false while the browser
+  // holds playback back until a tap (iOS Safari). VoiceClient.startAudio
+  // asks for it from the tap.
+  readonly playback: boolean;
   // Whether this browser lets the page choose the speakers (issue #660);
   // the outputs it lists, or null while they are not read; the output chosen
   // and in use, null being the system default; and what the page says of a
@@ -427,7 +460,7 @@ export interface VoiceEnv {
   readonly companion?: CompanionEnv;
   readonly report: (channel: string, state: VoiceTransmitState, signal: AbortSignal) => Promise<TransmitAnswer>;
   readonly newRoom: () => Room;
-  readonly claimShare: (channel: string, quality?: ShareQuality) => Promise<ShareClaimResult>;
+  readonly claimShare: (channel: string, quality?: SettledQuality) => Promise<ShareClaimResult>;
   // Releases the share whose claim started at startedAt (issue #487).
   readonly stopShare: (channel: string, startedAt: string) => Promise<unknown>;
   // The camera's claim, un-named or naming the claim it continues, and its
@@ -461,8 +494,36 @@ export interface VoiceEnv {
 // How long the SDK's own reconnect is allowed before the client goes back to
 // conchd (conch-voice.md section 5).
 export const reconnectLimit = 20_000;
+// How long a watched stream gone before presence has listed this person is
+// held before its watch ends (follow, issue #1930): a renewal of the room
+// within it keeps the watch. conchd deletes a renewed room in LiveKit as it
+// tells presence the room is empty, so LiveKit's room_deleted follows the
+// empty presence within this, if it did not come first.
+export const endingLimit = 5_000;
 // A connection that lasted this long starts the retry wait over.
 export const healthyAfter = 30_000;
+// openAudio makes the level meter's audio context and resumes it, in this
+// call, with nothing awaited before: iOS Safari starts a context suspended
+// unless it was made and resumed inside a user gesture, and the meter is made
+// long after the Join tap (issue #1794). Called first in the Join click. A
+// browser that has none, or refuses one, gets null: the room then makes its
+// own, and a refusal there is the meter note's (issue #1795).
+export function openAudio(): AudioContext | null {
+  if (typeof AudioContext !== 'function') return null;
+  try {
+    const context = new AudioContext();
+    void context.resume().catch(() => undefined);
+    return context;
+  } catch {
+    return null;
+  }
+}
+
+// closeAudio lets a context go; a failure to close is not news.
+function closeAudio(audio: AudioContext | null): void {
+  if (audio !== null) void audio.close().catch(() => undefined);
+}
+
 // How often the microphone level is read, for the open microphone's gate, and
 // how often the meter is told of it. The gate's read was every 50 ms until
 // issue #965: an onset waited up to that long before the gate opened.
@@ -475,11 +536,25 @@ const leaveDrain = 1000;
 // reported.
 export const reportWait = 1000;
 
-// What the desktop offers for a share (Q-D4-3 on #1578): 720p30, the default,
-// and 1080p30, until real captures are measured (#1584). Any other choice is
-// taken as the default.
+// What the desktop offers for a share (Q-D4-3 on #1578, lifted by Nick on
+// 2026-11-11, #1772): 720p30, the default, 1080p30, 1080p60 and Source at 30
+// and 60 fps. #1584 still measures the real numbers and may hide a choice
+// again; the sharer's Sending line (the browser's ShareReadout, fed from the
+// companion's own publication stats) says what is actually sent. Any other
+// choice is taken as the default, Auto (issue #1659) among them: the desktop
+// never offers it and reads a stored one as 720p30. The companion captures
+// and publishes through the same sdk.ts rows as the browser (shareAsk,
+// shareTops, contentHint), so each choice means what it means there.
 export const companionDefaultQuality: ShareQuality = { resolution: '720p', frameRate: 30 };
-export const companionQualities: readonly ShareQuality[] = [companionDefaultQuality, { resolution: '1080p', frameRate: 30 }];
+// What a live capture that cannot take a quality change says (setShareQuality).
+export const shareQualityRefusedNote = 'The share quality could not be changed on this capture.';
+export const companionQualities: readonly ShareQuality[] = [
+  companionDefaultQuality,
+  { resolution: '1080p', frameRate: 30 },
+  { resolution: '1080p', frameRate: 60 },
+  { resolution: 'source', frameRate: 30 },
+  { resolution: 'source', frameRate: 60 },
+];
 export function companionQuality(quality: ShareQuality): ShareQuality {
   return companionQualities.find((q) => q.resolution === quality.resolution && q.frameRate === quality.frameRate) ?? companionDefaultQuality;
 }
@@ -536,6 +611,7 @@ export const initialVoice: VoiceState = {
   speaking: new Set(),
   reportNote: null,
   share: idleShare,
+  shareCaptureStalled: false,
   shareQuality: defaultShareQuality,
   watched: new Set(),
   focusedShare: null,
@@ -546,6 +622,8 @@ export const initialVoice: VoiceState = {
   processing: true,
   reported: null,
   missing: false,
+  meter: true,
+  playback: true,
   outputSelection: false,
   outputs: null,
   output: null,
@@ -582,8 +660,12 @@ export class VoiceClient {
   private readonly gate: TransmitGate;
   private readonly reports: ReportQueue;
   private state: VoiceState = initialVoice;
+  private restartingShare = false;
   private listeners = new Set<() => void>();
   private room: Room | null = null;
+  // The meter's audio context, made in the Join gesture (issue #1794) and
+  // kept for the whole stay in voice, retries included; see releaseAudio.
+  private audio: AudioContext | null = null;
   private channel: string | null = null;
   // Each attempt has a number; answers for an older one are discarded.
   private attempt = 0;
@@ -603,6 +685,16 @@ export class VoiceClient {
   // (voice-multi-share.md §7.1).
   private readonly streamSinks = new Map<number, ShareSink>();
   private readonly awaiting = new Map<number, unknown>();
+  // Whether presence has listed this person since they joined. Until it has,
+  // their absence from it is conchd not having seen them yet, not a renewed
+  // room, and presence alone cannot tell a stopped share from a renewal
+  // (issue #1930).
+  private listedSinceJoin = false;
+  // ending holds one timer per watched publisher whose stream presence showed
+  // gone before it had listed this person (follow): the watch ends when the
+  // timer fires, unless this person's room goes first, a renewal, when the
+  // stream is waited for as any other that went with its room (drop).
+  private readonly ending = new Map<number, unknown>();
   // Who else holds a camera claim, from presence, and the elements the call
   // view plays cameras into: handed to every new connection.
   private cameraClaims: ReadonlySet<number> = new Set();
@@ -679,7 +771,7 @@ export class VoiceClient {
     this.share = new ScreenShare(
       { claim: env.claimShare, release: env.stopShare },
       (share) => {
-        this.set({ share });
+        this.set({ share, ...(share.kind === 'idle' || share.kind === 'stopping' || share.kind === 'resuming' ? { shareCaptureStalled: false } : {}) });
         this.settleCompanion();
       },
       env.clock,
@@ -738,13 +830,22 @@ export class VoiceClient {
   // companion is for the desktop (issue #1581): the page then connects as the
   // person's screen companion, p<id>.screen, with the grant main hands over,
   // and never as the person (the helper is) or with a microphone.
-  join(channel: string, options: { readonly watchOnly?: boolean; readonly beside?: boolean; readonly companion?: boolean } = {}): void {
-    if (this.state.phase !== 'idle' && this.state.phase !== 'stopped') return;
+  //
+  // audio is the level meter's audio context (openAudio), made and resumed
+  // by the caller inside the click, before anything else (issue #1794). A join
+  // that is not made closes it.
+  join(channel: string, options: { readonly watchOnly?: boolean; readonly beside?: boolean; readonly companion?: boolean; readonly audio?: AudioContext | null } = {}): void {
     const companion = options.companion === true;
     // A companion is not joined while the last one is still being left (its
     // room closing, main not yet told); the gate is only ever cleared by the
     // leave that owns it.
-    if (companion && this.companionLeaving !== null) return;
+    if ((this.state.phase !== 'idle' && this.state.phase !== 'stopped') || (companion && this.companionLeaving !== null)) {
+      closeAudio(options.audio ?? null);
+      return;
+    }
+    // One from an earlier stay that nothing released is let go first.
+    this.releaseAudio();
+    this.audio = options.audio ?? null;
     this.channel = channel;
     this.joins++;
     this.share.setCompanion(companion);
@@ -755,6 +856,8 @@ export class VoiceClient {
     // The camera is off on joining (design §3.4): only its button turns it
     // on, and why the last one ended is not news here.
     this.camera.reset();
+    // A new join is listed afresh (follow).
+    this.listedSinceJoin = false;
     // Joining is the person's own choice: a microphone missing before is
     // asked for again, as chosen.
     this.set({
@@ -772,6 +875,8 @@ export class VoiceClient {
       focusedShare: null,
       streamTracks: new Map(),
       missing: false,
+      meter: true,
+      playback: true,
     });
     if (companion) this.followCompanion();
     void this.connect();
@@ -866,7 +971,7 @@ export class VoiceClient {
   // and no watch. It is not asked for again by itself.
   private settleCompanion(): void {
     const s = this.state;
-    if (!s.companion || this.companionLeaving !== null || s.phase !== 'connected' || this.afterConnect !== null) return;
+    if (this.restartingShare || !s.companion || this.companionLeaving !== null || s.phase !== 'connected' || this.afterConnect !== null) return;
     if (s.share.kind !== 'idle' || s.watched.size > 0) return;
     void this.leaveVoice(s.companionShareUnavailable !== null);
   }
@@ -885,9 +990,18 @@ export class VoiceClient {
 
   // useMicrophone ends watch only: the microphone is captured, published and
   // muted, as on a full join, and the talk controls work from then on.
-  async useMicrophone(): Promise<void> {
+  //
+  // audio is the meter's audio context (openAudio), made first in the click
+  // that asked (issue #1794): the capture is made after awaits, where iOS
+  // would leave a new context suspended. Not used, it is closed.
+  async useMicrophone(audio: AudioContext | null = null): Promise<void> {
     const room = this.room;
-    if (!this.state.watchOnly || this.state.viewer || this.state.companion || this.state.listenOnly || this.state.phase !== 'connected' || room === null) return;
+    if (!this.state.watchOnly || this.state.viewer || this.state.companion || this.state.listenOnly || this.state.phase !== 'connected' || room === null) {
+      closeAudio(audio);
+      return;
+    }
+    this.releaseAudio();
+    this.audio = audio;
     const mine = this.attempt;
     this.set({ watchOnly: false });
     try {
@@ -895,7 +1009,7 @@ export class VoiceClient {
       if (mine !== this.attempt) return;
       room.setMicrophone(this.state.microphone?.id ?? null);
       room.setProcessing(this.state.processing);
-      await room.publishMicrophone();
+      await room.publishMicrophone(audio);
     } catch (err: unknown) {
       if (mine !== this.attempt) return;
       // The connection stays: the person keeps watching, told why. A chosen
@@ -1122,13 +1236,19 @@ export class VoiceClient {
   // is kept even if this browser cannot apply it to the track already open,
   // and then conchd is not told: the stream did not change.
   async setShareQuality(asked: ShareQuality): Promise<void> {
-    // The desktop offers 720p30 and 1080p30 only (Q-D4-3 on #1578).
-    const quality = this.env.companion === undefined ? asked : companionQuality(asked);
+    // A new choice replaces any note an earlier choice left (it is about that
+    // choice, not this one); the note comes back only if this one fails too.
+    if (this.state.why === shareQualityRefusedNote || this.state.why === qualityLaterNote) this.set({ why: null });
+    // The desktop offers companionQualities only (Q-D4-3 on #1578, widened by
+    // #1772); a choice outside them, Auto included, is its 720p30 default.
+    // The browser's Auto is always 30 fps (Q10 on #1614), whatever rate was
+    // left on the choice.
+    const quality = this.env.companion !== undefined ? companionQuality(asked) : asked.resolution === 'auto' ? { resolution: 'auto' as const, frameRate: autoFrameRate } : asked;
     this.set({ shareQuality: quality });
     try {
       await this.room?.setShareQuality(quality);
     } catch {
-      if (this.state.shareQuality === quality) this.set({ why: 'The share quality could not be changed on this capture.' });
+      if (this.state.shareQuality === quality) this.set({ why: shareQualityRefusedNote });
       return;
     }
     const answer = await this.share.changeQuality(quality);
@@ -1141,6 +1261,23 @@ export class VoiceClient {
 
   stopShare(): void {
     void this.share.stop('self');
+  }
+
+  // The person's restart gets a fresh portal pick through the ordinary start
+  // path. Keep an otherwise idle companion joined between stop and start.
+  async restartShare(): Promise<void> {
+    if (this.restartingShare || this.state.share.kind !== 'sharing') return;
+    this.restartingShare = true;
+    const room = this.room;
+    const attempt = this.attempt;
+    this.env.companion?.arm().catch(() => undefined);
+    try {
+      await this.share.stop('self');
+      if (room === this.room && attempt === this.attempt) this.startShare();
+    } finally {
+      this.restartingShare = false;
+      this.settleCompanion();
+    }
   }
 
   // ---- the camera
@@ -1375,13 +1512,40 @@ export class VoiceClient {
   // and everyone left it) is waited for: the same publisher's stream coming
   // back is watched as before. A stream that is back ends the wait for it, and
   // another publisher's never takes its place (voice-multi-share.md §7.1).
+  //
+  // A person not yet listed since joining is absent from presence either way
+  // (issue #1930): conchd lists a page only once a pass has seen it, up to
+  // about 1.5 s after it connected. So presence alone does not say whether a
+  // stream gone then stopped or went with a renewed room, and LiveKit does: a
+  // renewal disconnects this person's room (room_deleted), and a stop leaves
+  // it connected. LiveKit's own track and participant events cannot settle it
+  // at once, since a deleted room may end its publishers before this
+  // person. The watch is held as ending (endingLimit): this room going within
+  // that keeps it, waited for (drop); otherwise it ends. The same publisher
+  // sharing again while this room stayed is a new share after a stop: the
+  // watch ends then, and nothing is watched unasked. Listed meanwhile, the
+  // stream still gone, the watch ends at once.
   private follow(live: ReadonlySet<number>, listed: boolean): void {
+    if (listed) this.listedSinceJoin = true;
     for (const principal of [...this.state.watched]) {
-      if (live.has(principal)) this.endAwaiting(principal);
+      if (this.ending.has(principal)) {
+        if (listed || live.has(principal)) this.watchStream(principal, false);
+      } else if (live.has(principal)) this.endAwaiting(principal);
       else if (this.awaiting.has(principal)) continue;
       else if (listed) this.watchStream(principal, false);
+      else if (!this.listedSinceJoin) this.holdEnding(principal);
       else this.awaitShare(principal);
     }
+  }
+
+  // holdEnding ends one watch after endingLimit, unless a renewal takes this
+  // person's room first (follow, drop).
+  private holdEnding(principal: number): void {
+    if (this.ending.has(principal)) return;
+    this.ending.set(principal, this.env.clock.setTimeout(() => {
+      this.ending.delete(principal);
+      this.watchStream(principal, false);
+    }, endingLimit));
   }
 
   // awaitShare waits for the same publisher's watched share that went with its
@@ -1394,15 +1558,19 @@ export class VoiceClient {
     }, resumeLimit));
   }
 
+  // endAwaiting ends the wait for one publisher's stream, or for every one,
+  // and an ending watch's timer with it (follow).
   private endAwaiting(principal?: number): void {
-    if (principal === undefined) {
-      for (const timer of this.awaiting.values()) this.env.clock.clearTimeout(timer);
-      this.awaiting.clear();
-      return;
+    for (const held of [this.awaiting, this.ending]) {
+      if (principal === undefined) {
+        for (const timer of held.values()) this.env.clock.clearTimeout(timer);
+        held.clear();
+        continue;
+      }
+      const timer = held.get(principal);
+      if (timer !== undefined) this.env.clock.clearTimeout(timer);
+      held.delete(principal);
     }
-    const timer = this.awaiting.get(principal);
-    if (timer !== undefined) this.env.clock.clearTimeout(timer);
-    this.awaiting.delete(principal);
   }
 
   // leave shuts the gate, lets the last report go, and disconnects.
@@ -1456,7 +1624,17 @@ export class VoiceClient {
     const viewer = this.state.viewer;
     this.room = null;
     this.channel = null;
+    // The room's close starts here, before the page says it is out of voice,
+    // so that the LiveKit leave is already on its way when "Join voice"
+    // shows, and a page closed from now on still has it sent (issue #1764;
+    // LiveKitVoiceRoom.close starts its disconnect at once). It is awaited,
+    // bounded, below. "Join voice" still does not mean LiveKit has been told.
+    const closing = room !== null ? room.close().catch(() => undefined) : null;
+    // The context goes after the room's close has started: the room lets go of
+    // its tap on it first.
+    this.releaseAudio();
     this.endAwaiting();
+    this.listedSinceJoin = false;
     this.streamSinks.clear();
     // Nobody's camera is received out of voice; the next join reads presence.
     this.cameraClaims = new Set();
@@ -1479,6 +1657,8 @@ export class VoiceClient {
       microphones: null,
       ...nothingInUse,
       missing: false,
+      meter: true,
+      playback: true,
       outputs: null,
       outputNote: null,
       viewing: false,
@@ -1488,7 +1668,7 @@ export class VoiceClient {
       cameraInUse: null,
     });
     // Bounded, so that a close that never settles cannot keep the gate shut.
-    if (room !== null) await this.within(room.close().catch(() => undefined), leaveDrain);
+    if (closing !== null) await this.within(closing, leaveDrain);
     // The viewer is removed from the room as the page goes; a refusal is not
     // news, since its token lives seconds and the room drops it anyway.
     const remove = this.env.removeViewer;
@@ -1512,6 +1692,20 @@ export class VoiceClient {
   setMuted(muted: boolean): void {
     this.set({ muted });
     this.applyBlock();
+  }
+
+  // startAudio is the tap on "Tap to hear the channel": the room is asked
+  // synchronously, inside the click, which is the gesture the browser wants.
+  // Success is told by the room's playback event (which clears the state);
+  // a refusal leaves it, and is kept in the diagnostics ring by its name.
+  startAudio(): void {
+    const room = this.room;
+    if (room === null) return;
+    const mine = this.attempt;
+    room.startAudio().catch((err: unknown) => {
+      const name = errorName(err);
+      if (mine === this.attempt && typeof name === 'string') record({ kind: 'device_error', name });
+    });
   }
 
   setDeafened(deafened: boolean): void {
@@ -1564,6 +1758,14 @@ export class VoiceClient {
   dispose(): void {
     void this.leave();
     this.listeners.clear();
+  }
+
+  // releaseAudio closes the meter's audio context, once: the field is cleared
+  // first, so a leave and a stop that both get here close it one time.
+  private releaseAudio(): void {
+    const audio = this.audio;
+    this.audio = null;
+    closeAudio(audio);
   }
 
   private applyBlock(): void {
@@ -1713,12 +1915,22 @@ export class VoiceClient {
     else void this.share.lost(roomDeleted);
     // Every watched share goes with a deleted room and is waited for, whether
     // presence has said so yet or not (#1509).
+    // So does one held as ending (follow, issue #1930): its room went before
+    // the wait ran out, so its stream went with the room rather than stopped.
+    if (next.kind !== 'stop') {
+      for (const principal of [...this.ending.keys()]) {
+        this.endAwaiting(principal);
+        this.awaitShare(principal);
+      }
+    }
     if (roomDeleted && next.kind !== 'stop') for (const principal of this.state.watched) this.awaitShare(principal);
     const room = this.room;
     this.room = null;
     // A switch under way goes with its connection; its choice is kept.
     this.switching = false;
-    this.set({ speaking: new Set(), level: 0, talking: false, transmitting: false, streamTracks: new Map(), cameraTracks: noCameraTracks, ...nothingInUse, ...this.cameraNow() });
+    // The meter and the playback are the next room's to say: a note or a
+    // button about this one's would stay up through the retry.
+    this.set({ speaking: new Set(), level: 0, talking: false, transmitting: false, meter: true, playback: true, streamTracks: new Map(), cameraTracks: noCameraTracks, ...nothingInUse, ...this.cameraNow() });
     if (room !== null) void room.close().catch(() => undefined);
     if (companion && !fromMain) void this.endCompanion();
     this.act(next, mine);
@@ -1732,6 +1944,9 @@ export class VoiceClient {
         this.unfollowCompanion();
         this.share.abandon();
         this.camera.abandon();
+        // The stay is over (a join that failed for good, or a stop): nobody is
+        // left to hear with it.
+        this.releaseAudio();
         this.set({ phase: 'stopped', why: next.why, viewing: false, cameraTracks: noCameraTracks });
         break;
       case 'new_session':
@@ -1831,6 +2046,10 @@ export class VoiceClient {
         if (mine !== this.attempt) return;
         this.set({ speaking: new Set(ids) });
       },
+      onScreenStalled: (stalled) => {
+        if (mine !== this.attempt) return;
+        this.set({ shareCaptureStalled: stalled });
+      },
       onScreenEnded: (cause) => {
         if (mine !== this.attempt) return;
         this.share.ended(cause);
@@ -1849,6 +2068,20 @@ export class VoiceClient {
         this.set({ missing: true, ...nothingInUse });
         this.applyBlock();
         void this.readMicrophones(mine, room);
+      },
+      onMeter: (available, name) => {
+        if (mine !== this.attempt) return;
+        // Said by the error's name alone, as a device's error is (record keeps
+        // only a name of the shape of an error's).
+        if (!available && typeof name === 'string') record({ kind: 'device_error', name });
+        if (available !== this.state.meter) this.set({ meter: available });
+        // Nothing feeds the gate's level once the meter is gone: an open
+        // microphone that was talking would stay open. It is shut.
+        if (!available && this.state.mode === 'open') this.gate.shut();
+      },
+      onPlayback: (canPlay) => {
+        if (mine !== this.attempt) return;
+        if (canPlay !== this.state.playback) this.set({ playback: canPlay });
       },
       onDevicesChanged: () => {
         if (mine !== this.attempt) return;
@@ -1915,7 +2148,7 @@ export class VoiceClient {
     const processing = this.state.processing;
     room.setProcessing(processing);
     try {
-      await room.connect(session.value.livekit_url, grant.token, grant.room, publish && !this.state.missing, events);
+      await room.connect(session.value.livekit_url, grant.token, grant.room, publish && !this.state.missing, events, this.audio);
     } catch (err: unknown) {
       // A microphone refused or missing is said by the error's name alone.
       const name = errorName(err);
@@ -2024,7 +2257,9 @@ export class VoiceClient {
     const tick = () => {
       if (mine !== this.attempt) return;
       const raw = room.level();
-      this.gate.level(raw);
+      // No meter, no voice detection: the open microphone's gate stays shut
+      // (push to talk does not read the level).
+      if (this.state.meter) this.gate.level(raw);
       // Quantised, and told every meterEvery ms, so a meter does not
       // re-render the page at every read.
       if (++reads * levelEvery >= meterEvery) {

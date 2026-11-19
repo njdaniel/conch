@@ -4,6 +4,12 @@
 // every event and attach case of cases*.json is read as Go reads it, the
 // command builders write the golden commands, and the tracker accepts every
 // transcript and refuses the stream rules' breaches.
+//
+// voice-control-v3/ (issue #1851) is held to its generated validators in the
+// first block, and from issue #1854 the owner's v3 reader, builders and
+// tracker are held to its cases, golden commands and transcripts below
+// ("the owner's v3 reader", "v3 commands", "v3 negotiation", "the Tracker in
+// v3"). The owner offers v3 only with the Linux share-sound switch on.
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -12,31 +18,46 @@ import { describe, expect, it } from 'vitest';
 import {
   voiceControlAckV1,
   voiceControlAckV2,
+  voiceControlAckV3,
   voiceControlGetStateV1,
   voiceControlGetStateV2,
+  voiceControlGetStateV3,
   voiceControlHelloV1,
   voiceControlLeaveV1,
   voiceControlLeaveV2,
+  voiceControlLeaveV3,
   voiceControlPipeAttachedV1,
   voiceControlProtocolErrorV1,
   voiceControlProtocolErrorV2,
+  voiceControlProtocolErrorV3,
   voiceControlSetDeafenV1,
   voiceControlSetDeafenV2,
+  voiceControlSetDeafenV3,
   voiceControlSetDevicesV2,
+  voiceControlSetDevicesV3,
   voiceControlSetMuteV1,
   voiceControlSetMuteV2,
+  voiceControlSetMuteV3,
+  voiceControlSetShareAudioMuteV3,
+  voiceControlSetShareAudioV3,
   voiceControlSetTalkModeV2,
+  voiceControlSetTalkModeV3,
   voiceControlStartV1,
   voiceControlStartV2,
+  voiceControlStartV3,
   voiceControlStateV1,
   voiceControlStateV2,
+  voiceControlStateV3,
   type VoiceControlHelloV1,
 } from '../../../web/src/schema/generated.ts';
 import type { Validator } from '../../../web/src/schema/validate.ts';
 import {
   LineSplitter,
+  OWNER_VERSIONS,
+  OWNER_VERSIONS_SHARE_AUDIO,
   SCHEMA_V1,
   SCHEMA_V2,
+  SCHEMA_V3,
   Tracker,
   command,
   encodeCommand,
@@ -44,7 +65,9 @@ import {
   parseAttached,
   parseEventV1,
   parseEventV2,
+  parseEventV3,
   startCommand,
+  validApplicationName,
   validChannel,
   validNonce,
   validServer,
@@ -77,6 +100,24 @@ const validators: Record<string, Record<string, Validator<unknown>>> = {
     'event-ack': voiceControlAckV2,
     'event-state': voiceControlStateV2,
     'event-protocol-error': voiceControlProtocolErrorV2,
+  },
+  'voice-control-v3': {
+    'command-start': voiceControlStartV3,
+    'command-set-mute': voiceControlSetMuteV3,
+    'command-set-deafen': voiceControlSetDeafenV3,
+    'command-get-state': voiceControlGetStateV3,
+    'command-leave': voiceControlLeaveV3,
+    'command-set-devices': voiceControlSetDevicesV3,
+    'command-set-talk-mode': voiceControlSetTalkModeV3,
+    // The longer family wins: a set-share-audio-mute fixture is not a
+    // set-share-audio one.
+    'command-set-share-audio': voiceControlSetShareAudioV3,
+    'command-set-share-audio-mute': voiceControlSetShareAudioMuteV3,
+    // The v3 directory's hello is the v1 hello offering the three versions.
+    'event-hello': voiceControlHelloV1,
+    'event-ack': voiceControlAckV3,
+    'event-state': voiceControlStateV3,
+    'event-protocol-error': voiceControlProtocolErrorV3,
   },
   'voice-control-pipe': {
     attached: voiceControlPipeAttachedV1,
@@ -115,6 +156,47 @@ describe('golden fixtures match the generated types', () => {
       '$.token: key is not in the TypeScript type',
     );
   });
+
+  // v3 (issue #1851): the same of every one of its documents, the hello
+  // included, and neither version's state validator takes the other's state.
+  const v3 = cases.filter((c) => c.dir === 'voice-control-v3');
+
+  it('every kind of v3 document has a fixture', () => {
+    const families = new Set(v3.map((c) => c.file.replace(/\.json$/, '')).map((base) =>
+      Object.keys(validators['voice-control-v3'] ?? {})
+        .filter((f) => base === f || base.startsWith(`${f}-`))
+        .sort((a, b) => b.length - a.length)[0],
+    ));
+    expect([...families].sort()).toEqual(Object.keys(validators['voice-control-v3'] ?? {}).sort());
+  });
+
+  it.each(v3)('$dir/$file with an added key is refused', ({ dir, file }) => {
+    const doc = readFixture<object>(`${dir}/${file}`);
+    expect(validatorOf(dir, file)?.({ ...doc, token: 'x' })).toContain('$.token: key is not in the TypeScript type');
+  });
+
+  it('a state of one version is not a state of the other', () => {
+    const state2 = readFixture<object>('voice-control-v2/event-state-connected.json');
+    const state3 = readFixture<object>('voice-control-v3/event-state-share-audio-on.json');
+    expect(voiceControlStateV3(state3)).toEqual([]);
+    expect(voiceControlStateV3(state2)).not.toEqual([]);
+    expect(voiceControlStateV2(state3)).not.toEqual([]);
+    // Not by the schema name alone: a v2 state under v3's name lacks the
+    // fields v3 always writes.
+    expect(voiceControlStateV3({ ...state2, schema: 'conch.voice_control.v3' })).toContain('$.share_audio: required key is missing');
+  });
+
+  it('the vocabularies of v3 are strict', () => {
+    const state = readFixture<object>('voice-control-v3/event-state-share-audio-publish-refused.json');
+    expect(voiceControlStateV3({ ...state, share_audio: 'starting' })).not.toEqual([]);
+    expect(voiceControlStateV3({ ...state, share_audio_problem: 'no_consent' })).not.toEqual([]);
+    expect(voiceControlStateV3({ ...state, share_audio_problem: '' })).not.toEqual([]);
+    const ask = readFixture<object>('voice-control-v3/command-set-share-audio.json');
+    expect(voiceControlSetShareAudioV3({ ...ask, scope: 'system' })).not.toEqual([]);
+    expect(voiceControlSetShareAudioV3({ ...ask, kind: 'set_volume' })).not.toEqual([]);
+    // A kind of v3 is not a kind of the published versions' types.
+    expect(voiceControlSetMuteV2({ schema: 'conch.voice_control.v2', kind: 'set_share_audio_mute', id: 1, muted: true })).not.toEqual([]);
+  });
 });
 
 interface Case {
@@ -141,6 +223,29 @@ function casesOf(dir: string, direction: string): (Case & { readonly dir: string
         .map((c) => ({ ...c, dir, file })),
     );
 }
+
+describe.each([
+  { dir: 'voice-control', parse: parseEventV1, field: 'retry_in_ms' },
+  { dir: 'voice-control-v2', parse: parseEventV2, field: 'retry_in_ms' },
+  { dir: 'voice-control-v3', parse: parseEventV3, field: 'retry_in_ms' },
+  { dir: 'voice-control-v3', parse: parseEventV3, field: 'share_audio_sources' },
+])('$dir integer field $field (#1857)', ({ dir, parse, field }) => {
+  const zero = readFixture<{ cases: Case[] }>(`${dir}/cases-integers.json`).cases.find((c) => c.name === `${field} may be zero`);
+
+  it.each(['-0', ' \t-0 '])('refuses %s as invalid', (raw) => {
+    expect(zero?.line).toBeDefined();
+    const line = zero?.line?.replace(`"${field}":0`, `"${field}":${raw}`) ?? '';
+    const got = parse(Buffer.from(line));
+    expect(got.ok ? 'accepted' : got.code).toBe('invalid');
+  });
+
+  it('accepts ordinary zero and ignores negative zero in unknown fields', () => {
+    expect(zero?.line).toBeDefined();
+    const line = zero?.line ?? '';
+    expect(parse(Buffer.from(line)).ok).toBe(true);
+    expect(parse(Buffer.from(line.replace(/}$/, ',"ignored":-0}'))).ok).toBe(true);
+  });
+});
 
 describe('the owner reads every conformance case as Go does', () => {
   const v1 = casesOf('voice-control', 'event');
@@ -395,5 +500,257 @@ describe('Tracker', () => {
     t2.written(startCommand(SCHEMA_V2, 1, { server: 'https://conch.example.org', channel: 'general', principalId: 7, muted: false, deafened: false }));
     expect(t2.read(state(2))).toEqual({ ok: false, detail: 'unknown_schema' });
     expect(t2.read(Buffer.from(JSON.stringify(readFixture('voice-control-v2/event-state-starting.json')))).ok).toBe(true);
+  });
+});
+
+// ------------------------------------------------------------------ v3 (#1854)
+
+describe("the owner's v3 reader", () => {
+  const v3 = casesOf('voice-control-v3', 'event');
+  const events = readdirSync(join(TESTDATA, 'voice-control-v3')).filter((f) => /^event-(ack|state|protocol-error).*\.json$/.test(f));
+
+  it('finds them', () => {
+    expect(v3.length).toBeGreaterThan(60);
+    expect(events.length).toBeGreaterThan(15);
+  });
+
+  it.each(v3)('v3 $file: $name', (c) => {
+    const got = parseEventV3(lineOf(c.dir, c));
+    switch (c.want.result) {
+      case 'accept':
+        expect(got.ok, got.ok ? '' : got.code).toBe(true);
+        if (got.ok) expect(got.event.kind).toBe(c.want.kind);
+        break;
+      case 'skip':
+        expect(got.ok && got.event.kind === 'unknown').toBe(true);
+        break;
+      case 'refuse':
+        expect(got.ok ? 'accepted' : got.code).toBe(c.want.code);
+    }
+  });
+
+  // Every golden event is read as it was written: the problem left out when
+  // there is none, no_sources only beside on and zero sources, every field the
+  // generated type has.
+  it.each(events)('reads the golden %s into exactly its fields', (file) => {
+    const golden = readFixture<Record<string, unknown>>(`voice-control-v3/${file}`);
+    const got = parseEventV3(Buffer.from(JSON.stringify(golden)));
+    expect(got.ok, got.ok ? '' : got.code).toBe(true);
+    if (!got.ok) return;
+    const doc = got.event.kind === 'ack' ? got.event.ack : got.event.kind === 'state' ? got.event.state : got.event.kind === 'protocol_error' ? got.event.error : null;
+    expect(doc).toEqual(golden);
+    // Not a key more than the type has, and the problem omitted when none.
+    expect(Object.keys(doc ?? {}).sort()).toEqual(Object.keys(golden).sort());
+  });
+
+  it('a state with no problem has no share_audio_problem key at all', () => {
+    const got = parseEventV3(Buffer.from(JSON.stringify(readFixture('voice-control-v3/event-state-share-audio-on.json'))));
+    expect(got.ok && got.event.kind === 'state' && 'share_audio_problem' in got.event.state).toBe(false);
+  });
+
+  it('refuses a line of another version, and every other version refuses a v3 line', () => {
+    const state3 = Buffer.from(JSON.stringify(readFixture('voice-control-v3/event-state-share-audio-on.json')));
+    const state2 = Buffer.from(JSON.stringify(readFixture('voice-control-v2/event-state-connected.json')));
+    const state1 = Buffer.from(JSON.stringify(readFixture('voice-control/event-state-connected.json')));
+    expect(parseEventV3(state2)).toMatchObject({ ok: false, code: 'unknown_schema' });
+    expect(parseEventV3(state1)).toMatchObject({ ok: false, code: 'unknown_schema' });
+    expect(parseEventV2(state3)).toMatchObject({ ok: false, code: 'unknown_schema' });
+    expect(parseEventV1(state3)).toMatchObject({ ok: false, code: 'unknown_schema' });
+    // Under v3's name a v2 state lacks the fields v3 always writes: not read as off.
+    expect(parseEventV3(Buffer.from(JSON.stringify({ ...readFixture<object>('voice-control-v2/event-state-connected.json'), schema: SCHEMA_V3 })))).toMatchObject({ ok: false, code: 'invalid' });
+  });
+
+  it('a hello is v1’s, and invalid in v3', () => {
+    expect(parseEventV3(Buffer.from(JSON.stringify({ ...readFixture<object>('voice-control/event-hello.json'), schema: SCHEMA_V3 })))).toMatchObject({ ok: false, code: 'invalid' });
+  });
+});
+
+describe('v3 commands', () => {
+  const dir = 'voice-control-v3';
+  const start = { server: 'https://conch.example.org', channel: 'general', principalId: 7, muted: false, deafened: false };
+
+  // The want a golden command stands for, read from the golden itself.
+  function wantOf(g: Record<string, unknown>): Parameters<typeof command>[2] | null {
+    switch (g['kind']) {
+      case 'set_mute':
+        return { kind: 'set_mute', muted: g['muted'] as boolean };
+      case 'set_deafen':
+        return { kind: 'set_deafen', deafened: g['deafened'] as boolean };
+      case 'get_state':
+        return { kind: 'get_state' };
+      case 'leave':
+        return { kind: 'leave' };
+      case 'set_devices':
+        return { kind: 'set_devices', ...(g['input'] === undefined ? {} : { input: g['input'] as string }), ...(g['output'] === undefined ? {} : { output: g['output'] as string }) };
+      case 'set_talk_mode':
+        return { kind: 'set_talk_mode', talkMode: g['talk_mode'] as 'open' };
+      case 'set_share_audio':
+        return g['capturing'] === true
+          ? { kind: 'set_share_audio', capturing: true, scope: 'system_excluding_call', applicationName: g['application_name'] as string }
+          : { kind: 'set_share_audio', capturing: false };
+      case 'set_share_audio_mute':
+        return { kind: 'set_share_audio_mute', muted: g['muted'] as boolean };
+      default:
+        return null;
+    }
+  }
+
+  const goldens = readdirSync(join(TESTDATA, dir)).filter((f) => /^command-.*\.json$/.test(f) && f !== 'command-start.json' && f !== 'command-set-share-audio-application.json');
+
+  it('finds them', () => {
+    expect(goldens).toEqual(
+      expect.arrayContaining(['command-set-share-audio.json', 'command-set-share-audio-stop.json', 'command-set-share-audio-mute.json', 'command-set-share-audio-mute-off.json', 'command-leave.json']),
+    );
+  });
+
+  it.each(goldens)('builds the golden %s byte for byte', (file) => {
+    const golden = readFixture<{ id: number } & Record<string, unknown>>(`${dir}/${file}`);
+    const want = wantOf(golden);
+    expect(want, file).not.toBeNull();
+    const c = command(SCHEMA_V3, golden.id, want as NonNullable<typeof want>);
+    expect(c).not.toBeNull();
+    const line = encodeCommand(c as Command);
+    expect(line.at(-1)).toBe(0x0a);
+    expect(JSON.parse(line.toString())).toEqual(golden);
+  });
+
+  it('writes the v3 start with the credential in the environment, as v1 and v2 do', () => {
+    const golden = readFixture<Record<string, unknown>>(`${dir}/command-start.json`);
+    const c = startCommand(SCHEMA_V3, 1, { ...start, principalId: 7 });
+    expect(JSON.parse(encodeCommand(c).toString())).toEqual({ ...golden, credential: 'env' });
+  });
+
+  it('a stop carries no scope and no name, and a start of the sound carries both', () => {
+    const stop = JSON.parse(encodeCommand(command(SCHEMA_V3, 3, { kind: 'set_share_audio', capturing: false }) as Command).toString()) as Record<string, unknown>;
+    expect(Object.keys(stop).sort()).toEqual(['capturing', 'id', 'kind', 'schema']);
+    const on = JSON.parse(encodeCommand(command(SCHEMA_V3, 3, { kind: 'set_share_audio', capturing: true, scope: 'system_excluding_call', applicationName: 'Conch' }) as Command).toString()) as Record<string, unknown>;
+    expect(on).toMatchObject({ capturing: true, scope: 'system_excluding_call', application_name: 'Conch' });
+  });
+
+  it('never writes the application scope: the golden that has it is refused, whoever built it', () => {
+    const application = readFixture<Command>(`${dir}/command-set-share-audio-application.json`);
+    expect(() => encodeCommand(application)).toThrow(/system_excluding_call/);
+    const built = command(SCHEMA_V3, 4, { kind: 'set_share_audio', capturing: true, scope: 'system_excluding_call', applicationName: 'Conch' }) as Command;
+    expect(() => encodeCommand({ ...built, scope: 'application' } as Command)).toThrow(/system_excluding_call/);
+  });
+
+  it('refuses to write a share-audio command the helper must refuse', () => {
+    const on = command(SCHEMA_V3, 4, { kind: 'set_share_audio', capturing: true, scope: 'system_excluding_call', applicationName: 'Conch' }) as unknown as Record<string, unknown>;
+    const stop = command(SCHEMA_V3, 5, { kind: 'set_share_audio', capturing: false }) as unknown as Record<string, unknown>;
+    const mute = command(SCHEMA_V3, 6, { kind: 'set_share_audio_mute', muted: true }) as unknown as Record<string, unknown>;
+    const refused = [
+      { ...on, application_name: undefined },
+      { ...on, application_name: '' },
+      { ...on, application_name: 'x'.repeat(129) },
+      { ...on, application_name: 'Conch\n' },
+      { ...on, application_name: 'Cönch' },
+      { ...on, scope: undefined },
+      { ...stop, scope: 'system_excluding_call' },
+      { ...stop, application_name: 'Conch' },
+      { ...on, token: 'secret' },
+      { ...mute, scope: 'system_excluding_call' },
+      { ...mute, id: 0 },
+      { ...on, schema: SCHEMA_V2 },
+      { ...mute, schema: SCHEMA_V1 },
+    ];
+    for (const c of refused) expect(() => encodeCommand(c as unknown as Command), JSON.stringify(c)).toThrow();
+    expect(() => encodeCommand(on as unknown as Command)).not.toThrow();
+    expect(() => encodeCommand(stop as unknown as Command)).not.toThrow();
+  });
+
+  it('the names it will write: 1 to 128 bytes of printable ASCII', () => {
+    for (const ok of ['Conch', 'c', 'x'.repeat(128), 'My App (beta) 1.2 "q" \\ ~']) expect(validApplicationName(ok), ok).toBe(true);
+    for (const bad of ['', 'x'.repeat(129), 'a\tb', 'a\u007fb', 'ü', '😀']) expect(validApplicationName(bad), JSON.stringify(bad)).toBe(false);
+  });
+
+  it('only a v3 session has the share-audio commands', () => {
+    for (const version of [SCHEMA_V1, SCHEMA_V2] as const) {
+      expect(command(version, 2, { kind: 'set_share_audio', capturing: false })).toBeNull();
+      expect(command(version, 2, { kind: 'set_share_audio', capturing: true, scope: 'system_excluding_call', applicationName: 'Conch' })).toBeNull();
+      expect(command(version, 2, { kind: 'set_share_audio_mute', muted: true })).toBeNull();
+    }
+  });
+
+  it('writes every v1 and v2 command of the v3 session in v3', () => {
+    for (const want of [{ kind: 'set_mute', muted: true }, { kind: 'set_deafen', deafened: true }, { kind: 'get_state' }, { kind: 'leave' }, { kind: 'set_devices', input: 'default' }, { kind: 'set_talk_mode', talkMode: 'open' }] as const) {
+      const c = command(SCHEMA_V3, 9, want);
+      expect(c?.schema).toBe(SCHEMA_V3);
+      expect(() => encodeCommand(c as Command)).not.toThrow();
+    }
+  });
+
+  it('refuses a v3 start the helper must refuse, as v2’s', () => {
+    expect(() => encodeCommand(startCommand(SCHEMA_V3, 1, { ...start, server: 'https://Conch.example.org' }))).toThrow(/server address/);
+    expect(() => encodeCommand(startCommand(SCHEMA_V3, 1, { ...start, principalId: 0 }))).toThrow(/principal_id/);
+  });
+});
+
+describe('v3 negotiation', () => {
+  const hello = readFixture<VoiceControlHelloV1>('voice-control-v3/event-hello-v1-v2-and-v3.json');
+
+  it('offers v3 first only with the switch on, and never otherwise', () => {
+    expect(OWNER_VERSIONS).toEqual([SCHEMA_V2, SCHEMA_V1]);
+    expect(OWNER_VERSIONS_SHARE_AUDIO).toEqual([SCHEMA_V3, SCHEMA_V2, SCHEMA_V1]);
+  });
+
+  it('a v3 helper is spoken to in v3 with the switch on, and in v2 (silent) with it off', () => {
+    expect(negotiate(hello, OWNER_VERSIONS_SHARE_AUDIO)).toBe(SCHEMA_V3);
+    expect(negotiate(hello)).toBe(SCHEMA_V2);
+  });
+
+  it('falls back to v2 and then v1 when the helper does not offer v3', () => {
+    expect(negotiate(readFixture<VoiceControlHelloV1>('voice-control-v2/event-hello-v1-and-v2.json'), OWNER_VERSIONS_SHARE_AUDIO)).toBe(SCHEMA_V2);
+    expect(negotiate(readFixture<VoiceControlHelloV1>('voice-control/event-hello.json'), OWNER_VERSIONS_SHARE_AUDIO)).toBe(SCHEMA_V1);
+  });
+
+  it('nothing when no version is shared', () => {
+    expect(negotiate({ ...hello, versions: ['conch.voice_control.v9'] }, OWNER_VERSIONS_SHARE_AUDIO)).toBeNull();
+  });
+});
+
+describe('the Tracker in v3', () => {
+  const files = readdirSync(join(TESTDATA, 'voice-control-v3'))
+    .filter((f) => f.startsWith('transcript-'))
+    .map((f) => `voice-control-v3/${f}`);
+
+  // The version is the one the owner's start names, as in the other versions.
+  it.each(files)('accepts every helper line of %s', (file) => {
+    const t = new Tracker();
+    for (const step of transcript(file)) {
+      if (step.message === undefined) continue;
+      if (step.from === 'owner') {
+        if (step.message['kind'] === 'start') t.version = step.message['schema'] === SCHEMA_V3 ? SCHEMA_V3 : step.message['schema'] === SCHEMA_V2 ? SCHEMA_V2 : SCHEMA_V1;
+        t.written(step.message as unknown as Command);
+        continue;
+      }
+      const r = t.read(Buffer.from(JSON.stringify(step.message)));
+      expect(r.ok, `${file}: ${r.ok ? '' : r.detail}`).toBe(true);
+    }
+  });
+
+  it('refuses a v2 line in a v3 session, and a v3 line in a v2 session', () => {
+    const hello = Buffer.from(JSON.stringify(readFixture('voice-control-v3/event-hello-v1-v2-and-v3.json')));
+    const t3 = new Tracker();
+    t3.read(hello);
+    t3.version = SCHEMA_V3;
+    t3.written(startCommand(SCHEMA_V3, 1, { server: 'https://conch.example.org', channel: 'general', principalId: 7, muted: false, deafened: false }));
+    expect(t3.read(Buffer.from(JSON.stringify(readFixture('voice-control-v2/event-state-starting.json'))))).toEqual({ ok: false, detail: 'unknown_schema' });
+    expect(t3.read(Buffer.from(JSON.stringify(readFixture('voice-control-v3/event-state-starting.json')))).ok).toBe(true);
+    const t2 = new Tracker();
+    t2.read(hello);
+    t2.version = SCHEMA_V2;
+    t2.written(startCommand(SCHEMA_V2, 1, { server: 'https://conch.example.org', channel: 'general', principalId: 7, muted: false, deafened: false }));
+    expect(t2.read(Buffer.from(JSON.stringify(readFixture('voice-control-v3/event-state-starting.json'))))).toEqual({ ok: false, detail: 'unknown_schema' });
+  });
+
+  it('pairs the ack of a share-audio command with the command written', () => {
+    const t = new Tracker();
+    t.read(Buffer.from(JSON.stringify(readFixture('voice-control-v3/event-hello-v1-v2-and-v3.json'))));
+    t.version = SCHEMA_V3;
+    t.written(startCommand(SCHEMA_V3, 1, { server: 'https://conch.example.org', channel: 'general', principalId: 7, muted: false, deafened: false }));
+    expect(t.read(Buffer.from(JSON.stringify({ ...readFixture<object>('voice-control-v3/event-ack.json'), seq: 2, id: 1 }))).ok).toBe(true);
+    t.written(command(SCHEMA_V3, 2, { kind: 'set_share_audio', capturing: false }) as Command);
+    const acked = t.read(Buffer.from(JSON.stringify({ ...readFixture<object>('voice-control-v3/event-ack.json'), seq: 3, id: 2 })));
+    expect(acked).toMatchObject({ ok: true, acked: 'set_share_audio' });
   });
 });

@@ -58,8 +58,11 @@
 //! on reading until the keyboard is unplugged or the client exits.
 
 use std::fmt;
-use std::fs::{File, Metadata};
+use std::fs::File;
+#[cfg(unix)]
+use std::fs::Metadata;
 use std::io::{self, Read};
+#[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -89,7 +92,9 @@ pub const BUFFER_LEN: usize = RECORDS_PER_READ * INPUT_EVENT_LEN;
 /// `conch_voice_control::Config` has nowhere to hold one. The one other rule the binary
 /// can be given is [`DeviceRule::NamedPipeForTests`], by `managed`'s hidden, test-only
 /// `--test-key-device`: a named pipe, which no keyboard is, so that option cannot read a
-/// keyboard either. (The configuration separately refuses a `keys.device` that is not
+/// keyboard either. On Windows the same option reads fake Raw Input transitions from a named
+/// pipe in the kernel's pipe namespace (`\\.\pipe\`) and nothing else, by the same hidden
+/// option and no other route (`keys_windows::PipeSource`, #1791). (The configuration separately refuses a `keys.device` that is not
 /// written as a path under `/dev/input/`; this rule is about where the path leads and what
 /// was opened.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +126,10 @@ pub enum Refusal {
     /// It is not a named pipe, under the rule that reads nothing else
     /// ([`DeviceRule::NamedPipeForTests`]).
     NotANamedPipe,
+    /// This platform has no event devices to read: key devices are Linux's (`/dev/input`).
+    /// Final, as every refusal but [`Refusal::Changed`] is. A Windows key source is
+    /// separate work (`docs/design/windows-desktop.md` section 4).
+    Unsupported,
 }
 
 impl fmt::Display for Refusal {
@@ -133,6 +142,7 @@ impl fmt::Display for Refusal {
             Refusal::NotCharacterDevice => "it is not a character device",
             Refusal::Changed => "it changed while it was being opened",
             Refusal::NotANamedPipe => "it is not a named pipe",
+            Refusal::Unsupported => "key devices are not supported on this platform",
         })
     }
 }
@@ -331,12 +341,14 @@ pub fn permitted(canonical: &Path, is_char_device: bool) -> Result<(), Refusal> 
 
 /// What makes a device node the one it is: the file system it is on, its inode, and the
 /// device it stands for.
+#[cfg(unix)]
 fn identity(metadata: &Metadata) -> (u64, u64, u64) {
     (metadata.dev(), metadata.ino(), metadata.rdev())
 }
 
 /// Checks the file that was opened, not the path: it must be a character device, and the
 /// very one the path named when the rule was applied to it.
+#[cfg(unix)]
 fn confirm(named: &Metadata, opened: &Metadata) -> Result<(), Refusal> {
     if !opened.file_type().is_char_device() {
         return Err(Refusal::NotCharacterDevice);
@@ -362,6 +374,7 @@ pub fn open(device: &Path, rule: DeviceRule) -> Result<File, Problem> {
     let cannot = |error: io::Error| Problem::CannotOpen(OsError::from(&error));
     match rule {
         DeviceRule::AnyFileForTests => File::open(device).map_err(cannot),
+        #[cfg(unix)]
         DeviceRule::NamedPipeForTests => {
             // Looked at before it is opened, and the open file again after: whatever is
             // read is a pipe, never a device.
@@ -376,6 +389,7 @@ pub fn open(device: &Path, rule: DeviceRule) -> Result<File, Problem> {
             }
             Ok(file)
         }
+        #[cfg(unix)]
         DeviceRule::EventDevice => {
             let canonical = std::fs::canonicalize(device).map_err(cannot)?;
             // Of the resolved path itself: a link put there since is not followed.
@@ -385,6 +399,12 @@ pub fn open(device: &Path, rule: DeviceRule) -> Result<File, Problem> {
             let opened = file.metadata().map_err(cannot)?;
             confirm(&named, &opened).map_err(Problem::Refused)?;
             Ok(file)
+        }
+        // Devices and named pipes as these rules mean them are Unix's: a typed refusal, not
+        // a panic, and nothing is opened.
+        #[cfg(not(unix))]
+        DeviceRule::NamedPipeForTests | DeviceRule::EventDevice => {
+            Err(Problem::Refused(Refusal::Unsupported))
         }
     }
 }
@@ -594,6 +614,22 @@ pub fn spawn(
     timings: KeyTimings,
     inputs: mpsc::UnboundedSender<Input>,
 ) -> io::Result<()> {
+    // On Windows the keys come from Raw Input, not from a device that is opened
+    // (`keys_windows`); the device and the timings are Linux's. The test rule that names a
+    // pipe reads fake transitions from it instead (`keys_windows::PipeSource`, #1791, which
+    // `--test-key-device` alone leads to, as on Linux). The other test rule keeps the
+    // watcher, which answers `Unsupported` there.
+    #[cfg(windows)]
+    {
+        if rule == DeviceRule::EventDevice {
+            let _ = (&device, timings);
+            return crate::keys_windows::spawn(&bindings, inputs);
+        }
+        if rule == DeviceRule::NamedPipeForTests {
+            let _ = timings;
+            return crate::keys_windows::spawn_pipe(&device, &bindings, inputs);
+        }
+    }
     let watcher = Watcher {
         device,
         rule,
@@ -705,6 +741,36 @@ mod tests {
         }
     }
 
+    /// What this platform answers for a key device it cannot read: a typed refusal that is
+    /// final, with words that name no key and no device.
+    #[test]
+    fn the_unsupported_refusal_is_final_and_says_so_in_words() {
+        let problem = Problem::Refused(Refusal::Unsupported);
+        assert_eq!(problem.code(), "refused");
+        assert!(!problem.retried());
+        assert_eq!(
+            problem.to_string(),
+            "refused: key devices are not supported on this platform"
+        );
+        assert!(
+            !DeviceState::Missing(problem)
+                .describe()
+                .contains("trying again")
+        );
+    }
+
+    /// Where there are no event devices, the two rules that need them refuse without
+    /// opening anything, and the one that opens any file still does.
+    #[cfg(not(unix))]
+    #[test]
+    fn without_unix_the_device_rules_refuse_and_never_open() {
+        let refused = Err(Problem::Refused(Refusal::Unsupported));
+        for rule in [DeviceRule::EventDevice, DeviceRule::NamedPipeForTests] {
+            assert_eq!(open(Path::new("anything"), rule).map(|_| ()), refused);
+        }
+    }
+
+    #[cfg(unix)]
     #[test]
     fn what_was_opened_must_be_the_character_device_the_path_named() {
         // Character devices that are no keyboard: nothing is read from either.
@@ -727,6 +793,7 @@ mod tests {
 
     /// The rule `managed`'s test option uses reads a named pipe and nothing else: not a
     /// file, not a character device, so never a keyboard.
+    #[cfg(unix)]
     #[test]
     fn the_named_pipe_rule_opens_a_named_pipe_and_nothing_else() {
         let refused = Err(Problem::Refused(Refusal::NotANamedPipe));
@@ -820,7 +887,9 @@ mod tests {
 
     #[test]
     fn a_problem_says_why_in_words_that_hold_nothing_read() {
-        let denied = OsError::from(&io::Error::from_raw_os_error(13));
+        // EACCES on Unix, ERROR_ACCESS_DENIED on Windows: the code that means "denied".
+        let code = if cfg!(windows) { 5 } else { 13 };
+        let denied = OsError::from(&io::Error::from_raw_os_error(code));
         assert_eq!(denied.kind(), io::ErrorKind::PermissionDenied);
         for (problem, code, retried) in [
             (Problem::CannotOpen(denied), "cannot_open", true),
@@ -848,7 +917,7 @@ mod tests {
         }
         assert_eq!(
             Problem::CannotOpen(denied).to_string(),
-            format!("cannot open it: {}", io::Error::from_raw_os_error(13))
+            format!("cannot open it: {}", io::Error::from_raw_os_error(code))
         );
         assert_eq!(
             Problem::Refused(Refusal::OutsideDevInput).to_string(),

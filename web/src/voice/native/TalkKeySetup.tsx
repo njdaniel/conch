@@ -1,4 +1,6 @@
-// The talk-key setup of the desktop app (issue #1382, D3-11 of #771). In this
+// The talk-key setup of the desktop app (issue #1382, D3-11 of #771). Windows
+// dispatches to WindowsTalkKeySetup (#777), with no device grant or path.
+// On Linux, in this
 // order: what a read grant on a keyboard exposes (the person accepts it before
 // any device is listed); the devices and whether each is readable; for one that
 // is not, the exact udev rule to copy and run themselves (the app runs and
@@ -10,6 +12,7 @@
 // number and a name; the event itself is not kept, logged or passed on. Only
 // the number and the name outlive the capture. Rule text is rendered as text
 // and copied with services.copyText; nothing here executes it.
+import { WindowsTalkKeySetup } from './WindowsTalkKeySetup';
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { keyboardKeys, keyForCode, keyForMouseButton, mouseKeys, type EvdevKey } from '../../platform/desktop/evdev';
 import { updatePendingWords } from './words';
@@ -100,8 +103,8 @@ export function TalkKeySetup({
   readonly source: NativeVoice;
   // Whether a voice session is on: a saved key then waits for the next join.
   readonly joined: boolean;
-  // The chosen key's name, once saved.
-  readonly onSaved: (label: string) => void;
+  // The chosen key's name, once saved; Windows says if it waits for a join.
+  readonly onSaved: (label: string, nextJoinOnly?: boolean) => void;
   readonly onClose: () => void;
 }) {
   const [listing, setListing] = useState<VoiceKeyDevicesResult | null>(null);
@@ -209,6 +212,8 @@ export function TalkKeySetup({
     const k = m ?? keyboardKeys().find(([, row]) => row.label === value)?.[1];
     if (k !== undefined) setKey(k);
   };
+
+  if (listing?.ok && listing.platform === 'win32') return <WindowsTalkKeySetup source={source} onSaved={onSaved} onClose={onClose} />;
 
   return (
     <section className="talk-setup" aria-labelledby={heading}>

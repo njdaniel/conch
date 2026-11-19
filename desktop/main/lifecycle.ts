@@ -1,7 +1,8 @@
-// The lock and suspend rules of the Linux desktop app (issue #1588, D5-02 of
-// #773; linux-desktop.md §9, the Lock and suspend rows). Platform-neutral:
-// input is events (the screen locked or unlocked, the machine is about to
-// sleep or has woken, whether the lock can be observed at all), output is
+// The shared lock and suspend rules (Linux: issue #1588, D5-02 of #773;
+// Windows: #1935; linux-desktop.md §9 and windows-desktop.md §9.2).
+// Platform-neutral: input is events (the screen locked or unlocked, the
+// machine is about to sleep or has woken, whether the lock can be observed
+// at all), output is
 // actions on voice, the screen companion and notifications. It imports
 // nothing from Electron and nothing from Node, so every rule is testable.
 //
@@ -22,12 +23,12 @@
 //     locked, and #1593 says so. Every action is idempotent.
 //
 // Owns: the locked and suspended flags, and nothing that persists. A signal
-// source (lifecycle-linux.ts) reports under its own name: the screen is
-// locked if any source says so.
+// source (lifecycle-linux.ts or lifecycle-windows.ts) reports under its own
+// name: the screen is locked if any source says so.
 
 // A lock-state source: logind's LockedHint and Lock/Unlock signals, or the
-// idle-state poll (a second signal).
-export type LockSource = 'logind' | 'idle';
+// idle-state poll (a second signal), or Windows powerMonitor.
+export type LockSource = 'logind' | 'idle' | 'powerMonitor';
 
 // Whether main can tell when the screen locks. 'unavailable' is exposed for
 // #1593 (D5-07), which tells the person that lock won't mute them.

@@ -24,6 +24,17 @@ import (
 // rather than dropped. The response tolerates unknown fields, as a client of a
 // newer server must.
 
+// VoiceCompanionChannelIDParam is an optional positive channel id precondition
+// on companion POST/DELETE and audio PUT/DELETE. After resolving the path's
+// name and checking access, conchd refuses a different id before any effect.
+// Absent preserves legacy behavior; malformed or repeated values are 400
+// invalid_request. Servers returning a grant's channel_id honor this parameter.
+const VoiceCompanionChannelIDParam = "channel_id"
+
+// ErrorCodeChannelMismatch (409) means the path resolved to another channel
+// than the precondition. Clients may follow the held id to its current name.
+const ErrorCodeChannelMismatch = "channel_mismatch"
+
 // ErrorCodeVoiceCompanionBusy: the caller already has a companion in this room
 // (HTTP 409). A room has one companion per person at a time, and a second
 // request never displaces the first: the person who wants to move a share
@@ -124,7 +135,8 @@ func DecodeVoiceCompanionRequestV1(r io.Reader) (VoiceCompanionRequestV1, error)
 // POST /v1/channels/{channel}/voice/companion: everything the second
 // participant needs to connect, and nothing the person's own connection needs.
 // The renderer that holds it holds no other credential, so it carries no
-// bearer and no session of the person's.
+// bearer and no session of the person's. It also names the channel the grant
+// is for, by id (issue #1883).
 type VoiceCompanionResponseV1 struct {
 	// LivekitURL is the ws:// or wss:// address, exactly as configured.
 	LivekitURL string `json:"livekit_url"`
@@ -143,12 +155,23 @@ type VoiceCompanionResponseV1 struct {
 	// ExpiresAt is the token's expiry (UTC, ms precision), 15 s after issue as
 	// for a session: "connect now", not a deadline.
 	ExpiresAt Timestamp `json:"expires_at"`
+	// ChannelID is the id of the channel the grant is for (issue #1883): the
+	// one conchd resolved the route's {channel} to and checked the caller
+	// against. It is the resolved id, not an echo of the optional precondition.
+	// The route is addressed by name, and a name can be given to another
+	// channel, so a holder that asks again by name checks what it is answered
+	// against this id. conchd sends it on every answer. It is omitted when
+	// zero, which is how an answer from a server before #1883 decodes: such
+	// an answer does not say which channel, and every published v1 fixture is
+	// byte-identical.
+	ChannelID int64 `json:"channel_id,omitempty"`
 }
 
 // Validate reports whether the response is well-formed: an address, an
-// identity, a room, a token and an expiry present; a known publish set; and
-// subscribe true when publish is none. It does not look inside the identity,
-// the room name or the token.
+// identity, a room, a token and an expiry present; a known publish set;
+// subscribe true when publish is none; and a channel id that is not negative
+// (zero is absent). It does not look inside the identity, the room name or
+// the token.
 func (r VoiceCompanionResponseV1) Validate() error {
 	switch {
 	case r.LivekitURL == "":
@@ -161,6 +184,8 @@ func (r VoiceCompanionResponseV1) Validate() error {
 		return errors.New("schema: voice companion token is required")
 	case r.ExpiresAt.IsZero():
 		return errors.New("schema: voice companion expires_at is required")
+	case r.ChannelID < 0:
+		return errors.New("schema: voice companion channel_id must not be negative")
 	}
 	return VoiceCompanionRequestV1{Publish: r.Publish, Subscribe: r.Subscribe}.Validate()
 }
@@ -206,6 +231,35 @@ func (s VoiceShareAudioScope) Valid() bool {
 	}
 }
 
+// VoiceShareAudioPublisher names which participant publishes the share's
+// sound, the one the consent is for (docs/design/linux-share-audio.md §8,
+// decision D-3, issue #1853). The vocabulary is closed and case-sensitive;
+// absent on the wire means companion.
+type VoiceShareAudioPublisher string
+
+const (
+	// VoiceShareAudioPublisherCompanion: the person's companion (p<id>.screen)
+	// publishes the sound, and is granted screen_share_audio for it. The
+	// default, and the route Windows uses.
+	VoiceShareAudioPublisherCompanion VoiceShareAudioPublisher = "companion"
+	// VoiceShareAudioPublisherPerson: the person's own participant (p<id>)
+	// publishes the sound, which its share grant already carries. The consent
+	// is recorded and the companion is granted nothing.
+	VoiceShareAudioPublisherPerson VoiceShareAudioPublisher = "person"
+)
+
+// Valid reports whether p is a recognized publisher. The empty value is not
+// one: it is how a struct says the field is absent (omitempty), which the
+// request and response Validate accept.
+func (p VoiceShareAudioPublisher) Valid() bool {
+	switch p {
+	case VoiceShareAudioPublisherCompanion, VoiceShareAudioPublisherPerson:
+		return true
+	default:
+		return false
+	}
+}
+
 // VoiceCompanionAudioRequestV1 is the body of
 // PUT /v1/channels/{channel}/voice/companion/audio: the share holder's
 // consent to their companion publishing the share's sound, and to which
@@ -214,14 +268,32 @@ func (s VoiceShareAudioScope) Valid() bool {
 type VoiceCompanionAudioRequestV1 struct {
 	// Scope is the sound consented to. Required.
 	Scope VoiceShareAudioScope `json:"scope"`
+	// Publisher says who publishes the sound. Optional; absent means
+	// companion. A server from before issue #1853 refuses the field (the
+	// request is decoded strictly), which a client reads as "no sound route
+	// on this server".
+	Publisher VoiceShareAudioPublisher `json:"publisher,omitempty"`
 }
 
-// Validate reports whether the request is well-formed: a known scope.
+// Validate reports whether the request is well-formed: a known scope, and a
+// known publisher when one is named.
 func (r VoiceCompanionAudioRequestV1) Validate() error {
 	if !r.Scope.Valid() {
 		return fmt.Errorf("schema: voice share audio scope %q is not one of application, system_excluding_call", r.Scope)
 	}
+	if r.Publisher != "" && !r.Publisher.Valid() {
+		return fmt.Errorf("schema: voice share audio publisher %q is not one of companion, person", r.Publisher)
+	}
 	return nil
+}
+
+// EffectivePublisher is the publisher the request means: the one named, or
+// companion when it names none.
+func (r VoiceCompanionAudioRequestV1) EffectivePublisher() VoiceShareAudioPublisher {
+	if r.Publisher == "" {
+		return VoiceShareAudioPublisherCompanion
+	}
+	return r.Publisher
 }
 
 // DecodeVoiceCompanionAudioRequestV1 reads one request from r and is the only
@@ -256,26 +328,44 @@ func DecodeVoiceCompanionAudioRequestV1(r io.Reader) (VoiceCompanionAudioRequest
 
 // VoiceCompanionAudioV1 is the body of a successful
 // PUT /v1/channels/{channel}/voice/companion/audio: the consent as recorded,
-// and which share it belongs to. It carries no token, no identity and no
-// room name.
+// which share it belongs to, and which channel that share is in, by id
+// (issue #1883). It carries no token, no identity and no room name.
 type VoiceCompanionAudioV1 struct {
 	// Scope is the consent recorded: the request's, or on a repeated request
 	// the new one.
 	Scope VoiceShareAudioScope `json:"scope"`
+	// Publisher echoes the publisher recorded, when the request named one;
+	// absent means companion, as on the request (so a response to a request
+	// that named none says nothing of a publisher, as before issue #1853).
+	Publisher VoiceShareAudioPublisher `json:"publisher,omitempty"`
 	// StartedAt is the started_at of the caller's share (VoiceShareV1), the
 	// one the consent is part of: it ends with that share. UTC, ms
 	// precision.
 	StartedAt Timestamp `json:"started_at"`
+	// ChannelID is the id of the channel the consent was recorded in
+	// (issue #1883): the one conchd resolved the route's {channel} to and
+	// checked the caller against, not an echo of the precondition. As on
+	// VoiceCompanionResponseV1, a holder that asks by name checks the answer
+	// against the id its grant named. conchd sends it on every answer; it is
+	// omitted when zero, which is how an answer from a server before #1883
+	// decodes, and every published v1 fixture is byte-identical.
+	ChannelID int64 `json:"channel_id,omitempty"`
 }
 
-// Validate reports whether the response is well-formed: a known scope and a
-// started_at present.
+// Validate reports whether the response is well-formed: a known scope, a
+// started_at present, and a channel id that is not negative (zero is absent).
 func (a VoiceCompanionAudioV1) Validate() error {
 	if !a.Scope.Valid() {
 		return fmt.Errorf("schema: voice share audio scope %q is not one of application, system_excluding_call", a.Scope)
 	}
+	if a.Publisher != "" && !a.Publisher.Valid() {
+		return fmt.Errorf("schema: voice share audio publisher %q is not one of companion, person", a.Publisher)
+	}
 	if a.StartedAt.IsZero() {
 		return errors.New("schema: voice companion audio started_at is required")
+	}
+	if a.ChannelID < 0 {
+		return errors.New("schema: voice companion audio channel_id must not be negative")
 	}
 	return nil
 }

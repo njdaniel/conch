@@ -31,6 +31,17 @@
 //! written; and its channel, server and login come from its owner's start, not from the
 //! command line, `CONCH_SERVER` or `voice.toml`.
 //!
+//! A desktop owner speaking `conch.voice_control.v3` can also ask for the sound of its
+//! screen share (#1586, `docs/design/linux-share-audio.md`; [`share_audio`]): the input is
+//! then also, on Linux, the other applications' playback streams PipeWire lists, each
+//! captured by its serial and never a sink's monitor, with this process's own playback and
+//! the Conch process tree (read from `/proc`) left out ([`share_eligibility`],
+//! [`share_capture`]); the output is also a second LiveKit track of this participant, source
+//! `ScreenshareAudio`, carrying their stereo mix, with a mute of its own; and it owns those
+//! captures, the mix and that track from the owner's command until a stop, the end of the
+//! connection or the end of the session. None of it touches the microphone, its mute or the
+//! transmit gate. Elsewhere than Linux the request is answered `unsupported`.
+//!
 //! Owns: the connection to the channel's voice room, for as long as `join` runs; the
 //! process's logger ([`logger`]); and the tasks that hold the transmit gate ([`transmit`]),
 //! the mix ([`receive`]), the report queue ([`reports`]) and the presence socket
@@ -44,14 +55,17 @@
 //! scrubber's ([`secrets`]), which are compared with text about to be written and nothing
 //! else.
 //!
-//! Audio is PipeWire's: the default microphone and output, or the ones `[audio]` in the
-//! configuration names. `join`'s test options replace them with a tone or a WAV file and a
+//! Audio is PipeWire's on Linux and WASAPI's on Windows: the default microphone and output, or
+//! the ones `[audio]` in the configuration names. `join`'s test options replace them with a tone or a WAV file and a
 //! sink that counts, and nothing else does: a test that does not name them is a test that
 //! needs PipeWire.
 //!
-//! - [`audio`]: the microphone and speakers, over `dmn-audio`'s PipeWire streams.
+//! - [`audio`]: the microphone and speakers, over `dmn-audio`'s PipeWire streams, or on
+//!   Windows over WASAPI through the `wasapi` crate.
 //! - [`session`]: the loop that decides everything, written against the traits in [`sdk`].
 //! - [`managed`]: `conch-voice managed`, the helper `conch`'s TUI starts and drives.
+//! - [`share_audio`], [`share_capture`] and [`share_eligibility`]: the sound of a v3 owner's
+//!   screen share: its state and track, its captures and mix, and what is left out of them.
 //! - [`livekit`]: those traits over LiveKit's SDK, kept thin.
 //! - [`secrets`] and [`logger`]: what keeps tokens and room names out of the output.
 //! - [`lines`]: the queue every line passes on its way to standard output or standard
@@ -75,6 +89,8 @@ pub mod error;
 pub mod input;
 pub mod keydev;
 pub mod keys;
+#[cfg(any(windows, test))]
+pub(crate) mod keys_windows;
 pub mod lines;
 pub mod livekit;
 pub mod logger;
@@ -87,11 +103,13 @@ pub mod reports;
 pub mod sdk;
 pub mod secrets;
 pub mod session;
+pub mod share_audio;
+pub mod share_capture;
+pub mod share_eligibility;
 pub mod status;
 pub mod transmit;
 
 use std::io::{IsTerminal, Write};
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -99,9 +117,10 @@ use std::time::Duration;
 use conch_voice_audio::{CountingSink, ToneSource, WavSource};
 use tokio::sync::mpsc;
 
-use crate::audio::PipeWire;
+use crate::audio::AudioSystem;
 use crate::cli::{
-    Environment, JoinArgs, ManagedArgs, MicChoice, Resolved, SinkChoice, TONE_AMPLITUDE,
+    Environment, JoinArgs, ManagedArgs, MicChoice, Resolved, ShareChoice, SinkChoice,
+    TONE_AMPLITUDE,
 };
 pub use crate::error::Error;
 use crate::input::AtEnd;
@@ -118,15 +137,15 @@ use crate::session::{
 use crate::transmit::BoxedMic;
 
 /// What opens the microphone `--mic` chose, by the name it is given (`audio.input` first,
-/// then whatever a switch names; `None` for PipeWire's default). Nothing is opened until this
+/// then whatever a switch names; `None` for the audio system's default). Nothing is opened until this
 /// is called, which is first when a session first allows publishing: a client that may only
-/// listen never captures. `pipewire` is the connection, if the choice needs one. The test
+/// listen never captures. `audio` is the connection, if the choice needs one. The test
 /// choices, a tone, a WAV file or none, take no name and open the same each time.
-pub(crate) fn mic_opener(choice: MicChoice, pipewire: Option<PipeWire>) -> OpenMic {
+pub(crate) fn mic_opener(choice: MicChoice, audio: Option<AudioSystem>) -> OpenMic {
     Box::new(move |name| {
         Ok(match &choice {
-            MicChoice::PipeWire => match &pipewire {
-                Some(pipewire) => Some(Box::new(pipewire.microphone(name)?) as BoxedMic),
+            MicChoice::AudioSystem => match &audio {
+                Some(audio) => Some(Box::new(audio.microphone(name)?) as BoxedMic),
                 None => None,
             },
             MicChoice::None => None,
@@ -138,16 +157,43 @@ pub(crate) fn mic_opener(choice: MicChoice, pipewire: Option<PipeWire>) -> OpenM
     })
 }
 
+/// Where a managed helper captures a screen share's sound from, as `--test-share-source`
+/// chose: the synthetic applications, or the platform's captures, on the connection the
+/// microphone and the speakers use if there is one. Only Linux has captures; elsewhere a
+/// request is answered `unsupported`. Nothing is opened or captured here.
+pub(crate) fn share_source(
+    choice: &ShareChoice,
+    audio: Option<&AudioSystem>,
+) -> share_capture::ShareSource {
+    match choice {
+        ShareChoice::Synthetic(spec) => share_capture::synthetic_source(spec),
+        ShareChoice::AudioSystem => platform_share_source(audio),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn platform_share_source(audio: Option<&AudioSystem>) -> share_capture::ShareSource {
+    match audio {
+        Some(audio) => audio.share_source(),
+        None => share_capture::linux::pipewire_source(None),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn platform_share_source(_audio: Option<&AudioSystem>) -> share_capture::ShareSource {
+    share_capture::ShareSource::Unsupported
+}
+
 /// What opens the speakers `--sink` chose, by the name it is given (`audio.output` when the
-/// session starts, then whatever a switch names; `None` for PipeWire's default). The
+/// session starts, then whatever a switch names; `None` for the audio system's default). The
 /// counting sink takes no name.
-pub(crate) fn sink_opener(choice: SinkChoice, pipewire: Option<PipeWire>) -> OpenSink {
+pub(crate) fn sink_opener(choice: SinkChoice, audio: Option<AudioSystem>) -> OpenSink {
     Box::new(move |name| {
-        Ok(match (&choice, &pipewire) {
+        Ok(match (&choice, &audio) {
             (SinkChoice::Count(tones), _) => Box::new(CountingSink::new(tones)?) as BoxedSink,
-            (SinkChoice::PipeWire, Some(pipewire)) => Box::new(pipewire.speakers(name)?),
-            // Not reached: `join` connects whenever either choice is PipeWire.
-            (SinkChoice::PipeWire, None) => Box::new(CountingSink::new(&[])?),
+            (SinkChoice::AudioSystem, Some(audio)) => Box::new(audio.speakers(name)?),
+            // Not reached: `join` connects whenever either choice is the audio system.
+            (SinkChoice::AudioSystem, None) => Box::new(CountingSink::new(&[])?),
         })
     })
 }
@@ -213,22 +259,22 @@ pub fn join(
     // The keyboard to read, if any. The rule for what may be opened as one is written
     // out below and is not a setting: only an event device under /dev/input.
     let key_device = cli::key_device(&resolved.config, args.stdin_keys)?;
-    // One connection to PipeWire for the microphone and the speakers, made only if one of
-    // them is PipeWire's. A machine without it fails here, before anything is joined.
-    let pipewire = if args.mic == MicChoice::PipeWire || args.sink == SinkChoice::PipeWire {
-        Some(PipeWire::connect()?)
+    // One connection to the audio system (PipeWire, WASAPI) for the microphone and the speakers, made only if one of
+    // them uses it. A machine without it fails here, before anything is joined.
+    let audio = if args.mic == MicChoice::AudioSystem || args.sink == SinkChoice::AudioSystem {
+        Some(AudioSystem::connect()?)
     } else {
         None
     };
     let settings = Settings {
         channel: resolved.channel,
-        open_mic: mic_opener(args.mic.clone(), pipewire.clone()),
-        open_sink: sink_opener(args.sink.clone(), pipewire),
+        open_mic: mic_opener(args.mic.clone(), audio.clone()),
+        open_sink: sink_opener(args.sink.clone(), audio),
         input: resolved.config.audio.input.clone(),
         output: resolved.config.audio.output.clone(),
         sink_tones: match &args.sink {
             SinkChoice::Count(tones) => tones.clone(),
-            SinkChoice::PipeWire => Vec::new(),
+            SinkChoice::AudioSystem => Vec::new(),
         },
         release_tail_ms: resolved.config.audio.release_tail_ms,
         max_transmit: Duration::from_secs(u64::from(resolved.config.audio.max_transmit_secs)),
@@ -244,6 +290,8 @@ pub fn join(
             .map(|(device, _)| device.display().to_string()),
         unreachable_note: resolved.unreachable_note,
         share_audio_owner: args.share_audio_owner,
+        // `join` has no owner, and never captures a share's sound.
+        share_audio: share_capture::ShareSource::Unsupported,
         timings: Timings::default(),
     };
     let out = Output::stdout(args.json);
@@ -299,24 +347,40 @@ pub fn managed(
     scrubber: Arc<Scrubber>,
     parent: u32,
 ) -> Result<(), Error> {
-    // Where the events go: the endpoint the owner listens on, with the attach line already
-    // written, or file descriptor 3. Exactly one is looked at.
-    let (events, end): (Box<dyn Write + Send>, Option<UnixStream>) = match &args.events_pipe {
-        Some(path) => {
-            let endpoint = channel::attach(path, environment, &scrubber)?;
-            (Box::new(endpoint.events), Some(endpoint.end))
-        }
-        None => (Box::new(managed::open_event_pipe()?), None),
+    #[cfg(not(unix))]
+    let _ = parent;
+    // Descriptor 3 is looked at before anything is created: a runtime holds descriptors of
+    // its own (epoll), and with 3 closed one of them would become 3 and be judged in place
+    // of what the owner handed over (Linux's behaviour is unchanged by `--events-pipe`
+    // existing). Nothing else has been opened or read yet. Exactly one of the two sources
+    // is looked at.
+    let fd3 = match &args.events_pipe {
+        Some(_) => None,
+        None => Some(managed::open_event_pipe()?),
     };
+    // The runtime next: on Windows the pipe is registered with it when it is opened, and its
+    // events are written through it.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(Error::Runtime)?;
+    // Where the events go: the endpoint the owner listens on, with the attach line already
+    // written, or file descriptor 3.
+    let (events, end): (Box<dyn Write + Send>, Option<channel::End>) =
+        match (&args.events_pipe, fd3) {
+            (Some(path), _) => {
+                let _entered = runtime.enter();
+                let endpoint = channel::attach(path, environment, &scrubber)?;
+                (Box::new(endpoint.events), Some(endpoint.end))
+            }
+            (None, Some(fd3)) => (Box::new(fd3), None),
+            (None, None) => return Err(Error::EventPipe("is not open")),
+        };
     // The nonce was spent on the attach line: the session is given an environment without it.
     let environment = Environment {
         conch_voice_attach: None,
         ..environment.clone()
     };
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(Error::Runtime)?;
     let keys = match &args.test_key_device {
         Some(pipe) => managed::KeySource::NamedPipe(pipe.clone()),
         None => managed::KeySource::Configured,
@@ -330,6 +394,7 @@ pub fn managed(
             managed::Devices::Choices {
                 mic: args.mic.clone(),
                 sink: args.sink.clone(),
+                share: args.share.clone(),
             },
             keys,
             args.share_audio_owner,
@@ -337,6 +402,9 @@ pub fn managed(
         host.transmit_ceiling_secs = args.transmit_ceiling_secs;
         host.no_mute_key = args.no_mute_key;
         managed::signals(inputs.clone(), host.watchdog.clone()).map_err(Error::Runtime)?;
+        // Windows has no parent to watch (`parent_id` is 0 there, ids are reused): its owner
+        // is noticed by the events pipe ending or failing to be written (#938).
+        #[cfg(unix)]
         managed::watch_parent(parent, inputs.clone(), host.watchdog.clone());
         if let Some(end) = end {
             channel::watch_end(end, inputs.clone(), host.watchdog.clone());
@@ -351,8 +419,20 @@ pub fn managed(
 /// The platform's devices as the neutral table: connects, reads the list and lets go. On a
 /// platform with no audio backend that is [`Error::Audio`] holding `NoBackend`, which
 /// `devices` prints as one line, as for a PipeWire that cannot be reached.
+#[cfg(not(windows))]
 fn list_devices(wait: Duration) -> Result<devices::DeviceTable, Error> {
-    PipeWire::connect()?.list_devices(wait)
+    AudioSystem::connect()?.list_devices(wait)
+}
+
+/// On Windows `devices` still answers that there is no backend, though the backend can list
+/// endpoints (`Wasapi::list_devices`): `conch.voice_devices.v1` has a field that would say
+/// `pipewire: ok`, and a Windows helper writing it would be lying. The listing waits for
+/// `conch.voice_devices.v2` (#891, a schema sign-off; `docs/design/windows-desktop.md` §2.6).
+#[cfg(windows)]
+fn list_devices(_wait: Duration) -> Result<devices::DeviceTable, Error> {
+    Err(Error::Audio(conch_voice_audio::AudioError::NoBackend {
+        platform: std::env::consts::OS,
+    }))
 }
 
 /// `conch-voice devices`: the microphones and speakers PipeWire has, by the names the

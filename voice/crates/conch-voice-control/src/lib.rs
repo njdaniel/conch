@@ -54,7 +54,10 @@ pub use config::{
     unset_keys_value,
 };
 pub use error::Error;
-pub use keys::{KEY_CODE_MAX, Key, KeyAction, KeyBindings, KeyCode, KeyDecoder, KeyEvent};
+pub use keys::{
+    KEY_CODE_MAX, Key, KeyAction, KeyBindings, KeyCode, KeyDecoder, KeyEvent, WindowsBinding,
+    parse_windows_binding, parse_windows_only, require_windows_keys,
+};
 pub use policy::{
     BACKOFF_MAX, BACKOFF_MIN, ConnectionPolicy, EXIT_STOPPED, NextStep, Outcome, STABLE_AFTER,
 };

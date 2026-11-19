@@ -16,11 +16,22 @@
 #                                               Depends removed must FAIL at the
 #                                               ldd check (it passes when they do)
 #   desktop-deb-lifecycle.sh --broken=userdata  the same fixture packages with a
-#                                               postinst that writes a file under
-#                                               the test user's ~/.config/Conch
-#                                               must FAIL at the user-data check
-#                                               of the upgrade (so that check can
-#                                               fail)
+#                                               postinst that appends to the
+#                                               seeded settings.json in the test
+#                                               user's data folder must FAIL at
+#                                               the user-data check of the
+#                                               upgrade (so that check can fail)
+#
+# The user's data folder (issue #1800) is where the app keeps its data:
+# Electron's app.getPath('userData'), ~/.config/<app name> on Linux, where the
+# app name is the productName of the package.json packed in
+# resources/app.asar, or its name when it has none. The script reads that
+# package.json from each .deb's app.asar on the host (python3) and fails unless
+# both packages name the same folder and it is conch-desktop, the folder
+# docs/desktop/linux.md tells users about: a rename would move every user's
+# data, so it must fail here and be decided, not be followed silently. The
+# fixture packages carry a small app.asar holding desktop/package.json with the
+# electron-builder config's extraMetadata over it, as electron-builder packs it.
 #
 # What it checks, each failure one line naming the step and the file or library:
 #   1 install <old>   `apt install ./old.deb` in a container with nothing of
@@ -34,14 +45,18 @@
 #                     the container and did not fail; run again, it still
 #                     succeeds), and `diff -r` of the installed /opt/conch-desktop
 #                     against the .deb's own opt/conch-desktop (dpkg-deb -x)
-#   2 seed            a test user's ~/.config/Conch/profiles.json and settings.json
+#   2 seed            six files in a test user's ~/.config/conch-desktop, as the
+#                     app keeps them: profiles.json, settings.json,
+#                     profiles/p1/credential.bin (random bytes),
+#                     profiles/p1/voice.toml and two files under
+#                     "Local Storage/leveldb"; their SHA-256 sums are kept
 #   3 upgrade <new>   `apt install ./new.deb`: the version is the higher one, the
 #                     installed tree is the new .deb's tree (`diff -r` against its
 #                     dpkg-deb -x; the stamp resources/version is not compared to
 #                     the Debian version, which spells a pre-release with ~), no
-#                     file of the old package that the new one drops is left, the
-#                     user's files (every file under ~/.config/Conch) are
-#                     byte-identical
+#                     file of the old package that the new one drops is left,
+#                     the user's data folder is there and every seeded file
+#                     has its seeded SHA-256, and no file was added
 #   4 ldd             every ELF file of the package, executable or not (.so files
 #                     of mode 0644 too), resolves every library, after the
 #                     install and after the upgrade. A .so may name a sibling
@@ -59,8 +74,8 @@
 #   6 remove, purge   remove: nothing of the package is left in /opt or /usr
 #                     (the AppArmor profile, a conffile, stays until purge, as
 #                     dpkg keeps conffiles); purge: nothing in /opt, /usr or
-#                     /etc, the package is gone from dpkg; the user's
-#                     ~/.config/Conch is still there and byte-identical
+#                     /etc, the package is gone from dpkg; after each, the
+#                     user's data folder is checked as after the upgrade
 #
 # What it does not do: it never runs the app and needs no display. A container
 # is not a clean machine: no display, portal, keyring, PipeWire or real GPU,
@@ -97,7 +112,12 @@ die() {
 }
 
 app=/opt/conch-desktop
-cfg=/home/tester/.config/Conch
+# The user's data folder, named by the host from the packed package.json.
+data_dir=${CONCH_LIFECYCLE_DATA_DIR:-}
+cfg=/home/tester/.config/$data_dir
+# shellcheck disable=SC2088 # the label is for messages, not a path to expand
+label="~/.config/$data_dir"
+seeded=
 
 # apt_install <deb>: installs a package file with apt (Depends from the
 # archive); on failure shows the tail of apt's output.
@@ -229,13 +249,36 @@ check_postinst() {
     }
 }
 
-# user_sums: the name and checksum of every file under ~/.config/Conch.
-user_sums() { (cd "$cfg" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum); }
+# user_sums: the checksum and name of every file in the user's data folder.
+user_sums() { (cd "$cfg" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum); }
+# user_files: the name of every file in it, sorted.
+user_files() { (cd "$cfg" && find . -type f | LC_ALL=C sort); }
+
+# check_user_data <when>: the data folder is there, every seeded file is there
+# with its seeded SHA-256, and no file was added. $seeded is the seed's
+# user_sums. Each failure names the file.
+check_user_data() {
+    local now line f extra
+    [ -d "$cfg" ] || die "the user's $label is gone after $1"
+    now=$(user_sums) || die "cannot read the user's $label after $1"
+    while IFS= read -r line; do
+        f=${line#*  }
+        f=${f#./}
+        [ -f "$cfg/$f" ] || die "the user's $label/$f is gone after $1"
+        printf '%s\n' "$now" | grep -qxF "$line" || die "the user's $label/$f changed in $1 (its SHA-256 is not the seeded one)"
+    done <<<"$seeded"
+    extra=$(comm -13 <(printf '%s\n' "$seeded" | sed 's/^[^ ]*  //' | LC_ALL=C sort) <(user_files) | sed -n 1p)
+    [ -z "$extra" ] || die "the user's $label/${extra#./} is new after $1 (the package wrote into the user's data)"
+    echo "  user data: the $(printf '%s\n' "$seeded" | wc -l) seeded file(s) of $label are unchanged after $1"
+}
 
 inside() {
-    local old=$1 new=$2 oldv newv sum0 list_old stale p got
+    local old=$1 new=$2 oldv newv list_old stale p got n
     export DEBIAN_FRONTEND=noninteractive
     step="0 prepare"
+    case $data_dir in
+    '' | . | .. | */* | *[!A-Za-z0-9._-]*) die "CONCH_LIFECYCLE_DATA_DIR '$data_dir' is not a folder name" ;;
+    esac
     # _apt must read the packages (an unreadable file makes apt fall back to root).
     mkdir -p /var/tmp/pkg /var/tmp/tree-old /var/tmp/tree-new
     chmod 755 /var/tmp/pkg
@@ -275,11 +318,22 @@ inside() {
     check_helper
 
     step="2 seed"
-    mkdir -p "$cfg"
-    printf '{"profiles":[{"id":"p1","name":"Work","server":"https://chat.example.test"}],"last":"p1"}\n' >"$cfg/profiles.json"
+    [ ! -e "$cfg" ] || die "$cfg exists before the seed"
+    mkdir -p "$cfg/profiles/p1" "$cfg/Local Storage/leveldb"
+    printf '{"version":1,"profiles":[{"id":"p1","name":"Work","server":"https://chat.example.test"}],"active":"p1"}\n' >"$cfg/profiles.json"
     printf '{"theme":"dark","pushToTalk":{"key":"F13"}}\n' >"$cfg/settings.json"
+    head -c 512 /dev/urandom >"$cfg/profiles/p1/credential.bin"
+    printf '[talk]\nkey = "F13"\n' >"$cfg/profiles/p1/voice.toml"
+    printf 'fixture leveldb log\n' >"$cfg/Local Storage/leveldb/000003.log"
+    printf 'MANIFEST-000001\n' >"$cfg/Local Storage/leveldb/CURRENT"
     chown -R tester:tester /home/tester/.config
-    sum0=$(user_sums)
+    chmod 700 /home/tester/.config
+    find "$cfg" -type d -exec chmod 700 {} +
+    find "$cfg" -type f -exec chmod 600 {} +
+    seeded=$(user_sums)
+    n=$(printf '%s\n' "$seeded" | wc -l)
+    [ "$n" -eq 6 ] || die "the seed made $n file(s) in $label, not 6"
+    echo "  seeded $n file(s) in $label"
 
     step="3 upgrade $oldv -> $newv"
     apt_install "/var/tmp/pkg/$new"
@@ -287,7 +341,7 @@ inside() {
     check_files
     check_postinst
     check_tree /var/tmp/tree-new "$new ($newv)"
-    [ "$(user_sums)" = "$sum0" ] || die "the user's files under ~/.config/Conch changed in the upgrade"
+    check_user_data "the upgrade"
     # what the old package had and the new one drops is gone; /opt is replaced.
     stale=
     while IFS= read -r p; do
@@ -299,7 +353,7 @@ inside() {
         fi
     done < <(comm -23 <(printf '%s\n' "$list_old") <(dpkg -L conch-desktop | sort))
     [ -z "$stale" ] || die "$stale of the old package is left after the upgrade"
-    echo "  upgraded to $newv; $(basename "$cfg") untouched"
+    echo "  upgraded to $newv"
     step="4 ldd (after upgrade)"
     check_ldd
     require_checked "$app/conch-desktop"
@@ -315,7 +369,7 @@ inside() {
     [ -z "$(find /usr -name 'chat.conch.desktop*' -print -quit)" ] || die "$(find /usr -name 'chat.conch.desktop*' -print -quit) is left after remove"
     [ -f /etc/apparmor.d/conch-desktop ] || die "the conffile /etc/apparmor.d/conch-desktop is gone after remove (it stays until purge)"
     ! grep -qs 'chat.conch.desktop' /usr/share/applications/mimeinfo.cache || die "mimeinfo.cache still lists chat.conch.desktop.desktop after remove"
-    [ "$(user_sums)" = "$sum0" ] || die "the user's files changed in the remove"
+    check_user_data "the remove"
 
     step="6 purge"
     DEBIAN_FRONTEND=noninteractive apt-get purge -y -q conch-desktop >/var/tmp/apt-purge.log 2>&1 || { tail -n 10 /var/tmp/apt-purge.log; die "apt purge failed"; }
@@ -327,7 +381,7 @@ inside() {
     [ ! -e "$app" ] || die "$app is left after purge"
     [ ! -e /etc/apparmor.d/conch-desktop ] || die "/etc/apparmor.d/conch-desktop is left after purge"
     [ -z "$(find /usr /etc -name '*conch-desktop*' -print -quit)" ] || die "$(find /usr /etc -name '*conch-desktop*' -print -quit) is left after purge"
-    [ "$(user_sums)" = "$sum0" ] || die "the user's ~/.config/Conch is changed or gone after purge"
+    check_user_data "the purge"
     echo "desktop-deb-lifecycle: container: OK (install, upgrade, remove, purge)"
 }
 
@@ -344,6 +398,81 @@ fi
 fail() {
     echo "desktop-deb-lifecycle: FAIL: $*" >&2
     exit 1
+}
+
+# The folder the app's data is in: what docs/desktop/linux.md tells users.
+expected_data_dir=conch-desktop
+
+# asar_name <app.asar>: the name Electron gives the app, from the package.json
+# packed in the asar: its productName, or its name when it has none. On Linux
+# app.getPath('userData') is ~/.config/<that name>. The asar format: a 4-byte
+# pickle whose value is the header pickle's size, then the header pickle (its
+# payload size, the JSON's length, the JSON), then the files, at the offsets
+# the JSON gives, counted from the end of the header.
+asar_name() {
+    python3 -I - "$1" <<'PY'
+import json, struct, sys
+
+path = sys.argv[1]
+
+
+def fail(msg):
+    sys.exit(f"{path}: {msg}")
+
+
+with open(path, "rb") as f:
+    data = f.read()
+if len(data) < 16:
+    fail("is not an asar archive (too short)")
+size_len, header_size = struct.unpack_from("<II", data, 0)
+_, json_len = struct.unpack_from("<II", data, 8)
+if size_len != 4 or 16 + json_len > len(data) or 8 + header_size > len(data):
+    fail("is not an asar archive")
+try:
+    header = json.loads(data[16 : 16 + json_len])
+except ValueError:
+    fail("is not an asar archive (its header is not JSON)")
+entry = header.get("files", {}).get("package.json") if isinstance(header, dict) else None
+if not isinstance(entry, dict) or "offset" not in entry or "size" not in entry or entry.get("unpacked"):
+    fail("has no package.json packed at its top")
+start = 8 + header_size + int(entry["offset"])
+end = start + int(entry["size"])
+if end > len(data):
+    fail("is cut short (its package.json runs past the end)")
+try:
+    pkg = json.loads(data[start:end])
+except ValueError:
+    fail("has a package.json that is not JSON")
+name = pkg.get("productName") or pkg.get("name") if isinstance(pkg, dict) else None
+if not isinstance(name, str) or not name:
+    fail("has a package.json with no productName and no name")
+print(name)
+PY
+}
+
+# fixture_asar <out> <version>: an asar holding one package.json, packed as
+# electron-builder packs desktop/package.json: the config's extraMetadata over
+# it, the version set, scripts and devDependencies left out.
+fixture_asar() {
+    python3 -I - desktop/package.json desktop/build/electron-builder.config.json "$2" "$1" <<'PY'
+import json, struct, sys
+
+pkg_path, cfg_path, version, out = sys.argv[1:5]
+with open(pkg_path) as f:
+    pkg = json.load(f)
+with open(cfg_path) as f:
+    cfg = json.load(f)
+pkg.update(cfg.get("extraMetadata") or {})
+pkg["version"] = version
+for key in ("scripts", "devDependencies"):
+    pkg.pop(key, None)
+body = (json.dumps(pkg, indent=2) + "\n").encode()
+header = json.dumps({"files": {"package.json": {"size": len(body), "offset": "0"}}}, separators=(",", ":")).encode()
+payload = struct.pack("<I", len(header)) + header + b"\0" * (-len(header) % 4)
+pickle = struct.pack("<I", len(payload)) + payload
+with open(out, "wb") as f:
+    f.write(struct.pack("<II", 4, len(pickle)) + pickle + body)
+PY
 }
 
 broken=
@@ -380,6 +509,7 @@ fi
 for tool in dpkg-deb dpkg-shlibdeps; do
     command -v "$tool" >/dev/null 2>&1 || fail "$tool is not installed (apt install dpkg-dev)"
 done
+command -v python3 >/dev/null 2>&1 || fail "python3 is not installed (it reads the package.json packed in each .deb's app.asar)"
 
 work=$(mktemp -d)
 cname=conch-deb-lifecycle-$$
@@ -400,7 +530,7 @@ else
         cp "$elf" "$1/conch-desktop"
         printf '#!/bin/sh\necho "conch-voice %s (fixture)"\n' "${2#v}" >"$1/resources/conch-voice"
         chmod 755 "$1/resources/conch-voice"
-        echo fixture >"$1/resources/app.asar"
+        fixture_asar "$1/resources/app.asar" "${2#v}" || fail "cannot write the fixture app.asar"
         printf '%s\n' "${2#v}" >"$1/resources/version"
         echo fixture >"$1/locales/en-US.pak"
     }
@@ -412,6 +542,27 @@ else
     CONCH_RELEASE_VERSION=v0.1.0-alpha.2 ./scripts/desktop-deb.sh "$work/tree-new" "$work/n" >/dev/null || fail "cannot build the fixture package (new)"
     cp "$work"/o/*.deb "$work/debs/old.deb"
     cp "$work"/n/*.deb "$work/debs/new.deb"
+fi
+
+# The user's data folder, from the package.json packed in each package's
+# app.asar (the header says why). Both must name the same folder, and it must
+# be the documented one.
+# deb_app_name <old|new>: asar_name of that package's app.asar.
+deb_app_name() {
+    dpkg-deb --fsys-tarfile "$work/debs/$1.deb" | tar -xOf - ./opt/conch-desktop/resources/app.asar >"$work/$1.asar" ||
+        fail "the $1 package has no /opt/conch-desktop/resources/app.asar"
+    asar_name "$work/$1.asar" || fail "cannot read the package.json packed in the $1 package's app.asar"
+}
+data_dir_old=$(deb_app_name old)
+data_dir_new=$(deb_app_name new)
+[ "$data_dir_old" = "$data_dir_new" ] ||
+    fail "the old package's app is named '$data_dir_old' and the new one's '$data_dir_new': the upgrade would leave every user's data behind in ~/.config/$data_dir_old"
+data_dir=$data_dir_new
+[ "$data_dir" = "$expected_data_dir" ] ||
+    fail "the package.json packed in app.asar names the app '$data_dir', so its data is in ~/.config/$data_dir, not ~/.config/$expected_data_dir (docs/desktop/linux.md): a rename moves every user's data. Decide it, migrate it, and update the docs and this script"
+echo "desktop-deb-lifecycle: the app's data folder is ~/.config/$data_dir (from the package.json packed in app.asar)"
+
+if [ "$real" = 0 ]; then
     if [ -n "$broken" ]; then
         for n in old new; do
             dpkg-deb -R "$work/debs/$n.deb" "$work/x-$n"
@@ -421,11 +572,11 @@ else
                 mv "$work/x-$n/control.new" "$work/x-$n/DEBIAN/control"
                 chmod 644 "$work/x-$n/DEBIAN/control"
             else
-                # postinst appends to a file under the test user's ~/.config/Conch.
-                sed '/^set -e$/a\
-mkdir -p /home/tester/.config/Conch\
-date +%s%N >>/home/tester/.config/Conch/touched' "$work/x-$n/DEBIAN/postinst" >"$work/x-$n/postinst.new"
-                grep -q touched "$work/x-$n/postinst.new" || fail "cannot add the user-data write to the fixture postinst"
+                # postinst appends to the seeded settings.json in the test
+                # user's data folder, once it is there (so at the upgrade).
+                sed "/^set -e\$/a\\
+f=/home/tester/.config/$data_dir/settings.json; if [ -f \"\$f\" ]; then date +%s%N >>\"\$f\"; fi" "$work/x-$n/DEBIAN/postinst" >"$work/x-$n/postinst.new"
+                grep -q 'settings.json' "$work/x-$n/postinst.new" || fail "cannot add the user-data write to the fixture postinst"
                 mv "$work/x-$n/postinst.new" "$work/x-$n/DEBIAN/postinst"
                 chmod 755 "$work/x-$n/DEBIAN/postinst"
             fi
@@ -442,6 +593,7 @@ if [ "$real" = 1 ]; then real_env=1; fi
 # The names inside are fixed: old.deb and new.deb.
 set +e
 docker run --rm --name "$cname" -e CONCH_LIFECYCLE_INSIDE=1 -e "CONCH_LIFECYCLE_REAL=$real_env" \
+    -e "CONCH_LIFECYCLE_DATA_DIR=$data_dir" \
     -v "$work/debs:/debs:ro" -v "$root/scripts/desktop-deb-lifecycle.sh:/lifecycle.sh:ro" \
     "$image" bash /lifecycle.sh --inside old.deb new.deb >"$work/out" 2>&1
 status=$?
@@ -456,11 +608,11 @@ if [ "$broken" = ldd ]; then
     fail "the package without Depends did not fail at the ldd check (the test cannot catch a missing Depends)"
 fi
 if [ "$broken" = userdata ]; then
-    if [ "$status" -ne 0 ] && grep -q "FAIL: step 3 upgrade .*: the user's files under ~/.config/Conch changed in the upgrade" "$work/out"; then
-        echo "desktop-deb-lifecycle: OK: a postinst that writes under ~/.config/Conch fails at the user-data check, as it must"
+    if [ "$status" -ne 0 ] && grep -qF "FAIL: step 3 upgrade " "$work/out" && grep -qF ": the user's ~/.config/$data_dir/settings.json changed in the upgrade" "$work/out"; then
+        echo "desktop-deb-lifecycle: OK: a postinst that writes under ~/.config/$data_dir fails at the user-data check, as it must"
         exit 0
     fi
-    fail "the package whose postinst writes under ~/.config/Conch did not fail at the user-data check (the test cannot catch a changed user file)"
+    fail "the package whose postinst writes under ~/.config/$data_dir did not fail at the user-data check (the test cannot catch a changed user file)"
 fi
 [ "$status" -eq 0 ] || fail "the container run failed (see above)"
 echo "desktop-deb-lifecycle: OK (the app was not run; #1602 covers the running app)"

@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { DocumentGate } from '../../main/document.ts';
+import { Lifecycle } from '../../main/lifecycle.ts';
+import { WindowsLifecycle, type WindowsPowerEvent } from '../../main/lifecycle-windows.ts';
 import { Notifications, type NotificationOptions } from '../../main/notifications.ts';
 import { NOTIFICATION_EVENTS } from '../../shared/bridge-names.ts';
 
@@ -53,7 +55,7 @@ function harness() {
     show: vi.fn(),
     focus: vi.fn(),
   };
-  let current = { activation, gate };
+  let current: { activation: object; gate: DocumentGate } | null = { activation, gate };
   const notifications = new Notifications({
     Notification: FakeNotification,
     icon: '/app/icon.png',
@@ -61,7 +63,31 @@ function harness() {
     current: () => current,
   });
   const request = { tag: 'tag-1', title: 'Mention in #general', body: 'private message', channel: 'general' };
-  return { activation, other, gate, sent, window, notifications, request, setCurrent: (value: { activation: object; gate: DocumentGate }) => { current = value; } };
+  return { activation, other, gate, sent, window, notifications, request, setCurrent: (value: typeof current) => { current = value; } };
+}
+
+// Exercise the real lifecycle-to-notification hook, rather than only spying
+// on setLocked. The Windows source is fake; no Electron or OS toast is needed.
+function lifecycleHarness() {
+  const h = harness();
+  const rules = new Lifecycle({
+    voice: {
+      state: () => ({ status: 'idle' }),
+      setMute: () => Promise.resolve({ ok: true }),
+      leave: () => Promise.resolve(),
+      setLockMuted: () => undefined,
+    },
+    companion: { end: () => Promise.resolve() },
+    notifications: h.notifications,
+    log: () => undefined,
+  });
+  const show = () => {
+    expect(h.notifications.show(h.activation, h.gate.generation, h.request)).toBe(true);
+    const notification = FakeNotification.all.at(-1);
+    if (notification === undefined) throw new Error('notification not constructed');
+    return notification;
+  };
+  return { ...h, rules, show };
 }
 
 beforeEach(() => {
@@ -112,7 +138,7 @@ describe('desktop notifications (issue #1590)', () => {
     expect(FakeNotification.all[0]?.closed).toBe(true);
   });
 
-  it('only shows the window for a stale document or another activation', () => {
+  it('does nothing for a stale document or another activation', () => {
     const h = harness();
     h.notifications.show(h.activation, h.gate.generation, h.request);
     h.gate.begin();
@@ -126,8 +152,50 @@ describe('desktop notifications (issue #1590)', () => {
     h.notifications.show(h.activation, h.gate.generation, { ...h.request, tag: 'old-profile' });
     h.setCurrent({ activation: h.other, gate: h.gate });
     FakeNotification.all[1]?.emit('click');
-    expect(h.window.show).toHaveBeenCalledOnce();
+    expect(h.window.show).not.toHaveBeenCalled();
+    expect(h.window.focus).not.toHaveBeenCalled();
+    expect(h.window.restore).not.toHaveBeenCalled();
     expect(h.sent).toEqual([]);
+  });
+
+  it('does nothing for a removed profile, even if a native click arrives late', () => {
+    const h = harness();
+    h.notifications.show(h.activation, h.gate.generation, h.request);
+    h.setCurrent(null);
+    FakeNotification.all[0]?.emit('click');
+    expect(h.sent).toEqual([]);
+    expect(h.window.show).not.toHaveBeenCalled();
+    expect(h.window.focus).not.toHaveBeenCalled();
+    expect(h.window.restore).not.toHaveBeenCalled();
+    expect(FakeNotification.all[0]?.closed).toBe(true);
+  });
+
+  it('does not route to a profile that changes while the window is focused', () => {
+    const h = harness();
+    h.notifications.show(h.activation, h.gate.generation, h.request);
+    h.window.focus.mockImplementation(() => { h.setCurrent({ activation: h.other, gate: h.gate }); });
+    FakeNotification.all[0]?.emit('click');
+    expect(h.sent).toEqual([]);
+    expect(FakeNotification.all[0]?.closed).toBe(true);
+  });
+
+  it('preserves the privacy text supplied by the shared renderer', () => {
+    const h = harness();
+    h.notifications.show(h.activation, h.gate.generation, { ...h.request, body: '[spoiler]' });
+    expect(FakeNotification.all[0]?.options.body).toBe('[spoiler]');
+    expect(JSON.stringify(FakeNotification.all[0]?.options)).not.toContain(h.request.body);
+  });
+
+  it('forgets a notification closed when the shared renderer mutes its channel', () => {
+    const h = harness();
+    h.notifications.show(h.activation, h.gate.generation, h.request);
+    // useNotifications.toggleMute closes its NativeNotification; notifyClose
+    // reaches this same ownership-scoped close on Linux and Windows.
+    expect(h.notifications.close(h.activation, h.gate.generation, h.request.tag)).toBe(true);
+    FakeNotification.all[0]?.emit('click');
+    expect(FakeNotification.all[0]?.closed).toBe(true);
+    expect(h.sent).toEqual([]);
+    expect(h.window.focus).not.toHaveBeenCalled();
   });
 
   it('closes one by tag and closes every notification of an activation on teardown', () => {
@@ -206,5 +274,55 @@ describe('desktop notifications (issue #1590)', () => {
     expect(FakeNotification.all[0]?.closed).toBe(true);
     expect(FakeNotification.all[1]?.closed).toBe(true);
     expect(FakeNotification.all[2]?.closed).toBe(false);
+  });
+});
+
+describe('Windows notifications use shared lifecycle redaction (#1957)', () => {
+  it.each(['locked', 'unknown', 'active'])('starts with a %s lock state and follows powerMonitor events', (state) => {
+    const h = lifecycleHarness();
+    const listeners = new Map<WindowsPowerEvent, () => void>();
+    const watcher = new WindowsLifecycle({
+      rules: h.rules,
+      powerMonitor: {
+        on: (event, listener) => { listeners.set(event, listener); },
+        removeListener: (event) => { listeners.delete(event); },
+        getSystemIdleState: () => state,
+      },
+    });
+    watcher.start();
+    const first = h.show();
+    expect(first.options).toEqual({
+      title: state === 'active' ? h.request.title : 'Conch',
+      body: state === 'active' ? h.request.body : 'New message',
+      icon: '/app/icon.png',
+    });
+    listeners.get('unlock-screen')?.();
+    const unlocked = h.show();
+    expect(unlocked.options.body).toBe(h.request.body);
+    listeners.get('lock-screen')?.();
+    expect(first.closed).toBe(true);
+    expect(unlocked.closed).toBe(true);
+    first.emit('click');
+    expect(h.sent).toEqual([]);
+    expect(h.show().options).toEqual({ title: 'Conch', body: 'New message', icon: '/app/icon.png' });
+    listeners.get('unlock-screen')?.();
+    expect(h.show().options.body).toBe(h.request.body);
+    watcher.stop();
+    expect(h.show().options.body).toBe('New message');
+  });
+
+  it('keeps the Linux logind rule: unknown and locked redact, observed unlock restores text', async () => {
+    const h = lifecycleHarness();
+    expect(h.show().options).toEqual({ title: 'Conch', body: 'New message', icon: '/app/icon.png' });
+    h.rules.observe('available');
+    const unlocked = h.show();
+    expect(unlocked.options.body).toBe(h.request.body);
+    await h.rules.lockSignal('logind', true);
+    expect(unlocked.closed).toBe(true);
+    expect(h.show().options.body).toBe('New message');
+    await h.rules.lockSignal('logind', false);
+    expect(h.show().options.body).toBe(h.request.body);
+    h.rules.observe('unavailable');
+    expect(h.show().options.body).toBe('New message');
   });
 });

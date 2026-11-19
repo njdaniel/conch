@@ -7,7 +7,9 @@
 // 12-screen-share, which has LiveKit.
 import type { BrowserContextOptions, Locator, Page, WebSocketRoute } from '@playwright/test';
 import { voicePresenceV2, type VoicePresenceV2 } from '../src/schema/voice';
-import { channelButton, expect, expectFits, mainNav, messages, openChannel, phoneSizes, showView, signIn, test } from './fixtures';
+import { channelButton, drawDesktopStrip, expect, expectFits, mainNav, messages, openChannel, phoneSizes, showView, signIn, statusLine, test } from './fixtures';
+import { runV1 } from '../src/schema/run';
+import { openSession } from './api';
 import { call, ok, type World } from './world';
 
 const sizes: readonly (readonly [string, BrowserContextOptions])[] = [
@@ -16,6 +18,51 @@ const sizes: readonly (readonly [string, BrowserContextOptions])[] = [
   ['1440×900', { viewport: { width: 1440, height: 900 } }],
   ['1440×900 at 200%', { viewport: { width: 720, height: 450 }, deviceScaleFactor: 2 }],
 ];
+
+// Issue #1931: a layout probe using the shipped stylesheet, without LiveKit.
+// The conversation's intrinsic height exceeds the column: only a compact
+// stage may give its track a zero minimum instead of the min-content floor.
+// Both compact stage components use this rule. The former nested :has()
+// was discarded by Chromium, leaving the conversation at 300 px throughout.
+test('P1931 a compact stage lets the conversation use the remaining track', async ({ meet, world }) => {
+  const { page } = await meet({ viewport: { width: 1440, height: 900 } });
+  await page.goto(world.appUrl);
+  await page.evaluate(() => {
+    const centre = document.createElement('div');
+    centre.id = 'compact-stage-probe';
+    centre.className = 'centre';
+    centre.style.width = '600px';
+    centre.style.height = '200px';
+    const stage = document.createElement('div');
+    stage.className = 'stage';
+    const call = document.createElement('div');
+    // call-stage uses display: contents; its child supplies the row's height.
+    const row = document.createElement('div');
+    row.style.height = '44px';
+    row.style.flexShrink = '0';
+    call.append(row);
+    stage.append(call);
+    const conversation = document.createElement('div');
+    conversation.style.minHeight = '0';
+    const content = document.createElement('div');
+    content.style.height = '300px';
+    conversation.append(content);
+    centre.append(stage, conversation);
+    document.body.append(centre);
+  });
+  const centre = page.locator('#compact-stage-probe');
+  await expect(centre).toHaveCSS('display', 'grid');
+  const conversation = centre.locator(':scope > div').nth(1);
+  const height = () => conversation.evaluate((el) => el.getBoundingClientRect().height);
+  for (const component of ['call-view', 'call-stage']) {
+    const call = centre.locator('.stage > div');
+    await call.evaluate((el, name) => { el.setAttribute('class', name); }, component);
+    await expect.poll(height, 'an expanded stage keeps the min-content floor').toBeGreaterThanOrEqual(300);
+    await call.evaluate((el) => { el.classList.add('compact'); });
+    await expect.poll(height, `${component}: a compact stage leaves room for the conversation`).toBeGreaterThan(0);
+    await expect.poll(height, `${component}: the conversation fits below the compact row`).toBeLessThan(200);
+  }
+});
 
 async function must(world: World, token: string, method: 'POST' | 'PUT', path: string, body?: unknown): Promise<unknown> {
   const reply = await call(world, token, method, path, body);
@@ -396,3 +443,283 @@ for (const [size, options] of phoneSizes) {
     expect(sessions, `${size}: nothing asked for a voice session`).toBe(0);
   });
 }
+
+// ---------------------------------------------------------------- issue #1813
+
+// In a short desktop window the page scrolls as a document (issue #536). It
+// used to leave an empty band under the composer: the members list made the
+// middle row taller than the conversation. Now the conversation sets the row,
+// so at every height, with or without voice on the server, with a notice bar
+// above the page and under the desktop app's strip (issue #1980), the composer
+// sits on the voice dock, and with the page
+// scrolled to its end the composer is whole. Over 560 px the page fills the
+// window unless the dock leaves the conversation too little, when it scrolls the
+// same way (issue #1815), so 561, 600 and 640 are here too. Joined and watching
+// a share, which hold the dock up, are in 12-screen-share, which has LiveKit,
+// under the desktop app's strip as well.
+//
+// Each state has one page per pixel ratio, resized through the heights: every
+// page is one more live session on the one credential, which may hold 16
+// (MaxLiveSessionsPerCredential), and the test's pages all live until it ends.
+// Past the budget the page still draws, but its members panel says "Could not
+// start a session", which is not the page these cases mean to measure.
+const shortWindows: readonly (readonly [string, { readonly width: number; readonly height: number }, number])[] = [
+  ...[400, 470, 560, 561, 600, 640].map((height) => [`1215×${String(height)}`, { width: 1215, height }, 1] as const),
+  ['720×450 at 200%', { width: 720, height: 450 }, 2],
+];
+
+// With voice set up on the server the dock is taller: the strip's roster, its
+// buttons and its status (about 130 px against 58 px without). In the desktop
+// app the client is under the app's strip, which takes its own height from the
+// page (issue #1980).
+const dockStates = ['no voice', 'voice set up, nobody joined', 'a notice bar above the page', "voice set up, under the desktop app's strip"] as const;
+
+test('P1813 in a short window the composer stays on the voice dock, whole, as the person scrolls', async ({ meet, secrets, world }) => {
+  const tag = `p1813-${String(Date.now())}`;
+  const channel = `${tag}-c`;
+  await must(world, world.tokens.operator, 'POST', '/v0/channels', { name: channel });
+  const me = await member(world, channel, `${tag}-me`);
+  secrets.push(me.token);
+  const others: Member[] = [];
+  // A members list longer than any of these windows.
+  for (let i = 0; i < 30; i++) others.push(await member(world, channel, `${tag}-roster-${String(i)}`));
+  for (const o of others) secrets.push(o.token);
+  for (let i = 0; i < 60; i++) {
+    await must(world, me.token, 'POST', `/v2/channels/${encodeURIComponent(channel)}/messages`, { body: `${tag} message ${String(i)} ${'words '.repeat(i % 7 === 0 ? 40 : 3)}` });
+  }
+
+  for (const state of dockStates) {
+    // The state's page at each pixel ratio, opened at the first window of it.
+    const pages = new Map<number, Page>();
+    for (const [size, viewport, deviceScaleFactor] of shortWindows) {
+      let page = pages.get(deviceScaleFactor);
+      if (page === undefined) {
+        ({ page } = await meet({ viewport, deviceScaleFactor }));
+        pages.set(deviceScaleFactor, page);
+        if (state === 'voice set up, nobody joined' || state === "voice set up, under the desktop app's strip") await servePresence(page, world, me.token, channel, others.slice(0, 2).map((o) => o.id));
+        await signIn(page, world, me.token, me.name);
+        await openChannel(page, channel);
+        await expect(messages(page).getByText(`${tag} message 59`)).toBeVisible();
+        if (state === "voice set up, under the desktop app's strip") await drawDesktopStrip(page);
+        if (state === 'a notice bar above the page') {
+          // What the update notice does (UpdateNotice.tsx): a bar above the
+          // page, its height in --notice-h on the root.
+          await page.evaluate(() => {
+            const bar = document.createElement('div');
+            bar.textContent = 'A new version is ready';
+            bar.style.height = '44px';
+            document.body.prepend(bar);
+            document.documentElement.style.setProperty('--notice-h', '44px');
+          });
+        }
+      } else {
+        await page.setViewportSize(viewport);
+        await page.evaluate(() => {
+          window.scrollTo(0, 0);
+        });
+      }
+      // What is measured is the signed-in lobby with its members list, not a
+      // page that ran out of sessions.
+      await expect(statusLine(page)).toContainText('Connected');
+      await expect(page.getByText('Could not start a session'), `${size}, ${state}: the members panel started a session`).toHaveCount(0);
+      const composer = page.locator('.composer');
+      const dock = page.locator('.dock');
+      const screen = page.viewportSize();
+      if (screen === null) throw new Error('no window size');
+
+      // The composer's bottom edge is on the dock's top edge; and, with the
+      // page scrolled to its end, the composer and the dock are whole inside
+      // the window.
+      const settled = async (step: string): Promise<void> => {
+        const where = `${size}, ${state}, ${step}`;
+        await expect(async () => {
+          const c = await boxOf(composer, `${where}: the composer`);
+          const d = await boxOf(dock, `${where}: the dock`);
+          expect(Math.abs(c.y + c.height - d.y), `${where}: the composer is ${String(d.y - c.y - c.height)} px above the dock`).toBeLessThanOrEqual(1);
+        }).toPass({ timeout: 2000 });
+        await page.evaluate(() => {
+          window.scrollTo(0, document.documentElement.scrollHeight);
+        });
+        const c = await boxOf(composer, `${where}: the composer at the end of the page`);
+        const d = await boxOf(dock, `${where}: the dock at the end of the page`);
+        expect(c.y, `${where}: the composer's top at the end of the page`).toBeGreaterThanOrEqual(-0.5);
+        expect(c.y + c.height, `${where}: the composer's bottom at the end of the page`).toBeLessThanOrEqual(d.y + 1);
+        expect(d.y + d.height, `${where}: the dock's bottom at the end of the page`).toBeLessThanOrEqual(screen.height + 0.5);
+        await page.evaluate(() => {
+          window.scrollTo(0, 0);
+        });
+      };
+      const wheel = async (x: number, y: number, dy: number, step: string): Promise<void> => {
+        await page.mouse.move(x, y);
+        await page.mouse.wheel(0, dy);
+        await settled(step);
+      };
+
+      await settled('at the start');
+      const box = await boxOf(messages(page), `${size}: the log`);
+      const mid = { x: box.x + box.width / 2, y: Math.min(box.y + box.height / 2, screen.height - 10) };
+      await wheel(mid.x, mid.y, -3000, 'wheel up past the top of the messages');
+      await wheel(mid.x, mid.y, 6000, 'wheel down to the end');
+      await wheel(mid.x, mid.y, 3000, 'wheel past the end of the messages');
+      await wheel(20, screen.height - 20, 2000, 'wheel in the bottom corner');
+      await wheel(screen.width - 20, screen.height / 2, 2000, 'wheel over the members column');
+      await page.keyboard.press('End');
+      await settled('the End key');
+    }
+  }
+});
+
+// ---------------------------------------------------------------- issue #1815
+
+// Over 560 px the page grows past the window only for what a tall dock
+// squeezes: the composer and the stage's 300 px (issue #1815). Anything else
+// tall in the centre column keeps scrolling inside itself, as in the
+// full-height layout. Run detail with a long task and a many-line outcome, at
+// 1440×900 and in a window just over 560 px: the page does not scroll, the
+// dock is whole in the window, and the run detail ends on the dock and
+// scrolls inside itself to its last line.
+test('P1815 a long Run detail scrolls inside its column, and the dock stays in the window', async ({ meet, world }) => {
+  const tag = `p1815-${String(Date.now())}`;
+  const session = await openSession(world, world.tokens.worker, `${tag}-client`);
+  // The longest task the schema allows (one line), and an outcome of many lines.
+  const task = `${tag} ${'a long task for the layout '.repeat(18)}`.slice(0, 512);
+  const outcome = Array.from({ length: 120 }, (_, i) => String(i)).join('\n').slice(0, 512);
+  const started = await ok(world, world.tokens.worker, 'POST', `/v1/sessions/${String(session.id)}/runs`, runV1, { channel: 'general', task });
+  await must(world, world.tokens.worker, 'POST', `/v1/runs/${String(started.id)}/state`, { state: 'running', outcome });
+  try {
+    const { page } = await meet({ viewport: { width: 1440, height: 900 } });
+    await signIn(page, world, world.tokens.browser, 'browser-test');
+    await openChannel(page, 'general');
+    const panel = page.getByRole('region', { name: 'Members list' });
+    await panel.getByRole('button', { name: 'Show sessions for worker-test' }).click();
+    await panel.getByRole('button', { name: new RegExp(`^Run #${String(started.id)} · `) }).click();
+    const detail = page.getByRole('article', { name: 'Run detail' });
+    await expect(detail.getByRole('heading', { name: `Run #${String(started.id)}` })).toBeVisible();
+    const outcomeText = detail.locator('dd.ag-prose');
+    await expect(outcomeText).toBeVisible();
+    const dock = page.locator('.dock');
+
+    for (const viewport of [{ width: 1440, height: 900 }, { width: 1215, height: 600 }]) {
+      await page.setViewportSize(viewport);
+      const where = `${String(viewport.width)}×${String(viewport.height)}, a long Run detail`;
+      await expect(async () => {
+        const scroll = await page.evaluate(() => ({ page: document.documentElement.scrollHeight, window: window.innerHeight }));
+        expect(scroll.page, `${where}: the page is ${String(scroll.page)} px tall in a ${String(scroll.window)} px window`).toBeLessThanOrEqual(scroll.window + 1);
+        const d = await boxOf(dock, `${where}: the dock`);
+        expect(d.y, `${where}: the dock's top`).toBeGreaterThanOrEqual(0);
+        expect(d.y + d.height, `${where}: the dock's bottom`).toBeLessThanOrEqual(viewport.height + 0.5);
+        const r = await boxOf(detail, `${where}: the run detail`);
+        expect(r.y + r.height, `${where}: the run detail's bottom`).toBeLessThanOrEqual(d.y + 1);
+      }).toPass({ timeout: 5000 });
+      // It scrolls inside itself, to its last line, above the dock.
+      const inside = await detail.evaluate((el) => {
+        el.scrollTop = el.scrollHeight;
+        return { scrolled: el.scrollTop, overflow: el.scrollHeight - el.clientHeight };
+      });
+      expect(inside.overflow, `${where}: the run detail is taller than its box`).toBeGreaterThan(0);
+      expect(inside.scrolled, `${where}: the run detail scrolls`).toBeGreaterThan(0);
+      const last = await boxOf(outcomeText, `${where}: the outcome`);
+      const d = await boxOf(dock, `${where}: the dock`);
+      expect(last.y + last.height, `${where}: the outcome's end, scrolled to`).toBeLessThanOrEqual(d.y + 1);
+    }
+  } finally {
+    await call(world, world.tokens.worker, 'DELETE', `/v1/sessions/${String(session.id)}`);
+  }
+});
+
+// ---------------------------------------------------------------- issue #1980
+
+// A maximized window on a Windows laptop's screen: the taskbar (48 px) and the
+// window's title bar (32 px) come off the screen's height. Not in voice and
+// not watching, with voice set up on the server, a members list and a log
+// longer than the window: the page does not scroll and the voice dock is whole
+// in the window. In the desktop app the client sits under the app's strip
+// (ProfileBar's header.desktop-bar), in #root beside the lobby: the lobby
+// takes what the strip leaves of the window. It used to be a whole window
+// tall under the strip, so the dock was the strip's height under the window's
+// edge and the page scrolled; the browser cases passed throughout.
+const windowsScreens = [
+  [1280, 800],
+  [1366, 768],
+  [1280, 720],
+] as const;
+const windowsChrome = 48 + 32;
+const clientPlaces = ['in a browser', "under the desktop app's strip"] as const;
+
+test('P1980 on a Windows laptop screen, not in voice, the dock is in the window and the page does not scroll', async ({ meet, secrets, world }) => {
+  const tag = `p1980-${String(Date.now())}`;
+  const channel = `${tag}-c`;
+  await must(world, world.tokens.operator, 'POST', '/v0/channels', { name: channel });
+  const me = await member(world, channel, `${tag}-me`);
+  secrets.push(me.token);
+  const others: Member[] = [];
+  for (let i = 0; i < 30; i++) others.push(await member(world, channel, `${tag}-roster-${String(i)}`));
+  for (const o of others) secrets.push(o.token);
+  for (let i = 0; i < 40; i++) {
+    await must(world, me.token, 'POST', `/v2/channels/${encodeURIComponent(channel)}/messages`, { body: `${tag} message ${String(i)} ${'words '.repeat(i % 7 === 0 ? 40 : 3)}` });
+  }
+
+  // One page per place, resized through the screens (one live session each on
+  // the credential; see P1813).
+  for (const place of clientPlaces) {
+    const { page } = await meet({ viewport: { width: windowsScreens[0][0], height: windowsScreens[0][1] - windowsChrome } });
+    await servePresence(page, world, me.token, channel, []);
+    await signIn(page, world, me.token, me.name);
+    await openChannel(page, channel);
+    await expect(messages(page).getByText(`${tag} message 39`)).toBeVisible();
+    const dock = page.locator('.dock');
+    await expect(dock.getByRole('button', { name: 'Join voice' })).toBeVisible();
+    if (place === "under the desktop app's strip") await drawDesktopStrip(page);
+    for (const [width, height] of windowsScreens) {
+      const viewport = { width, height: height - windowsChrome };
+      await page.setViewportSize(viewport);
+      const where = `a maximized window (${String(viewport.width)}×${String(viewport.height)}) on a ${String(width)}×${String(height)} screen, ${place}`;
+      await expect(statusLine(page)).toContainText('Connected');
+      await expect(page.getByText('Could not start a session'), `${where}: the members panel started a session`).toHaveCount(0);
+      // Nothing overflows here, so the page does not scroll and the lobby
+      // fills the window: the dock is on the window's bottom edge, not
+      // floating above a blank band.
+      await expect(async () => {
+        const scroll = await page.evaluate(() => ({ page: document.documentElement.scrollHeight, window: window.innerHeight }));
+        expect(scroll.page, `${where}: the page is ${String(scroll.page)} px tall in a ${String(scroll.window)} px window`).toBeLessThanOrEqual(scroll.window + 1);
+        const d = await boxOf(dock, `${where}: the dock`);
+        expect(d.y, `${where}: the dock's top`).toBeGreaterThanOrEqual(0);
+        expect(Math.abs(d.y + d.height - viewport.height), `${where}: the dock's bottom is at ${String(d.y + d.height)}, the window's at ${String(viewport.height)}`).toBeLessThanOrEqual(1);
+      }).toPass({ timeout: 5000 });
+      // The composer still sits on the dock.
+      const c = await boxOf(page.locator('.composer'), `${where}: the composer`);
+      const d = await boxOf(dock, `${where}: the dock`);
+      expect(Math.abs(c.y + c.height - d.y), `${where}: the composer is ${String(d.y - c.y - c.height)} px above the dock`).toBeLessThanOrEqual(1);
+    }
+  }
+});
+
+// The desktop app draws its strip over the sign-in card too, while it checks a
+// kept credential ("Checking your sign-in…") and over the form after. The
+// strip's layout is the lobby's alone (issue #1980): the card keeps the width
+// it has in a browser, so it does not start narrow, fitted to its one line,
+// and jump wider when the form replaces it. The check is held until the card
+// has been measured, then answered as an expired credential, which brings the
+// form back in the same page under the same strip.
+test('P1980 under the desktop app\'s strip the "Checking your sign-in" card is as wide as the form', async ({ meet, world }) => {
+  const { page } = await meet({ viewport: { width: 1280, height: 720 } });
+  await signIn(page, world, world.tokens.browser, 'browser-test');
+  let answer: () => void = () => undefined;
+  const answered = new Promise<void>((resolve) => {
+    answer = resolve;
+  });
+  await page.route(/\/v1\/whoami$/, async (route) => {
+    await answered;
+    await route.fulfill({ status: 401, contentType: 'application/json', body: '{"error":"unauthorized"}' });
+  });
+  await page.reload();
+  const card = page.locator('#root > main.signin');
+  await expect(card.getByRole('status')).toHaveText('Checking your sign-in…');
+  await drawDesktopStrip(page);
+  const checking = await boxOf(card, 'the "Checking your sign-in" card');
+  answer();
+  await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
+  await expect(page.locator('#root > .desktop-bar'), 'the strip is still drawn over the form').toHaveCount(1);
+  const form = await boxOf(card, 'the sign-in form');
+  expect(Math.abs(checking.width - form.width), `the checking card is ${String(checking.width)} px wide, the form ${String(form.width)} px`).toBeLessThanOrEqual(1);
+});

@@ -170,7 +170,7 @@ type voiceControlCase struct {
 // as one: cases.json is published and does not change
 // (scripts/schema-compat.sh), so the cases pinned after it are in the files
 // beside it.
-var voiceControlCaseFiles = []string{"cases.json", "cases-strings.json"}
+var voiceControlCaseFiles = []string{"cases.json", "cases-strings.json", "cases-integers.json"}
 
 func loadVoiceControlCases(t *testing.T) []voiceControlCase {
 	t.Helper()

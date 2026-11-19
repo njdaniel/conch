@@ -288,9 +288,13 @@ pub enum Error {
         status: u16,
     },
 
-    /// No answer within the client's timeout.
+    /// The request or the presence socket upgrade timed out.
     #[error("conchd did not answer within the timeout")]
     Timeout,
+
+    /// The response headers arrived, but reading the body exceeded the client's timeout.
+    #[error("conchd did not answer within the timeout")]
+    BodyTimeout,
 
     /// No connection could be made: refused, unreachable, no such host, or TLS failed.
     #[error("could not connect to conchd: {detail}")]

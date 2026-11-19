@@ -3,10 +3,11 @@
 // previewed through POST /v2/invites/preview and makes an account (a name and
 // a password together) through POST /v2/invites/redeem. Guests are removed
 // for now (issue #1005), so the page offers an account when the server's
-// preview says the link allows it, and nothing else: it never routes to the
-// guest flow. The code is a prop held in memory by App, sent only in request
-// bodies, and never rendered: nothing on this page shows it. The one other
-// place it goes is the conch:// link of the "Open in the desktop app" button
+// preview says the link allows it. First choose whether to sign in or make
+// an account; the page never routes to the guest flow. The code is a prop
+// held in memory by App, sent only in request bodies, and never rendered:
+// nothing on this page shows it. The one other place it goes is the
+// conch:// link of the "Open in the desktop app" button
 // (issue #1592), made at the click and handed to the platform; it is not in
 // the page, and the page never navigates there by itself.
 import { useEffect, useRef, useState } from 'react';
@@ -170,6 +171,8 @@ export function Invite({
   const [preview, setPreview] = useState<Preview>({ state: 'loading' });
   const [attempt, setAttempt] = useState(0);
   const [busy, setBusy] = useState(false);
+  // Making an account starts only after the person chooses it.
+  const [makingAccount, setMakingAccount] = useState(false);
   const [problem, setProblem] = useState<AccountProblem | null>(null);
   const [untold, setUntold] = useState(false);
   // Redeeming found another sign-in held here after all.
@@ -177,7 +180,13 @@ export function Invite({
   const heading = useRef<HTMLHeadingElement>(null);
 
   useEffect(() => {
+    setMakingAccount(false);
+    setProblem(null);
+  }, [inviteCode]);
+
+  useEffect(() => {
     let live = true;
+    setPreview({ state: 'loading' });
     void api.previewMemberLink(inviteCode).then((result) => {
       if (!live) return;
       if (result.ok) setPreview({ state: 'ready', preview: result.value });
@@ -189,8 +198,8 @@ export function Invite({
   }, [inviteCode, attempt]);
 
   useEffect(() => {
-    heading.current?.focus();
-  }, [preview.state]);
+    if (preview.state !== 'ready' || !makingAccount) heading.current?.focus();
+  }, [preview.state, makingAccount]);
 
   const ready = preview.state === 'ready' ? preview.preview : null;
   const offer = ready === null ? null : offerOf(ready);
@@ -199,6 +208,8 @@ export function Invite({
   // but only after the password had crossed the network.
   const insecure = needsHttps(origin);
   const way = offer === null || insecure ? null : offer.account ? 'account' : null;
+
+  const canChoose = way === 'account' && offer?.paused === false;
 
   // Only where the platform can hand a conch:// link to an installed app: the
   // browser. The desktop app is the app, and has no such button.
@@ -364,7 +375,34 @@ export function Invite({
               ) : !offer.account ? (
                 <p className="notice">This invite cannot be used to join right now. Ask {ready.inviter} for another way in.</p>
               ) : null}
-              {way === 'account' ? (
+              {canChoose && !makingAccount ? (
+                <>
+                  <p>Do you already have an account on this server?</p>
+                  <div className="actions invite-choice">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onSignIn(ready.channels, ready.inviter);
+                      }}
+                    >
+                      Sign in
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMakingAccount(true);
+                      }}
+                    >
+                      Create an account
+                    </button>
+                  </div>
+                  <p className="hint">
+                    Signing in does not use this invite or add you to its channels. Ask {ready.inviter} or an operator to
+                    add you to {channelWords(ready.channels)}.
+                  </p>
+                </>
+              ) : null}
+              {canChoose && makingAccount ? (
                 <CreateAccount
                   purpose="invite"
                   busy={busy}
@@ -373,23 +411,25 @@ export function Invite({
                   onCancel={() => {
                     if (busy) return;
                     setProblem(null);
-                    onBack();
+                    setMakingAccount(false);
                   }}
                 />
               ) : null}
-              <p className="hint">
-                Already have an account?{' '}
-                <button
-                  type="button"
-                  className="link"
-                  onClick={() => {
-                    onSignIn(ready.channels, ready.inviter);
-                  }}
-                >
-                  Sign in instead
-                </button>
-                . Signing in does not use this invite or add you to its channels.
-              </p>
+              {!canChoose || makingAccount ? (
+                <p className="hint">
+                  Already have an account?{' '}
+                  <button
+                    type="button"
+                    className="link"
+                    onClick={() => {
+                      onSignIn(ready.channels, ready.inviter);
+                    }}
+                  >
+                    Sign in instead
+                  </button>
+                  . Signing in does not use this invite or add you to its channels.
+                </p>
+              ) : null}
             </>
           )}
           {canOpenDesktop ? (

@@ -375,6 +375,10 @@ type voicePoller struct {
 	// appendAudit is Store.AppendAuditEventAt, the write behind a row that
 	// carries its own time. A test seam like the reads above.
 	appendAudit func(ctx context.Context, actor, action, subject, detail string, at time.Time) (store.AuditEvent, error)
+	// appendAuditNow is Store.AppendAuditEvent, the write behind a row that
+	// takes the time it is written (the share-audio rows among them). A test
+	// seam beside appendAudit.
+	appendAuditNow func(ctx context.Context, actor, action, subject, detail string) (store.AuditEvent, error)
 	// reports bounds transmit reports per principal (voice_transmit.go).
 	reports voiceReportLimiter
 
@@ -479,6 +483,7 @@ func newVoicePoller(s *Server) *voicePoller {
 		recordHolder:    s.store.RecordVoiceHolder,
 		gap:             voicePassGap,
 		appendAudit:     s.store.AppendAuditEventAt,
+		appendAuditNow:  s.store.AppendAuditEvent,
 		wakeLoop:        make(chan struct{}, 1),
 		rooms:           make(map[string]*voiceRoomState),
 		shareEnded:      make(map[voiceShareEndKey]schema.VoiceShareEnded),
@@ -1829,7 +1834,7 @@ func (p *voicePoller) writeEvent(ctx context.Context, e voiceEvent) error {
 		subject = fmt.Sprintf("channel:%d", e.channelID)
 	}
 	if e.at.IsZero() {
-		_, err := p.s.store.AppendAuditEvent(ctx, e.actor, e.action, subject, e.detail)
+		_, err := p.appendAuditNow(ctx, e.actor, e.action, subject, e.detail)
 		return err
 	}
 	_, err := p.appendAudit(ctx, e.actor, e.action, subject, e.detail, e.at)

@@ -295,6 +295,30 @@ test.describe('the packaged app against a real conchd', () => {
     await expect.poll(async () => ((await invoke(page, 'restore')) as { ok?: boolean }).ok).toBe(true);
     expect(await renderer(page)).not.toContain(server.operatorToken);
     expect(await heap(page)).not.toContain(server.operatorToken);
+  });
+
+  // Issue #1768: the link of a new invite is a secret made for someone else.
+  // Main makes the request, with the operator's bearer, through the
+  // createMemberLink function, and answers once; the page shows the link and
+  // keeps it nowhere. The generic request still refuses the operation.
+  test('creates an invite and reads its link, through main alone, which the generic request still refuses', async () => {
+    expect(await invoke(page, 'request', { operation: 'createMemberLink', body: { kind: 'member' } })).toBe('rejected: refused');
+    await page.getByRole('button', { name: 'Invite someone' }).click();
+    await page.getByRole('button', { name: 'Make link' }).click();
+    const group = page.getByRole('group', { name: 'New invite link' });
+    await expect(group).toBeVisible();
+    // A link of this server (inviteLink: origin/app/#/invite/<code>).
+    const link = await group.getByLabel('Invite link').inputValue();
+    expect(link.startsWith(`${server.origin}/app/#/invite/`)).toBe(true);
+    const code = decodeURIComponent(link.slice(link.indexOf('/invite/') + '/invite/'.length));
+    expect(code.length).toBeGreaterThan(8);
+    // The page showed it and put it in no address or title; main did not log it.
+    expect(page.url()).not.toContain(code);
+    expect(await page.title()).not.toContain(code);
+    expect(app.output()).not.toContain(code);
+    // And the server made it: it is listed among the operator's links.
+    const listed = (await server.api(server.operatorToken, 'GET', '/v2/invites')).body as { invites?: unknown[] };
+    expect(listed.invites?.length ?? 0).toBeGreaterThan(0);
     page = await signOutThroughSettings(browser, page);
   });
 

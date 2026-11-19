@@ -285,6 +285,7 @@ describe('the sign-in link landing page', () => {
     window.location.hash = `#/invite/${inviteCode}`;
     render(<App origin={origin} />);
     // An invite makes an account with a password, through v2 (issue #713).
+    fireEvent.click(await screen.findByRole('button', { name: 'Create an account' }));
     fireEvent.change(await screen.findByLabelText('Your name'), { target: { value: 'wren' } });
     fireEvent.change(screen.getByLabelText('Choose a password'), { target: { value: 'correct horse battery staple' } });
     fireEvent.change(screen.getByLabelText('Type the password again'), { target: { value: 'correct horse battery staple' } });

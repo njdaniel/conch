@@ -3,6 +3,7 @@ package main
 import (
 	"go/parser"
 	"go/token"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -63,5 +64,16 @@ func TestGateKeysOf(t *testing.T) {
 func TestRowSourcesExcludeGateRows(t *testing.T) {
 	if slices.Contains(rowSources, "gaterows.go") {
 		t.Fatal("rowSources lists gaterows.go")
+	}
+}
+
+// TestEveryPermissionPendingGateHasReference keeps deferred coverage
+// actionable: each note names this issue or the test covering the gate.
+func TestEveryPermissionPendingGateHasReference(t *testing.T) {
+	testName := regexp.MustCompile(`\bTest[A-Z][A-Za-z0-9_]*\b`)
+	for gate, note := range pendingGates {
+		if !strings.Contains(note, "#1217") && !testName.MatchString(note) {
+			t.Errorf("%s: pending note must name #1217 or its covering test: %s", gate, note)
+		}
 	}
 }
