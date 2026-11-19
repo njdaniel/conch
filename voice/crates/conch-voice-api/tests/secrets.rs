@@ -27,7 +27,7 @@ use conch_voice_api::{
     parse_event_v2, parse_event_v3,
 };
 use serde_json::json;
-use support::{FAKE_TOKEN, Reply, Request, Step, Stub, client_for, closed_port};
+use support::{FAKE_TOKEN, Reply, Request, Step, Stub, client_for, released_port_url};
 
 const FAKE_ROOM: &str = "conch-FAKEROOM-zq81-do-not-print";
 const FAKE_NET_ROOM: &str = "conch-FAKENETROOM-7h2k-do-not-print";
@@ -563,14 +563,15 @@ async fn errors_made_around_secrets() -> Vec<(&'static str, Error)> {
     let stub = Stub::always(Reply::Stall(Duration::from_secs(5))).await;
     let hurried = stub.client_with(Duration::from_millis(100));
     errors.push(("a timeout", hurried.presence("general").await.unwrap_err()));
-    let closed = closed_port().await;
-    let nowhere = client_for(&closed.url(), Duration::from_secs(5));
+    // A refusal (Connect) on every platform: a released port, not `closed_port`, which
+    // macOS and Windows let time out (#1737).
+    let nowhere = client_for(&released_port_url(), Duration::from_secs(5));
     errors.push((
-        "a refused connection",
+        "a closed port (REST)",
         nowhere.session("general").await.unwrap_err(),
     ));
     errors.push((
-        "a refused socket",
+        "a closed port (WebSocket)",
         nowhere.presence_stream("general").await.unwrap_err(),
     ));
     // A server that echoes the request back, as a debugging proxy might.

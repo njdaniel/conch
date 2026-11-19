@@ -13,7 +13,9 @@ use conch_voice_api::{
     VoiceTransmitState,
 };
 use serde_json::{Value, json};
-use support::{FAKE_AUTHORIZATION, FAKE_TOKEN, Reply, Stub, client_for, closed_port};
+use support::{
+    FAKE_AUTHORIZATION, FAKE_TOKEN, Reply, Stub, client_for, closed_port, is_closed_port_failure,
+};
 
 const FAKE_ROOM: &str = "conch-FAKE-room-k3m7q2x9v4t1b8n6";
 const FAKE_JOIN_TOKEN: &str = "FAKE-join-token-not-a-real-credential";
@@ -379,9 +381,8 @@ async fn whoami_refusals_and_failures_each_have_their_error() {
     assert_no_secret(&error, "an id that is not a number");
     // Nothing listening.
     let closed = closed_port().await;
-    let client = client_for(&closed.url(), Duration::from_secs(5));
-    let error = client.whoami().await.unwrap_err();
-    assert!(matches!(error, Error::Connect { .. }), "{error:?}");
+    let error = closed.client().whoami().await.unwrap_err();
+    assert!(is_closed_port_failure(&error), "{error:?}");
 }
 
 #[tokio::test]
@@ -782,9 +783,29 @@ async fn a_slow_server_is_a_timeout_and_the_request_is_not_sent_again() {
 }
 
 #[tokio::test]
+async fn a_timeout_after_the_headers_is_a_body_timeout() {
+    for status in [200, 503] {
+        let stub = Stub::always(Reply::StallBody(status, Duration::from_secs(5))).await;
+        let client = stub.client_with(Duration::from_millis(500));
+        let error = client.session("general").await.unwrap_err();
+        assert!(
+            matches!(error, Error::BodyTimeout),
+            "HTTP {status}: {error:?}"
+        );
+        stub.only_request();
+    }
+}
+
+#[tokio::test]
 async fn nothing_listening_is_a_connection_failure() {
     let closed = closed_port().await;
-    let client = client_for(&closed.url(), Duration::from_secs(5));
+    // A second listener cannot acquire the fixture's port while requests are in flight.
+    assert!(
+        tokio::net::TcpListener::bind(closed.url().trim_start_matches("http://"))
+            .await
+            .is_err()
+    );
+    let client = closed.client();
     let session = client.session("general").await;
     let report = client
         .transmit("general", VoiceTransmitState::Stopped, None)
@@ -797,7 +818,7 @@ async fn nothing_listening_is_a_connection_failure() {
         ("presence", presence.unwrap_err()),
         ("presence stream", stream.unwrap_err()),
     ] {
-        assert!(matches!(error, Error::Connect { .. }), "{name}: {error:?}");
+        assert!(is_closed_port_failure(&error), "{name}: {error:?}");
         assert_eq!((error.status(), error.code()), (None, None));
         assert_no_secret(&error, name);
         // The request's address is not part of the error: it says why, not where to.

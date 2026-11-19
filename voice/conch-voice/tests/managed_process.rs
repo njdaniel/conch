@@ -17,10 +17,10 @@
 //! them), and one must never be handed to the helper by accident.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-// Unix only: File descriptor 3, Unix sockets, shells and named pipes. Windows runs the unit
-// tests in `src/`, which include the answers a non-Unix platform gives, and the tests in
-// this directory that need none of this (#1309).
-#![cfg(unix)]
+// Linux only: reopening fd 3 and finding the socket owner's uid both use /proc.
+// MF2 (#1738) brings up the macOS socket transport and its process tests.
+// Windows has its own process tests in managed_windows.rs.
+#![cfg(target_os = "linux")]
 
 mod support;
 

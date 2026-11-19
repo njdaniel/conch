@@ -2509,6 +2509,11 @@ async fn a_microphone_switch_during_a_transmission_ends_it_and_a_fresh_press_is_
     })
     .await;
     world.frames_pass(20).await;
+    // The fake microphone's frames and the stub's HTTP reports advance independently.
+    rig.until("started and stopped reported", |rig| {
+        rig.conchd.reported().len() >= 2
+    })
+    .await;
     assert_eq!(rig.sdk.frames(), at_ack, "nothing after the switch");
     assert!(
         sent_levels(&rig, 0)

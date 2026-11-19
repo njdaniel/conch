@@ -448,12 +448,6 @@ async fn a_conchd_that_cannot_reach_livekit_or_cannot_be_reached_is_tried_again(
 /// did come, even a refusal that is waited out, is not about the wrong server and says
 /// nothing of the kind.
 #[tokio::test]
-#[cfg_attr(
-    windows,
-    ignore = "Windows does not refuse a connection to a loopback port that is bound and not \
-              listening: it retries for about two seconds, so the attempt limit ends the \
-              attempt first and the detail is a timeout, not a refusal"
-)]
 async fn a_server_that_cannot_be_reached_names_the_stored_logins_and_nothing_else_does() {
     const NOTE: &str = "nothing answered at http://127.0.0.1:8080; logins are stored for \
                         http://a.test:1, http://b.test:2: choose one with --server <url>, \
@@ -478,9 +472,14 @@ async fn a_server_that_cannot_be_reached_names_the_stored_logins_and_nothing_els
         .unwrap();
     assert_eq!(waiting["reason"], "server_unreachable");
     let detail = waiting["detail"].as_str().unwrap();
+    // Linux refuses the bound, non-listening port at once; macOS and Windows can leave the
+    // connect to time out instead. Both are an unreachable server, and the
+    // reason above is the same: only the detail's first words differ.
+    let refused = detail.starts_with("could not connect to conchd: ");
+    #[cfg(any(windows, target_os = "macos"))]
+    let refused = refused || detail.starts_with("conchd did not answer within the timeout");
     assert!(
-        detail.starts_with("could not connect to conchd: ")
-            && detail.ends_with(&format!(" ({NOTE})")),
+        refused && detail.ends_with(&format!(" ({NOTE})")),
         "{detail}"
     );
 

@@ -387,7 +387,13 @@ async fn read_body(
     mut response: reqwest::Response,
 ) -> Result<Option<Vec<u8>>, Error> {
     let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|e| transport(scrubber, e))? {
+    while let Some(chunk) = response.chunk().await.map_err(|e| {
+        if e.is_timeout() {
+            Error::BodyTimeout
+        } else {
+            transport(scrubber, e)
+        }
+    })? {
         if body.len() + chunk.len() > MAX_BODY_BYTES {
             return Ok(None);
         }

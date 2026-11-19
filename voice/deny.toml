@@ -8,9 +8,9 @@
 # advisories.
 
 [graph]
-# Windows (#890, docs/design/windows-desktop.md section 1): so that a crate
-# pulled in under cfg(windows) is checked too.
-targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+# Include Windows (#890) and macOS (#1737) so platform-specific dependencies
+# are checked too (section 1 of each desktop design).
+targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc", "aarch64-apple-darwin"]
 all-features = true
 
 [sources]
