@@ -513,6 +513,7 @@ export interface MessageV2 {
   guest_author?: GuestAttributionV1;
   edited_at?: string;
   removed?: boolean;
+  removed_by_author?: boolean;
 }
 
 export const messageV2 = object<MessageV2>({
@@ -528,6 +529,7 @@ export const messageV2 = object<MessageV2>({
   guest_author: optional(guestAttributionV1),
   edited_at: optional(timestamp),
   removed: optional(bool),
+  removed_by_author: optional(bool),
 });
 
 // schema.PostMessageRequestV2
