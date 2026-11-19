@@ -197,7 +197,7 @@ export function createNativeVoice(get: () => DesktopVoiceBridge | undefined = vo
     }
   };
 
-  const command = async (call: (b: DesktopVoiceBridge) => Promise<VoiceCommandResult>): Promise<VoiceCommandResult> => {
+  const command = async <R extends VoiceCommandResult>(call: (b: DesktopVoiceBridge) => Promise<R>): Promise<R | typeof unsupported | typeof lost> => {
     const b = get();
     if (b === undefined) return unsupported;
     try {
@@ -234,7 +234,7 @@ export function createNativeVoice(get: () => DesktopVoiceBridge | undefined = vo
     setMute: (muted: boolean) => command((b) => b.voiceSetMute(muted)),
     setDeafen: (deafened: boolean) => command((b) => b.voiceSetDeafen(deafened)),
     setDevices: (devices) => command((b) => b.voiceSetDevices(devices)),
-    setTalkMode: (mode: VoiceControlTalkMode) => command((b) => b.voiceSetTalkMode(mode)),
+    setTalkMode: (mode: VoiceControlTalkMode, save?: true) => command((b) => save === true ? b.voiceSetTalkMode(mode, save) : b.voiceSetTalkMode(mode)),
     devices: () => oneShot((b) => b.voiceDevices(), { ok: false, error: 'unsupported' }),
     saveDevice: (request) => oneShot((b) => b.voiceSaveDevice(request), { ok: false, error: 'failed' }),
     keyDevices: async () => {

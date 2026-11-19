@@ -3,7 +3,7 @@
 // reaches a process: argv, environment, teardown, two instances.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { VOICE_CONTROL_STOP_KILL_AFTER_MS } from '../../../web/src/schema/generated.ts';
+import { VOICE_CONTROL_STOP_KILL_AFTER_MS, type VoiceControlTalkMode } from '../../../web/src/schema/generated.ts';
 import { Supervisor, type CommandResult, type StartRequest, type VoiceState } from '../../main/voice/supervisor.ts';
 import { CEILING_ARGS, DESKTOP_MISSED_RELEASE_SECS, HELPER_ARGS, MUTE_OWNER_ARGS, SHARE_AUDIO_ARGS, VoiceService, type VoiceIdentity, type VoiceSupervisor } from '../../main/voice/service.ts';
 import type { NativeVoiceDevicesResult, NativeVoiceView, VoiceDeviceKey, VoiceSaveResult } from '../../../web/src/platform/desktop/bridge.ts';
@@ -59,7 +59,8 @@ class FakeSupervisor implements VoiceSupervisor {
   setDevices(): Promise<CommandResult> {
     return Promise.resolve(this.ack);
   }
-  setTalkMode(): Promise<CommandResult> {
+  setTalkMode(mode: VoiceControlTalkMode): Promise<CommandResult> {
+    this.calls.push(`talk:${mode}`);
     return Promise.resolve(this.ack);
   }
 }
@@ -646,6 +647,37 @@ describe('the one-shot runs (issue #1378)', () => {
       ['save', '/nonexistent/config/p1', 'audio.input', 'Mic'],
       ['save', '/nonexistent/config/p1', 'audio.talk_mode', 'open'],
     ]);
+  });
+
+  it('switches from push-to-talk and saves open mic after the helper accepts it', async () => {
+    expect(await join()).toMatchObject({ status: 'running', helper: { talkMode: 'push_to_talk' } });
+    let acknowledge: (result: CommandResult) => void = () => undefined;
+    const apply = vi.spyOn(fake, 'setTalkMode').mockReturnValue(new Promise((resolve) => { acknowledge = resolve; }));
+    const choice = svc.setAndSaveTalkMode('open');
+    expect(apply).toHaveBeenCalledWith('open');
+    expect(oneShot.calls).toEqual([]);
+    expect(await svc.setAndSaveTalkMode('push_to_talk')).toEqual({ ok: false, error: 'busy' });
+    acknowledge({ ok: true });
+    expect(await choice).toEqual({ ok: true, saved: { ok: true } });
+    expect(oneShot.calls).toEqual([['save', id.configDir, 'audio.talk_mode', 'open']]);
+  });
+
+  it('does not save a mode the live helper refused', async () => {
+    await join();
+    fake.ack = { ok: false, error: 'unsupported' };
+    expect(await svc.setAndSaveTalkMode('open')).toEqual(fake.ack);
+    expect(oneShot.calls).toEqual([]);
+  });
+
+  it('cancels the save when teardown overtakes the live switch', async () => {
+    await join();
+    let acknowledge: (result: CommandResult) => void = () => undefined;
+    vi.spyOn(fake, 'setTalkMode').mockReturnValue(new Promise((resolve) => { acknowledge = resolve; }));
+    const choice = svc.setAndSaveTalkMode('open');
+    await svc.teardown();
+    acknowledge({ ok: true });
+    expect(await choice).toEqual({ ok: true, saved: { ok: false, error: 'cancelled' } });
+    expect(oneShot.calls).toEqual([]);
   });
 
   it('refuses a key or a value that does not fit, without running anything', async () => {

@@ -39,9 +39,9 @@ class Fake {
         this.deviceAck = resolve;
       });
     },
-    setTalkMode: (m) => {
-      this.calls.push(`setTalkMode ${m}`);
-      return Promise.resolve({ ok: true });
+    setTalkMode: (mode, save) => {
+      this.calls.push(`setTalkMode ${mode} ${save === true ? 'and save' : 'live only'}`);
+      return Promise.resolve({ ok: true, saved: save === true ? this.saved : undefined });
     },
     devices: () => Promise.resolve(this.list),
     saveDevice: (r) => {
@@ -218,12 +218,12 @@ describe('VoiceOptions talk mode', () => {
     const ptt = screen.getByRole<HTMLInputElement>('radio', { name: 'Push to talk' });
     expect(screen.getByRole<HTMLInputElement>('radio', { name: 'Open microphone' }).checked).toBe(true);
     fireEvent.click(ptt);
-    await waitFor(() => { expect(fake.calls).toEqual(['setTalkMode push_to_talk', 'save audio.talk_mode=push_to_talk']); });
+    await waitFor(() => { expect(fake.calls).toEqual(['setTalkMode push_to_talk and save']); });
   });
 
-  it('open microphone says what it means and needs a confirm', async () => {
+  it.each([2, 3] as const)('confirms, switches and saves open microphone in one request with helper v%s', async (version) => {
     const fake = new Fake();
-    await open(fake, running());
+    const { rerender } = await open(fake, running({ version }));
     fireEvent.click(screen.getByRole('radio', { name: 'Open microphone' }));
     const box = screen.getByRole('alertdialog');
     expect(within(box).getByText(new RegExp(openMeans, 'u'))).toBeTruthy();
@@ -233,7 +233,21 @@ describe('VoiceOptions talk mode', () => {
     expect(screen.queryByRole('alertdialog')).toBeNull();
     fireEvent.click(screen.getByRole('radio', { name: 'Open microphone' }));
     fireEvent.click(screen.getByRole('button', { name: 'Use open microphone' }));
-    await waitFor(() => { expect(fake.calls).toEqual(['setTalkMode open', 'save audio.talk_mode=open']); });
+    await waitFor(() => { expect(fake.calls).toEqual(['setTalkMode open and save']); });
+    rerender(<VoiceOptions source={fake.nv} view={running({ version, talkMode: 'open' })} open />);
+    await waitFor(() => { expect(screen.queryByText('switching…')).toBeNull(); });
+    expect(screen.getByRole<HTMLInputElement>('radio', { name: 'Open microphone' }).checked).toBe(true);
+    expect(screen.queryByText('Could not keep that choice for next time.')).toBeNull();
+  });
+
+  it('reports a save failure separately from the live switch', async () => {
+    const fake = new Fake();
+    fake.saved = { ok: false, error: 'failed' };
+    await open(fake, running());
+    fireEvent.click(screen.getByRole('radio', { name: 'Open microphone' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Use open microphone' }));
+    expect(await screen.findByText('Could not keep that choice for next time.')).toBeTruthy();
+    expect(fake.calls).toEqual(['setTalkMode open and save']);
   });
 
   it('while not joined only saves the mode', async () => {

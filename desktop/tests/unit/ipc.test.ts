@@ -32,7 +32,7 @@ interface Fixture {
   event(over?: Partial<InvokeEvent>): InvokeEvent;
 }
 
-function fixture(): Fixture {
+function fixture(takeGesture?: () => 'pointer' | null): Fixture {
   const main = frame();
   const contents = { destroyed: false, mainFrame: main, isDestroyed() { return this.destroyed; } };
   const gate = new DocumentGate();
@@ -64,7 +64,7 @@ function fixture(): Fixture {
   const settings = new Proxy({} as SettingsApi, { get: (_t, name: string) => record(`settings.${name}`) });
   const integrations = new Proxy({} as IntegrationsApi, { get: (_t, name: string) => record(`integrations.${name}`) });
   const companion = new Proxy({} as CompanionApi, { get: (_t, name: string) => record(`companion.${name}`) });
-  const gestures = { take: () => (input.recent ? ('pointer' as const) : null) };
+  const gestures = { take: takeGesture ?? (() => (input.recent ? ('pointer' as const) : null)) };
   const installed = new Proxy({} as InstalledApi, { get: (_t, name: string) => record(`installed.${name}`) });
   const share = new ShareAllowance({ now: () => clock.now, generation: () => gate.generation });
   const ipc = new Ipc({ owned: () => contents, gate, service, feeds, files, gestures, profiles, voice, invites, notifications, settings, integrations, companion, share, installed, now: () => clock.now, log: (line) => logs.push(line) });
@@ -726,6 +726,10 @@ describe('the voice family (issue #1374)', () => {
     ['voiceSetTalkMode', ['OPEN']],
     ['voiceSetTalkMode', [{ mode: 'open' }]],
     ['voiceSetTalkMode', ['open', 'extra']],
+    ['voiceSetTalkMode', ['open', false]],
+    ['voiceSetTalkMode', ['open', { save: true }]],
+    ['voiceSetTalkMode', ['open', true, 'extra']],
+    ['voiceSetTalkMode', ['hold', true]],
     ['voiceSetTalkMode', ['toString']],
     ['voiceKeyDevices', [1]],
     ['voiceSaveTalkBinding', []],
@@ -802,6 +806,8 @@ describe('the voice family (issue #1374)', () => {
     ['voiceJoin', [{ channel: 'general', muted: false, deafened: false }]],
     ['voiceRetry', []],
     ['voiceSetTalkMode', ['open']],
+    ['voiceSetTalkMode', ['open', true]],
+    ['voiceSetTalkMode', ['push_to_talk', true]],
     ['voiceSaveDevice', [{ key: 'audio.input', value: 'Mic' }]],
     ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: 275 }]],
   ] as const)('refuses %s without a recent gesture and executes nothing', async (name, args) => {
@@ -812,6 +818,19 @@ describe('the voice family (issue #1374)', () => {
     f.input.recent = true;
     expect((await f.ipc.invoke(f.event(), name, args)).ok).toBe(true);
     expect(f.calls).toHaveLength(1);
+  });
+
+  it('consumes one gesture for a live switch and its save (issue #1993)', async () => {
+    let recent = true;
+    const f = fixture(() => {
+      if (!recent) return null;
+      recent = false;
+      return 'pointer';
+    });
+    expect(await f.ipc.invoke(f.event(), 'voiceSetTalkMode', ['open', true])).toEqual({ ok: true, value: { ran: 'voice.setAndSaveTalkMode' } });
+    expect(await f.ipc.invoke(f.event(), 'voiceSetTalkMode', ['open', true])).toEqual({ ok: false, kind: 'refused' });
+    expect(await f.ipc.invoke(f.event(), 'voiceSaveDevice', [{ key: 'audio.talk_mode', value: 'open' }])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toEqual([['voice.setAndSaveTalkMode', ['open']]]);
   });
 
   it('needs no gesture to leave, mute, deafen, set devices or choose push-to-talk, nor to read the state', async () => {
@@ -839,6 +858,7 @@ describe('the voice family (issue #1374)', () => {
       gestures: { take: (_c, within) => { asked.push(within); return 'pointer'; } }, now: () => 0, log: () => undefined,
     });
     await ipc.invoke(f.event(), 'voiceSetTalkMode', ['bogus']);
+    await ipc.invoke(f.event(), 'voiceSetTalkMode', ['open', 'save']);
     expect(asked).toEqual([]);
   });
 

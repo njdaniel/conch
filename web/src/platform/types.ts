@@ -24,6 +24,7 @@ import type {
   VoiceDeviceKey,
   VoiceKeyDevicesResult,
   VoiceSaveResult,
+  VoiceTalkModeResult,
   VoiceTalkBindingResult,
   VoiceTalkBindingRequest,
 } from './desktop/bridge';
@@ -241,7 +242,7 @@ export interface NativeVoice {
   setMute(muted: boolean): Promise<VoiceCommandResult>;
   setDeafen(deafened: boolean): Promise<VoiceCommandResult>;
   setDevices(devices: { readonly input?: string; readonly output?: string }): Promise<VoiceCommandResult>;
-  setTalkMode(mode: VoiceControlTalkMode): Promise<VoiceCommandResult>;
+  setTalkMode(mode: VoiceControlTalkMode, save?: true): Promise<VoiceTalkModeResult>;
   // The helper's one-shot runs (issue #1379, D3-8): the device list, and a
   // choice kept for the next session (`config set`). Neither changes a live
   // session; setDevices and setTalkMode do.

@@ -108,7 +108,7 @@ export type ProfilesApi = Pick<
 export type InstalledApi = Pick<Installed, 'view' | 'restart'>;
 export type InvitesApi = Pick<Invites, 'check' | 'accept' | 'cancel' | 'take' | 'arrived'>;
 
-export type VoiceApi = Pick<VoiceService, 'state' | 'join' | 'leave' | 'retry' | 'setMute' | 'setDeafen' | 'setDevices' | 'setTalkMode' | 'devices' | 'saveDevice' | 'keyDevices' | 'saveTalkBinding'>;
+export type VoiceApi = Pick<VoiceService, 'state' | 'join' | 'leave' | 'retry' | 'setMute' | 'setDeafen' | 'setDevices' | 'setTalkMode' | 'setAndSaveTalkMode' | 'devices' | 'saveDevice' | 'keyDevices' | 'saveTalkBinding'>;
 export type NotificationsApi = Pick<Notifications, 'show' | 'close' | 'supported'>;
 
 export type SettingsApi = Pick<SettingsService, 'view' | 'set'>;
@@ -681,12 +681,19 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
     parse: parseDevices,
     run: ({ voice }, [devices]) => voice.setDevices(devices as { input?: string; output?: string }),
   },
+  // A confirmed talk-mode choice can switch and save on the same gesture
+  // (issue #1993). The save is limited to the exact mode validated here.
   voiceSetTalkMode: {
     limit: 30,
     maxBytes: 32,
-    parse: (args) => (args.length === 1 && typeof args[0] === 'string' && voiceControlTalkMode(args[0]).length === 0 ? args : null),
-    run: ({ voice }, [mode]) => voice.setTalkMode(mode as VoiceControlTalkMode),
-    gesture: (args) => args[0] === 'open',
+    parse: (args) => (
+      (args.length === 1 || (args.length === 2 && args[1] === true))
+      && typeof args[0] === 'string' && voiceControlTalkMode(args[0]).length === 0 ? args : null
+    ),
+    run: ({ voice }, [mode, save]) => save === true
+      ? voice.setAndSaveTalkMode(mode as VoiceControlTalkMode)
+      : voice.setTalkMode(mode as VoiceControlTalkMode),
+    gesture: ([mode, save]) => mode === 'open' || save === true,
   },
   // The helper's one-shot runs (issue #1378). The list is read-only; a save
   // writes the person's voice.toml and is the person's act alone. Each is
