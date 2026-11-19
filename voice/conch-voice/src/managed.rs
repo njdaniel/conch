@@ -2351,6 +2351,7 @@ fn whoami_reason(error: &ApiError) -> VoiceControlReason {
         ApiError::Forbidden(_) => Reason::NotAPerson,
         ApiError::VoiceRequiresAuth(_) => Reason::VoiceRequiresAuth,
         ApiError::Timeout
+        | ApiError::BodyTimeout
         | ApiError::Connect { .. }
         | ApiError::Transport { .. }
         | ApiError::UnexpectedResponse { .. }

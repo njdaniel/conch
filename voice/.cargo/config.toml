@@ -4,8 +4,10 @@
 # archive (scripts/voice-pins.sh) is built /MT; rustc and cc-rs default to the dynamic
 # runtime (/MD), and mixing them fails to link (LNK2038, LNK2005). With crt-static both use
 # /MT. This is in a file, not in RUSTFLAGS, because the RUSTFLAGS variable would replace it.
-#
-# The macOS design (section 1, MF1) will want `-ObjC` for
-# aarch64-apple-darwin here too, in the same way.
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# macOS (design §1, MF1): load ObjC categories from the static libwebrtc so
+# its initializers can run when the helper starts.
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-args=-ObjC"]

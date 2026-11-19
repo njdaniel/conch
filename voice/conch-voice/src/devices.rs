@@ -1165,7 +1165,9 @@ Speakers (`output`)
     }
 }
 
-#[cfg(test)]
+// Only Windows (no numeric uid) and Linux (/proc) have a case here; on macOS the
+// module would hold nothing but its import (#1737).
+#[cfg(all(test, any(not(unix), target_os = "linux")))]
 mod uid_tests {
     use super::*;
 

@@ -7,7 +7,7 @@
 //! can read or write the real user's files.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-// Unix only: The process tests run shells, named pipes and /proc and read file modes.
+// Unix only: The process tests run shells and named pipes and read file modes.
 // Windows runs the unit tests in `src/`, which include the answers a non-Unix platform
 // gives, and the tests in this directory that need none of this (#1309).
 #![cfg(unix)]
@@ -953,6 +953,7 @@ fn on_a_terminal(private: &Path, args: &[&str], token: bool) -> (Option<i32>, St
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "requires script(1) from util-linux")]
 fn on_a_terminal_keys_says_what_it_will_show_and_only_then_tries_the_device() {
     let private = tempfile::tempdir().unwrap();
     let absent = private.path().join("absent-event-kbd");
@@ -972,6 +973,7 @@ fn on_a_terminal_keys_says_what_it_will_show_and_only_then_tries_the_device() {
     assert_eq!(code, Some(1));
 }
 
+#[cfg_attr(target_os = "macos", ignore = "requires script(1) from util-linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn on_a_terminal_the_status_is_redrawn_in_place_and_with_json_it_is_not() {
     let reason = "not a member of this channel, or there is no such channel";
@@ -1140,6 +1142,10 @@ fn room_left(writer: std::io::PipeWriter) -> usize {
 /// it (each line that is not a command is answered with one, and thirty thousand of them
 /// are far more than a pipe and the queue behind it hold). It must still leave on a
 /// signal, and on the end of its standard input, within a few seconds, and cleanly.
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "observes the blocked writer via Linux /proc"
+)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_standard_output_nobody_reads_cannot_keep_the_process_from_leaving() {
     for way in ["TERM", "INT", "the end of standard input"] {
@@ -1226,6 +1232,7 @@ const NOT_A_TERMINAL: &str = "conch-voice: keys shows every key pressed and writ
                               terminal: standard output is not one\n";
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "requires script(1) from util-linux")]
 fn keys_looks_at_standard_output_and_at_nothing_else_to_decide_whether_to_write() {
     let private = tempfile::tempdir().unwrap();
     // Not a keyboard, and not there: nothing could be read whatever `keys` decided.
@@ -1275,6 +1282,7 @@ fn keys_looks_at_standard_output_and_at_nothing_else_to_decide_whether_to_write(
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "requires script(1) from util-linux")]
 fn on_a_terminal_keys_refuses_a_file_and_a_pipe_itself_and_reads_nothing_from_them() {
     use std::fs::OpenOptions;
     let private = tempfile::tempdir().unwrap();

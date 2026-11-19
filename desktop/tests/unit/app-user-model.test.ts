@@ -130,8 +130,8 @@ describe('Windows invite launches', () => {
   }
 
   for (const path of ['cold', 'second'] as const) {
-    it(`${path}: takes the final URL without contacting a server until a click`, async () => {
-      const { invites, profiles, log } = launch(path, [exe, '--original-process-start-time=123', 'C:\\file name.txt', link]);
+    it.each([link, link.replace('//invite?', '//invite/?')])(`${path}: takes the final URL (form %#) without contacting a server until a click`, async (url) => {
+      const { invites, profiles, log } = launch(path, [exe, '--original-process-start-time=123', 'C:\\file name.txt', url]);
       const shown = invites.arrived();
       expect(shown).toMatchObject({ ok: true, origin, host: 'chat.example.org', voice: false });
       expect(JSON.stringify(shown)).not.toContain(secret);
@@ -147,17 +147,18 @@ describe('Windows invite launches', () => {
       expect(JSON.stringify(log.mock.calls)).not.toContain(secret);
     });
 
-    it.each([
-      [exe, `"${link}"`],
-      [exe, `${link}" --inspect=9229`],
-      [exe, `${link}&exec=calc.exe`],
-      [exe, link.replace(secret, `${secret}%22%20%26%20calc.exe`)],
-      [exe, `--url=${link}`],
-      [exe, `C:\\downloads\\${link}.url`],
-      [exe, `${link}\n`],
-      [exe, 'conch://not-an-invite', link],
-    ])(`${path}: refuses hostile argv %#`, (...argv) => {
-      const { invites, profiles, log } = launch(path, argv);
+    it.each<[string[], string | null]>([
+      [[`"${link}"`], null],
+      [[`${link}" --inspect=9229`], 'characters'],
+      [[`${link}&exec=calc.exe`], 'malformed'],
+      [[link.replace(secret, `${secret}%22%20%26%20calc.exe`)], 'code'],
+      [[`--url=${link}`], null],
+      [[`C:\\downloads\\${link}.url`], null],
+      [[`${link}\n`], 'characters'],
+      [['conch://not-an-invite', link], 'malformed'],
+    ])(`${path}: refuses hostile argv %#`, (args, refusal) => {
+      const { invites, profiles, log } = launch(path, [exe, ...args]);
+      expect(invites.arrived()).toEqual(refusal === null ? null : { ok: false, refusal });
       expect(invites.arrived()).toBeNull();
       expect(invites.take()).toBeNull();
       expect(profiles.add).not.toHaveBeenCalled();

@@ -156,7 +156,8 @@ pub async fn until(what: &str, context: impl Fn() -> String, met: impl Fn() -> b
 ///
 /// A port that was bound and then let go can be handed to the next `bind` of any test running
 /// beside this one, and a client sent there would meet another test's stub. A socket that is
-/// bound and never made to listen keeps the port to itself, and connecting to it is refused.
+/// bound and never made to listen keeps the port to itself. Linux refuses the connect, and
+/// macOS and Windows may let it time out.
 pub fn refused_address() -> (String, tokio::net::TcpSocket) {
     let socket = tokio::net::TcpSocket::new_v4().unwrap();
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();

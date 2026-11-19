@@ -270,8 +270,10 @@ jobs:
 
       # The toolchain script fetches one pinned clang, cargo-deny and
       # libwebrtc and verifies each against the SHA-256 in
-      # scripts/voice-pins.sh, which is therefore the cache key. rustup, on
-      # the runner, installs the Rust version voice/rust-toolchain.toml names.
+      # scripts/voice-pins.sh, which is therefore part of the cache key. The
+      # v2 cache retains the verified cargo-deny archive. Reuse the existing
+      # clang and libwebrtc from v1 when populating it. rustup installs the
+      # Rust version voice/rust-toolchain.toml names.
       - name: rust toolchain cache
         uses: actions/cache@v4
         with:
@@ -279,7 +281,9 @@ jobs:
             ~/.cache/conch/llvm-*
             ~/.cache/conch/cargo-deny-*
             ~/.cache/conch/webrtc-*
-          key: voice-toolchain-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
+          key: voice-toolchain-v2-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
+          restore-keys: |
+            voice-toolchain-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
 
       # -lt: built with line tables (above), so never mixed with a cache of
       # full-debug builds.
@@ -466,6 +470,72 @@ jobs:
 
       - name: config directory vectors (Go)
         run: go test ./internal/cli -run TestConfigDirSharedVectorsWindows -count=1 -v
+
+  # MF1 (#1737, docs/design/macos-desktop.md section 1): build the voice
+  # workspace on Apple silicon with the hosted image's Xcode and SDK.
+  voice-macos:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: macos-15
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      MACOSX_DEPLOYMENT_TARGET: "15.0"
+      TMPDIR: ${{ github.workspace }}/.tmp
+    steps:
+      - uses: actions/checkout@v4
+
+      # Cache Cargo downloads. Fetch the two native archives each run so
+      # their hashes are checked before delivering any binaries to the build.
+      - name: rust dependency cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+          key: voice-deps-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('voice/Cargo.lock') }}
+
+      - name: Xcode and macOS SDK on the runner (ME1)
+        run: |
+          mkdir -p "$TMPDIR"
+          test "$(uname -m)" = arm64
+          sw_vers
+          xcodebuild -version
+          xcrun --sdk macosx --show-sdk-version
+          xcrun clang --version
+          (cd voice && rustc -Vv)
+
+      - name: rust toolchain
+        run: ./scripts/voice-toolchain.sh
+
+      - name: cargo build and deployment targets (ME1)
+        run: |
+          . scripts/voice-env.sh
+          cd voice
+          time cargo build --locked --workspace --target aarch64-apple-darwin
+          bin=target/aarch64-apple-darwin/debug/conch-voice
+          "$bin" --version
+          ls -lh "$bin"
+          xcrun otool -L "$bin"
+          xcrun vtool -show-build "$bin"
+          # Report the distinct minimum versions across libwebrtc's objects.
+          xcrun otool -l "$LK_CUSTOM_WEBRTC/lib/libwebrtc.a" |
+            awk '/cmd LC_VERSION_MIN_MACOSX$/ { legacy = 1 }
+                 $1 == "version" && legacy { print "LC_VERSION_MIN_MACOSX " $2; legacy = 0 }
+                 $1 == "minos" { print "LC_BUILD_VERSION minos " $2 }' |
+            sort -u
+
+      - name: cargo test, clippy and deny (workspace)
+        run: |
+          . scripts/voice-env.sh
+          cd voice
+          cargo test --locked --no-fail-fast --workspace --target aarch64-apple-darwin
+          cargo clippy --locked --workspace --all-targets --target aarch64-apple-darwin -- -D warnings
+          cargo deny --locked check sources licenses bans
 
   # The web client under web/ (ADR-007). setup-node installs exactly the
   # Node web/.nvmrc pins and caches npm's download cache by the lockfile.
@@ -786,12 +856,13 @@ jobs:
           Write-Output "uninstalled: $dir, the conch:// key and the shortcut are gone; $($seeded.Count) seeded files are unchanged"
 
   # The required status check. It runs the text checks every pull request
-  # gets, docs-only ones included, then passes only if every job above that
-  # should have run succeeded: skipped is accepted only for a docs-only
+  # gets, docs-only ones included, then passes only if every job it needs
+  # that should have run succeeded: skipped is accepted only for a docs-only
   # change (changes said code=false). It runs even when one of them failed,
   # so the failure is reported here rather than as a skipped check. changes
   # itself is not judged: if it fails, code is unset and every job runs in
-  # full, so a pass here still means every check ran and passed.
+  # full. voice-macos reports separately, as required by MF1
+  # (docs/design/macos-desktop.md section 13, "never a gate on Linux work").
   check:
     needs: [changes, go, go-test-server, go-test, rust, voice-windows, web, desktop, desktop-windows]
     if: ${{ !cancelled() }}
@@ -911,7 +982,9 @@ jobs:
             ~/.cache/conch/llvm-*
             ~/.cache/conch/cargo-deny-*
             ~/.cache/conch/webrtc-*
-          key: voice-toolchain-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
+          key: voice-toolchain-v2-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
+          restore-keys: |
+            voice-toolchain-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
 
       - name: rust system packages cache
         uses: actions/cache@v4
@@ -1468,7 +1541,9 @@ jobs:
             ~/.cache/conch/llvm-*
             ~/.cache/conch/cargo-deny-*
             ~/.cache/conch/webrtc-*
-          key: voice-toolchain-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
+          key: voice-toolchain-v2-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
+          restore-keys: |
+            voice-toolchain-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
 
       - name: rust build cache
         uses: actions/cache/restore@v4
@@ -1576,7 +1651,9 @@ jobs:
             ~/.cache/conch/llvm-*
             ~/.cache/conch/cargo-deny-*
             ~/.cache/conch/webrtc-*
-          key: voice-toolchain-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
+          key: voice-toolchain-v2-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
+          restore-keys: |
+            voice-toolchain-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
 
       - name: rust build cache
         uses: actions/cache/restore@v4
