@@ -389,7 +389,7 @@ pub struct Settings {
     /// The key device being watched, as it is named when its state is shown. `None` when
     /// presses come from standard input only.
     pub key_device: Option<String>,
-    /// Added, in brackets, to what is shown when no connection to `conchd` could be made:
+    /// Added, in brackets, to what is shown when a session request cannot connect or times out:
     /// the stored logins, when the server is the default and they are for others
     /// (`cli::Resolved::unreachable_note`).
     pub unreachable_note: Option<String>,
@@ -1423,11 +1423,13 @@ impl<T: Transport> Session<T> {
         self.scrubber.scrub_line(&error.to_string())
     }
 
-    /// What is shown for a session request that failed: the error, and when no connection
-    /// could be made at all, the note on the stored logins, as `conch` adds it.
+    /// What is shown for a session request that failed: the error, with the note on stored
+    /// logins when the connection failed or the request timed out without an answer.
     fn session_failure_text(&self, error: &ApiError) -> String {
         match (error, &self.unreachable_note) {
-            (ApiError::Connect { .. }, Some(note)) => self.shown_text(&format!("{error} ({note})")),
+            (ApiError::Connect { .. } | ApiError::Timeout, Some(note)) => {
+                self.shown_text(&format!("{error} ({note})"))
+            }
             _ => self.shown_text(error),
         }
     }
@@ -2519,6 +2521,20 @@ mod tests {
         let (_inputs, received) = mpsc::unbounded_channel();
         let out = Output::new(false, Box::new(std::io::sink()));
         Session::new(settings, conchd, Nowhere, Scrubber::new(), received, out).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_session_request_timeout_includes_the_stored_logins_note_when_available() {
+        let mut session = session(Box::new(|_| Ok(Box::new(CountingSink::new(&[])?))));
+        assert_eq!(
+            session.session_failure_text(&ApiError::Timeout),
+            "conchd did not answer within the timeout"
+        );
+        session.unreachable_note = Some("logins are stored for http://a.test:1".to_owned());
+        assert_eq!(
+            session.session_failure_text(&ApiError::Timeout),
+            "conchd did not answer within the timeout (logins are stored for http://a.test:1)"
+        );
     }
 
     fn switch_speakers(session: &mut Session<Nowhere>, name: &str) {
