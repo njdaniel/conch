@@ -297,7 +297,8 @@ export async function start(): Promise<void> {
     log,
   });
   await settings.load();
-  // An entry written earlier is judged again: the install may have been loosened since.
+  // Recheck launch at login after loading: the install may have been
+  // loosened, or the setting restored on an unsupported platform.
   await settings.rejudge();
   const store = new ProfileStore(
     checked.ok

@@ -697,7 +697,9 @@ jobs:
       # resources (the one path main/voice/spawn.ts findHelper runs on
       # Windows), the uninstaller, the version in the executable's resource
       # (the app has no window-less version flag) and in the uninstall entry,
-      # the conch:// handler under HKCU only, and nothing per-machine.
+      # the conch:// handler under HKCU only, and nothing per-machine. The
+      # app.asar must contain the Windows tray icon, and Electron's default
+      # app must be absent.
       - name: check the installed files
         shell: pwsh
         env:
@@ -707,9 +709,14 @@ jobs:
           $dir = Join-Path $env:LOCALAPPDATA 'Programs\Conch'
           $exe = Join-Path $dir 'Conch.exe'
           $helper = Join-Path $dir 'resources\conch-voice.exe'
-          foreach ($f in @($exe, $helper, (Join-Path $dir 'resources\app.asar'), (Join-Path $dir 'resources\version'), (Join-Path $dir 'Uninstall Conch.exe'))) {
+          $asar = Join-Path $dir 'resources\app.asar'
+          foreach ($f in @($exe, $helper, $asar, (Join-Path $dir 'resources\version'), (Join-Path $dir 'Uninstall Conch.exe'))) {
             if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { throw "missing $f" }
           }
+          if (Test-Path -LiteralPath (Join-Path $dir 'resources\default_app.asar')) { throw 'Electron default_app.asar was installed' }
+          $contents = & node desktop/node_modules/@electron/asar/bin/asar.js list --is-pack $asar
+          if ($LASTEXITCODE -ne 0) { throw "could not list the installed app.asar (exit $LASTEXITCODE)" }
+          if ($contents -cnotcontains 'pack   : \build\icons\48.png') { throw 'the Windows tray icon is missing from app.asar' }
           if (Test-Path -LiteralPath (Join-Path $dir 'resources\elevate.exe')) { throw 'elevate.exe was installed (packElevateHelper is false)' }
           foreach ($d in @("$env:ProgramFiles\Conch", "${env:ProgramFiles(x86)}\Conch")) {
             if (Test-Path -LiteralPath $d) { throw "a per-machine install exists at $d" }

@@ -371,7 +371,9 @@ describe('the desktop app settings (issue #1587)', () => {
     ];
     Object.defineProperty(window, 'conchDesktop', { value: { ...window.conchDesktop, integrations: () => Promise.resolve({ rows }) }, configurable: true, writable: true });
     await open();
-    expect(screen.getByRole('checkbox', { name: 'Open Conch when I log in' })).toHaveProperty('disabled', true);
+    const launchAtLogin = screen.getByRole('checkbox', { name: 'Open Conch when I log in' });
+    expect(launchAtLogin).toHaveProperty('disabled', true);
+    expect(launchAtLogin).toHaveProperty('checked', false);
     expect(screen.getByText('Open at login is not available on Windows yet.')).toBeDefined();
     const list = await screen.findByRole('list');
     expect(list.textContent).toContain('Open at login is not available on Windows yet.');
@@ -379,7 +381,7 @@ describe('the desktop app settings (issue #1587)', () => {
     expect(list.textContent).toContain('sealed by Windows (DPAPI)');
   });
 
-  it('describes Windows notifications in terms of the app window', async () => {
+  it('says Windows notifications are on when the app window is hidden', async () => {
     install({ profiles: () => Promise.resolve({ ...active, platform: 'win32' }) });
     const noop = () => undefined;
     render(
@@ -388,7 +390,7 @@ describe('the desktop app settings (issue #1587)', () => {
           push={{ state: { kind: 'unsupported' }, failure: null, onEnable: noop, onDisable: noop }} />
       </DesktopShell>,
     );
-    expect(await screen.findByText(/when the Conch window is in the background/)).toBeDefined();
+    expect(await screen.findByText(/notifications are on when the Conch window is hidden\./)).toBeDefined();
     expect(screen.getByText('Notifications when Conch is closed are not available in the desktop app.')).toBeDefined();
   });
 

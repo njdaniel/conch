@@ -117,7 +117,7 @@ export function NotificationSettings({ policy, native, permission, supported, ch
       {!supported || permission === 'unsupported' ? <p className="hint">{notificationKind} notifications are not supported. Alerts stay here.</p> : null}
       {permission === 'denied' ? <p className="hint">{notificationKind} permission is denied. Alerts stay here; you can allow it in your browser settings.</p> : null}
       {!native && supported && permission !== 'unsupported' ? <button type="button" onClick={onEnable}>Enable {notificationKind.toLowerCase()} notifications</button> : null}
-      {native && permission === 'granted' ? <p className="hint">{notificationKind} notifications are on when {windows ? 'the Conch window' : 'this tab'} is in the background. Alerts always remain available here.</p> : null}
+      {native && permission === 'granted' ? <p className="hint">{notificationKind} notifications are on when {windows ? 'the Conch window is hidden' : 'this tab is in the background'}. Alerts always remain available here.</p> : null}
       {platform.services.sounds === undefined ? null : <fieldset>
         <legend>Sounds</legend>
         <p className="hint">Optional sounds on the default speakers, after you interact with Conch. Notification policy and channel mutes apply to all sounds.</p>
