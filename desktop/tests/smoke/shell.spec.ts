@@ -57,7 +57,7 @@ test.describe('the packaged shell', () => {
     expect(response.status()).toBe(200);
     const h = response.headers();
     expect(h['content-security-policy']).toBe(
-      "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' blob: data:; connect-src wss: https:; object-src 'none'; base-uri 'none'; frame-src 'none'; frame-ancestors 'none'; form-action 'none'; worker-src 'none'",
+      "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' blob: data:; media-src 'self'; connect-src wss: https:; object-src 'none'; base-uri 'none'; frame-src 'none'; frame-ancestors 'none'; form-action 'none'; worker-src 'none'",
     );
     expect(h['x-content-type-options']).toBe('nosniff');
     expect(h['content-type']).toBe('text/html; charset=utf-8');
@@ -70,7 +70,7 @@ test.describe('the packaged shell', () => {
       'object',
       [
         'createAccount', 'joinAsGuest', 'keepCredential', 'redeemInvite', 'redeemInviteAsGuest', 'redeemSetupToken', 'redeemSignInLink', 'request', 'restore', 'resetPassword',
-        'serverAddress', 'signInWithCode', 'signInWithCredential', 'signInWithPassword', 'signOut', 'replaceCredential', 'subscribe', 'uploadFile', 'downloadFile', 'saveFile',
+        'serverAddress', 'signInWithCode', 'signInWithCredential', 'signInWithPassword', 'signOut', 'replaceCredential', 'createMemberLink', 'createSignInLink', 'totpEnroll', 'createPrincipalSignInLink', 'createPrincipalCredential', 'createHook', 'subscribe', 'uploadFile', 'downloadFile', 'saveFile',
         'profiles', 'profileAdd', 'profileRename', 'profileRemove', 'profileSwitch', 'storageRetry', 'profilesRecover',
         // The voice family (#1374): state, commands and its event, and no press,
         // release or transmit function.
@@ -88,6 +88,10 @@ test.describe('the packaged shell', () => {
         // The screen companion (#1579): its grant, its end and its event; and
         // the share allowance's arming (#1580).
         'companionGrant', 'companionEnd', 'shareArm', 'onCompanion',
+        // The share's sound on Linux (#1854). Named here whatever the switch
+        // says: main refuses each with 'disabled', before taking any act,
+        // when CONCH_LINUX_SHARE_AUDIO=0 (or the platform) gave it none.
+        'shareSoundStart', 'shareSoundChoose', 'shareSoundMute', 'shareSoundEnd', 'shareSoundShareEnded',
         // The installed files replaced under the running app (#1600).
         'updateState', 'updateRestart', 'onUpdateState',
       ].sort(),

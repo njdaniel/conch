@@ -484,6 +484,8 @@ pub struct Output {
     screen: Option<Screen>,
     /// The talk mode, for the words of the user's own state. `--json` does not change.
     talk_mode: TalkMode,
+    /// Whether only what explains a failure is written (see [`Output::diagnostics_only`]).
+    diagnostics_only: bool,
 }
 
 impl fmt::Debug for Output {
@@ -504,6 +506,7 @@ impl Output {
             out: Sink::Direct(out),
             screen: None,
             talk_mode: TalkMode::PushToTalk,
+            diagnostics_only: false,
         }
     }
 
@@ -518,6 +521,7 @@ impl Output {
             out: Sink::Direct(out),
             screen: Some(screen),
             talk_mode: TalkMode::PushToTalk,
+            diagnostics_only: false,
         }
     }
 
@@ -532,6 +536,7 @@ impl Output {
             out: Sink::Queued(LineQueue::spawn(out, QUEUE_LINES, Box::new(marker))),
             screen: None,
             talk_mode: TalkMode::PushToTalk,
+            diagnostics_only: false,
         }
     }
 
@@ -544,6 +549,18 @@ impl Output {
             Some(screen) => Self::redrawn(screen, Box::new(std::io::stdout())),
             None => Self::queued(json, Box::new(std::io::stdout())),
         }
+    }
+
+    /// This output, writing only the events that say why a session is not working: the
+    /// connection's changes (with the error's text, scrubbed where it was made), a
+    /// microphone that did not open and a transmit report that was not delivered. Nothing
+    /// else is written: not who is in the room, not the user's own state, not a key device
+    /// (a managed helper names no device, §20.7). For a managed helper's standard error,
+    /// which its owner keeps the tail of.
+    #[must_use]
+    pub fn diagnostics_only(mut self) -> Self {
+        self.diagnostics_only = true;
+        self
     }
 
     /// The user typed a line on standard input. On a terminal it was echoed under the
@@ -583,6 +600,9 @@ impl Output {
     /// With `--json` nothing is written, since no object carries it, and this returns false
     /// for the caller to say it elsewhere.
     pub fn note(&mut self, text: &str) -> bool {
+        if self.diagnostics_only {
+            return true;
+        }
         if let Some(screen) = &mut self.screen {
             if let Some(drawn) = screen.note(text)
                 && let Sink::Direct(out) = &mut self.out
@@ -621,6 +641,14 @@ impl Output {
     }
 
     fn show_as(&mut self, event: &Event<'_>, last: bool) {
+        if self.diagnostics_only
+            && !matches!(
+                event,
+                Event::Connection(_) | Event::Microphone { .. } | Event::Report { .. }
+            )
+        {
+            return;
+        }
         if let Some(screen) = &mut self.screen {
             // What the screen gives back has had every line through the same filter as a
             // plain line below.
@@ -808,6 +836,37 @@ mod tests {
         });
         output.show(&Event::PressIgnored(ShutReason::NotConnected));
         assert_eq!(written.text(), "connecting\npress ignored: not connected\n");
+    }
+
+    #[test]
+    fn a_diagnostics_only_output_writes_the_connection_and_what_failed_and_nothing_else() {
+        let written = Buffer::default();
+        let mut output = Output::new(false, Box::new(written.clone())).diagnostics_only();
+        output.show(&Event::Own(status_after(&[])));
+        output.show(&Event::Track {
+            speaker: "p3",
+            subscribed: true,
+        });
+        output.show(&Event::PressIgnored(ShutReason::NotConnected));
+        output.show(&Event::UnknownCommand);
+        output.show(&Event::KeyDevice {
+            device: "/dev/input/event3",
+            state: DeviceState::Ready,
+        });
+        output.show(&Event::Connection(&Connection::Waiting {
+            reason: "connect_failed",
+            detail: Some("the SDK could not connect".into()),
+            retry_in: Duration::from_secs(2),
+        }));
+        output.show(&Event::Microphone {
+            detail: "no microphone".into(),
+        });
+        assert!(output.note("a note"));
+        assert_eq!(
+            written.text(),
+            "not connected: connect failed (the SDK could not connect); trying again in 2.0 s\n\
+             no microphone: no microphone\n"
+        );
     }
 
     #[test]

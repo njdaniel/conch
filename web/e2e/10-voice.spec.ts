@@ -89,7 +89,7 @@ test.describe('with LiveKit', () => {
   // joins (issue #1244: one that never chose joins in the open microphone,
   // which transmits on the fake microphone's tone, and the tests that count
   // what a held key reports start from silence). 'unchosen' is a fresh browser.
-  function person(browser: Browser, who: 'alice' | 'bob' | 'carol' | Member, options?: BrowserContextOptions, before?: (page: Page) => void, mode: 'push to talk' | 'unchosen' = 'push to talk') {
+  function person(browser: Browser, who: 'alice' | 'bob' | 'carol' | Member, options?: BrowserContextOptions, before?: (page: Page) => void | Promise<void>, mode: 'push to talk' | 'unchosen' = 'push to talk') {
     return enter(browser, vw, typeof who === 'string' ? vw[who] : who, { mode, ...(options === undefined ? {} : { context: options }), ...(before === undefined ? {} : { before }) });
   }
 
@@ -97,6 +97,14 @@ test.describe('with LiveKit', () => {
   // in anything the page said or kept, and nothing the browser reports as wrong
   // that the person never sees: people.ts expectClean says what is checked.
   const expectClean = (p: Parameters<typeof expectCleanPage>[1]): Promise<void> => expectCleanPage(vw, p);
+
+  // The join token conchd last gave a page, read by watchPage from conchd's
+  // answers to that page and never from the world's secrets, which hold the
+  // tokens LiveKit gave the page too (issue #1948). Read after settled().
+  const conchdJoinToken = (p: { readonly watch: { readonly conchdTokens: readonly string[] } }): string | undefined => p.watch.conchdTokens.at(-1);
+  // The tokens LiveKit gave a page, without the signed parts that come with a
+  // token only the scan found (signal-tokens.ts), which end in a dot.
+  const livekitTokens = (p: { readonly watch: { readonly livekitTokens: readonly string[] } }): string[] => p.watch.livekitTokens.filter((t) => !t.endsWith('.'));
 
   test('a member joins, is heard only while transmitting, shows as talking, and is audited as a reported pair', async ({ browser }) => {
     const a = await person(browser, 'alice');
@@ -1278,6 +1286,188 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
     }
   });
 
+  // Issue #1792: on an iPhone in Safari voice joined for a second and dropped,
+  // for ever, because the level meter's audio context was refused and that
+  // ended the connect. Only the meter's context is made to fail here (it is
+  // the one that makes an analyser; LiveKit's own do not): the join must stay,
+  // the page must say why the open microphone is shut, and push to talk still
+  // works. Tagged @voice because WebKit, the browser of the report, has no
+  // fake microphone to join with; the same defect is reproduced on Chromium.
+  test('@voice a level meter the browser will not start leaves voice connected, and the open microphone says it needs one', async ({ browser }) => {
+    const member = await vw.addMember('pia');
+    const refuseMeter = async (page: Page): Promise<void> => {
+      await page.addInitScript(() => {
+        const w = window as unknown as { meterRefused: number };
+        w.meterRefused = 0;
+        AudioContext.prototype.createAnalyser = function createAnalyser(): AnalyserNode {
+          w.meterRefused++;
+          throw new DOMException('refused for the test', 'NotSupportedError');
+        };
+      });
+    };
+    const a = await person(browser, member, undefined, refuseMeter, 'unchosen');
+    try {
+      const voice = voiceRegion(a.page);
+      await voice.getByRole('button', { name: 'Join voice' }).click();
+      await expect(voice).toContainText('Connected in #voice-room', { timeout: 30_000 });
+      // The open microphone is the default, and says what it lacks.
+      await expect(voice.getByRole('button', { name: 'Open mic', exact: true })).toHaveAttribute('aria-pressed', 'true');
+      await expect(voice).toContainText('Open microphone needs the level meter');
+      expect(await a.page.evaluate(() => (window as unknown as { meterRefused: number }).meterRefused)).toBeGreaterThan(0);
+      // The old behaviour dropped within about a second and retried after 1 s.
+      // A few seconds on, it is still the one connection.
+      await a.page.waitForTimeout(5000);
+      await expect(voice).toContainText('Connected in #voice-room');
+      await expect(voice).not.toContainText('trying again');
+      await expect(voice).not.toContainText('Reconnecting');
+      // Push to talk is unaffected.
+      await voice.getByRole('button', { name: 'Open mic', exact: true }).click();
+      await expect(voice.getByRole('button', { name: 'Hold to talk' })).toBeVisible();
+      await expect(voice).not.toContainText('needs the level meter');
+      await voice.getByRole('button', { name: 'Leave voice' }).click();
+      await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
+    } finally {
+      await closeAll(a.context);
+    }
+  });
+
+  // Issue #1794: on an iPhone in Safari, as the issue reads it, an
+  // AudioContext made outside a tap starts suspended and cannot be resumed
+  // there, so a meter made after the join reads silence: the open microphone
+  // never hears anyone. Chromium lets any page run one, so the init script
+  // makes it behave as the issue assumes Safari does: a
+  // context made outside a click is suspended, and a resume outside a click
+  // never settles. Every context is recorded with whether it was made in a
+  // click. The page must make the meter's inside the Join click, and the
+  // meter must then read the fake microphone's tone.
+  test('@voice the level meter\'s audio context is made in the Join click, so a browser that suspends the rest still hears the open microphone', async ({ browser }) => {
+    const member = await vw.addMember('quinn');
+    const likeSafari = async (page: Page): Promise<void> => {
+      await page.addInitScript(() => {
+        interface Seen {
+          gesture: boolean;
+          // Whether it made an analyser: the meter's context is the one that does
+          // (LiveKit makes contexts of its own, outside any click).
+          analyser: boolean;
+        }
+        const w = window as unknown as { seen: Seen[] };
+        w.seen = [];
+        let inClick = false;
+        // Capture runs before the page's handler, bubble after it.
+        // A handler that stops propagation never reaches the bubble listener,
+        // so the flag is also cleared on a timer.
+        window.addEventListener('click', () => { inClick = true; setTimeout(() => { inClick = false; }, 0); }, true);
+        window.addEventListener('click', () => { inClick = false; }, false);
+        const Real = window.AudioContext;
+        const made = new WeakMap<object, boolean>();
+        class Strict extends Real {
+          private readonly entry: Seen;
+          constructor(options?: AudioContextOptions) {
+            super(options);
+            made.set(this, inClick);
+            this.entry = { gesture: inClick, analyser: false };
+            w.seen.push(this.entry);
+            if (!inClick) void super.suspend();
+          }
+          override createAnalyser(): AnalyserNode {
+            this.entry.analyser = true;
+            return super.createAnalyser();
+          }
+          override resume(): Promise<void> {
+            if (made.get(this) === true || inClick) return super.resume();
+            return new Promise<void>(() => undefined);
+          }
+        }
+        window.AudioContext = Strict;
+      });
+    };
+    const a = await person(browser, member, undefined, likeSafari, 'unchosen');
+    try {
+      const voice = voiceRegion(a.page);
+      await voice.getByRole('button', { name: 'Join voice' }).click();
+      await expect(voice).toContainText('Connected in #voice-room', { timeout: 30_000 });
+      // The open microphone is the default, and it has its meter.
+      await expect(voice.getByRole('button', { name: 'Open mic', exact: true })).toHaveAttribute('aria-pressed', 'true');
+      // The meter works: it reads the fake microphone's tone, and the page
+      // does not say the open microphone has no meter.
+      await expect.poll(async () => Number(await voice.getByRole('meter', { name: 'Microphone level' }).getAttribute('value')), { timeout: 15_000 }).toBeGreaterThan(0);
+      await expect(voice).not.toContainText('needs the level meter');
+      // The first context the page made, before the join's own awaits, was
+      // made in the click and is the one the meter reads from. (Later ones are
+      // other code's, LiveKit's among them, and may be made outside a click.)
+      const seen = await a.page.evaluate(() => (window as unknown as { seen: { gesture: boolean; analyser: boolean }[] }).seen);
+      expect(seen[0], `contexts made: ${JSON.stringify(seen)}`).toEqual({ gesture: true, analyser: true });
+      await voice.getByRole('button', { name: 'Leave voice' }).click();
+      await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
+    } finally {
+      await closeAll(a.context);
+    }
+  });
+
+  // Issue #1793: on an iPhone in Safari the page may not play audio until it
+  // is tapped. A browser that refuses playback is made here by an init script
+  // on bob's page: an audio element's play() rejects, as Safari's does, until
+  // the page says it may (the test lets it only after it has seen the button).
+  // The real SDK then emits its playback event, the page shows "Tap to hear
+  // the channel", and the tap reaches room.startAudio: a tap that is refused
+  // leaves the button, one that is allowed clears it.
+  test('@voice a browser that holds playback back shows Tap to hear the channel, and the tap starts it', async ({ browser }) => {
+    const holdPlayback = async (page: Page): Promise<void> => {
+      await page.addInitScript(() => {
+        const w = window as unknown as { playAllowed: boolean; playRefused: number };
+        w.playAllowed = false;
+        w.playRefused = 0;
+        const real: unknown = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'play')?.value;
+        HTMLMediaElement.prototype.play = function held(this: HTMLMediaElement): Promise<void> {
+          if (this instanceof HTMLAudioElement && !w.playAllowed) {
+            w.playRefused++;
+            return Promise.reject(new DOMException('play() needs a tap', 'NotAllowedError'));
+          }
+          return typeof real === 'function' ? (Reflect.apply(real, this, []) as Promise<void>) : Promise.resolve();
+        };
+      });
+    };
+    const a = await person(browser, 'alice');
+    const b = await person(browser, 'bob', undefined, holdPlayback);
+    try {
+      const voice = voiceRegion(b.page);
+      await voiceRegion(a.page).getByRole('button', { name: 'Join voice' }).click();
+      await expect(voiceRegion(a.page)).toContainText('Connected in #voice-room', { timeout: 30_000 });
+      await voice.getByRole('button', { name: 'Join voice' }).click();
+      await expect(voice).toContainText('Connected in #voice-room', { timeout: 30_000 });
+      // Alice's voice reaches bob's page, whose browser will not play it.
+      const hear = voice.getByRole('button', { name: 'Tap to hear the channel' });
+      await expect(hear).toBeVisible({ timeout: 15_000 });
+      // Alice has no such button: her browser plays.
+      await expect(voiceRegion(a.page).getByRole('button', { name: 'Tap to hear the channel' })).toHaveCount(0);
+      // A tap the browser still refuses leaves it.
+      const refused = () => b.page.evaluate(() => (window as unknown as { playRefused: number }).playRefused);
+      const before = await refused();
+      await hear.click();
+      await expect.poll(refused).toBeGreaterThan(before);
+      await expect(hear).toBeVisible();
+      // Allowed, the tap starts playback and the button goes.
+      await b.page.evaluate(() => {
+        (window as unknown as { playAllowed: boolean }).playAllowed = true;
+      });
+      await hear.click();
+      await expect(hear).toHaveCount(0, { timeout: 10_000 });
+      // Playing: every audio element of the page is.
+      await expect
+        .poll(() => b.page.evaluate(() => {
+          const audios = [...document.querySelectorAll('audio')];
+          return audios.length > 0 && audios.every((el) => !el.paused);
+        }))
+        .toBe(true);
+      await expect(voice).toContainText('Connected in #voice-room');
+      await voice.getByRole('button', { name: 'Leave voice' }).click();
+      await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
+    } finally {
+      await closeAll(a.context);
+      await closeAll(b.context);
+    }
+  });
+
   // Issue #591 (F24): one person's credential open on two pages, one of them
   // in voice. The other names them "cy (on another device)" and says that
   // joining there moves their voice; the one in voice names them "cy", and
@@ -1361,7 +1551,7 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
       await voice.getByRole('button', { name: 'Join voice' }).click();
       await expect(voice).toContainText('Connected in', { timeout: 60_000 });
       await a.watch.settled();
-      const join = vw.secrets.filter((x) => x.startsWith('eyJ')).at(-1);
+      const join = conchdJoinToken(a);
       if (join === undefined) throw new Error('no join token was captured from the session answers');
       const origin = vw.livekitOrigin.replace(/^ws/, 'http');
       await a.page.evaluate(async ([o, t]) => {
@@ -1537,7 +1727,184 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
       await vw.startLiveKit();
       await expect(voice).toContainText('Connected in', { timeout: 120_000 });
       await expect(voice).not.toContainText('Voice server unreachable');
+      // While LiveKit was down the SDK's retries made Chromium log "WebSocket
+      // connection to 'ws://<livekit>/rtc/v1?access_token=<join token>...'
+      // failed: ... net::ERR_CONNECTION_REFUSED" (not an app log; issue
+      // #1760), and the first try after it came back, to a room it no longer
+      // had, "... failed: Error during WebSocket handshake: Unexpected
+      // response code: 404" (issue #1915). Whether a try fell in either
+      // window, and whether it carried the join token conchd issued or the
+      // one LiveKit refreshed after the join, is timing, so lines of exactly
+      // those shapes are allowed here and nowhere else.
+      await expectClean({ ...a, allowLiveKitRefusals: true });
+    } finally {
+      await closeAll(a.context);
+    }
+  });
+
+  // The allowance on a real failed socket, made on purpose, in each of the two
+  // shapes it covers: the page opens a WebSocket to LiveKit's address with its
+  // own join token, as the SDK does, either with LiveKit stopped (refused,
+  // issue #1760) or with LiveKit up and a join request it cannot read, which
+  // it answers with 400 instead of the upgrade (the shape of the 404 after a
+  // restart, issue #1915). Chromium logs it as an error entry whose text holds
+  // the address and so the token; expectClean refuses that, and refuses it no
+  // less with the allowance for any other line: the page's own console.error
+  // of that very line, token and all, among them (the security review of
+  // #1915: the allowance goes by where a line came from, not only by what it
+  // says).
+  for (const { how, stopped, logged } of [
+    { how: 'a refused LiveKit socket', stopped: true, logged: 'Error in connection establishment: net::ERR_' },
+    { how: 'a rejected LiveKit handshake', stopped: false, logged: 'Error during WebSocket handshake: Unexpected response code: ' },
+  ]) {
+    test(`${how} fails expectClean unless refusals are allowed`, async ({ browser }) => {
+      const a = await person(browser, 'alice');
+      try {
+        const voice = voiceRegion(a.page);
+        await voice.getByRole('button', { name: 'Join voice' }).click();
+        await expect(voice).toContainText('Connected in', { timeout: 60_000 });
+        await a.watch.settled();
+        const join = conchdJoinToken(a);
+        if (join === undefined) throw new Error('no join token was captured from the session answers');
+        if (stopped) vw.stopLiveKit();
+        try {
+          await a.page.evaluate(
+            ([o, t]) =>
+              new Promise<void>((done) => {
+                const ws = new WebSocket(`${o ?? ''}/rtc/v1?access_token=${t ?? ''}&join_request=x`);
+                ws.onerror = () => {
+                  done();
+                };
+                ws.onopen = () => {
+                  ws.close();
+                  done();
+                };
+              }),
+            [vw.livekitOrigin, join],
+          );
+          // The line of this socket, not of the SDK's own retries (with
+          // LiveKit stopped they come too, the same address over and over).
+          const isLine = (l: string) => l.includes('WebSocket connection to') && l.includes("&join_request=x' failed: ") && l.includes(logged);
+          await expect.poll(() => a.watch.console.filter(isLine).length, { timeout: 10_000 }).toBeGreaterThan(0);
+          await expect(expectClean(a), `${how}, without the allowance`).rejects.toThrow();
+          await expectClean({ ...a, allowLiveKitRefusals: true });
+          // Chromium's line, as the page would log it itself with console.error.
+          // It is this socket's: the browser logged it once, and so allows one,
+          // whatever the views below leave out. (Copied from an SDK retry, a
+          // retry left out of a view would leave its Log entry to allow it.)
+          const line = a.watch.console.find(isLine)?.replace(/^error: /, '');
+          if (line === undefined) throw new Error(`no line of ${how} in the console`);
+          // Each leak is checked on its own: the console as it was clean, and
+          // the lines from that leak on (one leak must not pass for another).
+          const clean = [...a.watch.console];
+          const leaks: [string, () => Promise<void>][] = [
+            [
+              'a logged token, with the allowance',
+              () =>
+                a.page.evaluate((x) => {
+                  console.log(x);
+                }, join),
+            ],
+            [
+              'the same line logged by the page, with the allowance',
+              () =>
+                a.page.evaluate((x) => {
+                  console.error(x);
+                }, line),
+            ],
+          ];
+          for (const [what, leak] of leaks) {
+            const from = a.watch.console.length;
+            await leak();
+            await expect.poll(() => a.watch.console.length, { timeout: 10_000 }).toBeGreaterThan(from);
+            const watch = { ...a.watch, console: [...clean, ...a.watch.console.slice(from)] };
+            await expect(expectClean({ ...a, watch, allowLiveKitRefusals: true }), what).rejects.toThrow();
+          }
+        } finally {
+          if (stopped) await vw.startLiveKit();
+        }
+      } finally {
+        await closeAll(a.context);
+      }
+    });
+  }
+
+  // The allowance above is for Chromium's refusal and rejection lines only: a
+  // secret that the page itself logs still fails expectClean in the test that
+  // has it, bare or in the exact shape of either of Chromium's lines (the
+  // member's own credential stands in for a join token: the page logs it, so
+  // the browser's network source never did).
+  const selfLogged = [
+    ['bare', 'log', (_o: string, t: string) => t],
+    ['as a refused socket', 'error', (o: string, t: string) => `WebSocket connection to '${o}/rtc/v1?access_token=${t}&join_request=x' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED`],
+    ['as a rejected handshake', 'error', (o: string, t: string) => `WebSocket connection to '${o}/rtc/v1?access_token=${t}&join_request=x' failed: Error during WebSocket handshake: Unexpected response code: 404`],
+  ] as const;
+  const logFromPage = (page: Page, level: 'log' | 'error', line: string) =>
+    page.evaluate(
+      ([l, x]) => {
+        if (l === 'log') console.log(x);
+        else console.error(x);
+      },
+      [level, line] as const,
+    );
+  const livekitWs = () => vw.livekitOrigin.replace(/^http/, 'ws').replace(/\/+$/, '');
+  for (const [what, level, shape] of selfLogged) {
+    test(`a secret the page logs ${what} still fails expectClean where refusals are allowed`, async ({ browser }) => {
+      const a = await person(browser, 'alice');
+      try {
+        await expectClean({ ...a, allowLiveKitRefusals: true });
+        const from = a.watch.console.length;
+        await logFromPage(a.page, level, shape(livekitWs(), a.member.token));
+        await expect.poll(() => a.watch.console.length, { timeout: 10_000 }).toBeGreaterThan(from);
+        await expect(expectClean({ ...a, allowLiveKitRefusals: true })).rejects.toThrow();
+      } finally {
+        await closeAll(a.context);
+      }
+    });
+  }
+
+  // LiveKit's own token (issue #1948): after a join LiveKit sends the page a
+  // token of its own, refreshed from the one conchd issued, which the SDK
+  // reconnects with (it joins the room as well as conchd's does) and conchd
+  // never sees. watchPage reads it from the signalling frames the browser
+  // received, as each arrives, and never from anything the page logs; from
+  // then on it is a secret like any join token. It is told from the join token
+  // by comparing it with the token conchd's session answer gave the page, read
+  // from that answer itself, so a LiveKit that handed the join token back
+  // unchanged fails here. The page logging it fails expectClean, bare and in
+  // the exact shape of each of Chromium's lines, with the allowance or without
+  // (the browser's network source never logged it).
+  test('a token LiveKit refreshes after the join is watched for, and the page logging it fails expectClean', async ({ browser }) => {
+    const a = await person(browser, 'alice');
+    try {
+      const voice = voiceRegion(a.page);
+      await voice.getByRole('button', { name: 'Join voice' }).click();
+      await expect(voice).toContainText('Connected in', { timeout: 60_000 });
+      await expect.poll(() => livekitTokens(a).length, { timeout: 30_000, message: 'a token LiveKit gave the page after the join' }).toBeGreaterThan(0);
+      await a.watch.settled();
+      const join = conchdJoinToken(a);
+      if (join === undefined) throw new Error('no join token was captured from the session answer');
+      const refreshed = livekitTokens(a).at(-1) ?? '';
+      // Compared as booleans, never printed: a failure must not put a token in the report.
+      expect(join.startsWith('eyJ'), 'the join token conchd issued is a JWT').toBe(true);
+      expect(refreshed.startsWith('eyJ'), 'the refreshed token is a JWT').toBe(true);
+      expect(refreshed === join, 'the refreshed token is not the join token conchd issued').toBe(false);
+      expect(a.watch.conchdTokens.includes(refreshed), 'the refreshed token is none conchd issued').toBe(false);
+      expect(vw.secrets.includes(refreshed), "the refreshed token is in the world's secrets").toBe(true);
+      // Nothing the page did on its own shows it.
       await expectClean(a);
+      await expectClean({ ...a, allowLiveKitRefusals: true });
+      // Each leak on its own: the console as it was clean, and the lines from
+      // that leak on (one leak must not pass for another).
+      const clean = [...a.watch.console];
+      for (const [what, level, shape] of selfLogged) {
+        const from = a.watch.console.length;
+        await logFromPage(a.page, level, shape(livekitWs(), refreshed));
+        await expect.poll(() => a.watch.console.length, { timeout: 10_000 }).toBeGreaterThan(from);
+        const watch = { ...a.watch, console: [...clean, ...a.watch.console.slice(from)] };
+        await expect(expectClean({ ...a, watch }), `the refreshed token logged ${what}`).rejects.toThrow(/in the console/);
+        await expect(expectClean({ ...a, watch, allowLiveKitRefusals: true }), `the refreshed token logged ${what}, with the allowance`).rejects.toThrow(/in the console/);
+      }
     } finally {
       await closeAll(a.context);
     }

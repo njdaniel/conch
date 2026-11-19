@@ -118,7 +118,7 @@ async function logCommunity(world: World, secrets: string[], label: string) {
 test('F15 with 30 messages held the log is one tab stop, and no control is named by an id', async ({ meet, secrets, world }) => {
   const { channel, owner, member } = await logCommunity(world, secrets, 'stop');
   for (let i = 1; i <= 30; i++) await post(world, i % 3 === 0 ? member.token : owner.token, channel, `f15 message ${String(i)}`);
-  // The newest is the owner's, so the member's stop has one control: Reply.
+  // The newest is the owner's, so the member's stop offers copying and Reply.
   await post(world, owner.token, channel, 'f15 newest');
   const { page } = await meet({ viewport: { width: 1440, height: 900 } });
   await signIn(page, world, member.token, member.name);
@@ -137,12 +137,12 @@ test('F15 with 30 messages held the log is one tab stop, and no control is named
       return (el?.closest('[data-message-id]')?.getAttribute('data-message-id') ?? '-') + ':' + (el?.getAttribute('aria-label') ?? el?.textContent ?? '');
     }));
   }
-  // Search, the newest message, its name (issue #1544) and Reply, the
-  // composer's Whisper and Attach, then its box: seven presses, not one per
-  // message. The log costs three, whatever history is held.
-  expect(presses, seen.join(' | ')).toBe(7);
+  // Search, the newest message, its name (issue #1544), its copy menu and Reply, the
+  // composer's Whisper and Attach, then its box: eight presses, not one per
+  // message. The log costs four, whatever history is held.
+  expect(presses, seen.join(' | ')).toBe(8);
   const inLog = seen.map((where) => where.split(':')[0]).filter((id) => id !== '-');
-  expect(inLog, seen.join(' | ')).toHaveLength(3);
+  expect(inLog, seen.join(' | ')).toHaveLength(4);
   expect(new Set(inLog).size, seen.join(' | ')).toBe(1);
 
   const names = await messages(page).evaluate((log) => [...log.querySelectorAll('[aria-label]')].map((el) => el.getAttribute('aria-label') ?? ''));
@@ -200,6 +200,8 @@ test('@cross F15 arrow keys move between messages, and a keyboard alone edits an
   await expect(items.nth(0)).toBeFocused();
   await page.keyboard.press('Tab');
   await expect(items.nth(0).locator('.profile-card-name')).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(items.nth(0).getByRole('button', { name: /^More actions for / })).toBeFocused();
   await page.keyboard.press('Tab');
   await expect(items.nth(0).getByRole('button', { name: /^Reply to owner-.+'s message, \d\d:\d\d$/ })).toBeFocused();
   await page.keyboard.press('Enter');

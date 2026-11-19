@@ -1520,7 +1520,7 @@ func fieldString(fields map[string]json.RawMessage, key string) (string, bool) {
 
 func fieldInt(fields map[string]json.RawMessage, key string) (int64, bool) {
 	raw, ok := fields[key]
-	if !ok || isJSONNull(raw) {
+	if !ok || isJSONNull(raw) || isJSONNegativeZero(raw) {
 		return 0, false
 	}
 	var n int64
@@ -1528,6 +1528,13 @@ func fieldInt(fields map[string]json.RawMessage, key string) (int64, bool) {
 		return 0, false
 	}
 	return n, true
+}
+
+// isJSONNegativeZero identifies the integer spelling -0. Go decodes it as an
+// int64, but Rust's JSON reader treats it as a float and refuses integer fields.
+// Writers never emit it; all three protocol versions refuse it (#1857).
+func isJSONNegativeZero(raw json.RawMessage) bool {
+	return bytes.Equal(bytes.TrimSpace(raw), []byte("-0"))
 }
 
 // fieldReader takes fields out of a decoded object by exact name and
@@ -1548,7 +1555,8 @@ func (r *fieldReader) take(key string, v any, required bool) bool {
 		}
 		return false
 	}
-	if isJSONNull(raw) || json.Unmarshal(raw, v) != nil {
+	_, integer := v.(*int64)
+	if isJSONNull(raw) || (integer && isJSONNegativeZero(raw)) || json.Unmarshal(raw, v) != nil {
 		if r.missing == "" {
 			r.missing = key
 		}

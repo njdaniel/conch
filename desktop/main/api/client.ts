@@ -19,8 +19,9 @@
 //  - the answer is dropped when the identity that asked has ended.
 import { errorV0 } from '../../../web/src/schema/error.ts';
 import { fromServer } from '../../../web/src/schema/validate.ts';
-import { operations, previewHeader, type Operation, type OperationId } from '../../../web/src/platform/operations.ts';
+import { previewHeader, type Operation } from '../../../web/src/platform/operations.ts';
 import type { NoAnswerReason } from '../../../web/src/platform/desktop/bridge.ts';
+import { operationOf, type SendableOperationId } from './main-operations.ts';
 import type { Capture, Session } from './session.ts';
 import { previewable, targetOf } from './target.ts';
 import { isCertificateFailure } from './trust.ts';
@@ -50,7 +51,7 @@ export type Exchange =
   | { readonly kind: 'unauthorized' };
 
 export interface Send {
-  readonly op: OperationId;
+  readonly op: SendableOperationId;
   readonly params?: Readonly<Record<string, unknown>>;
   readonly query?: string;
   readonly body?: unknown;
@@ -126,7 +127,7 @@ function parseJson(bytes: Uint8Array): { readonly ok: true; readonly value: unkn
 
 // The writes whose body holds a password or a proof of one: the credential
 // replacing steps (convertGuest has the member's password and no secret flag).
-const carriesPassword = (op: OperationId): boolean => operations[op].secret === true || op === 'convertGuest';
+const carriesPassword = (op: SendableOperationId): boolean => operationOf(op).secret === true || op === 'convertGuest';
 
 export class Client {
   readonly #deps: ClientDeps;
@@ -144,7 +145,7 @@ export class Client {
   async #send(request: Send, resendToken: string | null): Promise<Exchange> {
     const { session } = this.#deps;
     const capture = request.capture ?? session.capture();
-    const op: Operation = operations[request.op];
+    const op: Operation = operationOf(request.op);
     if (op.socket === true || capture.origin === null) return none(capture.origin === null ? 'no-server' : 'unsupported');
     const target = targetOf(request.op, request.params, request.query);
     if (target === null) return none('unsupported');

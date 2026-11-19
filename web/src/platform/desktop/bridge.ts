@@ -26,9 +26,12 @@ import type {
   VoiceControlPTT,
   VoiceControlPTTProblem,
   VoiceControlReason,
+  VoiceControlShareAudio,
+  VoiceControlShareAudioProblem,
   VoiceControlTalkMode,
   VoiceDevice,
   VoiceDevicesPipeWire,
+  VoiceShareAudioScope,
 } from '../../schema/generated';
 import type {
   ChangePasswordRequestV1,
@@ -40,9 +43,11 @@ import type {
   TOTPLoginRequestV1,
 } from '../../schema/auth';
 import type { ConvertGuestRequestV1, JoinAccountRequestV1, JoinGuestRequestV1 } from '../../schema/guest';
-import type { RedeemInviteGuestRequestV1, RedeemInviteRequestV2 } from '../../schema/invite';
+import type { CreateHookRequest } from '../../schema/admin';
+import type { CreateCredentialRequestV1 } from '../../schema/credential';
+import type { CreateInviteRequestV2, RedeemInviteGuestRequestV1, RedeemInviteRequestV2 } from '../../schema/invite';
 import type { WhoAmIResponseV1 } from '../../schema/principal';
-import type { RedeemSignInLinkRequestV1 } from '../../schema/signin';
+import type { CreateDeviceLinkRequestV1, CreateSignInLinkRequestV1, RedeemSignInLinkRequestV1 } from '../../schema/signin';
 import type { OperationId, Params } from '../operations';
 
 // The server this window talks to: the canonical origin of the selected
@@ -74,8 +79,8 @@ export type StorageStatus =
   | { readonly kind: 'session-only'; readonly reason: 'unavailable' | 'insecure-backend' | 'unknown-backend' | 'unsafe-root' }
   | { readonly kind: 'unavailable' };
 
-// Something the last switch or sign-out has to tell the person.
-export type ProfileNotice = 'sign-in-again' | 'could-not-verify' | 'account-mismatch' | 'revocation-unconfirmed' | 'revocation-unsent' | 'teardown-slow';
+// Something the last sign-in, switch or sign-out has to tell the person.
+export type ProfileNotice = 'operator-window-only' | 'sign-in-again' | 'could-not-verify' | 'account-mismatch' | 'revocation-unconfirmed' | 'revocation-unsent' | 'teardown-slow';
 
 // Whether the active server's release is one this app was tested with
 // (issue #946). none: no server is active. supported: it is on the list.
@@ -107,8 +112,7 @@ export interface ProfilesView {
   readonly recovery: boolean;
   readonly notice: ProfileNotice | null;
   readonly compat: CompatView;
-  // The platform, for the storage text (DPAPI does not protect from other apps
-  // of the same user).
+  // The main process's OS, for platform-specific copy such as the limits of DPAPI.
   readonly platform: string;
 }
 
@@ -293,6 +297,22 @@ export interface ConchDesktopBridge {
   // once and kept nowhere.
   replaceCredential(request: ReplaceCredentialRequest): Promise<SignInOutcome>;
 
+  // The six operations whose answer holds a secret made for someone or
+  // something else (issue #1768): an invite's link, a sign-in link for another
+  // device, the authenticator's seed, a sign-in link for a person, a script's
+  // credential, a hook's secret. Each is its own function: main makes the one
+  // request with its bearer, exactly as the page would, and answers once with
+  // the server's validated reply (the secret in it) for the page to show and
+  // copy. Main logs, stores and keeps none of it; the page keeps none in a URL,
+  // a title or a log, and drops it when the view closes. The generic request
+  // still refuses all six (renderer: false), so these are the only way.
+  createMemberLink(request: CreateInviteRequestV2): Promise<BridgeReply>;
+  createSignInLink(request: CreateDeviceLinkRequestV1): Promise<BridgeReply>;
+  totpEnroll(): Promise<BridgeReply>;
+  createPrincipalSignInLink(request: { readonly id: number; readonly body: CreateSignInLinkRequestV1 }): Promise<BridgeReply>;
+  createPrincipalCredential(request: { readonly id: number; readonly body: CreateCredentialRequestV1 }): Promise<BridgeReply>;
+  createHook(request: CreateHookRequest): Promise<BridgeReply>;
+
   // Attachments (issue #947). Upload sends the operation uploadFile; the
   // answer is the server's, validated. Download gives a file's bytes for a
   // blob preview; nothing is written or opened. Save asks main to show the
@@ -326,7 +346,12 @@ export interface ConchDesktopBridge {
 declare global {
   interface Window {
     // Present only in the desktop shell's renderer.
-    readonly conchDesktop?: ConchDesktopBridge & Partial<DesktopVoiceBridge> & Partial<DesktopSettingsBridge> & Partial<DesktopCompanionBridge> & Partial<DesktopInviteBridge>;
+    readonly conchDesktop?: ConchDesktopBridge &
+      Partial<DesktopVoiceBridge> &
+      Partial<DesktopSettingsBridge> &
+      Partial<DesktopCompanionBridge> &
+      Partial<DesktopInviteBridge> &
+      Partial<DesktopShareSoundBridge>;
   }
 }
 
@@ -340,7 +365,7 @@ export type NativeVoiceStatus = 'idle' | 'unavailable' | 'starting' | 'running' 
 // The helper's confirmed state, from VoiceControlStateV1 or V2: never what
 // the page asked for, only what the helper reported.
 export interface NativeVoiceHelper {
-  readonly version: 1 | 2;
+  readonly version: 1 | 2 | 3;
   readonly phase: VoiceControlPhase;
   readonly reason?: VoiceControlReason;
   readonly retryInMs?: number;
@@ -353,6 +378,41 @@ export interface NativeVoiceHelper {
   readonly talkMode?: VoiceControlTalkMode;
   readonly ptt: VoiceControlPTT;
   readonly pttProblem?: VoiceControlPTTProblem;
+  // The helper's confirmed state of the screen share's sound (a v3 helper
+  // only; issue #1854): never what the page asked for. "With sound" is shown
+  // only for state 'on'. No application, process or device is ever in it: a
+  // count of streams and a closed reason, nothing more.
+  readonly shareAudio?: NativeShareAudio;
+}
+
+export interface NativeShareAudio {
+  readonly state: VoiceControlShareAudio;
+  // The share-sound mute as the helper confirmed it, independent of muted.
+  readonly muted: boolean;
+  // Why 'unavailable', or 'no_sources' beside 'on' (nothing is playing).
+  readonly problem?: VoiceControlShareAudioProblem;
+  readonly sources: number;
+}
+
+// The per-profile choice (issue #1854, #1552): the scope everything but the
+// call, or none. Kept by main with the profile; never in the page.
+export type ShareSoundChoice = Extract<VoiceShareAudioScope, 'system_excluding_call'> | 'none';
+
+// Why the screen's sound is not offered or not carried now, a fixed word for
+// each (words.ts): the helper has no route (it does not speak v3), the server
+// cannot record the consent, the consent was refused otherwise, the sound
+// system is not reachable, the call could not be told from the rest, the
+// publish was refused after one repeat, or the helper cannot carry it.
+export type ShareSoundReason = 'old-helper' | 'old-server' | 'consent-failed' | 'no-pipewire' | 'no-process-tree' | 'publish-refused' | 'unavailable';
+
+// Main's part of the share's sound, in its view. Absent when the Linux
+// share-sound switch is off, which main reads once and the page cannot set:
+// the page then offers no toggle and says what it said before.
+export interface ShareSoundView {
+  readonly choice: ShareSoundChoice;
+  // Set when no route is available now (the toggle is disabled with the
+  // reason) or the share's sound failed (the words, the share going on silent).
+  readonly unavailable?: ShareSoundReason;
 }
 
 export interface NativeVoiceView {
@@ -363,11 +423,21 @@ export interface NativeVoiceView {
   // A supervisor refusal, failure or loss kind, or a helper's reason: a
   // fixed vocabulary, never free text.
   readonly problem?: string;
+  // A closed set refining problem 'untrusted': the helper's folder can be
+  // changed by other users. The path itself never reaches the page.
+  readonly cause?: 'folder-writable';
+  // For an end with a connection reason (connect_failed, server_unreachable,
+  // internal_error): the helper's own words, redacted by main of the token,
+  // the session nonce and any JWT-shaped text, printable ASCII, at most 201
+  // characters. Shown as text behind "Details", never parsed.
+  readonly detail?: string;
   readonly retryable: boolean;
   readonly helper?: NativeVoiceHelper;
   // Set while main's mute at a screen lock (issue #1588) is still in force:
   // the strip says "You were muted when your screen locked".
   readonly mutedByLock?: true;
+  // Main's share-sound state (issue #1854); see ShareSoundView.
+  readonly shareSound?: ShareSoundView;
 }
 
 export type VoiceCommandResult =
@@ -445,12 +515,20 @@ export type VoiceKeyDevicesResult =
   | {
       readonly ok: true;
       readonly devices: readonly VoiceKeyDevice[];
+      readonly platform?: 'win32';
       // What a read grant means, to be shown before the rule is.
       readonly disclosure: readonly string[];
     }
   | { readonly ok: false; readonly error: VoiceOneShotError };
 
-// Saves keys.device then keys.talk. failed says which of the two did not save.
+// Windows capture carries only an allowlisted physical code and the voice
+// generation shown during configuration. Main translates it; no event or text.
+export type VoiceTalkBindingRequest =
+  | { readonly deviceId: string; readonly code: number }
+  | { readonly windowsCode: string; readonly generation: number };
+
+// Linux saves keys.device then keys.talk; Windows saves only keys.talk.
+// failed says which write did not save.
 export type VoiceTalkBindingResult =
   | { readonly ok: true }
   | { readonly ok: false; readonly error: VoiceOneShotError; readonly failed?: 'device' | 'talk' };
@@ -467,7 +545,7 @@ export interface DesktopVoiceBridge {
   voiceDevices(): Promise<NativeVoiceDevicesResult>;
   voiceSaveDevice(request: { readonly key: VoiceDeviceKey; readonly value: string }): Promise<VoiceSaveResult>;
   voiceKeyDevices(): Promise<VoiceKeyDevicesResult>;
-  voiceSaveTalkBinding(request: { readonly deviceId: string; readonly code: number }): Promise<VoiceTalkBindingResult>;
+  voiceSaveTalkBinding(request: VoiceTalkBindingRequest): Promise<VoiceTalkBindingResult>;
   onVoiceState(listener: (view: NativeVoiceView) => void): Unsubscribe;
 }
 
@@ -553,10 +631,11 @@ export interface DesktopSettingsView {
   readonly trayConfirmed: boolean;
   // Whether this build may set launch at login (an installed build may).
   readonly launchAvailable: boolean;
-  // Why not, when it is not: an unpackaged run, or an app that sits where
-  // others could change it.
-  readonly launchUnavailable?: 'unpackaged' | 'unsafe-location';
+  // Why this install or platform cannot set launch at login.
+  readonly launchUnavailable?: LaunchUnavailable;
 }
+
+export type LaunchUnavailable = 'unpackaged' | 'unsafe-location' | 'launch-unsupported';
 
 export interface SettingsChange {
   readonly closeToTray?: boolean;
@@ -567,7 +646,7 @@ export interface SettingsChange {
 
 export type SettingsResult =
   | { readonly ok: true; readonly view: DesktopSettingsView }
-  | { readonly ok: false; readonly reason: 'unpackaged' | 'unsafe-location' | 'foreign-file' | 'no-tray' | 'failed' };
+  | { readonly ok: false; readonly reason: LaunchUnavailable | 'foreign-file' | 'no-tray' | 'failed' };
 
 // What works on this desktop (issue #1593, D5-07 of #773; UX-23). One row per
 // integration, read from the state main already holds: nothing is probed to
@@ -587,16 +666,14 @@ export type IntegrationWhy =
   | 'notifications-unsupported'
   | 'lock-unobserved'
   | 'lock-checking'
-  | 'no-portal'
-  | 'not-wayland'
+  | CompanionShareUnavailable
   | 'portal-unasked'
   | 'secret-store-missing'
   | 'insecure-backend'
   | 'unknown-backend'
   | 'unsafe-root'
   | 'secret-store-silent'
-  | 'unpackaged'
-  | 'unsafe-location'
+  | LaunchUnavailable
   | 'share-silent'
   | 'not-installed'
   | 'untrusted'
@@ -660,9 +737,9 @@ export type CompanionGrantError = 'not-in-voice' | 'not-yet' | 'elsewhere' | 'en
 // Q-D4-4 on #1578): the grant still serves watching others' shares. Share
 // goes only through the screen-cast portal's own picker. no-portal: the
 // portal does not answer for ScreenCast; not-wayland: the session is not
-// Wayland, where Chromium would not use the portal. The page says "share
-// unavailable: no screen-cast portal" for either, and main opens no capture.
-export type CompanionShareUnavailable = 'no-portal' | 'not-wayland';
+// Wayland, where Chromium would not use the portal; capture-unsupported:
+// this platform has no implemented capture path.
+export type CompanionShareUnavailable = 'no-portal' | 'not-wayland' | 'capture-unsupported';
 
 export type CompanionGrantResult =
   | { readonly ok: true; readonly grant: CompanionGrant; readonly shareUnavailable?: CompanionShareUnavailable }
@@ -686,8 +763,8 @@ export interface CompanionEvent {
 export interface DesktopCompanionBridge {
   // The companion's grant for the voice destination. Only right after the
   // person's own click or key.
-  // The result's shareUnavailable ('no-portal' | 'not-wayland') is how the
-  // page learns, before it picks, that this desktop has no screen-cast portal.
+  // The result's shareUnavailable is how the page learns, before it picks,
+  // that this desktop cannot start a screen share.
   companionGrant(request: { readonly channel: ChannelName }): Promise<CompanionGrantResult>;
   // Arms the share allowance (issue #1580, D4-03): the page calls this
   // synchronously at the very start of the Share click, before anything else
@@ -705,6 +782,64 @@ export interface DesktopCompanionBridge {
   // Removes the live companion, if there is one, and says whether there was.
   companionEnd(): Promise<boolean>;
   onCompanion(listener: (event: CompanionEvent) => void): Unsubscribe;
+}
+
+// The Linux screen share's sound (issue #1854; docs/design/linux-share-audio.md
+// §5.3, §9, §10, §12). The renderer never captures or publishes sound and holds
+// no bearer: it asks main, which records the sharer's consent with conchd and
+// only then tells the voice helper. Nothing here names a scope, an application,
+// a process, a device or a share: main builds all of them. Every call is
+// refused (rejects) from a subframe, a stale document or with the switch off;
+// start and choose also need the person's own act (a fresh click or the Share
+// click's arm).
+//
+// share is an opaque number main made for one share's sound, which the page
+// gives back to end it, so that a late end of an older share can never stop a
+// newer share's sound.
+export type ShareSoundStartError =
+  // The switch is off, or the person's choice is none.
+  | 'not-offered'
+  // No live share of this document, or this one is overtaken.
+  | 'no-share'
+  // No route now (the view says why); the share goes on silent.
+  | 'unavailable'
+  // The consent or the helper did not take it (the view says why); silent.
+  | 'failed';
+
+// A start that was unavailable or failed may still name the record main kept
+// for the live share (its words are in the view): the page ends it with the
+// share, as it would a start that took, so the words do not outlive the share.
+export type ShareSoundStartResult =
+  | { readonly ok: true; readonly share: number }
+  | { readonly ok: false; readonly error: ShareSoundStartError; readonly share?: number };
+
+// share is the number main made for the live share's sound when the choice put
+// it on (to give back to shareSoundEnd), else null: the choice was kept and
+// there is no live share, or it is off.
+export type ShareSoundChooseResult = { readonly ok: true; readonly share: number | null } | { readonly ok: false; readonly error: 'not-offered' | 'not-saved' };
+
+export interface DesktopShareSoundBridge {
+  // Asks main to add the share's sound to the live share: consent, then the
+  // helper's command, in that order, when the person's choice is "with sound".
+  // The result says what was asked, not that the sound is on: only the view's
+  // helper.shareAudio says that.
+  shareSoundStart(): Promise<ShareSoundStartResult>;
+  // The person's act: keep the choice for the profile in force and, during a
+  // share, apply it (off: the helper's stop, then the withdrawal; on: consent,
+  // then the command).
+  shareSoundChoose(request: { readonly choice: ShareSoundChoice }): Promise<ShareSoundChooseResult>;
+  // The share-sound mute (the helper's, confirmed in the view), apart from the
+  // microphone mute and deafen, which it does not touch and which do not touch it.
+  shareSoundMute(muted: boolean): Promise<VoiceCommandResult>;
+  // The share ended in the page: stop its sound (the helper's stop, then the
+  // withdrawal). Names the share main gave; one that is not the live one is
+  // ignored. Answers whether it ended anything.
+  shareSoundEnd(request: { readonly share: number }): Promise<boolean>;
+  // The page's share ended, whether or not its sound was ever asked for: main
+  // forgets that the window's capture was a share and ends any sound of it.
+  // No token and no act: it only takes away. Answers whether it ended or
+  // cleared anything.
+  shareSoundShareEnded(): Promise<boolean>;
 }
 
 // Whether the installed files were replaced under this running app (issue
@@ -726,4 +861,10 @@ export interface DesktopUpdateBridge {
 
 // The object the preload exposes: the bridge, the voice family, the settings,
 // the companion, the invite family and the update family. Still no press, release, gate or transmit function in any.
-export type ExposedDesktopBridge = ConchDesktopBridge & DesktopVoiceBridge & DesktopSettingsBridge & DesktopCompanionBridge & DesktopInviteBridge & DesktopUpdateBridge;
+export type ExposedDesktopBridge = ConchDesktopBridge &
+  DesktopVoiceBridge &
+  DesktopSettingsBridge &
+  DesktopCompanionBridge &
+  DesktopInviteBridge &
+  DesktopUpdateBridge &
+  DesktopShareSoundBridge;

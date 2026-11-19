@@ -40,10 +40,10 @@ function capture(answer: ShareAvailability | 'unknown'): IntegrationRow {
   switch (answer) {
     case 'available':
       return working('capture');
+    case 'capture-unsupported':
     case 'no-portal':
-      return { id: 'capture', state: 'unavailable', why: 'no-portal' };
     case 'not-wayland':
-      return { id: 'capture', state: 'unavailable', why: 'not-wayland' };
+      return { id: 'capture', state: 'unavailable', why: answer };
     case 'unknown':
       return { id: 'capture', state: 'unknown', why: 'portal-unasked' };
   }
@@ -109,7 +109,7 @@ export async function integrationsView(deps: IntegrationsDeps): Promise<Integrat
     lock(deps.lockObservation(), deps.lockTrying()),
     capture(deps.share()),
     storage(deps.storage()),
-    settings.launchAvailable ? working('launch') : { id: 'launch', state: 'unavailable', why: settings.launchUnavailable === 'unsafe-location' ? 'unsafe-location' : 'unpackaged' },
+    settings.launchAvailable ? working('launch') : { id: 'launch', state: 'unavailable', why: settings.launchUnavailable ?? 'unpackaged' },
     // Nothing plays a sound when a share starts or ends on Linux until
     // #1585 and #1586; the row is a fixed answer, not a probe.
     { id: 'shareSound', state: 'unavailable', why: 'share-silent' },

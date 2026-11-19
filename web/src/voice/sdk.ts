@@ -127,7 +127,7 @@ import type { Camera, CameraProfile, KeptCamera } from './camera';
 import type { CameraTrack, Microphone, Output, Processing, Room, RoomEvents, ShareSink } from './connection';
 import { personOf, principalOf, publisherOf } from './presence';
 import { LogRing, Redactor } from './redact';
-import { defaultShareQuality, type Captured, type KeptScreen, type ShareDirection, type ShareLimitation, type ShareQuality, type ShareSample } from './share';
+import { autoFrameRate, defaultShareQuality, provisionalQuality, resolveAuto, settleQuality, type Captured, type KeptScreen, type SettledQuality, type SettledResolution, type ShareDirection, type ShareLimitation, type ShareQuality, type ShareSample } from './share';
 
 export { principalOf };
 
@@ -431,9 +431,13 @@ const sourceAsk = { width: 3840, height: 2160, frameRate: 60 } as const;
 
 // The SDK turns the resolution into an ideal (a maximum on Safari), never an
 // exact size or a minimum, so a smaller source is not scaled up or refused.
+// Auto (issue #1659) asks for the most (Source's size, at 30 fps) so that the
+// capture shows how large the screen is; it is then settled by its rule
+// (settleQuality) and the settled quality caps the capture and the encodings.
 function shareAsk(quality: ShareQuality): { readonly width: number; readonly height: number; readonly frameRate: number } {
   if (quality.resolution === '720p') return { width: 1280, height: 720, frameRate: quality.frameRate };
   if (quality.resolution === '1080p') return { width: 1920, height: 1080, frameRate: quality.frameRate };
+  if (quality.resolution === 'auto') return { ...sourceAsk, frameRate: autoFrameRate };
   return { ...sourceAsk, frameRate: quality.frameRate };
 }
 
@@ -465,12 +469,14 @@ function fitBox(width: number, height: number, boxWidth: number, boxHeight: numb
 }
 
 // shareEncodings chooses the top layer from the capture and the sharer's
-// choice, and the lower layers from the top, smallest first.
+// choice, and the lower layers from the top, smallest first. Auto is settled
+// against the capture first.
 export function shareEncodings(captured: CapturedVideo, quality: ShareQuality = defaultShareQuality): { readonly top: ShareLayer; readonly lower: readonly ShareLayer[] } {
-  const ask = shareAsk(quality);
+  const ask = shareAsk(settleQuality(quality, captured));
   const [capturedWidth, capturedHeight] = known(captured.width) && known(captured.height) ? [captured.width, captured.height] : [ask.width, ask.height];
   const [width, height] = fitBox(capturedWidth, capturedHeight, ask.width, ask.height);
-  const fps = known(captured.frameRate) ? Math.min(captured.frameRate, ask.frameRate) : ask.frameRate;
+  // A transiently low capture reading must not become a lasting encoder cap.
+  const fps = ask.frameRate;
   const long = Math.max(width, height);
   const short = Math.min(width, height);
 
@@ -489,6 +495,54 @@ export function shareEncodings(captured: CapturedVideo, quality: ShareQuality = 
     lower.push({ width: w, height: h, maxBitrate: layer.maxBitrate, maxFramerate: Math.min(layer.maxFramerate, fps) });
   }
   return { top: { width, height, maxBitrate, maxFramerate: fps }, lower };
+}
+
+// shareEstimateMbps is about what a share at this quality sends up, in Mbps:
+// the top layer's bitrate row and the lower layers beneath it, as
+// shareEncodings builds them for a capture at the size asked, summed as in
+// voice-multi-share.md §8. An estimate from those rows, not a measurement
+// (#1513 owes the measurement). Auto is estimated at its larger case, which is
+// also 1080p's (a capture to 1920 px is shared as it is, a larger one at
+// 1080p).
+export function shareEstimateMbps(quality: ShareQuality): number {
+  const settled: SettledQuality = quality.resolution === 'auto' ? { resolution: '1080p', frameRate: autoFrameRate } : { resolution: quality.resolution, frameRate: quality.frameRate };
+  const ask = shareAsk(settled);
+  const { top, lower } = shareEncodings({ width: ask.width, height: ask.height, frameRate: ask.frameRate }, settled);
+  const total = top.maxBitrate + lower.reduce((sum, layer) => sum + layer.maxBitrate, 0);
+  return Math.round(total / 1_000_000);
+}
+
+// A live capture can stop delivering frames without ending. Report a sustained
+// mute once, and clear it on recovery or when ownership of the track ends.
+export function watchScreenCapture(capture: MediaStreamTrack, changed: (stalled: boolean) => void): () => void {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let stalled = false;
+  const clear = () => {
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
+    if (stalled) changed(false);
+    stalled = false;
+  };
+  const mute = () => {
+    if (timer !== null || stalled || capture.readyState === 'ended') return;
+    timer = setTimeout(() => {
+      timer = null;
+      if (!capture.muted || capture.readyState === 'ended') return;
+      stalled = true;
+      console.warn('Screen capture stopped delivering frames (muted for 3 seconds).');
+      changed(true);
+    }, 3000);
+  };
+  capture.addEventListener('mute', mute);
+  capture.addEventListener('unmute', clear);
+  capture.addEventListener('ended', clear);
+  if (capture.muted) mute();
+  return () => {
+    capture.removeEventListener('mute', mute);
+    capture.removeEventListener('unmute', clear);
+    capture.removeEventListener('ended', clear);
+    clear();
+  };
 }
 
 // What the picker asks for: the chosen picture caps, unprocessed sound, the
@@ -517,6 +571,7 @@ export function videoPublishOptions(captured: CapturedVideo, quality: ShareQuali
   return {
     source: Track.Source.ScreenShare,
     simulcast: true,
+    degradationPreference: quality.frameRate === 15 ? 'maintain-resolution' : 'maintain-framerate',
     screenShareEncoding: new VideoPreset(top.width, top.height, top.maxBitrate, top.maxFramerate).encoding,
     screenShareSimulcastLayers: lower.map((l) => new VideoPreset(l.width, l.height, l.maxBitrate, l.maxFramerate)),
   };
@@ -686,7 +741,7 @@ function lossText(share: number): string {
 
 // askedText says what the sharer asked for, labelled as asked: "Asked 1080p ·
 // 60 fps". It is the chosen quality, never a measurement.
-export function askedText(quality: ShareQuality): string {
+export function askedText(quality: SettledQuality): string {
   const size = quality.resolution === 'source' ? 'source size' : quality.resolution;
   return `Asked ${size} · ${String(quality.frameRate)} fps`;
 }
@@ -715,7 +770,7 @@ export const noShortfall: ShortfallState = { short: null, good: null, reason: nu
 // null when it is on target or nothing can be said. The reason comes only
 // from the stats and the capture's settings. An encoder that says it is not
 // limited (none) is not short on rate, as a still screen sends few frames.
-export function shortfallReason(sample: ShareSample, quality: ShareQuality): string | null {
+export function shortfallReason(sample: ShareSample, quality: SettledQuality): string | null {
   const ask = shareAsk(quality);
   const asked = quality.resolution === 'source' ? null : ask;
   const long = Math.max(sample.width, sample.height);
@@ -759,7 +814,7 @@ export function shortfallReason(sample: ShareSample, quality: ShareQuality): str
 // monotonic clock): it appears once the shortfall has held shortfallHold, and
 // clears shortfallHold after the picture is back on target. The reason shown
 // follows the latest while short.
-export function nextShortfall(state: ShortfallState, sample: ShareSample | null, quality: ShareQuality, now: number): ShortfallState {
+export function nextShortfall(state: ShortfallState, sample: ShareSample | null, quality: SettledQuality, now: number): ShortfallState {
   if (sample === null) return noShortfall;
   const base = state.publication === sample.publication ? state : noShortfall;
   const reason = shortfallReason(sample, quality);
@@ -838,15 +893,76 @@ const uncapped: Track.Dimensions = { width: 7680, height: 4320 };
 
 const isShare = (source: Track.Source) => source === Track.Source.ScreenShare || source === Track.Source.ScreenShareAudio;
 
+// LiveKit 2.22.3 observes PiP visibility (including a background tab), but
+// HTMLElementInfo.width/height still read clientWidth/clientHeight. Supply
+// the actual PiP dimensions through the same track event the SDK observes.
+// Reapply after an in-page ResizeObserver update; no private SDK fields, DOM
+// sizing tricks or audio/subscription changes. The publication cap is lifted
+// only for this popped-out watched picture, and restored on leave. A remote
+// camera's tile is sized the same way (playCamera, issue #1954); it has no
+// cap to lift.
+// Both sizes are scaled as the SDK scales its own (pixelDensity), so a dense
+// screen is sent the layer it would be sent for an element of that size.
+const pipWindows = new WeakMap<HTMLVideoElement, PictureInPictureWindow>();
+
+// pixelDensity is the SDK's default (roomOptions sets none): 2 on a screen
+// denser than 2, else 1 (RemoteVideoTrack.getPixelDensity).
+const pixelDensity = () => (window.devicePixelRatio > 2 ? 2 : 1);
+
+export function sizePictureInPicture(video: HTMLVideoElement, track: RemoteTrack, changed: () => void): () => void {
+  let pip: PictureInPictureWindow | null = document.pictureInPictureElement === video ? pipWindows.get(video) ?? null : null;
+  let emitting = false;
+  const emit = (width: number, height: number) => {
+    const density = pixelDensity();
+    track.emit(TrackEvent.VideoDimensionsChanged, { width: width * density, height: height * density });
+  };
+  const size = () => {
+    if (pip === null || emitting) return;
+    emitting = true;
+    emit(pip.width, pip.height);
+    emitting = false;
+  };
+  const leave = () => {
+    pip?.removeEventListener('resize', size);
+    pip = null;
+    pipWindows.delete(video);
+    changed();
+    emit(video.clientWidth, video.clientHeight);
+  };
+  const enter = (event: Event) => {
+    pip?.removeEventListener('resize', size);
+    pip = (event as PictureInPictureEvent).pictureInPictureWindow;
+    pipWindows.set(video, pip);
+    pip.addEventListener('resize', size);
+    changed();
+    size();
+  };
+  video.addEventListener('enterpictureinpicture', enter);
+  video.addEventListener('leavepictureinpicture', leave);
+  track.on(TrackEvent.VideoDimensionsChanged, size);
+  pip?.addEventListener('resize', size);
+  size();
+  return () => {
+    pip?.removeEventListener('resize', size);
+    video.removeEventListener('enterpictureinpicture', enter);
+    video.removeEventListener('leavepictureinpicture', leave);
+    track.off(TrackEvent.VideoDimensionsChanged, size);
+  };
+}
+
 // A share's capture between two connections: still capturing, published on
 // neither.
 class Kept implements KeptScreen {
   readonly tracks: readonly LocalTrack[];
   readonly audio: boolean;
+  // What Auto settled to for this capture, if it was chosen (issue #1659), so
+  // the next connection declares and shapes the same.
+  readonly resolved: SettledResolution | null;
   onEnded: (() => void) | null = null;
 
-  constructor(tracks: readonly LocalTrack[]) {
+  constructor(tracks: readonly LocalTrack[], resolved: SettledResolution | null = null) {
     this.tracks = tracks;
+    this.resolved = resolved;
     this.audio = tracks.some((t) => t.source === Track.Source.ScreenShareAudio);
     const video = tracks.find((t) => t.source === Track.Source.ScreenShare);
     video?.mediaStreamTrack.addEventListener('ended', () => {
@@ -909,7 +1025,15 @@ class LiveKitAdapter implements Room {
   private events: RoomEvents | null = null;
   private track: LocalAudioTrack | null = null;
   private publication: LocalTrackPublication | null = null;
-  private tap: { readonly context: AudioContext; readonly analyser: AnalyserNode; readonly clone: MediaStreamTrack } | null = null;
+  // The tap on the microphone. owned is whether the tap made its context
+  // (and so closes it) or was given the client's, which outlives the tap: a
+  // mic switch makes a new tap on the same context (issue #1794). stop undoes
+  // what the tap added to a context it does not own: the listener, and the
+  // nodes.
+  private tap: { readonly context: AudioContext; readonly analyser: AnalyserNode; readonly clone: MediaStreamTrack; readonly owned: boolean; readonly stop: () => void } | null = null;
+  // The audio context the client made inside the Join gesture, for the meter
+  // (issue #1794). Never closed here: the client does.
+  private given: AudioContext | null = null;
   private wantSending = false;
   // The microphone chosen, by device id, or null for the system default; and
   // whether the capture was lost, when nothing captures until a new choice.
@@ -929,7 +1053,9 @@ class LiveKitAdapter implements Room {
   private output = '';
   // The elements playing each microphone, by track sid, and whose it is; and
   // the volume of each person not at full volume, by principal (issue #661).
-  private readonly elements = new Map<string, { readonly el: HTMLMediaElement; readonly principal: number | null }>();
+  // held is the element's volumechange listener, which keeps deafen on (the
+  // SDK unmutes an element when it starts playback, a tap's or its own).
+  private readonly elements = new Map<string, { readonly el: HTMLMediaElement; readonly principal: number | null; readonly held: () => void }>();
   private readonly volumes = new Map<number, number>();
   private readonly buffer = new Uint8Array(levelWindow);
   // The share this page captured, until it is stopped; and whether this
@@ -937,7 +1063,15 @@ class LiveKitAdapter implements Room {
   private screen: LocalTrack[] = [];
   private shareQuality: ShareQuality = defaultShareQuality;
   private shareQualityChange: Promise<void> = Promise.resolve();
+  // What Auto settled to for the capture held (issue #1659): decided once, from
+  // the capture's size before any cap, and kept while the capture is, so a later
+  // change of the encodings does not read the capped size and flip it.
+  private autoResolved: SettledResolution | null = null;
+  // The choice the held capture was last capped to (constrainShare), or null
+  // for a capture not capped here (just picked, or adopted).
+  private cappedAs: string | null = null;
   private stoppingScreen = false;
+  private unwatchScreen: (() => void) | null = null;
   // Called at the next change of this connection's own permission, and when
   // the share is stopped, kept or closed: where a share's publish refused for
   // want of the claim's grant waits (publishGranted).
@@ -952,6 +1086,7 @@ class LiveKitAdapter implements Room {
   private watching: ReadonlySet<number> = new Set();
   private focused: number | null = null;
   private readonly streamSinks = new Map<number, ShareSink>();
+  private readonly pipSizes = new Map<number, () => void>();
   private readonly remoteShares = new Map<number, { video: RemoteTrack | null; audio: RemoteTrack | null }>();
   // The camera this page captured, until it is stopped or kept; its
   // publication once published; whether this adapter is taking it down, so
@@ -986,10 +1121,14 @@ class LiveKitAdapter implements Room {
   private companion = false;
   private readonly remoteCameras = new Map<number, RemoteTrack>();
   private readonly cameraViews = new Map<number, HTMLVideoElement>();
+  // Each played camera's PiP sizing (sizePictureInPicture, issue #1954), by
+  // principal, while its track plays into its tile.
+  private readonly cameraPipSizes = new Map<number, () => void>();
 
-  async connect(url: string, token: string, roomName: string, publish: boolean, events: RoomEvents): Promise<void> {
+  async connect(url: string, token: string, roomName: string, publish: boolean, events: RoomEvents, audio?: AudioContext | null): Promise<void> {
     this.ensureOpen();
     this.events = events;
+    this.given = audio ?? null;
     // Held for this adapter alone: its close() releases these and no other
     // connection's.
     redactor.hold(this, token, roomName);
@@ -1043,7 +1182,17 @@ class LiveKitAdapter implements Room {
         const el = track.attach();
         el.muted = this.deafened;
         el.volume = this.volumeOf(principal);
-        this.elements.set(track.sid ?? '', { el, principal });
+        // A muted flag changed under us (the SDK's restart of playback when
+        // an iOS page is visible again) is put back to deafen's.
+        const held = (): void => {
+          if (el.muted !== this.deafened) el.muted = this.deafened;
+        };
+        el.addEventListener('volumechange', held);
+        // A voice the browser refused (paused) or let go of is told as the
+        // page's playback, not only the room's: see playbackAllowed.
+        el.addEventListener('playing', this.reportPlayback);
+        el.addEventListener('pause', this.reportPlayback);
+        this.elements.set(track.sid ?? '', { el, principal, held });
         document.body.appendChild(el);
       })
       .on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack, _pub: RemoteTrackPublication, participant?: RemoteParticipant) => {
@@ -1056,8 +1205,19 @@ class LiveKitAdapter implements Room {
           this.cameraGone(track);
           return;
         }
+        // livekit-client has already detached the track's elements when it
+        // emits this (RemoteTrackPublication.setTrack: prevTrack.detach(), then
+        // the Unsubscribed event), so detach() gives back [] here: the element
+        // this adapter holds for the sid is removed as well, or it stays in
+        // the page for the rest of the call.
         for (const el of track.detach()) el.remove();
+        const gone = this.elements.get(track.sid ?? '');
+        gone?.el.remove();
+        gone?.el.removeEventListener('volumechange', gone.held);
+        gone?.el.removeEventListener('playing', this.reportPlayback);
+        gone?.el.removeEventListener('pause', this.reportPlayback);
         this.elements.delete(track.sid ?? '');
+        this.reportPlayback();
       })
       .on(RoomEvent.LocalTrackPublished, (pub: LocalTrackPublication) => {
         // Published again by the SDK after a full reconnect: muted again.
@@ -1098,6 +1258,14 @@ class LiveKitAdapter implements Room {
       .on(RoomEvent.ParticipantPermissionsChanged, (_prev: unknown, participant: Participant) => {
         if (participant === room.localParticipant) this.wakeGrant();
       })
+      .on(RoomEvent.AudioPlaybackStatusChanged, () => {
+        // Read as the event fires, with the room's answer and every voice
+        // element's (playbackAllowed): playing starts and is refused again (a
+        // call, an interruption) as the browser decides.
+        if (this.closed) return;
+        this.keepDeafened();
+        events.onPlayback(this.playbackAllowed());
+      })
       .on(RoomEvent.MediaDevicesChanged, () => {
         void this.devicesChanged();
       })
@@ -1134,6 +1302,8 @@ class LiveKitAdapter implements Room {
     this.ensureOpen();
     // Whoever was already in the room: their tracks are subscribed by choice too.
     this.subscribeAll();
+    // Whether the browser lets this page play what it just subscribed to.
+    events.onPlayback(this.playbackAllowed());
     if (!publish) return;
     await this.publishMicrophone();
   }
@@ -1146,9 +1316,12 @@ class LiveKitAdapter implements Room {
     this.processing = on;
   }
 
-  async publishMicrophone(): Promise<void> {
+  // audio is the meter's context when the capture follows a click (Use
+  // microphone after Watch only, issue #1794): the tap uses it, as at a join.
+  async publishMicrophone(audio?: AudioContext | null): Promise<void> {
     this.ensureOpen();
     if (this.companion) throw new Error('voice: a companion has no microphone');
+    if (audio !== undefined) this.given = audio;
     // One under way is joined, to its end: its track is set before it is
     // published.
     if (this.publishing === null) {
@@ -1304,31 +1477,109 @@ class LiveKitAdapter implements Room {
   // listen taps a clone of the microphone for the level meter and the voice
   // detection: the published track is muted while the gate is shut, and a
   // muted track carries silence.
+  //
+  // It listens with the audio context the client made in the Join gesture
+  // (issue #1794), while that is open: iOS leaves a context made later
+  // suspended, and a suspended one reads silence. A mic switch comes here too,
+  // outside any gesture, and reuses it; it never makes one while there is one
+  // to use. Without one (a watch only joined, a browser without) or with one
+  // closed, it makes its own, as before. The meter is reported working only
+  // once the context runs, and follows its state from then on: a context that
+  // is not running when the tap is made is reported as no meter (silently, no
+  // name) until it runs. A context interrupted (a call, the screen locked) is
+  // resumed when the page is visible again.
   private listen(track: LocalAudioTrack): void {
     if (this.closed) return;
     // A tap left from an earlier capture is let go: one device open at a time.
     void this.untap();
-    const clone = track.mediaStreamTrack.clone();
-    // A clone copies the track's enabled flag, and the track was muted just
-    // before this: the tap must hear the room whatever the published track does.
-    clone.enabled = true;
-    const context = new AudioContext();
-    const analyser = context.createAnalyser();
-    analyser.fftSize = levelWindow;
-    context.createMediaStreamSource(new MediaStream([clone])).connect(analyser);
-    this.tap = { context, analyser, clone };
-    // The page was interacted with to get here, so the browser lets it run;
-    // a context that starts suspended would read silence.
-    void context.resume().catch(() => undefined);
+    let clone: MediaStreamTrack | null = null;
+    let context: AudioContext | null = null;
+    const given = this.given !== null && this.given.state !== 'closed' ? this.given : null;
+    try {
+      clone = track.mediaStreamTrack.clone();
+      // A clone copies the track's enabled flag, and the track was muted just
+      // before this: the tap must hear the room whatever the published track does.
+      clone.enabled = true;
+      const ctx = given ?? new AudioContext();
+      context = ctx;
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = levelWindow;
+      const src = ctx.createMediaStreamSource(new MediaStream([clone]));
+      src.connect(analyser);
+      // The meter works exactly while the context runs: a suspended or
+      // interrupted one (a call, the screen locked) reads nothing, or its last
+      // buffer. A change reaches the client, and an open microphone's gate is
+      // shut by the client when it hears the meter is gone.
+      const resumeIfVisible = (): void => {
+        if (ctx.state !== 'running' && ctx.state !== 'closed' && document.visibilityState === 'visible') void ctx.resume().catch(() => undefined);
+      };
+      const changed = (): void => {
+        this.events?.onMeter(ctx.state === 'running');
+        // Nothing else brings back a context an interruption suspended.
+        if (ctx.state === 'suspended') resumeIfVisible();
+      };
+      ctx.addEventListener('statechange', changed);
+      document.addEventListener('visibilitychange', resumeIfVisible);
+      this.tap = {
+        context: ctx,
+        analyser,
+        clone,
+        owned: given === null,
+        stop: () => {
+          ctx.removeEventListener('statechange', changed);
+          document.removeEventListener('visibilitychange', resumeIfVisible);
+          // The nodes of a context that stays are let go; a context closed
+          // goes with its own. A node already gone is not news.
+          try {
+            src.disconnect();
+            analyser.disconnect();
+          } catch {
+            // nothing to disconnect
+          }
+        },
+      };
+    } catch (err: unknown) {
+      // The tap only feeds the level meter and the open microphone's voice
+      // detection (a browser may refuse the audio context, or run out of
+      // them). The connection and the published track are good without it:
+      // what was made is let go, and the client is told there is no meter. A
+      // context that was given is the client's to close.
+      clone?.stop();
+      if (given === null) void context?.close().catch(() => undefined);
+      // Said by the error's name alone.
+      const name = typeof err === 'object' && err !== null && 'name' in err && typeof err.name === 'string' ? err.name : undefined;
+      this.events?.onMeter(false, name);
+      return;
+    }
+    if (context.state === 'running') {
+      this.events?.onMeter(true);
+      return;
+    }
+    // Not running yet (a context made here, or one the browser has not
+    // started): reported as no meter, with no name (nothing for the
+    // diagnostics), until it runs, so a context that never does is not taken
+    // for a working meter. The resume or the statechange listener says true.
+    const waiting = context;
+    this.events?.onMeter(false);
+    waiting.resume().then(
+      () => {
+        if (this.tap?.context === waiting) this.events?.onMeter(waiting.state === 'running');
+      },
+      () => {
+        if (this.tap?.context === waiting) this.events?.onMeter(waiting.state === 'running');
+      },
+    );
   }
 
-  // untap stops the tap's clone and closes its audio context.
+  // untap stops the tap's clone and, when the tap made its context, closes it.
+  // A context the client gave stays open for the next tap.
   private async untap(): Promise<void> {
     const tap = this.tap;
     this.tap = null;
     if (tap === null) return;
     tap.clone.stop();
-    await tap.context.close().catch(() => undefined);
+    tap.stop();
+    if (tap.owned) await tap.context.close().catch(() => undefined);
   }
 
   async setSending(on: boolean): Promise<void> {
@@ -1339,9 +1590,39 @@ class LiveKitAdapter implements Room {
     else await pub.mute();
   }
 
+  // Called from the tap, with nothing awaited before the SDK's own call: the
+  // browser counts only a call made inside the gesture.
+  startAudio(): Promise<void> {
+    const started = this.room.startAudio();
+    // The SDK unmutes every attached element, synchronously, before its first
+    // await: deafen is put back at once.
+    this.keepDeafened();
+    return started;
+  }
+
+  // The room's canPlaybackAudio goes true as soon as any one element plays,
+  // while an element the browser refused earlier stays paused: that voice is
+  // silent and the tap that would start it is gone. Playback is allowed only
+  // when the room says so and no voice element is paused (#1793).
+  private playbackAllowed(): boolean {
+    if (!this.room.canPlaybackAudio) return false;
+    for (const { el } of this.elements.values()) if (el.paused) return false;
+    return true;
+  }
+
+  private readonly reportPlayback = (): void => {
+    if (this.closed) return;
+    this.events?.onPlayback(this.playbackAllowed());
+  };
+
+  // Every voice element is muted exactly when the person is deafened.
+  private keepDeafened(): void {
+    for (const { el } of this.elements.values()) el.muted = this.deafened;
+  }
+
   setDeafened(on: boolean): void {
     this.deafened = on;
-    for (const { el } of this.elements.values()) el.muted = on;
+    this.keepDeafened();
   }
 
   // setVolume sets how loud this page plays one person's microphone, 0 to
@@ -1360,7 +1641,10 @@ class LiveKitAdapter implements Room {
 
   level(): number {
     const tap = this.tap;
-    if (tap === null) return 0;
+    // A context that does not run (suspended, interrupted) may hold the last
+    // buffer it had; if that was speech the open microphone's gate would stay
+    // open on it (issue #1794).
+    if (tap === null || tap.context.state !== 'running') return 0;
     tap.analyser.getByteTimeDomainData(this.buffer);
     let sum = 0;
     for (const v of this.buffer) {
@@ -1409,6 +1693,8 @@ class LiveKitAdapter implements Room {
     this.ensureOpen();
     this.shareQuality = quality;
     await this.stopScreen();
+    this.autoResolved = null;
+    this.cappedAs = null;
     const made = await this.room.localParticipant.createScreenTracks(captureOptions(quality, !this.companion));
     // The companion has no sound to share on Linux: whatever the portal gave
     // beyond the picture is stopped and never held or published.
@@ -1423,7 +1709,10 @@ class LiveKitAdapter implements Room {
     const video = tracks.find((t): t is LocalVideoTrack => t.source === Track.Source.ScreenShare);
     if (video !== undefined) {
       try {
-        await this.constrainShare(video, quality);
+        // The choice as it is now: one changed while the picker was open is the
+        // one the capture is settled and capped to. Auto is read from the
+        // capture as it came only if it was asked for at Auto's size.
+        await this.constrainShare(video, await this.settleShare(video, this.shareQuality, quality.resolution === 'auto'));
         this.ensureOpen();
       } catch (err) {
         for (const t of tracks) t.stop();
@@ -1432,6 +1721,30 @@ class LiveKitAdapter implements Room {
     }
     this.holdScreen(tracks);
     return { audio: tracks.some((t) => t.source === Track.Source.ScreenShareAudio) };
+  }
+
+  // settled is the quality as it applies to the capture held: Auto as it was
+  // settled for it, anything else as it is; before a capture, the provisional
+  // value (provisionalQuality).
+  settled(quality: ShareQuality): SettledQuality {
+    if (quality.resolution === 'auto' && this.autoResolved !== null) return { resolution: this.autoResolved, frameRate: autoFrameRate };
+    return provisionalQuality(quality);
+  }
+
+  // settleShare decides what Auto comes to for a capture, once. A capture just
+  // picked (fresh) is read as it came. One already capped by an earlier choice
+  // has the cap lifted to Auto's ask first, so the size read is the screen's
+  // and not a smaller one.
+  private async settleShare(track: LocalVideoTrack, quality: ShareQuality, fresh = false): Promise<SettledQuality> {
+    if (quality.resolution !== 'auto') {
+      this.autoResolved = null;
+      return this.settled(quality);
+    }
+    if (this.autoResolved === null) {
+      if (!fresh) await this.constrainShare(track, quality);
+      this.autoResolved = resolveAuto(track.mediaStreamTrack.getSettings());
+    }
+    return this.settled(quality);
   }
 
   setShareQuality(quality: ShareQuality): Promise<void> {
@@ -1446,17 +1759,26 @@ class LiveKitAdapter implements Room {
   private async applyShareQuality(): Promise<void> {
     const track = this.screen.find((t): t is LocalVideoTrack => t.source === Track.Source.ScreenShare);
     if (track === undefined) return;
-    await this.constrainShare(track, this.shareQuality);
+    const settled = await this.settleShare(track, this.shareQuality);
+    await this.constrainShare(track, settled);
     this.ensureOpen();
-    await this.shapeSender(track, this.shareQuality);
+    await this.shapeSender(track, settled);
   }
 
-  // constrainShare holds the chosen caps on the live capture.
+  // constrainShare applies the chosen caps unless the current constraints
+  // already have those exact maxima. Settings can reflect a static or smaller
+  // source and do not tell us whether the capture is capped.
   private async constrainShare(track: LocalVideoTrack, quality: ShareQuality): Promise<void> {
     const capture = track.mediaStreamTrack;
     const ask = shareAsk(quality);
     capture.contentHint = quality.frameRate === 15 ? 'detail' : 'motion';
-    await capture.applyConstraints({ width: { max: ask.width }, height: { max: ask.height }, frameRate: { max: ask.frameRate } });
+    const previous = capture.getConstraints();
+    const matches = (constraint: ConstrainULong | ConstrainDouble | undefined, target: number): boolean =>
+      typeof constraint === 'object' && constraint.max === target;
+    if (!matches(previous.width, ask.width) || !matches(previous.height, ask.height) || !matches(previous.frameRate, ask.frameRate)) {
+      await capture.applyConstraints({ width: { max: ask.width }, height: { max: ask.height }, frameRate: { max: ask.frameRate } });
+    }
+    this.cappedAs = `${quality.resolution}/${String(quality.frameRate)}`;
   }
 
   // shapeSender sets the published encodings by position: the highest carries
@@ -1471,6 +1793,8 @@ class LiveKitAdapter implements Room {
     const sender = track.sender;
     if (sender === undefined) return;
     const { top, lower } = shareEncodings(settings, quality);
+    // A hint only: a browser that refuses it must not cost the encodings below.
+    await track.setDegradationPreference(quality.frameRate === 15 ? 'maintain-resolution' : 'maintain-framerate').catch(() => undefined);
     const parameters = sender.getParameters();
     const last = parameters.encodings.length - 1;
     // Smallest first: the order LiveKit builds them in.
@@ -1499,13 +1823,20 @@ class LiveKitAdapter implements Room {
   // holdScreen makes a capture this connection's share, picked here or kept
   // from an earlier connection.
   private holdScreen(tracks: LocalTrack[]): void {
+    this.unwatchScreen?.();
+    this.unwatchScreen = null;
     this.screen = tracks;
     this.captureEnded = false;
     const video = tracks.find((t) => t.source === Track.Source.ScreenShare);
     if (video === undefined) return;
+    this.unwatchScreen = watchScreenCapture(video.mediaStreamTrack, (stalled) => {
+      this.events?.onScreenStalled?.(stalled);
+    });
     video.mediaStreamTrack.addEventListener('ended', () => {
       // Kept for another connection since: not this one's to report.
       if (!this.screen.includes(video)) return;
+      this.unwatchScreen?.();
+      this.unwatchScreen = null;
       // A track stopped by script fires no ended event: this is the browser.
       this.captureEnded = true;
       if (!this.stoppingScreen && !this.closed) this.events?.onScreenEnded('browser');
@@ -1513,6 +1844,8 @@ class LiveKitAdapter implements Room {
   }
 
   keepScreen(): KeptScreen | null {
+    this.unwatchScreen?.();
+    this.unwatchScreen = null;
     const tracks = this.screen;
     this.screen = [];
     this.wakeGrant();
@@ -1529,7 +1862,9 @@ class LiveKitAdapter implements Room {
     } finally {
       this.stoppingScreen = false;
     }
-    return new Kept(tracks);
+    const resolved = this.autoResolved;
+    this.autoResolved = null;
+    return new Kept(tracks, resolved);
   }
 
   adoptScreen(kept: KeptScreen): void {
@@ -1537,6 +1872,8 @@ class LiveKitAdapter implements Room {
     if (!(kept instanceof Kept)) throw new Error('voice: not a capture this page kept');
     // Sent again as captured, from this connection's publish on.
     for (const track of kept.tracks) track.mediaStreamTrack.enabled = true;
+    this.autoResolved = kept.resolved;
+    this.cappedAs = null;
     this.holdScreen([...kept.tracks]);
   }
 
@@ -1551,12 +1888,24 @@ class LiveKitAdapter implements Room {
       const settings = track.mediaStreamTrack.getSettings();
       // The companion publishes the picture alone, whatever was captured.
       if (this.companion && track.source !== Track.Source.ScreenShare) continue;
-      const options = track.source === Track.Source.ScreenShareAudio ? audioPublishOptions((settings.channelCount ?? 1) >= 2) : videoPublishOptions(settings, this.shareQuality);
+      // The picture is settled and capped to the choice as it is now before it
+      // is published: it may have changed while the share was being claimed or
+      // resumed, when nothing held a capture to apply it to (issue #1659).
+      let options: TrackPublishOptions;
+      if (track.source === Track.Source.ScreenShareAudio) {
+        options = audioPublishOptions((settings.channelCount ?? 1) >= 2);
+      } else {
+        const video = track as LocalVideoTrack;
+        const quality = await this.settleShare(video, this.shareQuality).catch(() => this.settled(this.shareQuality));
+        this.ensureOpen();
+        if (this.cappedAs !== `${quality.resolution}/${String(quality.frameRate)}`) await this.constrainShare(video, quality).catch(() => undefined);
+        options = videoPublishOptions(video.mediaStreamTrack.getSettings(), quality);
+      }
       await this.publishGranted(track, options, deadline);
       this.ensureOpen();
       // LiveKit builds the top layer from the real capture size: hold the cap
       // on it. A refusal leaves the share as published.
-      if (track.source === Track.Source.ScreenShare) await this.shapeSender(track as LocalVideoTrack, this.shareQuality).catch(() => undefined);
+      if (track.source === Track.Source.ScreenShare) await this.shapeSender(track as LocalVideoTrack, this.settled(this.shareQuality)).catch(() => undefined);
     }
   }
 
@@ -1612,6 +1961,8 @@ class LiveKitAdapter implements Room {
   }
 
   async stopScreen(): Promise<void> {
+    this.unwatchScreen?.();
+    this.unwatchScreen = null;
     const tracks = this.screen;
     this.screen = [];
     this.wakeGrant();
@@ -1646,6 +1997,8 @@ class LiveKitAdapter implements Room {
   }
 
   attachStream(principal: number, sink: ShareSink | null): void {
+    this.pipSizes.get(principal)?.();
+    this.pipSizes.delete(principal);
     const old = this.streamSinks.get(principal);
     const tracks = this.remoteShares.get(principal);
     if (old !== undefined) {
@@ -1656,6 +2009,7 @@ class LiveKitAdapter implements Room {
     else this.streamSinks.set(principal, sink);
     if (sink !== null) {
       tracks?.video?.attach(sink.video);
+      if (tracks?.video != null) this.pipSizes.set(principal, sizePictureInPicture(sink.video, tracks.video, () => { this.subscribeAll(); }));
       tracks?.audio?.attach(sink.audio);
     }
   }
@@ -1683,7 +2037,7 @@ class LiveKitAdapter implements Room {
     // element: the top layer on a full stage, less on a phone
     // (voice-multi-share.md §8).
     if (want && pub.source === Track.Source.ScreenShare && principal !== null) {
-      if (wants.focused === principal) this.release(pub);
+      if (wants.focused === principal || (document.pictureInPictureElement != null && this.streamSinks.get(principal)?.video === document.pictureInPictureElement)) this.release(pub);
       else this.hold(pub);
     }
   }
@@ -1730,11 +2084,21 @@ class LiveKitAdapter implements Room {
     else current.audio = track;
     this.remoteShares.set(principal, current);
     const sink = this.streamSinks.get(principal);
-    if (sink !== undefined) track.attach(video ? sink.video : sink.audio);
+    if (sink !== undefined) {
+      track.attach(video ? sink.video : sink.audio);
+      if (video) {
+        this.pipSizes.get(principal)?.();
+        this.pipSizes.set(principal, sizePictureInPicture(sink.video, track, () => { this.subscribeAll(); }));
+      }
+    }
     this.events?.onStreamTracks(principal, { video: current.video !== null, audio: current.audio !== null });
   }
 
   private unshared(track: RemoteTrack, principal: number): void {
+    if (track.source === Track.Source.ScreenShare) {
+      this.pipSizes.get(principal)?.();
+      this.pipSizes.delete(principal);
+    }
     track.detach();
     const current = this.remoteShares.get(principal);
     if (current === undefined) return;
@@ -1989,13 +2353,14 @@ class LiveKitAdapter implements Room {
   }
 
   attachCamera(principal: number, el: HTMLVideoElement | null): void {
+    this.unsizeCamera(principal);
     const old = this.cameraViews.get(principal);
     const track = this.remoteCameras.get(principal);
     if (old !== undefined) track?.detach(old);
     if (el === null) this.cameraViews.delete(principal);
     else {
       this.cameraViews.set(principal, el);
-      track?.attach(el);
+      if (track !== undefined) this.playCamera(principal, track, el);
     }
   }
 
@@ -2003,19 +2368,39 @@ class LiveKitAdapter implements Room {
     const principal = principalOf(participant.identity);
     if (principal === null) return;
     const before = this.remoteCameras.get(principal);
-    if (before !== undefined && before !== track) before.detach();
+    if (before !== undefined && before !== track) {
+      this.unsizeCamera(principal);
+      before.detach();
+    }
     this.remoteCameras.set(principal, track);
     const el = this.cameraViews.get(principal);
-    if (el !== undefined) track.attach(el);
+    if (el !== undefined) this.playCamera(principal, track, el);
     this.events?.onCameraTracks([...this.remoteCameras.keys()]);
   }
 
   private cameraGone(track: RemoteTrack): void {
     track.detach();
     for (const [principal, t] of this.remoteCameras) {
-      if (t === track) this.remoteCameras.delete(principal);
+      if (t !== track) continue;
+      this.unsizeCamera(principal);
+      this.remoteCameras.delete(principal);
     }
     this.events?.onCameraTracks([...this.remoteCameras.keys()]);
+  }
+
+  // playCamera plays a camera into its tile, sized as a share's picture is
+  // while that tile's element is in PiP (issue #1954). A camera's layer is
+  // never capped (hold is a share's), so nothing is asked again on enter or
+  // leave: adaptive stream follows the size given.
+  private playCamera(principal: number, track: RemoteTrack, el: HTMLVideoElement): void {
+    track.attach(el);
+    this.unsizeCamera(principal);
+    this.cameraPipSizes.set(principal, sizePictureInPicture(el, track, () => undefined));
+  }
+
+  private unsizeCamera(principal: number): void {
+    this.cameraPipSizes.get(principal)?.();
+    this.cameraPipSizes.delete(principal);
   }
 
   async close(): Promise<void> {
@@ -2024,7 +2409,14 @@ class LiveKitAdapter implements Room {
     this.wantSending = false;
     // A share's or a camera's publish waiting for a grant stops waiting.
     this.wakeGrant();
-    for (const { el } of this.elements.values()) el.remove();
+    for (const { el, held } of this.elements.values()) {
+      el.removeEventListener('volumechange', held);
+      // livekit keeps a detached element for its next attach: nothing of
+      // this closed room may stay on it.
+      el.removeEventListener('playing', this.reportPlayback);
+      el.removeEventListener('pause', this.reportPlayback);
+      el.remove();
+    }
     this.elements.clear();
     for (const principal of [...this.streamSinks.keys()]) this.attachStream(principal, null);
     for (const tracks of this.remoteShares.values()) {
@@ -2032,6 +2424,7 @@ class LiveKitAdapter implements Room {
       tracks.audio?.detach();
     }
     this.remoteShares.clear();
+    for (const principal of [...this.cameraPipSizes.keys()]) this.unsizeCamera(principal);
     for (const t of this.remoteCameras.values()) t.detach();
     this.remoteCameras.clear();
     this.cameraViews.clear();
@@ -2048,11 +2441,19 @@ class LiveKitAdapter implements Room {
     // disconnect(true) stops published tracks; these may not have been
     // published yet.
     track?.stop();
+    this.unwatchScreen?.();
+    this.unwatchScreen = null;
     for (const t of this.screen) t.stop();
     this.screen = [];
-    await untapped;
+    // The leave starts at once, not after the untap (issue #1764): closing the
+    // AudioContext can take long under load, and a page closed meanwhile never
+    // sent its leave, so LiveKit listed the person until it timed the dead
+    // connection out. The two run side by side; a failed untap was never
+    // thrown (untap swallows it), and a failed disconnect still is.
+    const disconnected = this.room.disconnect(true);
     try {
-      await this.room.disconnect(true);
+      const [, left] = await Promise.allSettled([untapped, disconnected]);
+      if (left.status === 'rejected') throw left.reason;
     } finally {
       redactor.release(this);
     }

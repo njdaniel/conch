@@ -2,9 +2,12 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/njdaniel/conch/pkg/schema"
 )
 
 // Files (issue #23). This file holds the rows of uploaded files. The question
@@ -80,35 +83,139 @@ func (s *Store) InsertFile(ctx context.Context, n NewFile) (File, error) {
 	now := time.Now().Truncate(time.Millisecond)
 	var id int64
 	err := s.withImmediateTx(ctx, func(tx execer) error {
-		member, err := isChannelMemberTx(ctx, tx, n.ChannelID, n.UploaderID)
-		if err != nil {
-			return err
-		}
-		if !member {
-			return ErrNotChannelMember
-		}
-		// The archived guard of an upload (issue #844).
-		if err := channelNotArchivedTx(ctx, tx, n.ChannelID); err != nil {
-			return err
-		}
-		res, err := tx.ExecContext(ctx,
-			`INSERT INTO files (channel_id, uploader_id, filename, media_type, size, sha256, created_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			n.ChannelID, n.UploaderID, n.Filename, n.MediaType, n.Size, n.SHA256, now.UnixMilli())
-		if err != nil {
-			return fmt.Errorf("store: insert file in channel %d: %w", n.ChannelID, err)
-		}
-		if id, err = res.LastInsertId(); err != nil {
-			return fmt.Errorf("store: insert file in channel %d: %w", n.ChannelID, err)
-		}
-		return appendAuditEventTx(ctx, tx, principalActor(n.UploaderID), AuditFileUploaded, fileSubject(id),
-			fmt.Sprintf("channel=%d size=%d sha256=%s", n.ChannelID, n.Size, n.SHA256), now)
+		var err error
+		id, err = insertFileTx(ctx, tx, n, now)
+		return err
 	})
 	if err != nil {
 		return File{}, err
 	}
 	return File{ID: id, ChannelID: n.ChannelID, UploaderID: n.UploaderID, Filename: n.Filename,
 		MediaType: n.MediaType, Size: n.Size, SHA256: n.SHA256, CreatedAt: now}, nil
+}
+
+// insertFileTx is InsertFile in the caller's transaction: the membership
+// check, the archived guard, the row and its file_uploaded audit event. Every
+// file row is made here, so an upload a message brings with it (MessageUploads)
+// is recorded and audited exactly as one sent to the upload route is.
+func insertFileTx(ctx context.Context, tx execer, n NewFile, now time.Time) (int64, error) {
+	member, err := isChannelMemberTx(ctx, tx, n.ChannelID, n.UploaderID)
+	if err != nil {
+		return 0, err
+	}
+	if !member {
+		return 0, ErrNotChannelMember
+	}
+	// The archived guard of an upload (issue #844).
+	if err := channelNotArchivedTx(ctx, tx, n.ChannelID); err != nil {
+		return 0, err
+	}
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO files (channel_id, uploader_id, filename, media_type, size, sha256, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		n.ChannelID, n.UploaderID, n.Filename, n.MediaType, n.Size, n.SHA256, now.UnixMilli())
+	if err != nil {
+		return 0, fmt.Errorf("store: insert file in channel %d: %w", n.ChannelID, err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("store: insert file in channel %d: %w", n.ChannelID, err)
+	}
+	return id, appendAuditEventTx(ctx, tx, principalActor(n.UploaderID), AuditFileUploaded, fileSubject(id),
+		fmt.Sprintf("channel=%d size=%d sha256=%s", n.ChannelID, n.Size, n.SHA256), now)
+}
+
+// MessageUploads are files a message brings with it (issue #1798): an agent's
+// post_message with attachments. They are recorded in the transaction that
+// inserts the message, which attaches them, so the files and the message are
+// stored together or not at all: a refused post leaves no file row, and a
+// file row is never left without its message.
+//
+// A post that carries uploads carries no payload of its own. The store writes
+// the conch.file_attachment.v1 payload that names the new rows, in the order
+// of Files.
+type MessageUploads struct {
+	// Files are the files to record, one to schema.MaxFileAttachments of
+	// them. The channel and the uploader are the post's channel and author,
+	// whatever these say.
+	Files []NewFile
+	// Place puts the bytes where the rows say they are. It is called once,
+	// last, inside the transaction: after every row is written and before
+	// the commit, so that a row never points at nothing (the order the
+	// upload route keeps) and a refused post has placed nothing. If it fails
+	// the transaction is rolled back.
+	Place func() error
+}
+
+// errUploadsWithPayload is a post that carries both uploads and a payload:
+// the caller's mistake, never a request's (the tool refuses that pair).
+var errUploadsWithPayload = errors.New("store: a post with uploads carries no payload of its own")
+
+// recordUploadsTx records the files of u as authorID's uploads to channelID
+// and returns the payload that attaches them, for the message insert that
+// follows in the same transaction. With no uploads it returns payload as it
+// was given.
+func recordUploadsTx(
+	ctx context.Context, tx execer, channelID, authorID int64, u *MessageUploads, payload *schema.Payload, now time.Time,
+) (*schema.Payload, error) {
+	if u == nil {
+		return payload, nil
+	}
+	if payload != nil {
+		return nil, errUploadsWithPayload
+	}
+	att := schema.FileAttachmentV1{FileIDs: make([]int64, 0, len(u.Files))}
+	for _, n := range u.Files {
+		n.ChannelID, n.UploaderID = channelID, authorID
+		id, err := insertFileTx(ctx, tx, n, now)
+		if err != nil {
+			return nil, err
+		}
+		att.FileIDs = append(att.FileIDs, id)
+	}
+	if err := att.Validate(); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrFileAttachment, err)
+	}
+	data, err := json.Marshal(att)
+	if err != nil {
+		return nil, fmt.Errorf("store: encode file attachment: %w", err)
+	}
+	return &schema.Payload{Schema: schema.FileAttachmentV1Name, Data: data}, nil
+}
+
+// place runs u's Place, if there is one, as the last step of the transaction.
+func (u *MessageUploads) place() error {
+	if u == nil || u.Place == nil {
+		return nil
+	}
+	return u.Place()
+}
+
+// InsertMessageWithUploads is InsertMessageV1 for a channel-wide message that
+// brings its files with it: the file rows, the message that attaches them and
+// every audit event are one transaction (see MessageUploads).
+func (s *Store) InsertMessageWithUploads(ctx context.Context, channelID, authorID int64, body string, uploads *MessageUploads) (Message, error) {
+	now := time.Now().Truncate(time.Millisecond)
+	var id int64
+	var payload *schema.Payload
+	var guest *schema.GuestAttributionV1
+	err := s.withImmediateTx(ctx, func(tx execer) error {
+		var err error
+		if payload, err = recordUploadsTx(ctx, tx, channelID, authorID, uploads, nil, now); err != nil {
+			return err
+		}
+		if id, err = insertChannelWideTx(ctx, tx, channelID, authorID, body, payload, 0, now); err != nil {
+			return err
+		}
+		if guest, err = guestAuthorTx(ctx, tx, id); err != nil {
+			return err
+		}
+		return uploads.place()
+	})
+	if err != nil {
+		return Message{}, err
+	}
+	return Message{ID: id, ChannelID: channelID, AuthorID: authorID, Body: body, Payload: payload, CreatedAt: now, GuestAuthor: guest}, nil
 }
 
 // CountFiles returns how many file rows exist, attached or not. It exists for

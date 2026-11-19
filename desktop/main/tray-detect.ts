@@ -1,15 +1,21 @@
-// Is a tray host on the session bus? (issue #1589, D5-03; linux-desktop.md §9,
-// Q-D5-2). Input: a RunFile. Output: whether org.kde.StatusNotifierWatcher
-// has an owner and reports a registered host (IsStatusNotifierHostRegistered):
-// a watcher with no host draws no icon. Owns: the two gdbus command lines.
+// Is a tray host available? Linux uses the session bus (issue #1589, D5-03;
+// linux-desktop.md §9, Q-D5-2); Windows uses the native tray (#1935).
+// Input: a RunFile, environment and platform. Output: live host evidence.
+// On Linux, org.kde.StatusNotifierWatcher must have an owner and report a
+// registered host (IsStatusNotifierHostRegistered): a watcher with no host
+// draws no icon. Owns: the gdbus and tasklist command lines and their parsing.
 //
-// This is necessary and not sufficient for a working tray: Electron gives no
-// "is the icon visible" answer, so the person also confirms they can see it
-// (settings.ts). Detection fails closed: a gdbus that is missing, slow or
-// answers anything but `(true,)` means no tray.
+// On Windows, icon creation is an opt-in attempt, independent of this live
+// host check. tasklist identifies this process's session, then asks whether
+// explorer.exe is running there. This is a heuristic, not proof that an icon
+// is visible; visibility confirmation is still required. F14 hardware testing
+// (#903) checks the heuristic and Explorer recovery.
 //
-// The probe is argv only through runFile: an absolute path, no shell, no
-// PATH search, nothing of the person's text in it.
+// Detection fails closed on errors, timeouts or unknown output. RunFile bounds
+// each query's time (3.5 seconds) and output. All probes use an absolute path
+// and argv, never a shell or PATH search.
+import { win32 } from 'node:path';
+
 import type { RunResult } from './voice/spawn.ts';
 
 // RunFile is the one runner, voice/spawn.ts's runFile (its signature).
@@ -83,9 +89,53 @@ export async function watcherPresent(run: RunFile, env: Readonly<Record<string, 
   return result !== null && result.code === 0 && parseHasOwner(result.stdout) === true;
 }
 
-// trayHostPresent: the watcher has an owner and a host is registered with it.
-export async function trayHostPresent(run: RunFile, env: Readonly<Record<string, string>> = busEnv()): Promise<boolean> {
-  if (!(await watcherPresent(run, env))) return false;
-  const result = await run(GDBUS, HOST_ARGV, env);
+// Only SystemRoot is needed by tasklist; never pass credentials or PATH.
+function windowsEnv(): Record<string, string> {
+  const root = Object.entries(process.env).find(([name]) => name.toUpperCase() === 'SYSTEMROOT')?.[1];
+  return root === undefined ? {} : { SystemRoot: root };
+}
+
+interface Task {
+  readonly image: string;
+  readonly pid: string;
+  readonly session: string;
+}
+
+// /FO CSV /NH has five quoted columns, independent of localized headings.
+// Reject the whole answer on unexpected rows (including localized "no tasks"
+// messages), rather than searching arbitrary output for explorer.exe.
+function tasks(result: RunResult | null): Task[] | null {
+  if (result === null || result.code !== 0 || result.stdout.trim() === '') return null;
+  const rows: Task[] = [];
+  for (const line of result.stdout.trim().split(/\r?\n/u)) {
+    const match = /^"([^"\r\n]+)","([1-9][0-9]*)","[^"\r\n]+","([0-9]+)","[^"\r\n]+"$/u.exec(line);
+    if (match === null) return null;
+    rows.push({ image: match[1] ?? '', pid: match[2] ?? '', session: match[3] ?? '' });
+  }
+  return rows;
+}
+
+async function windowsHostPresent(run: RunFile, env: Readonly<Record<string, string>>): Promise<boolean> {
+  const root = env['SystemRoot'];
+  if (root === undefined || !/^[A-Za-z]:[\\/]/u.test(root) || root.includes('\0')) return false;
+  const file = win32.join(root, 'System32', 'tasklist.exe');
+  try {
+    const own = tasks(await run(file, ['/FI', `PID eq ${String(process.pid)}`, '/FO', 'CSV', '/NH'], env));
+    if (own?.length !== 1 || own[0]?.pid !== String(process.pid)) return false;
+    const session = own[0].session;
+    const hosts = tasks(await run(file, ['/FI', 'IMAGENAME eq explorer.exe', '/FI', `SESSION eq ${session}`, '/FO', 'CSV', '/NH'], env));
+    return hosts !== null && hosts.length > 0 && hosts.every((host) => host.image.toLowerCase() === 'explorer.exe' && host.session === session);
+  } catch {
+    return false;
+  }
+}
+
+// trayHostPresent supplies live evidence for periodic and close-time checks;
+// permission to attempt native icon creation is not evidence of a live host.
+export async function trayHostPresent(run: RunFile, env?: Readonly<Record<string, string>>, platform: NodeJS.Platform = process.platform): Promise<boolean> {
+  if (platform === 'win32') return windowsHostPresent(run, env ?? windowsEnv());
+  const bus = env ?? busEnv();
+  if (!(await watcherPresent(run, bus))) return false;
+  const result = await run(GDBUS, HOST_ARGV, bus);
   return result !== null && result.code === 0 && parseHostRegistered(result.stdout) === true;
 }

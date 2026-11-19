@@ -18,15 +18,16 @@
 //    or a window source type (AvailableSourceTypes, a bitmask: 1 monitor,
 //    2 window).
 // Anything else, a missing gdbus included, is "unavailable": the app never
-// guesses that a capture would go through a picker.
+// guesses that a capture would go through a picker. Other platforms
+// report unsupported capture without probing for a Linux portal.
 import { existsSync } from 'node:fs';
+import type { CompanionShareUnavailable } from '../../web/src/platform/desktop/bridge.ts';
 
 import { PORTAL_TIMEOUT_MS, runFile, type RunResult } from './voice/spawn.ts';
 
 export { runFile };
 
-export type ShareUnavailable = 'no-portal' | 'not-wayland';
-export type ShareAvailability = 'available' | ShareUnavailable;
+export type ShareAvailability = 'available' | CompanionShareUnavailable;
 
 // Where GLib installs gdbus. Never looked up on PATH.
 export const GDBUS_PATHS: readonly string[] = ['/usr/bin/gdbus', '/bin/gdbus'];
@@ -80,6 +81,7 @@ export interface PortalDeps {
 
 const WORDS: Record<ShareAvailability, string> = {
   available: 'screen share: the screen-cast portal answered',
+  'capture-unsupported': 'share unavailable: screen capture is not supported on this platform',
   'no-portal': 'share unavailable: no screen-cast portal',
   'not-wayland': 'share unavailable: no screen-cast portal (not a Wayland session, so Chromium would not use one)',
 };
@@ -109,7 +111,7 @@ export class Portal {
 
   async #ask(): Promise<ShareAvailability> {
     const { platform, env } = this.#deps;
-    if (platform !== 'linux') return 'no-portal';
+    if (platform !== 'linux') return 'capture-unsupported';
     if (!underWayland(env)) return 'not-wayland';
     const gdbus = GDBUS_PATHS.find((p) => this.#deps.executable(p));
     if (gdbus === undefined) return 'no-portal';

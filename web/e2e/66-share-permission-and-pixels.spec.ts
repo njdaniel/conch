@@ -10,7 +10,9 @@
 // ends with reason access_lost, the viewer's tile goes, its frames stop and
 // LiveKit lists no screen track of the sharer's. The owner's PUT
 // /v1/permissions ends it before it answers, so the bound below is the
-// 10-voice roster bound, a stated margin and no more.
+// 10-voice roster bound, a stated margin and no more. Frames stop once those
+// already on their way have landed (settleWithin, issue #1962): LiveKit lists
+// no track a little before the viewer has decoded its last frame.
 //
 // Pixels: the viewer's <video> is drawn to a canvas five times over two
 // seconds; the picture is not flat (luminance standard deviation above
@@ -45,6 +47,18 @@ const movedBy = 8;
 // The longest a share may take to end after share_screen goes off: the 10-voice
 // roster bound (2 * (2 s call + 1.5 s gap + 2 s call)), for a loaded machine.
 const endsWithin = 2 * (2000 + 1500 + 2000);
+// How long an ended stream may go on decoding the frames already sent once
+// LiveKit lists no screen track (issue #1962). Measured over 20 runs: the
+// viewer's tile went 50 to 104 ms after the revoke answered and LiveKit's list
+// was empty 7 to 13 ms later; the viewer then decoded 3 or 4 more frames, the
+// last of them 110 to 126 ms after the empty list, and the stream left the
+// page's stats (its receiver removed) 220 to 234 ms after it. So a single read
+// as LiveKit's list empties is too early (the flake on #1961); this is about
+// ten times the worst measured, for a loaded machine.
+const settleWithin = 3000;
+// A stream still in the stats has stopped once its count has not moved for
+// this long: at the fake screen's frame rate that is many frames missed.
+const stillFor = 1000;
 
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
 const shareView = (page: Page) => page.getByRole('region', { name: 'Shared screen' });
@@ -145,6 +159,29 @@ test.describe('@smoke screen share permission and pixels with LiveKit', () => {
     const at = (await videoFrames(p)).get(id) ?? 0;
     await expect.poll(async () => (await videoFrames(p)).get(id) ?? 0, { timeout: 15_000, message: 'its frames keep rising' }).toBeGreaterThan(at);
     return id;
+  }
+
+  // framesSettle waits for an ended stream to stop decoding and returns the
+  // most frames it had: settled when it has left the page's stats (its
+  // receiver removed) or its count has not moved for stillFor. A stream still
+  // decoding after settleWithin has not stopped, and fails.
+  async function framesSettle(p: Someone, id: string): Promise<number> {
+    const start = Date.now();
+    let most = 0;
+    let movedAt = start;
+    for (;;) {
+      const frames = (await videoFrames(p)).get(id);
+      const now = Date.now();
+      if (frames === undefined) return most;
+      if (frames > most) {
+        most = frames;
+        movedAt = now;
+      } else if (now - movedAt >= stillFor) {
+        return most;
+      }
+      if (now - start > settleWithin) throw new Error(`frames still decoded ${String(now - start)} ms after the share ended (at most ${String(settleWithin)} ms)`);
+      await p.page.waitForTimeout(100);
+    }
   }
 
   // Five luminance samples of the watched <video> over two seconds, each a
@@ -274,12 +311,14 @@ test.describe('@smoke screen share permission and pixels with LiveKit', () => {
         await expect(voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' })).toHaveCount(0);
         await expect(shareView(c.page)).toHaveCount(0, { timeout: endsWithin });
         await expect.poll(() => answered(vw.tracks(vw.alice, 'screen')), { timeout: endsWithin }).toEqual([]);
-        framesAtEnd = (await videoFrames(c)).get(stream) ?? 0;
+        // The frames already sent land first (settleWithin), and then stop.
+        framesAtEnd = await framesSettle(c, stream);
       });
       const me = `principal:${String(vw.alice.id)}`;
       const rows = (await shareRows()).slice(before).map(rowName);
       expect(rows).toEqual([`${me} voice_share_started`, `${me} voice_share_stopped access_lost`]);
-      // The ended stream decoded nothing more while the rows were read.
+      // The ended stream, once settled, decoded nothing more while the rows
+      // were read.
       expect((await videoFrames(c)).get(stream) ?? 0, 'frames after the share ended').toBeLessThanOrEqual(framesAtEnd);
       // Back as found: alice may share again.
       await expect(voiceRegion(a.page).getByRole('button', { name: 'Share screen' })).toBeEnabled();

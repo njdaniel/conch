@@ -6,7 +6,15 @@
 // bridge's subscribe is not one invoke: the preload carries it as the three
 // feed calls below, and main answers with feed events on the one channel
 // FEED_EVENTS (issue #943).
-import type { ConchDesktopBridge, DesktopCompanionBridge, DesktopInviteBridge, DesktopSettingsBridge, DesktopUpdateBridge, DesktopVoiceBridge } from '../../web/src/platform/desktop/bridge.ts';
+import type {
+  ConchDesktopBridge,
+  DesktopCompanionBridge,
+  DesktopInviteBridge,
+  DesktopSettingsBridge,
+  DesktopShareSoundBridge,
+  DesktopUpdateBridge,
+  DesktopVoiceBridge,
+} from '../../web/src/platform/desktop/bridge.ts';
 
 export const BRIDGE_FUNCTIONS = [
   'serverAddress',
@@ -26,6 +34,12 @@ export const BRIDGE_FUNCTIONS = [
   'createAccount',
   'signOut',
   'replaceCredential',
+  'createMemberLink',
+  'createSignInLink',
+  'totpEnroll',
+  'createPrincipalSignInLink',
+  'createPrincipalCredential',
+  'createHook',
   'uploadFile',
   'downloadFile',
   'saveFile',
@@ -95,6 +109,13 @@ export const COMPANION_FUNCTIONS = ['companionGrant', 'companionEnd', 'shareArm'
 
 export type CompanionFunction = (typeof COMPANION_FUNCTIONS)[number];
 
+// The Linux screen share's sound (issue #1854): DesktopShareSoundBridge. Main
+// answers them only with its own switch on; none names a scope, an
+// application, a process or a device.
+export const SHARE_SOUND_FUNCTIONS = ['shareSoundStart', 'shareSoundChoose', 'shareSoundMute', 'shareSoundEnd', 'shareSoundShareEnded'] as const satisfies readonly (keyof DesktopShareSoundBridge)[];
+
+export type ShareSoundFunction = (typeof SHARE_SOUND_FUNCTIONS)[number];
+
 // The update family (issue #1600, D6-06): the installed files replaced under
 // the running app. onUpdateState is its event, not an invoke.
 export const UPDATE_FUNCTIONS = ['updateState', 'updateRestart'] as const satisfies readonly (keyof DesktopUpdateBridge)[];
@@ -110,7 +131,17 @@ export const FEED_CALLS = ['feedSubscribe', 'feedAck', 'feedUnsubscribe'] as con
 export type FeedCall = (typeof FEED_CALLS)[number];
 
 // The functions that cross into main as one invoke each.
-export type InvokedFunction = Exclude<BridgeFunction, 'subscribe'> | FeedCall | ProfileFunction | VoiceFunction | InviteFunction | NotifyFunction | SettingsFunction | CompanionFunction | UpdateFunction;
+export type InvokedFunction =
+  | Exclude<BridgeFunction, 'subscribe'>
+  | FeedCall
+  | ProfileFunction
+  | VoiceFunction
+  | InviteFunction
+  | NotifyFunction
+  | SettingsFunction
+  | CompanionFunction
+  | UpdateFunction
+  | ShareSoundFunction;
 
 export const INVOKED_FUNCTIONS: readonly InvokedFunction[] = [
   ...BRIDGE_FUNCTIONS.filter((name): name is Exclude<BridgeFunction, 'subscribe'> => name !== 'subscribe'),
@@ -122,6 +153,7 @@ export const INVOKED_FUNCTIONS: readonly InvokedFunction[] = [
   ...SETTINGS_FUNCTIONS,
   ...COMPANION_FUNCTIONS,
   ...UPDATE_FUNCTIONS,
+  ...SHARE_SOUND_FUNCTIONS,
 ];
 
 export function channelOf(name: InvokedFunction | typeof NOTIFICATION_SUPPORT): string {

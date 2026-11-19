@@ -87,6 +87,12 @@ import {
   listOwnCredentialsResponseV1,
   listOwnSignInLinksResponseV1,
   listReadStateResponseV1,
+  listOwnPushRegistrationsResponseV1,
+  notificationPreferencesV1,
+  putNotificationPreferencesRequestV1,
+  pushConfigV1,
+  pushRegistrationV1,
+  createPushRegistrationRequestV1,
   listRunsResponseV1,
   loginRequestV1,
   loginResponseV1,
@@ -162,7 +168,12 @@ export interface Operation {
   // unaffected; it holds all of these itself.
   readonly renderer: boolean;
   // The response fields that are credentials, which the desktop main consumes
-  // and never returns to the renderer.
+  // and never returns to the renderer. The exception is a secret made for
+  // someone or something else (issue #1768: createMemberLink, createSignInLink,
+  // totpEnroll, createPrincipalSignInLink, createPrincipalCredential,
+  // createHook): the person has to see and copy it, so main's one bridge
+  // function for the operation returns it once, in that call's result. The
+  // operation stays renderer: false, so the generic request still refuses it.
   readonly credentials?: readonly string[];
   // True for a WebSocket upgrade: GET, opened with a single-use ticket.
   readonly socket?: true;
@@ -371,6 +382,15 @@ export const operations = {
   listReactors: op('GET', '/v2/channels/{channel}/messages/{id}/reactions/{emoji}', 'bearer', { response: reply(listReactorsResponseV1) }),
   setReaction: op('PUT', '/v2/channels/{channel}/messages/{id}/reactions/{emoji}', 'bearer', { response: reply(reactionSummaryV1) }),
   removeReaction: op('DELETE', '/v2/channels/{channel}/messages/{id}/reactions/{emoji}', 'bearer', { response: reply(reactionSummaryV1) }),
+  // Background push (issue #1826): the browser's Web Push registration and the
+  // server's copy of its notification policy. Members only; the server refuses
+  // a guest or an agent.
+  pushConfig: op('GET', '/v1/push/config', 'bearer', { response: reply(pushConfigV1) }),
+  listPushRegistrations: op('GET', '/v1/push/registrations/mine', 'bearer', { response: reply(listOwnPushRegistrationsResponseV1) }),
+  createPushRegistration: op('POST', '/v1/push/registrations', 'bearer', { request: check(createPushRegistrationRequestV1), response: reply(pushRegistrationV1) }),
+  endPushRegistration: op('DELETE', '/v1/push/registrations/{id}', 'bearer'),
+  getNotificationPreferences: op('GET', '/v1/notifications/preferences', 'bearer', { response: reply(notificationPreferencesV1) }),
+  putNotificationPreferences: op('PUT', '/v1/notifications/preferences', 'bearer', { request: check(putNotificationPreferencesRequestV1), response: reply(notificationPreferencesV1) }),
   moderateReaction: op('DELETE', '/v2/channels/{channel}/messages/{id}/reactions/{emoji}/{principal}', 'bearer', { response: reply(reactionSummaryV1) }),
   removeReactor: op('DELETE', '/v2/channels/{channel}/messages/{id}/reactors/{principal}', 'bearer', { response: reply(reactionSummaryV1) }),
   messageRevisions: op('GET', '/v2/channels/{channel}/messages/{id}/revisions', 'bearer', { response: reply(listMessageRevisionsResponseV1) }),

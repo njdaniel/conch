@@ -11,13 +11,16 @@
 //
 // Like conchd's /app/ policy there is no inline script or style, no eval and
 // no remote script, style, image or font; unlike it, this one forbids frames,
-// workers, forms and base URLs outright.
+// workers, forms and base URLs outright. Nick's #1924 decision (2026-11-18)
+// adds only media-src 'self' for bundled interface WAVs played by <audio>;
+// connect-src and the scheme privileges stay unchanged.
 export const CONTENT_SECURITY_POLICY = [
   "default-src 'none'",
   "script-src 'self'",
   "style-src 'self'",
   "font-src 'self'",
   "img-src 'self' blob: data:",
+  "media-src 'self'",
   'connect-src wss: https:',
   "object-src 'none'",
   "base-uri 'none'",

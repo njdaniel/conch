@@ -23,8 +23,9 @@ import { usePresence } from './usePresence';
 import { useNativeVoice } from './useNativeVoice';
 import { lockMutedNote, updatePendingWords } from './words';
 import { VoiceOptions } from './VoiceOptions';
-import { NativeStreams, ShareButton, ShareNotes, shareDisabledReason } from './NativeShare';
+import { NativeStreams, ShareButton, ShareNotes, ShareSoundMute, shareDisabledReason } from './NativeShare';
 import type { Companion } from './useCompanion';
+import { useShareSound } from './useShareSound';
 import { TalkKeySetup } from './TalkKeySetup';
 
 // How long the duplicate-identity warning waits for a second Join.
@@ -44,8 +45,11 @@ export const unavailableWords: Readonly<Record<string, string>> = {
 
 const runtimeDirectory = 'The voice runtime directory was refused as unsafe.';
 
-function unavailableWhy(problem: string | undefined): string | null {
+export const folderWritable = "The voice helper is in a folder that other users can change, so it was not started.";
+
+function unavailableWhy(problem: string | undefined, cause?: string): string | null {
   if (problem === undefined || problem === 'unsupported') return null;
+  if (problem === 'untrusted' && cause === 'folder-writable') return folderWritable;
   if (Object.prototype.hasOwnProperty.call(unavailableWords, problem)) return unavailableWords[problem] ?? null;
   return problem.startsWith('runtime-dir-') ? runtimeDirectory : null;
 }
@@ -132,12 +136,21 @@ export function NativeVoicePanel({
   // Linux yet, so the silent-share notes are said.
   readonly soundRoute?: boolean;
 }) {
-  const { view, words, actions } = useNativeVoice(source, binding);
+  // A Windows config save is for the next helper. Persist its readable label
+  // through onBound, while this generation continues to show its old key.
+  const [previousBinding, setPreviousBinding] = useState<{ readonly generation: number; readonly label: string | undefined } | null>(null);
+  const { view, words, actions } = useNativeVoice(source, previousBinding === null ? binding : previousBinding.label);
+  useEffect(() => {
+    if (previousBinding !== null && previousBinding.generation !== view.generation) setPreviousBinding(null);
+  }, [previousBinding, view.generation]);
+  // The share's sound (issue #1854): main's view of it and the two moments the
+  // page owes it; undefined unless main's switch is on.
+  const sound = useShareSound(source, companion, view);
   const session = hasSession(view);
   const [setup, setSetup] = useState(false);
   const joined = session ? view.channel : null;
   const shown = joined ?? (signedIn ? channel : null);
-  const snapshot = usePresence({ channel: shown, voiceAllowed, onUnauthorized });
+  const snapshot = usePresence({ channel: shown, joined, voiceAllowed, onUnauthorized });
   const presence = snapshot.kind === 'presence' ? snapshot.presence : null;
   const named = useVoiceNames({ joined, viewed: channel, presence, people });
 
@@ -181,6 +194,7 @@ export function NativeVoicePanel({
   const [pending, setPending] = useState<'mute' | 'deafen' | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [options, setOptions] = useState(false);
+  const [details, setDetails] = useState(false);
   const run = async (what: 'mute' | 'deafen', go: () => Promise<{ readonly ok: boolean; readonly error?: NativeVoiceError }>) => {
     setPending(what);
     setNote(null);
@@ -214,7 +228,7 @@ export function NativeVoicePanel({
   const noSpeaking: ReadonlySet<number> = new Set();
   const noVolumes: ReadonlyMap<number, number> = new Map();
 
-  const why = view.status === 'unavailable' ? unavailableWhy(view.problem) : null;
+  const why = view.status === 'unavailable' ? unavailableWhy(view.problem, view.cause) : null;
   const unavailable = view.status === 'unavailable';
   const live = helper !== undefined && view.status === 'running' && helper.phase === 'connected';
   const muted = helper?.muted === true;
@@ -291,6 +305,7 @@ export function NativeVoicePanel({
                   </>
                 ) : null}
                 {share}
+                {sound === undefined ? null : <ShareSoundMute sound={sound} />}
                 <OptionsButton open={options} onToggle={() => { setOptions(!options); }} />
                 <button type="button" className="danger" disabled={view.status === 'stopping' || actions === undefined} onClick={() => { if (actions !== undefined) void outcome(() => actions.leave()); }}>
                   <Glyph name="leave" />
@@ -313,7 +328,15 @@ export function NativeVoicePanel({
       {unavailable || actions === undefined ? null : <VoiceOptions source={source} view={view} open={options} />}
       <div className="voice-notes">
         {why === null ? null : <p role="status" className="hint">{why}</p>}
-        {companion === null || unavailable ? null : <ShareNotes companion={companion} joined={joined} reason={shareReason} soundRoute={soundRoute} />}
+        {view.detail === undefined ? null : (
+          <>
+            <button type="button" className="more" aria-expanded={details} onClick={() => { setDetails(!details); }}>
+              Details
+            </button>
+            {details ? <p className="hint voice-detail">{view.detail}</p> : null}
+          </>
+        )}
+        {companion === null || unavailable ? null : <ShareNotes companion={companion} joined={joined} reason={shareReason} soundRoute={soundRoute} sound={sound} />}
         {view.mutedByLock === true && muted ? <p role="status" className="hint">{lockMutedNote}</p> : null}
         {note === null ? null : <p role="status" className="hint">{note}</p>}
         {idle === null ? null : <p role="status" className="hint">{idle}</p>}
@@ -330,7 +353,10 @@ export function NativeVoicePanel({
         <TalkKeySetup
           source={source}
           joined={session}
-          onSaved={(label) => { onBound?.(label); }}
+          onSaved={(label, nextJoinOnly) => {
+            if (nextJoinOnly === true) setPreviousBinding((old) => old ?? { generation: view.generation, label: binding });
+            onBound?.(label);
+          }}
           onClose={() => { setSetup(false); }}
         />
       ) : null}

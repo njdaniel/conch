@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { matchChannels, nextUnread, stepChannel } from './channelNav';
+import { matchChannels, nextUnread, stepChannel } from './channelOrder';
 import type { ChannelV0 } from './schema/channel';
 
 const ch = (id: number, name: string, extra: Partial<ChannelV0> = {}): ChannelV0 => ({ id, name, created_at: '2026-10-18T00:00:00.000Z', ...extra });

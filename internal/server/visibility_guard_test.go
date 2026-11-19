@@ -155,8 +155,11 @@ func checkMessageReads(t *testing.T, fset *token.FileSet, path string, file *ast
 				// reader's own message by the same condition and are held to
 				// the same reader rule below. RemoveMessage (issue #852) finds the
 				// message to remove by the same condition and is held to it too.
+				// InsertMessageWithUploads (issue #1798) is InsertMessageV1 with
+				// the message's files recorded in the same transaction: an
+				// insert, which reads no message.
 				case "ListVisibleMessages", "ListVisibleMessagesPage", "SearchVisibleMessages", "CountVisibleMessagesAfter", "CountVisibleUnreadMessagesAfter", "ListThreadMessages", "ReplyRootMessage", "InsertReplyMessage",
-					"InsertMessage", "InsertMessageV1", "InsertScopedMessage", "EditOwnMessage", "OwnMessageRevisions", "RemoveMessage":
+					"InsertMessage", "InsertMessageV1", "InsertMessageWithUploads", "InsertScopedMessage", "EditOwnMessage", "OwnMessageRevisions", "RemoveMessage":
 				default:
 					t.Errorf("%s: %s calls the store's %s; server code may only use the visibility functions and the inserts", path, fset.Position(x.Pos()), name)
 					return true

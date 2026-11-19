@@ -16,6 +16,9 @@ import {
   forgetStored,
   getFileMeta,
   hasToken,
+  keptShareQuality,
+  readShareQuality,
+  writeShareQuality,
   heldElsewhere,
   listChannels,
   listInvites,
@@ -603,6 +606,26 @@ describe('invites', () => {
     expect(path).toBe('/v1/channels/red%20team/voice/share');
     expect(init?.method).toBe('POST');
     expect(init?.body).toBe(JSON.stringify({ quality }));
+  });
+
+  it.each([
+    { what: 'absent', stored: null, kept: null, read: { resolution: '1080p', frameRate: 30 } },
+    { what: 'auto', stored: '{"resolution":"auto","frameRate":30}', kept: { resolution: 'auto', frameRate: 30 }, read: { resolution: 'auto', frameRate: 30 } },
+    { what: 'auto with a stray frame rate is 30 fps', stored: '{"resolution":"auto","frameRate":60}', kept: { resolution: 'auto', frameRate: 30 }, read: { resolution: 'auto', frameRate: 30 } },
+    { what: 'a concrete choice', stored: '{"resolution":"source","frameRate":60}', kept: { resolution: 'source', frameRate: 60 }, read: { resolution: 'source', frameRate: 60 } },
+    { what: 'an unknown resolution', stored: '{"resolution":"4k","frameRate":30}', kept: null, read: { resolution: '1080p', frameRate: 30 } },
+    { what: 'an unknown frame rate', stored: '{"resolution":"auto","frameRate":24}', kept: null, read: { resolution: '1080p', frameRate: 30 } },
+    { what: 'not an object', stored: '"auto"', kept: null, read: { resolution: '1080p', frameRate: 30 } },
+    { what: 'not json', stored: 'auto', kept: null, read: { resolution: '1080p', frameRate: 30 } },
+  ])('keeps the share quality across a reload, Auto included: $what (issue #1659)', ({ stored, kept, read }) => {
+    if (stored !== null) window.localStorage.setItem('conch.web.voice.share-quality.v1', stored);
+    expect(keptShareQuality()).toEqual(kept);
+    expect(readShareQuality()).toEqual(read);
+  });
+
+  it('writes Auto as a choice that reads back', () => {
+    writeShareQuality({ resolution: 'auto', frameRate: 30 });
+    expect(keptShareQuality()).toEqual({ resolution: 'auto', frameRate: 30 });
   });
 
   it('names the share a release means by its started_at, and passes on a stale answer (issue #487)', async () => {

@@ -78,6 +78,7 @@ test('G7a a member adds a device with a link revealed once, the other browser sw
   const name = `g7a-dev-${String(Date.now())}`;
   const laptop = await meet({ viewport: { width: 1280, height: 800 } });
   await laptop.page.goto(inviteUrl(world, invite.code));
+  await laptop.page.getByRole('button', { name: 'Create an account', exact: true }).click();
   await fillAccount(laptop.page, name);
   await expect(statusLine(laptop.page)).toContainText('Connected');
   const laptopToken = await laptop.page.evaluate(() => window.localStorage.getItem('conch.web.token'));
@@ -155,6 +156,7 @@ test('F7 a password change that stays signed in logs no console error and sends 
   const { page } = await meet({ viewport: { width: 1440, height: 900 } });
   const errors = consoleErrors(page);
   await page.goto(inviteUrl(world, invite.code));
+  await page.getByRole('button', { name: 'Create an account', exact: true }).click();
   await fillAccount(page, name, first);
   await expect(statusLine(page)).toContainText('Connected');
   const oldToken = (await page.evaluate(() => window.localStorage.getItem('conch.web.token'))) ?? '';

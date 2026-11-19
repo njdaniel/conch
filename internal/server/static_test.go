@@ -202,6 +202,43 @@ func TestStaticServing(t *testing.T) {
 	}
 }
 
+// TestStaticServiceWorker pins how the client's service worker is served
+// (issue #1826, background Web Push): a script type, revalidated on every load
+// so an updated worker is picked up, under the client's own CSP, which already
+// admits a same-origin worker through script-src 'self'. It sits at /app/sw.js,
+// so its default scope is /app/ and it needs no Service-Worker-Allowed header,
+// which would only widen it.
+func TestStaticServiceWorker(t *testing.T) {
+	const worker = "self.addEventListener('push', () => {});"
+	ts := webFSServer(t, AuthRequired, fstest.MapFS{
+		"index.html": &fstest.MapFile{Data: []byte(indexHTML)},
+		"sw.js":      &fstest.MapFile{Data: []byte(worker)},
+	})
+	resp, body := fetch(t, "GET", ts.URL+"/app/sw.js")
+	if resp.StatusCode != http.StatusOK || body != worker {
+		t.Fatalf("GET /app/sw.js = %d %q, want 200 and the script", resp.StatusCode, body)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/javascript") && !strings.HasPrefix(ct, "application/javascript") {
+		t.Errorf("Content-Type = %q, want a JavaScript type (a worker script is refused otherwise)", ct)
+	}
+	if got := resp.Header.Get("Cache-Control"); got != "no-cache" {
+		t.Errorf("Cache-Control = %q, want no-cache", got)
+	}
+	if got := resp.Header.Get("Content-Security-Policy"); got != webCSP {
+		t.Errorf("Content-Security-Policy = %q, want the client's own", got)
+	}
+	if got := resp.Header.Get("Service-Worker-Allowed"); got != "" {
+		t.Errorf("Service-Worker-Allowed = %q, want none: the scope is /app/", got)
+	}
+	if !strings.Contains(webCSP, "script-src 'self'") || strings.Contains(webCSP, "worker-src") {
+		t.Errorf("the CSP must admit the worker through script-src 'self' alone: %s", webCSP)
+	}
+	// A missing script is a 404, never the page.
+	if resp, _ := fetch(t, "GET", ts.URL+"/app/other-sw.js"); resp.StatusCode != http.StatusNotFound {
+		t.Errorf("GET /app/other-sw.js = %d, want 404", resp.StatusCode)
+	}
+}
+
 // TestStaticPermissionsPolicy pins the page's powers directive by directive
 // (issues #444, #1242): its own origin may capture a microphone, a camera and
 // a screen, no other origin may, and nothing else is named.

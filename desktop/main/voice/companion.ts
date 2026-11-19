@@ -38,6 +38,18 @@
 //    unconfirmed end. Main has no signal for whether the page's
 //    display-capture track still runs, so it cannot tell a page that ignored
 //    the end event;
+//  - the DELETE follows a rename of the channel (issue #1881, as the share's
+//    sound does, #1880): conchd resolves the channel by its current name, so
+//    after a rename the held name answers 404 channel_not_found. When main
+//    holds the channel's id (issue #1883: the grant answer's channel_id, the
+//    channel conchd resolved and granted for; for a server that sends none,
+//    learned by the share's sound from a presence answer that showed this
+//    person's share; never from the page), a 404 or 409 channel_mismatch
+//    makes main read conchd's channel list, find the id and
+//    send the DELETE once more by the name it has now. With no id, or a name
+//    main's client would refuse, the one DELETE by the held name stands, as it
+//    did, and its failure is logged. One bound covers the DELETE, the list
+//    read and the retry (COMPANION_REMOVE_TIMEOUT_MS);
 //  - every grant needs a new act: none is re-issued after a room renewal,
 //    which ends the share (Q-D4-2 on #1578).
 //
@@ -54,6 +66,7 @@ import type {
 import { voiceCompanionResponseV1, type VoiceCompanionRequestV1, type VoiceCompanionResponseV1 } from '../../../web/src/schema/generated.ts';
 import { fromServer } from '../../../web/src/schema/validate.ts';
 import type { Exchange, Send } from '../api/client.ts';
+import { currentName, isMoved } from './channel-follow.ts';
 import type { VoiceService } from './service.ts';
 
 // One pass of conchd's voice poller: how long after the helper connects
@@ -122,10 +135,48 @@ export interface CompanionDeps {
   // Called at the start of every end() and stop(), whether or not a companion
   // is held (app.ts: clears the share allowance, share-allowance.ts).
   readonly ended?: () => void;
+  // The id of the live share's channel, as main learned it from conchd's own
+  // answers (ShareSound.channelId), or null when none was learned. Only the
+  // fallback for a grant that carried no id (Held.channelId). Read at the
+  // start of every end() and stop(), synchronously and before any await: the
+  // share's sound (soundEnded) forgets the id once its own withdrawals are
+  // done, and the companion's DELETE runs alongside it and may need the id
+  // after its first answer. Absent: no id, and the DELETE is by the held name
+  // alone.
+  readonly channelId?: (share: ShareRef) => number | null;
+  // The share's sound (issue #1854): told of every end and stop of a held
+  // companion, once, with the share's ref and after the record is forgotten.
+  // It sends the helper's stop and then the consent's DELETE, and resolves
+  // when both are done (bounded); the companion's own removal does not wait
+  // for it and it does not wait for the removal. Absent (the switch off):
+  // nothing.
+  readonly soundEnded?: (share: ShareRef, reason: RemoveReason) => Promise<void>;
+}
+
+// The live share as the share's sound (issue #1854, voice/share-audio.ts) holds
+// it: a number main made for this companion alone (never the page's, never
+// reused), the destination, the helper generation it was asked under, the
+// document that was given the grant and the client of the activation it was
+// asked with. A stop of the sound names the share by `id`, so a late stop of
+// an older share can never stop a newer one's sound.
+export interface ShareRef {
+  readonly id: number;
+  readonly channel: string;
+  readonly generation: number;
+  readonly document: number;
+  readonly client: CompanionClient;
+  // The principal the grant's identity (p<id>.screen) names: this person's own
+  // participant in presence. From conchd's answer, never the page's.
+  readonly principal: number;
+  // The id of the channel conchd resolved and granted for (the grant answer's
+  // channel_id, issue #1883), or null when the server did not say. From
+  // conchd's answer, never the page's.
+  readonly channelId: number | null;
 }
 
 // The live companion: what it was asked for, and with what.
 interface Held {
+  readonly id: number;
   readonly channel: string;
   // The voice helper's generation it was asked under: a new helper is not
   // the parent this companion was folded into.
@@ -136,9 +187,15 @@ interface Held {
   // The owned contents when it was given: null when none was known.
   readonly contents: object | null;
   readonly origin: string;
+  readonly principal: number;
+  // The grant answer's channel_id, or null (see ShareRef.channelId).
+  readonly channelId: number | null;
 }
 
 type Asking = Pick<Held, 'channel' | 'generation'>;
+
+// Why a removal was sent, for its log line.
+export type RemoveReason = CompanionEndReason | 'stopped' | 'unused';
 
 // stillHeldBy says whether the owned window is still the one that held a
 // grant: the same web contents object, and the same document generation (S2
@@ -147,9 +204,6 @@ type Asking = Pick<Held, 'channel' | 'generation'>;
 export function stillHeldBy(now: { readonly contents: object | null; readonly generation: number }, held: { readonly contents: object | null; readonly document: number }): boolean {
   return now.contents !== null && now.contents === held.contents && now.generation === held.document;
 }
-
-// Why a removal was sent, for its log line.
-type RemoveReason = CompanionEndReason | 'stopped' | 'unused';
 
 const refuse = (error: CompanionGrantError): CompanionGrantResult => ({ ok: false, error });
 
@@ -191,15 +245,20 @@ function livekitOrigin(text: string): string | null {
 // grantOf is the part of conchd's answer the renderer is given, and the
 // origin main remembers, or null for an answer that is not a screen
 // companion's grant as asked for.
-function grantOf(body: unknown): { readonly grant: CompanionGrant; readonly origin: string } | null {
+function grantOf(body: unknown): { readonly grant: CompanionGrant; readonly origin: string; readonly principal: number; readonly channelId: number | null } | null {
   if (fromServer(voiceCompanionResponseV1)(body).length > 0) return null;
   const answer = body as VoiceCompanionResponseV1;
   if (answer.publish !== REQUEST.publish || answer.subscribe !== REQUEST.subscribe) return null;
   if (!COMPANION_IDENTITY.test(answer.identity) || answer.token === '' || answer.token.length > MAX_TOKEN_LENGTH) return null;
   const origin = livekitOrigin(answer.livekit_url);
   if (origin === null) return null;
+  const principal = Number(/^p([1-9][0-9]{0,18})\./u.exec(answer.identity)?.[1]);
+  if (!Number.isSafeInteger(principal)) return null;
+  // The channel conchd granted for: only a safe integer above zero counts;
+  // anything else, absent or not, is "this server doesn't say".
+  const channelId = answer.channel_id !== undefined && Number.isSafeInteger(answer.channel_id) && answer.channel_id > 0 ? answer.channel_id : null;
   // Exactly these four: never the room's name, the bearer or the session.
-  return { origin, grant: { livekitUrl: answer.livekit_url, token: answer.token, identity: answer.identity, expiresAt: answer.expires_at } };
+  return { origin, principal, channelId, grant: { livekitUrl: answer.livekit_url, token: answer.token, identity: answer.identity, expiresAt: answer.expires_at } };
 }
 
 function codeOf(exchange: Exchange): string | null {
@@ -220,6 +279,8 @@ export class Companion {
   readonly #changed = new Set<() => void>();
   // Counts ends and stops: a request begun before one is overtaken by it.
   #epoch = 0;
+  // Numbers the companions held, from 1: a share's identity for its sound.
+  #serial = 0;
 
   constructor(deps: CompanionDeps) {
     this.#deps = deps;
@@ -257,6 +318,43 @@ export class Companion {
   // companion is live (#1580, D4-03: the request filter allows it alone).
   liveOrigin(): string | null {
     return this.#held?.origin ?? null;
+  }
+
+  // current is the live share, as its sound holds it (ShareRef), or null when
+  // no companion is live. It is main's own record: nothing the page says.
+  current(): ShareRef | null {
+    const held = this.#held;
+    return held === null ? null : { id: held.id, channel: held.channel, generation: held.generation, document: held.document, client: held.client, principal: held.principal, channelId: held.channelId };
+  }
+
+  #refOf(held: Held): ShareRef {
+    return { id: held.id, channel: held.channel, generation: held.generation, document: held.document, client: held.client, principal: held.principal, channelId: held.channelId };
+  }
+
+  // #idOf is the id of the held share's channel: the grant's, else the one
+  // the share's sound learned, if any; never throws. Taken before #endSound
+  // (see CompanionDeps.channelId).
+  #idOf(held: Held): number | null {
+    if (held.channelId !== null) return held.channelId;
+    try {
+      return this.#deps.channelId?.(this.#refOf(held)) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  // #endSound tells the share's sound that this share ended, and never throws.
+  #endSound(held: Held, reason: RemoveReason): Promise<void> {
+    const sound = this.#deps.soundEnded;
+    if (sound === undefined) return Promise.resolve();
+    try {
+      return sound(this.#refOf(held), reason).catch(() => {
+        this.#deps.log(`companion: the share's sound could not be ended after ${reason}`);
+      });
+    } catch {
+      this.#deps.log(`companion: the share's sound could not be ended after ${reason}`);
+      return Promise.resolve();
+    }
   }
 
   // grant asks conchd for the companion's grant for the voice destination
@@ -319,11 +417,11 @@ export class Companion {
     if (given === null || overtaken) {
       // conchd has issued a companion nobody will use: remove it.
       if (given === null) this.#deps.log('companion: the answer was not the grant asked for');
-      await this.#remove(client, asking.channel, 'unused');
+      await this.#remove(client, asking.channel, 'unused', given?.channelId ?? null, given?.channelId != null);
       return refuse(given === null ? 'failed' : 'ended');
     }
     const contents = this.#deps.contents?.() ?? null;
-    this.#held = { ...asking, client, document, contents, origin: given.origin };
+    this.#held = { ...asking, id: ++this.#serial, client, document, contents, origin: given.origin, principal: given.principal, channelId: given.channelId };
     try {
       this.#deps.granted?.(contents, document);
     } catch {
@@ -348,9 +446,17 @@ export class Companion {
     // Ended is called above, before the record goes: no listener sees a held
     // grant after it.
     this.#announce();
+    // The id is read now, before the first await: the sound's end forgets it
+    // when its withdrawals are done (a microtask later when it has none), while
+    // the DELETE below may need it after its first answer.
+    const id = this.#idOf(held);
+    // The share's sound ends first, at once: its stop is written now, ahead
+    // of anything the removal does.
+    const sound = this.#endSound(held, 'stopped');
     const closing = this.#close();
-    const removed = await this.#remove(held.client, held.channel, 'stopped');
+    const removed = await this.#remove(held.client, held.channel, 'stopped', id, held.channelId !== null);
     await closing;
+    await sound;
     this.#unconfirmed(removed, held, 'stopped');
     return true;
   }
@@ -371,10 +477,18 @@ export class Companion {
     } catch {
       // A window that cannot be told is not a reason to keep the companion.
     }
+    // The id is read now, before the first await: the sound's end forgets it
+    // when its withdrawals are done (a microtask later when it has none), while
+    // the DELETE below may need it after its first answer.
+    const id = this.#idOf(held);
+    // The share's sound ends at once, with the end: its stop is written before
+    // anything else here, and its withdrawal follows the stop.
+    const sound = this.#endSound(held, reason);
     // Begun at once, alongside the DELETE: neither waits for the other.
     const closing = this.#close();
-    const removed = await this.#remove(held.client, held.channel, reason);
+    const removed = await this.#remove(held.client, held.channel, reason, id, held.channelId !== null);
     await closing;
+    await sound;
     this.#unconfirmed(removed, held, reason);
     return true;
   }
@@ -424,13 +538,41 @@ export class Companion {
     }
   }
 
-  // The one DELETE of an end: never retried. True when conchd confirmed it.
-  async #remove(client: CompanionClient, channel: string, reason: RemoveReason): Promise<boolean> {
-    let exchange: Exchange;
-    try {
-      exchange = await client.send({ op: 'voiceViewerEnd', params: { channel }, query: 'publish=screen', timeoutMs: COMPANION_REMOVE_TIMEOUT_MS });
-    } catch {
-      exchange = { kind: 'none' };
+  // The one DELETE of an end, with channel_id whenever held: the grant's
+  // (#1883), else the share sound's presence-derived fallback. A grant carrying
+  // its id proves the server honors the precondition (#1891), so a 2xx needs
+  // no list read. Older servers keep the after-the-fact name check: their 204
+  // has no body and can otherwise confirm a DELETE on a retaken name.
+  // A 404 channel_not_found or 409 channel_mismatch follows the id to its
+  // current name and retries once, still with the id. One deadline bounds
+  // the DELETE, list read and retry; a name currentName refuses is not sent.
+  // With no id, a 2xx by the held name is taken as it comes.
+  async #remove(client: CompanionClient, channel: string, reason: RemoveReason, id: number | null = null, precondition = false): Promise<boolean> {
+    const deadline = Date.now() + COMPANION_REMOVE_TIMEOUT_MS;
+    const sendBy = async (name: string, first = false): Promise<Exchange> => {
+      const ms = first ? COMPANION_REMOVE_TIMEOUT_MS : deadline - Date.now();
+      if (ms <= 0) return { kind: 'none' };
+      try {
+        return await client.send({ op: 'voiceViewerEnd', params: { channel: name }, query: `publish=screen${id === null ? '' : `&channel_id=${String(id)}`}`, timeoutMs: ms });
+      } catch {
+        return { kind: 'none' };
+      }
+    };
+    let exchange = await sendBy(channel, true);
+    // Without proof of precondition support, a 2xx needs the legacy check.
+    // A move is followed to the id's name now in either case. conchd answers 204 to this DELETE on
+    // any channel of the caller's with no room, so a channel that took the old
+    // name would confirm a removal that never reached the share's channel,
+    // and the unconfirmed end's reload (#unconfirmed) would be skipped.
+    const confirmed = exchange.kind === 'answer' && exchange.ok;
+    if (id !== null && ((confirmed && !precondition) || isMoved(exchange))) {
+      const name = await currentName(client, id, deadline - Date.now());
+      if (name === 'gone' || name === 'unknown') {
+        // The channel's name now could not be checked: not confirmed.
+        if (confirmed) exchange = { kind: 'none' };
+      } else if (name.name !== channel) {
+        exchange = await sendBy(name.name);
+      }
     }
     if (exchange.kind === 'answer' && exchange.ok) return true;
     this.#deps.log(`companion: the removal after ${reason} was not confirmed`);

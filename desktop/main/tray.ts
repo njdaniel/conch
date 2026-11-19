@@ -121,6 +121,8 @@ export interface TrayDeps {
   readonly buildMenu: (items: readonly TrayMenuItem[]) => unknown;
   // The directory the icons are in.
   readonly iconDir: string;
+  // Optional high-contrast idle icon for this platform's taskbar.
+  readonly idleIcon?: string;
   readonly voice: {
     state(): NativeVoiceView;
     subscribe(listener: (view: NativeVoiceView) => void): () => void;
@@ -207,7 +209,7 @@ export class TrayController {
       const model = this.#model();
       let tray: TrayLike | null = null;
       try {
-        tray = this.#deps.createTray(join(this.#deps.iconDir, iconFile(model.icon)));
+        tray = this.#deps.createTray(this.#iconPath(model.icon));
         tray.setToolTip('Conch');
         tray.on('click', () => {
           this.#deps.show();
@@ -331,8 +333,12 @@ export class TrayController {
     const tray = this.#tray;
     if (tray === null) return;
     const model = this.#model();
-    tray.setImage(join(this.#deps.iconDir, iconFile(model.icon)));
+    tray.setImage(this.#iconPath(model.icon));
     tray.setContextMenu(this.#deps.buildMenu(this.#items(model)));
+  }
+
+  #iconPath(icon: TrayIcon): string {
+    return (icon === 'idle' ? this.#deps.idleIcon : undefined) ?? join(this.#deps.iconDir, iconFile(icon));
   }
 
   #model(): TrayModel {

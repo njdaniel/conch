@@ -49,6 +49,7 @@ type observer struct {
 	mu       sync.Mutex
 	wakes    map[string]int
 	failures map[string]int
+	events   []string
 }
 
 func newObserver() *observer {
@@ -58,12 +59,14 @@ func newObserver() *observer {
 func (o *observer) Wake(outcome string) {
 	o.mu.Lock()
 	o.wakes[outcome]++
+	o.events = append(o.events, "wake:"+outcome)
 	o.mu.Unlock()
 }
 
 func (o *observer) Failure(class string) {
 	o.mu.Lock()
 	o.failures[class]++
+	o.events = append(o.events, "failure:"+class)
 	o.mu.Unlock()
 }
 
@@ -77,6 +80,12 @@ func (o *observer) failure(class string) int {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return o.failures[class]
+}
+
+func (o *observer) recordedEvents() []string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return slices.Clone(o.events)
 }
 
 // source is a Source with a fixed target list.
@@ -223,6 +232,9 @@ type harnessOpts struct {
 	perMin   int
 	queue    int
 	workers  int
+	// clientTimeout, when set, replaces the client's whole-request budget, so a
+	// test of the timeout does not race waitFor's wall-clock budget.
+	clientTimeout time.Duration
 }
 
 // newHarness builds a sender that reaches the provider through the real
@@ -241,6 +253,9 @@ func newHarness(t *testing.T, o harnessOpts) *harness {
 	pool := x509.NewCertPool()
 	pool.AddCert(h.prov.Certificate())
 	client := newClient(NewDialer(h.res, false), pool)
+	if o.clientTimeout > 0 {
+		client.Timeout = o.clientTimeout
+	}
 
 	u, err := url.Parse(h.prov.Endpoint(h.sub))
 	if err != nil {
@@ -466,6 +481,10 @@ func TestStatuses(t *testing.T) {
 			h.prov.WaitFor(t, tt.requests, 5*time.Second)
 			if tt.outcome != "" {
 				waitFor(t, "outcome "+tt.outcome, func() bool { return h.obs.wake(tt.outcome) == 1 })
+				// Outcomes are counted before store writes; wait for the worker
+				// to finish before checking their side effects. Pending retries
+				// keep the sender busy, so only terminal outcomes wait for Idle.
+				waitFor(t, "the sender to finish", h.sender.Idle)
 			} else {
 				waitFor(t, "a retry to be scheduled", func() bool { return len(h.timers.delays()) == 1 })
 				if got := h.timers.delays()[0]; got != tt.firstWait {
@@ -622,7 +641,9 @@ func TestPortRuleBeforeSend(t *testing.T) {
 // TestHangingProviderTimesOut: a provider that never answers costs one worker
 // for the client's timeout, and is a "timeout" failure. Other wakes go on.
 func TestHangingProviderTimesOut(t *testing.T) {
-	h := newHarness(t, harnessOpts{})
+	// A short client timeout, far under waitFor's budget: the test must not
+	// depend on headroom between two wall-clock timeouts.
+	h := newHarness(t, harnessOpts{clientTimeout: 200 * time.Millisecond})
 	h.prov.Script(func(n int, _ *pushtest.Delivery) pushtest.Reply {
 		if n == 1 {
 			return pushtest.Reply{Hang: true}
@@ -636,6 +657,14 @@ func TestHangingProviderTimesOut(t *testing.T) {
 	h.sender.Enqueue(post)
 	waitFor(t, "the second wake to be sent while the first hangs", func() bool { return h.obs.wake(OutcomeSent) == 1 })
 	waitFor(t, "the timeout", func() bool { return h.obs.failure(ClassTimeout) == 1 })
+	// Compare recorded order instead of checking for no timeout after observing
+	// sent: the timeout could occur between that observation and the check.
+	// One worker must time out before it can send the second wake, so fails here.
+	events := h.obs.recordedEvents()
+	sent, timeout := slices.Index(events, "wake:"+OutcomeSent), slices.Index(events, "failure:"+ClassTimeout)
+	if sent >= timeout {
+		t.Fatalf("second wake must be sent before the first times out; events = %v", events)
+	}
 }
 
 // TestSenderBounds: the queue is bounded and never blocks, drops are counted,
@@ -1093,20 +1122,23 @@ func TestNoEndpointInLogsOrCounts(t *testing.T) {
 		name  string
 		reply pushtest.Reply
 		res   *fakeResolver
+		// timeout replaces the client's budget for the row that hangs only, so
+		// it does not race waitFor (#1804) and no other row depends on it.
+		timeout time.Duration
 	}{
-		{"sent", pushtest.Reply{Status: 201}, nil},
-		{"rejected", pushtest.Reply{Status: 410}, nil},
-		{"4xx", pushtest.Reply{Status: 400}, nil},
-		{"5xx", pushtest.Reply{Status: 503}, nil},
-		{"3xx", pushtest.Reply{Status: 302, Location: "https://marker-location.example/MARKER-LOC"}, nil},
-		{"hang", pushtest.Reply{Hang: true}, nil},
-		{"private address", pushtest.Reply{}, sequence([]string{"10.1.2.3"})},
-		{"lookup failure", pushtest.Reply{}, &fakeResolver{fn: func(int, string) ([]netipAddr, error) { return nil, fmt.Errorf("marker-resolver-error") }}},
+		{"sent", pushtest.Reply{Status: 201}, nil, 0},
+		{"rejected", pushtest.Reply{Status: 410}, nil, 0},
+		{"4xx", pushtest.Reply{Status: 400}, nil, 0},
+		{"5xx", pushtest.Reply{Status: 503}, nil, 0},
+		{"3xx", pushtest.Reply{Status: 302, Location: "https://marker-location.example/MARKER-LOC"}, nil, 0},
+		{"hang", pushtest.Reply{Hang: true}, nil, 200 * time.Millisecond},
+		{"private address", pushtest.Reply{}, sequence([]string{"10.1.2.3"}), 0},
+		{"lookup failure", pushtest.Reply{}, &fakeResolver{fn: func(int, string) ([]netipAddr, error) { return nil, fmt.Errorf("marker-resolver-error") }}, 0},
 	}
 	var markers []string
 	for _, o := range outcomes {
 		t.Run(o.name, func(t *testing.T) {
-			h := newHarness(t, harnessOpts{resolver: o.res})
+			h := newHarness(t, harnessOpts{resolver: o.res, clientTimeout: o.timeout})
 			h.prov.Script(func(int, *pushtest.Delivery) pushtest.Reply { return o.reply })
 			u, _ := url.Parse(h.target.Endpoint)
 			h.src.targets[0].Endpoint = "https://example.com:" + u.Port() + u.Path + "?marker-query=MARKER-QUERY-1f2e"
@@ -1182,7 +1214,11 @@ func TestEndpointNowForbiddenIsRefusedOnEverySend(t *testing.T) {
 				h.clk.Advance(2 * time.Hour) // past the backoff each refusal starts
 				h.sender.Enqueue(post)
 				want := i + 1
-				waitFor(t, "a refusal", func() bool { return h.obs.failure(ClassAddressRefused) == want })
+				// The sender records the class, then the outcome: wait for
+				// both, or the read below races the last one (issue #1928).
+				waitFor(t, "a refusal", func() bool {
+					return h.obs.failure(ClassAddressRefused) == want && h.obs.wake(OutcomeFailed) == want
+				})
 			}
 			if h.prov.Count() != 0 {
 				t.Errorf("%d requests reached the provider", h.prov.Count())

@@ -1,0 +1,402 @@
+{
+  "description": "A share's sound from start to stop. The owner has recorded the sharer's consent with conchd and asks for everything the system plays but the call; the state says on, with two applications playing, before the ack. The count follows what is playing: when nothing is, the share's sound is still on, the track is published and silent, and no_sources says so. Muting keeps the track published and the count going; unmuting is the reverse. Stopping carries no scope and no name, and the state is off before its ack. The microphone's fields do not move through any of it.",
+  "steps": [
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "hello",
+        "seq": 1,
+        "versions": [
+          "conch.voice_control.v1",
+          "conch.voice_control.v2",
+          "conch.voice_control.v3"
+        ],
+        "helper_version": "0.3.0 (48000 Hz, 10 ms frames)"
+      }
+    },
+    {
+      "from": "owner",
+      "message": {
+        "schema": "conch.voice_control.v3",
+        "kind": "start",
+        "id": 1,
+        "server": "https://conch.example.org",
+        "channel": "general",
+        "principal_id": 7,
+        "credential": "stored",
+        "muted": false,
+        "deafened": false
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v3",
+        "kind": "state",
+        "seq": 2,
+        "phase": "starting",
+        "capture": "off",
+        "playback": "off",
+        "transmitting": false,
+        "muted": false,
+        "deafened": false,
+        "blocked": [
+          "not_connected",
+          "no_publish_grant",
+          "no_microphone"
+        ],
+        "talk_mode": "push_to_talk",
+        "ptt": "unknown",
+        "share_audio": "off",
+        "share_audio_muted": false,
+        "share_audio_sources": 0
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v3",
+        "kind": "ack",
+        "seq": 3,
+        "id": 1,
+        "ok": true
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v3",
+        "kind": "state",
+        "seq": 4,
+        "phase": "connecting",
+        "capture": "off",
+        "playback": "on",
+        "transmitting": false,
+        "muted": false,
+        "deafened": false,
+        "blocked": [
+          "not_connected",
+          "no_publish_grant",
+          "no_microphone"
+        ],
+        "talk_mode": "push_to_talk",
+        "ptt": "ready",
+        "share_audio": "off",
+        "share_audio_muted": false,
+        "share_audio_sources": 0
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v3",
+        "kind": "state",
+        "seq": 5,
+        "phase": "connected",
+        "capture": "on",
+        "playback": "on",
+        "transmitting": false,
+        "muted": false,
+        "deafened": false,
+        "blocked": [],
+        "talk_mode": "push_to_talk",
+        "ptt": "ready",
+        "share_audio": "off",
+        "share_audio_muted": false,
+        "share_audio_sources": 0
+      }
+    },
+    {
+      "from": "owner",
+      "message": {
+        "schema": "conch.voice_control.v3",
+        "kind": "set_share_audio",
+        "id": 2,
+        "capturing": true,
+        "scope": "system_excluding_call",
+        "application_name": "Conch"
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v3",
+        "kind": "state",
+        "seq": 6,
+        "phase": "connected",
+        "capture": "on",
+        "playback": "on",
+        "transmitting": false,
+        "muted": false,
+        "deafened": false,
+        "blocked": [],
+        "talk_mode": "push_to_talk",
+        "ptt": "ready",
+        "share_audio": "on",
+        "share_audio_muted": false,
+        "share_audio_sources": 2
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v3",
+        "kind": "ack",
+        "seq": 7,
+        "id": 2,
+        "ok": true
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v3",
+        "kind": "state",
+        "seq": 8,
+        "phase": "connected",
+        "capture": "on",
+        "playback": "on",
+        "transmitting": false,
+        "muted": false,
+        "deafened": false,
+        "blocked": [],
+        "talk_mode": "push_to_talk",
+        "ptt": "ready",
+        "share_audio": "on",
+        "share_audio_muted": false,
+        "share_audio_problem": "no_sources",
+        "share_audio_sources": 0
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v3",
+        "kind": "state",
+        "seq": 9,
+        "phase": "connected",
+        "capture": "on",
+        "playback": "on",
+        "transmitting": false,
+        "muted": false,
+        "deafened": false,
+        "blocked": [],
+        "talk_mode": "push_to_talk",
+        "ptt": "ready",
+        "share_audio": "on",
+        "share_audio_muted": false,
+        "share_audio_sources": 1
+      }
+    },
+    {
+      "from": "owner",
+      "message": {
+        "schema": "conch.voice_control.v3",
+        "kind": "set_share_audio_mute",
+        "id": 3,
+        "muted": true
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v3",
+        "kind": "state",
+        "seq": 10,
+        "phase": "connected",
+        "capture": "on",
+        "playback": "on",
+        "transmitting": false,
+        "muted": false,
+        "deafened": false,
+        "blocked": [],
+        "talk_mode": "push_to_talk",
+        "ptt": "ready",
+        "share_audio": "on",
+        "share_audio_muted": true,
+        "share_audio_sources": 1
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v3",
+        "kind": "ack",
+        "seq": 11,
+        "id": 3,
+        "ok": true
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v3",
+        "kind": "state",
+        "seq": 12,
+        "phase": "connected",
+        "capture": "on",
+        "playback": "on",
+        "transmitting": false,
+        "muted": false,
+        "deafened": false,
+        "blocked": [],
+        "talk_mode": "push_to_talk",
+        "ptt": "ready",
+        "share_audio": "on",
+        "share_audio_muted": true,
+        "share_audio_sources": 3
+      }
+    },
+    {
+      "from": "owner",
+      "message": {
+        "schema": "conch.voice_control.v3",
+        "kind": "set_share_audio_mute",
+        "id": 4,
+        "muted": false
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v3",
+        "kind": "state",
+        "seq": 13,
+        "phase": "connected",
+        "capture": "on",
+        "playback": "on",
+        "transmitting": false,
+        "muted": false,
+        "deafened": false,
+        "blocked": [],
+        "talk_mode": "push_to_talk",
+        "ptt": "ready",
+        "share_audio": "on",
+        "share_audio_muted": false,
+        "share_audio_sources": 3
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v3",
+        "kind": "ack",
+        "seq": 14,
+        "id": 4,
+        "ok": true
+      }
+    },
+    {
+      "from": "owner",
+      "message": {
+        "schema": "conch.voice_control.v3",
+        "kind": "set_share_audio",
+        "id": 5,
+        "capturing": false
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v3",
+        "kind": "state",
+        "seq": 15,
+        "phase": "connected",
+        "capture": "on",
+        "playback": "on",
+        "transmitting": false,
+        "muted": false,
+        "deafened": false,
+        "blocked": [],
+        "talk_mode": "push_to_talk",
+        "ptt": "ready",
+        "share_audio": "off",
+        "share_audio_muted": false,
+        "share_audio_sources": 0
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v3",
+        "kind": "ack",
+        "seq": 16,
+        "id": 5,
+        "ok": true
+      }
+    },
+    {
+      "from": "owner",
+      "message": {
+        "schema": "conch.voice_control.v3",
+        "kind": "leave",
+        "id": 6
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v3",
+        "kind": "state",
+        "seq": 17,
+        "phase": "stopping",
+        "reason": "left",
+        "capture": "on",
+        "playback": "on",
+        "transmitting": false,
+        "muted": false,
+        "deafened": false,
+        "blocked": [
+          "not_connected"
+        ],
+        "talk_mode": "push_to_talk",
+        "ptt": "ready",
+        "share_audio": "off",
+        "share_audio_muted": false,
+        "share_audio_sources": 0
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v3",
+        "kind": "ack",
+        "seq": 18,
+        "id": 6,
+        "ok": true
+      }
+    },
+    {
+      "from": "owner",
+      "close": "stdin"
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v3",
+        "kind": "state",
+        "seq": 19,
+        "phase": "stopped",
+        "reason": "left",
+        "capture": "off",
+        "playback": "off",
+        "transmitting": false,
+        "muted": false,
+        "deafened": false,
+        "blocked": [
+          "not_connected"
+        ],
+        "talk_mode": "push_to_talk",
+        "ptt": "ready",
+        "share_audio": "off",
+        "share_audio_muted": false,
+        "share_audio_sources": 0
+      }
+    },
+    {
+      "from": "helper",
+      "exit": 0
+    }
+  ]
+}

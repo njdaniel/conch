@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { dateTimeOf } from './time';
 import { App } from './App';
-import { goneHeading, heldLine, noLongerWorks } from './Invite';
+import { Invite, goneHeading, heldLine, noLongerWorks } from './Invite';
 import { addressWithoutFragment, inviteFromHash, inviteLink, takeLinkFromAddress } from './route';
 import { insecureLine } from './transport';
 
@@ -96,9 +96,12 @@ function expectNoCode(container: HTMLElement): void {
 // account with a password, through POST /v2/invites/redeem).
 const password = 'correct horse battery staple';
 
-// chooseName fills in the account form, name and password together, and
-// sends it.
+// chooseName chooses to make an account, fills in the name and password,
+// and sends it. A retry keeps the form already open.
 async function chooseName(name: string): Promise<void> {
+  if (screen.queryByLabelText('Your name') === null) {
+    fireEvent.click(await screen.findByRole('button', { name: 'Create an account' }));
+  }
   const field = await screen.findByLabelText('Your name');
   fireEvent.change(field, { target: { value: name } });
   fireEvent.change(screen.getByLabelText('Choose a password'), { target: { value: password } });
@@ -174,7 +177,77 @@ describe('the invite route', () => {
 });
 
 describe('the landing page', () => {
-  it('shows the preview, then a name prompt, and joins into the lobby with the code nowhere', async () => {
+  it('offers sign-in first and passes the invite context to onSignIn', async () => {
+    serve(joining);
+    const onSignIn = vi.fn();
+    render(<Invite origin={origin} inviteCode={inviteCode} signedInAs={null} unchecked={false}
+      onNewPerson={() => Promise.resolve(true)} onBack={vi.fn()} onJoined={vi.fn()} onSignIn={onSignIn} />);
+    const signIn = await screen.findByRole('button', { name: 'Sign in' });
+    expect(screen.queryByLabelText('Your name')).toBeNull();
+    expect(screen.getByText(/Ask ada or an operator to/).textContent).toContain('#red and #blue');
+    fireEvent.click(signIn);
+    expect(onSignIn).toHaveBeenCalledExactlyOnceWith(['red', 'blue'], 'ada');
+  });
+
+  it('returns from the account form to the choice without leaving or redeeming', async () => {
+    const calls = serve(joining);
+    const onBack = vi.fn();
+    render(<Invite origin={origin} inviteCode={inviteCode} signedInAs={null} unchecked={false}
+      onNewPerson={() => Promise.resolve(true)} onBack={onBack} onJoined={vi.fn()} onSignIn={vi.fn()} />);
+    const create = await screen.findByRole('button', { name: 'Create an account' });
+    create.focus();
+    fireEvent.click(create);
+    expect(document.activeElement).toBe(screen.getByLabelText('Your name'));
+    const back = screen.getByRole('button', { name: 'Go back' });
+    back.focus();
+    fireEvent.click(back);
+    expect(screen.getByRole('button', { name: 'Sign in' })).toBeDefined();
+    expect(screen.getByRole('button', { name: 'Create an account' })).toBeDefined();
+    expect(screen.queryByLabelText('Your name')).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole('heading', { level: 1 }));
+    expect(onBack).not.toHaveBeenCalled();
+    expect(calls.some((c) => c.path === '/v2/invites/redeem')).toBe(false);
+  });
+
+  it.each([
+    { state: 'paused', answer: () => json({ ...preview, join: { ...preview.join, paused: true } }), line: 'Joining through this invite is paused for now. Try the link again later.' },
+    { state: 'closed', answer: () => refusal(404, 'invite_invalid'), line: noLongerWorks },
+    { state: 'insecure', answer: () => json(preview), line: insecureLine },
+    { state: 'account:false', answer: () => json({ ...preview, join: { guest: true, account: false } }), line: 'This invite cannot be used to join right now. Ask ada for another way in.' },
+    { state: 'signed in', answer: () => json(preview), line: /You are signed in here as/ },
+  ])('offers no account form or choice when $state', async ({ state, answer, line }) => {
+    const calls = serve({ ...joining, 'POST /v2/invites/preview': answer });
+    render(<Invite origin={state === 'insecure' ? 'http://192.168.1.20:8080' : origin}
+      inviteCode={inviteCode} signedInAs={state === 'signed in' ? 'ada' : null} unchecked={false}
+      onNewPerson={() => Promise.resolve(true)} onBack={vi.fn()} onJoined={vi.fn()} onSignIn={vi.fn()} />);
+    expect(await screen.findByText(line)).toBeDefined();
+    expect(screen.queryByLabelText('Your name')).toBeNull();
+    expect(document.querySelector('input[type="password"]')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Create an account' })).toBeNull();
+    expect(calls.some((c) => c.path === '/v2/invites/redeem')).toBe(false);
+  });
+
+  it('returns to the choice and clears the previous refusal when the invite code changes', async () => {
+    const calls = serve({ ...joining, 'POST /v2/invites/redeem': () => refusal(409, 'principal_exists') });
+    const props = { origin, signedInAs: null, unchecked: false,
+      onNewPerson: () => Promise.resolve(true), onBack: vi.fn(), onJoined: vi.fn(), onSignIn: vi.fn() };
+    const view = render(<Invite {...props} inviteCode={inviteCode} />);
+    await chooseName('wren');
+    const line = 'That name is taken. Choose another.';
+    expect(await screen.findByText(line)).toBeDefined();
+
+    const nextCode = `conch_inv_${'R'.repeat(40)}`;
+    view.rerender(<Invite {...props} inviteCode={nextCode} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Create an account' }));
+    expect(calls.filter((c) => c.path === '/v2/invites/preview').map((c) => c.body)).toEqual([
+      { code: inviteCode }, { code: nextCode },
+    ]);
+    expect(screen.queryByText(line)).toBeNull();
+    expect(screen.getByLabelText<HTMLInputElement>('Your name').value).toBe('');
+    expect(document.activeElement).toBe(screen.getByLabelText('Your name'));
+  });
+
+  it('shows the preview, then a choice, and joins into the lobby with the code nowhere', async () => {
     const replace = vi.spyOn(window.history, 'replaceState');
     const { calls, view } = opened(joining);
     // Out of the address before anything else.
@@ -189,7 +262,10 @@ describe('the landing page', () => {
     expect(within(shown).queryByText('Voice')).toBeNull();
     expect(within(shown).getByText(dateTimeOf(expires_at)).getAttribute('datetime')).toBe(expires_at);
     expect(screen.getByText(origin)).toBeDefined();
-    expect(screen.getByText(/Up to 100 characters/)).toBeDefined();
+    expect(screen.getByText('Do you already have an account on this server?')).toBeDefined();
+    expect(screen.queryByLabelText('Your name')).toBeNull();
+    const choices = screen.getByRole('button', { name: 'Sign in' }).parentElement;
+    expect(choices?.textContent).toBe('Sign inCreate an account');
     expectNoCode(view.container);
 
     await chooseName('wren');
@@ -284,7 +360,8 @@ describe('the landing page', () => {
   // F19: guests are off (#1005), so the name hint no longer says the prefix is for them.
   it('says the guest prefix is reserved, and not that it is kept for guests', async () => {
     opened(joining);
-    const field = await screen.findByLabelText('Your name');
+    fireEvent.click(await screen.findByRole('button', { name: 'Create an account' }));
+    const field = screen.getByLabelText('Your name');
     expect(field.getAttribute('aria-describedby')).not.toBeNull();
     expect(document.body.textContent).toContain('Names that begin with “guest” are reserved.');
     expect(document.body.textContent).not.toContain('kept for guests');
@@ -391,7 +468,7 @@ describe('the landing page', () => {
     expect(await screen.findByText(line)).toBeDefined();
     serve(joining);
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
-    await screen.findByLabelText('Your name');
+    await screen.findByRole('button', { name: 'Create an account' });
     expect(calls.length).toBeGreaterThan(0);
   });
 
@@ -462,7 +539,7 @@ describe('the landing page', () => {
 
   it('says another sign-in is held when redeeming finds one the page had not', async () => {
     opened(joining);
-    await screen.findByLabelText('Your name');
+    fireEvent.click(await screen.findByRole('button', { name: 'Create an account' }));
     // Another tab of this browser signs in while the form is open.
     window.localStorage.setItem(key, memberToken);
     await chooseName('wren');
