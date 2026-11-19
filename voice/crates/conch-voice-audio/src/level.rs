@@ -123,10 +123,20 @@ impl LevelDetector {
     /// Takes one captured frame. Returns [`LevelChange::SoundStarted`] if it completes the
     /// attack, [`LevelChange::QuietStarted`] if it completes the hang.
     ///
-    /// A qualifying frame contributes 10 ms to the attack or hang, whenever it arrives.
-    /// This lets a source catching up after a stall count by what it captured. A sample
-    /// that is not a finite number counts as silence.
+    /// Use this when frames are consecutive without a measured gap. A qualifying frame
+    /// contributes 10 ms to the attack or hang. A non-finite sample counts as silence.
     pub fn frame(&mut self, frame: &Frame) -> Option<LevelChange> {
+        self.frame_after(frame, Duration::ZERO)
+    }
+
+    /// Takes a captured frame after a measured gap from the previous frame. A gap of
+    /// 50 ms or more clears a partial attack before the new frame is counted.
+    pub fn frame_after(
+        &mut self,
+        frame: &Frame,
+        since_last_frame: Duration,
+    ) -> Option<LevelChange> {
+        self.reset_attack_after_gap(since_last_frame);
         let power = mean_square(frame);
         let loud = if self.sounding {
             power >= self.close_power
@@ -175,13 +185,17 @@ impl LevelDetector {
     /// the hang.
     pub fn no_frame_for(&mut self, since_last_frame: Duration) -> Option<LevelChange> {
         if !self.sounding {
-            if since_last_frame >= ATTACK_GAP {
-                self.attack_frames = 0;
-            }
+            self.reset_attack_after_gap(since_last_frame);
             return None;
         }
         self.no_frame = self.no_frame.max(since_last_frame);
         self.quiet_if_hung()
+    }
+
+    fn reset_attack_after_gap(&mut self, since_last_frame: Duration) {
+        if since_last_frame >= ATTACK_GAP {
+            self.attack_frames = 0;
+        }
     }
 
     /// It has been `since_sound` since the last frame reaching the closing level, or since the

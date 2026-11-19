@@ -1,7 +1,7 @@
 //! Microphones for the open microphone's tests: one that plays a script of tone and silence
 //! and can stop delivering, and one whose sound the test switches on and off. Both are read
-//! once every 10 ms, as a tone or a WAV file is, and number every frame in its first
-//! sample, so that a test can say which frames reached the track (`FakeSdk::first_samples`).
+//! once every 10 ms, as a tone or a WAV file is, and number every frame in its middle
+//! sample, so that a test can say which frames reached the track (`FakeSdk::middle_samples`).
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -12,24 +12,25 @@ use conch_voice_audio::{FRAME_LEN, FRAME_MS, Frame, MicRead, MicSource};
 
 use super::MakeMic;
 
-/// The level of every sample of a loud frame but its first: -12 dBFS, far above the
+/// The level of every sample of a loud frame but its tag: -12 dBFS, far above the
 /// default level of -40.
 const LOUD: f32 = 0.25;
-/// One frame number in a first sample: frame `n`'s first sample is `n` · 10⁻⁹, which leaves
+/// Frame `n`'s middle sample is `n` · 10⁻⁹, which leaves
 /// a quiet frame far below any level the configuration accepts (-80 dBFS).
 const STEP: f64 = 1e-9;
 
-/// The number of the frame whose first sample is `sample`.
+/// The number of the frame whose middle sample is `sample`.
 #[must_use]
 pub fn frame_number(sample: f32) -> u64 {
     (f64::from(sample) / STEP).round() as u64
 }
 
 /// Frame `n`: a tone (here a constant level, which is all a level detector looks at) or
-/// silence, told apart from every other by its first sample.
+/// silence, told apart from every other by its middle sample. Both 5 ms fades have
+/// unity gain at the midpoint, so the tag survives even on a transmission's edge.
 fn numbered(n: u64, loud: bool) -> Frame {
     let mut frame = [if loud { LOUD } else { 0.0 }; FRAME_LEN];
-    frame[0] = (n as f64 * STEP) as f32;
+    frame[FRAME_LEN / 2] = (n as f64 * STEP) as f32;
     frame
 }
 

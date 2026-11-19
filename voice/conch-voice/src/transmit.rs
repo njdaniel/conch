@@ -19,12 +19,14 @@
 //!   (issue #631). The frame's hand-over and the mute both take one [`TrackLock`]: a frame
 //!   is handed over before the mute, or not at all.
 //! - In open mode (`docs/design/tui-voice.md` §20.6) the level detector is given each
-//!   captured frame before the gate is, and hands nothing onward: it says only that sound
-//!   started or quiet started ([`TxEvent::Sound`]), and the push-to-talk machine decides.
+//!   captured frame before the gate is, and hands nothing onward: it reports the start of
+//!   sound or quiet ([`TxEvent::Sound`]) to the push-to-talk machine. The transmit task
+//!   finishes a zero-tail opening as soon as it detects quiet.
 //!   The attack frames meet a shut gate on the first onset and go nowhere. Open-mic
-//!   transmissions ramp in on the first forwarded frame and ramp out on the final frame of a
-//!   natural release or at the frame limit. Time counts as well as frames, from this task's
-//!   pace: quiet comes once the hang has passed with no frame or below the closing level,
+//!   transmissions ramp in on the first forwarded frame and ramp out on the final tail frame
+//!   or at the frame limit. With no tail, the frame that completes the hang ramps out if
+//!   one is available. Time counts as well as frames: quiet comes once the hang has passed
+//!   with no frame at or above the closing level,
 //!   so a source that stops delivering, or trickles, does not hold the gate open;
 //!   and a release tail, which the gate counts in frames, is cut once it has run for its
 //!   length by the clock, in push-to-talk as well (issue #686): a source that stops
@@ -63,7 +65,7 @@ use std::task::Poll;
 use std::time::Duration;
 
 use conch_voice_audio::{
-    AudioError, FRAME_LEN, FRAME_MS, ForceShut, Frame, GateConfig, GateShut, GateStatus, Gated,
+    AudioError, FRAME_LEN, FRAME_MS, ForceShut, Frame, GateConfig, GateShut, GateStatus,
     LevelChange, LevelConfig, LevelDetector, MicRead, MicSource, OpenOutcome, Pacing, SILENCE,
     ShutReason as GateShutReason, TransmitGate,
 };
@@ -215,10 +217,8 @@ impl TrackLock {
     }
 
     /// Frames may be handed over again. Call it after unmuting the track, and before the
-    /// gate is told to open. Its only caller in the program is the session loop's answer
-    /// to a press (`Session::on_answer`), straight after the unmute: a call anywhere else
-    /// could let a frame reach a muted track again. It is public for the tests that drive
-    /// a transmitter with no session.
+    /// gate is told to open. The session loop calls it when carrying out an open command.
+    /// It is also public for tests that drive a transmitter with no session.
     pub fn reopen(&self) {
         *self.0.lock().unwrap_or_else(PoisonError::into_inner) = true;
     }
@@ -519,8 +519,9 @@ impl Listen {
             return None;
         }
         let now = self.clock.now();
+        let gap = now.saturating_sub(self.since);
         self.since = now;
-        let change = self.detector.frame(frame);
+        let change = self.detector.frame_after(frame, gap);
         if self.detector.last_frame_loud() {
             self.sound_at = now;
         }
@@ -552,14 +553,16 @@ impl Listen {
         self.tail_from.get_or_insert_with(|| self.clock.now());
     }
 
-    fn needs_fade_frame(&self) -> bool {
-        self.is_open() && self.tail < Duration::from_millis(u64::from(FRAME_MS))
-    }
-
-    /// A natural open-mic release with no whole tail frame configured uses one frame
-    /// for the fade. A forced shut still takes effect immediately.
-    fn finishing_without_tail(&self, status: GateStatus) -> bool {
-        self.needs_fade_frame() && status == GateStatus::Open && self.tail_from.is_some()
+    /// Quiet ends the opening immediately when the configured tail holds no whole frame.
+    fn quiet_without_tail(&self, event: TxEvent, status: GateStatus) -> bool {
+        matches!(
+            event,
+            TxEvent::Sound {
+                sounding: false,
+                ..
+            }
+        ) && status == GateStatus::Open
+            && self.tail < Duration::from_millis(u64::from(FRAME_MS))
     }
 
     /// Whether the release tail has run for as long as it lasts, by the clock, plus
@@ -678,9 +681,7 @@ impl<F: MicFeed> Task<F> {
             }
             TxCommand::Gate(GateCommand::Shut) => {
                 let was_open = self.gate.status() == GateStatus::Open;
-                if was_open && self.listen.needs_fade_frame() {
-                    self.listen.tail_began();
-                } else if let Some(shut) = self.gate.shut() {
+                if let Some(shut) = self.gate.shut() {
                     self.shut(shut);
                 } else if was_open {
                     self.listen.tail_began();
@@ -765,13 +766,15 @@ impl<F: MicFeed> Task<F> {
         // Open mode: the detector judges the frame before the gate does, and hands it
         // nowhere. Its word goes to the machine; the frame itself goes to the gate below,
         // which is shut for an onset frame.
-        if let Some(said) = self.listen.frame(captured) {
+        let status = self.gate.status();
+        let sound = self.listen.frame(captured);
+        let quiet_without_tail =
+            sound.is_some_and(|said| self.listen.quiet_without_tail(said, status));
+        if let Some(said) = sound.filter(|_| !quiet_without_tail) {
             self.report(said);
         }
-        let status = self.gate.status();
-        let finishing_without_tail = self.listen.finishing_without_tail(status);
         if self.listen.is_open() && !matches!(status, GateStatus::Shut(_)) {
-            self.fade_open_mic(captured, status, finishing_without_tail);
+            self.fade_open_mic(captured, status, quiet_without_tail);
         }
         let gated = self.gate.pass(captured);
         if let (Some(frame), Some(feed)) = (gated.frame(), self.feed.as_mut()) {
@@ -781,9 +784,14 @@ impl<F: MicFeed> Task<F> {
                 self.frames_sent.fetch_add(1, Ordering::Relaxed);
             }
         }
-        if let Gated::Last(_, shut) = gated {
-            self.shut(shut);
-        } else if finishing_without_tail && let Some(shut) = self.gate.shut() {
+        // With zero tail, finish on the frame that completed the hang. Report quiet
+        // after handing off that frame and before reporting the shut.
+        let mut shut = gated.shut();
+        if let Some(said) = sound.filter(|_| quiet_without_tail) {
+            shut = shut.or_else(|| self.gate.shut());
+            self.report(said);
+        }
+        if let Some(shut) = shut {
             self.shut(shut);
         }
         true
@@ -791,12 +799,7 @@ impl<F: MicFeed> Task<F> {
 
     /// Apply gain at the transmission edges. The frame still has to pass the gate
     /// and the track lock before it can be handed over.
-    fn fade_open_mic(
-        &mut self,
-        frame: &mut Frame,
-        status: GateStatus,
-        finishing_without_tail: bool,
-    ) {
+    fn fade_open_mic(&mut self, frame: &mut Frame, status: GateStatus, quiet_without_tail: bool) {
         if self.listen.open_frames == 0 {
             fade(frame.iter_mut());
         }
@@ -807,7 +810,7 @@ impl<F: MicFeed> Task<F> {
                 remaining_ms: FRAME_MS
             }
         );
-        if finishing_without_tail
+        if quiet_without_tail
             || final_tail_frame
             || self
                 .open_max_ms
@@ -826,11 +829,18 @@ impl<F: MicFeed> Task<F> {
     /// milliseconds late can lose the tail's last frame.
     fn no_frame(&mut self) {
         if let Some(said) = self.listen.no_frame() {
+            // The source ran out of frames before the hang ended. Shut immediately.
+            let shut = if self.listen.quiet_without_tail(said, self.gate.status()) {
+                self.gate.shut()
+            } else {
+                None
+            };
             self.report(said);
+            if let Some(shut) = shut {
+                self.shut(shut);
+            }
         }
-        let status = self.gate.status();
-        if (matches!(status, GateStatus::Closing { .. })
-            || self.listen.finishing_without_tail(status))
+        if matches!(self.gate.status(), GateStatus::Closing { .. })
             && self.listen.tail_over()
             && let Some(shut) = self.gate.cut()
         {
@@ -1409,7 +1419,7 @@ mod tests {
             tail_ms: u32,
             hang_ms: u32,
         ) -> (Task<Record>, Ring, Record, mpsc::UnboundedReceiver<TxEvent>) {
-            task_on(tail_ms, hang_ms, TxClock::real())
+            task_on(tail_ms, hang_ms, Hand::default().clock())
         }
 
         /// As [`task`], with what it measures by the clock read from `clock`.
@@ -1475,7 +1485,7 @@ mod tests {
         async fn listening(
             tail_ms: u32,
         ) -> (Task<Record>, Ring, Record, mpsc::UnboundedReceiver<TxEvent>) {
-            listening_on(tail_ms, TxClock::real()).await
+            listening_on(tail_ms, Hand::default().clock()).await
         }
 
         /// As [`listening`], with what the task measures by the clock read from `clock`.
@@ -1514,45 +1524,73 @@ mod tests {
                 push_quiet(&ring, n);
             }
             read_all(&mut task).await;
-            assert_eq!(reported(&mut said), [sound(false)]);
+            assert_eq!(
+                reported(&mut said),
+                [
+                    sound(false),
+                    TxEvent::GateShut {
+                        limit_reached: false
+                    }
+                ]
+            );
             let heard = record.heard();
             assert_eq!(heard.len(), 11);
             assert_eq!(heard[0], 0.0);
 
-            // Even a zero-tail release uses one frame to ramp to silence.
+            // The machine's shut confirms the release. A zero tail sends no further frame.
             task.obey(TxCommand::Gate(GateCommand::Shut));
             push_quiet(&ring, 11);
             read_all(&mut task).await;
-            assert_eq!(
-                reported(&mut said),
-                [TxEvent::GateShut {
-                    limit_reached: false
-                }]
-            );
+            assert_eq!(reported(&mut said), []);
             push_onset(&ring, 9);
             read_all(&mut task).await;
             assert_eq!(reported(&mut said), [sound(true)]);
-            assert_eq!(record.heard().len(), 12, "nothing while the gate is shut");
+            assert_eq!(record.heard().len(), 11, "nothing while the gate is shut");
         }
 
         #[tokio::test]
-        async fn open_mic_fades_the_first_and_last_frames_even_without_a_release_tail() {
-            for (tail_ms, cap_ms) in [(0, None), (20, None), (20, Some(30))] {
-                let (mut task, ring, record, mut said) = listening(tail_ms).await;
+        async fn a_frame_ready_after_a_stall_starts_a_fresh_attack() {
+            let ms = Duration::from_millis;
+            for (gap, completes_attack) in [(49, true), (50, false), (60, false)] {
+                let hand = Hand::default();
+                let (mut task, ring, record, mut said) = listening_on(0, hand.clock()).await;
+                let mut captured = SILENCE;
+                for _ in 0..3 {
+                    hand.advance(ms(10));
+                    ring.push(1);
+                    assert!(task.frame(&mut captured).await);
+                }
+                assert_eq!(reported(&mut said), []);
+                // No empty poll between the third loud frame and the resumed frame.
+                hand.advance(ms(gap));
+                ring.push(1);
+                assert!(task.frame(&mut captured).await);
+                if !completes_attack {
+                    assert_eq!(reported(&mut said), [], "onset after a {gap} ms gap");
+                    for _ in 0..3 {
+                        hand.advance(ms(10));
+                        ring.push(1);
+                        assert!(task.frame(&mut captured).await);
+                    }
+                }
+                assert_eq!(reported(&mut said), [sound(true)]);
+                assert!(record.heard().is_empty());
+            }
+        }
+
+        #[tokio::test]
+        async fn open_mic_fades_the_first_and_last_frames_of_a_tail_or_frame_capped_opening() {
+            for cap_ms in [None, Some(30)] {
+                let (mut task, ring, record, mut said) = listening(20).await;
                 task.open_max_ms = cap_ms;
                 task.gate.set_max_open_ms(cap_ms).unwrap();
                 task.obey(TxCommand::Gate(GateCommand::Open));
                 ring.push(1);
-                if tail_ms == 0 {
-                    ring.push(1);
-                }
                 read_all(&mut task).await;
                 if cap_ms.is_none() {
                     task.obey(TxCommand::Gate(GateCommand::Shut));
                 }
-                if tail_ms != 0 {
-                    ring.push(1);
-                }
+                ring.push(1);
                 ring.push(1);
                 read_all(&mut task).await;
                 assert_eq!(
@@ -1577,26 +1615,101 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn muting_an_open_mic_cancels_even_a_pending_fade() {
-            let (mut task, ring, record, mut said) = listening(0).await;
-            task.obey(TxCommand::Gate(GateCommand::Open));
-            ring.push(1);
-            read_all(&mut task).await;
-            task.obey(TxCommand::Gate(GateCommand::Shut));
-            task.obey(TxCommand::Gate(GateCommand::ForceShut(ShutReason::Muted)));
-            push_onset(&ring, 1);
-            read_all(&mut task).await;
+        async fn zero_tail_release_at_995_ms_sends_no_frame_at_1015_ms() {
+            use conch_voice_control::{Ptt, PttInput, PttOutput};
 
-            assert_eq!(record.heard().len(), 1);
-            assert_eq!(
-                reported(&mut said),
-                [
-                    TxEvent::GateShut {
+            let ms = Duration::from_millis;
+            for quiet_frame in [false, true] {
+                let hand = Hand::default();
+                let (mut task, ring, record, mut said) = listening_on(0, hand.clock()).await;
+                task.open_max_ms = Some(1000);
+                task.gate.set_max_open_ms(Some(1000)).unwrap();
+                let (mut ptt, _) = Ptt::with_talk_mode(ms(1000), TalkMode::Open);
+                for input in [
+                    PttInput::Microphone(true),
+                    PttInput::PublishGrant(true),
+                    PttInput::Connected(true),
+                    PttInput::Sound(false),
+                ] {
+                    ptt.handle(hand.now(), input);
+                }
+                push_onset(&ring, 1);
+                read_all(&mut task).await;
+                assert_eq!(reported(&mut said), [sound(true)]);
+                assert!(
+                    ptt.handle(hand.now(), PttInput::Sound(true))
+                        .contains(&PttOutput::Gate(GateCommand::Open))
+                );
+                task.obey(TxCommand::Gate(GateCommand::Open));
+                assert_eq!(ptt.deadline(), Some(ms(1000)));
+
+                // The frame cap still has room when the hang ends at 995 ms, with
+                // either a quiet frame to fade or an empty poll.
+                hand.advance(ms(895));
+                ring.push(1);
+                read_all(&mut task).await;
+                hand.advance(ms(100));
+                let quiet = 0.001;
+                if quiet_frame {
+                    ring.frames.lock().unwrap().push_back([quiet; FRAME_LEN]);
+                }
+                read_all(&mut task).await;
+                assert_eq!(
+                    said.try_recv().unwrap(),
+                    TxEvent::Sound {
+                        sounding: false,
+                        restarts: task.listen.restarts,
+                    }
+                );
+                assert!(
+                    ptt.handle(hand.now(), PttInput::Sound(false))
+                        .contains(&PttOutput::Gate(GateCommand::Shut))
+                );
+                task.obey(TxCommand::Gate(GateCommand::Shut));
+                assert_eq!(
+                    reported(&mut said),
+                    [TxEvent::GateShut {
                         limit_reached: false
-                    },
-                    sound(true)
-                ]
-            );
+                    }]
+                );
+
+                hand.advance(ms(20));
+                ring.push(2);
+                read_all(&mut task).await;
+                let heard = record.0.lock().unwrap();
+                assert_eq!(heard.len(), 1 + usize::from(quiet_frame));
+                if quiet_frame {
+                    let last = &heard[1];
+                    assert!(last[..FADE_SAMPLES].iter().all(|&s| s == quiet));
+                    assert!(last[FADE_SAMPLES..].windows(2).all(|p| p[0] > p[1]));
+                    assert_eq!(last[FRAME_LEN - 1], 0.0);
+                }
+                assert_eq!(reported(&mut said), []);
+            }
+        }
+
+        #[tokio::test]
+        async fn a_zero_tail_shut_or_mute_cuts_the_open_mic_immediately() {
+            for shut in [GateCommand::Shut, GateCommand::ForceShut(ShutReason::Muted)] {
+                let (mut task, ring, record, mut said) = listening(0).await;
+                task.obey(TxCommand::Gate(GateCommand::Open));
+                ring.push(1);
+                read_all(&mut task).await;
+                task.obey(TxCommand::Gate(shut));
+                push_onset(&ring, 1);
+                read_all(&mut task).await;
+
+                assert_eq!(record.heard().len(), 1);
+                assert_eq!(
+                    reported(&mut said),
+                    [
+                        TxEvent::GateShut {
+                            limit_reached: false
+                        },
+                        sound(true)
+                    ]
+                );
+            }
         }
 
         #[tokio::test]
