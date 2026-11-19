@@ -136,6 +136,17 @@ var TSConstants = []TSConstant{
 	{Name: "MAX_DM_CLIENT_NONCE_BYTES", Value: MaxDMClientNonceBytes},
 	{Name: "DM_CLIENT_NONCE_WINDOW_SECONDS", Value: DMClientNonceWindowSeconds},
 	{Name: "MAX_DM_CURSOR_BYTES", Value: MaxDMCursorBytes},
+
+	// Private calls (issue #2029, DRAFT pending ADR-017): the timings a call
+	// screen may show, and the bounds a client must not exceed.
+	{Name: "PRIVATE_CALL_RING_SECONDS", Value: PrivateCallRingSeconds},
+	{Name: "PRIVATE_CALL_JOIN_SECONDS", Value: PrivateCallJoinSeconds},
+	{Name: "PRIVATE_CALL_RECONNECT_GRACE_SECONDS", Value: PrivateCallReconnectGraceSeconds},
+	{Name: "PRIVATE_CALL_ACTION_WINDOW_SECONDS", Value: PrivateCallActionWindowSeconds},
+	{Name: "MIN_PRIVATE_CALL_ID_BYTES", Value: MinPrivateCallIDBytes},
+	{Name: "MAX_PRIVATE_CALL_ID_BYTES", Value: MaxPrivateCallIDBytes},
+	{Name: "MAX_PRIVATE_CALL_ACTION_ID_BYTES", Value: MaxPrivateCallActionIDBytes},
+	{Name: "MAX_PRIVATE_CALL_HISTORY_PAGE", Value: MaxPrivateCallHistoryPage},
 }
 
 // TSTypes is every struct the web client reads or sends, and the refusal
@@ -573,6 +584,22 @@ var TSTypes = []TSType{
 	{Value: NotificationSummaryV2{}, Family: "notification-summary-v2", Schema: NotificationSummarySchemaV2},
 	{Value: ListPendingNotificationsResponseV2{}, Family: "list-pending-notifications-response-v2"},
 
+	// Private calls (issue #2029, DRAFT pending ADR-017): the attempt, the
+	// invite and action bodies, the answers, the stream's frames and
+	// snapshot, the history page and the media-join grant, the one shape that
+	// carries a room and a token.
+	{Value: PrivateCallV1{}, Family: "private-call-v1", Schema: PrivateCallSchemaV1},
+	{Value: InvitePrivateCallRequestV1{}, Family: "invite-private-call-request-v1"},
+	{Value: PrivateCallActionRequestV1{}, Family: "private-call-action-request-v1"},
+	{Value: PrivateCallResponseV1{}, Family: "private-call-response-v1"},
+	{Value: PrivateCallConflictV1{}, Family: "private-call-conflict-v1"},
+	{Value: PrivateCallSessionV1{}, Family: "private-call-session-v1", Schema: PrivateCallSessionSchemaV1},
+	{Value: PrivateCallRingingV1{}, Family: "private-call-ringing-v1", Schema: PrivateCallRingingSchemaV1},
+	{Value: PrivateCallStopRingingV1{}, Family: "private-call-stop-ringing-v1", Schema: PrivateCallStopRingingSchemaV1},
+	{Value: PrivateCallStateV1{}, Family: "private-call-state-v1", Schema: PrivateCallStateSchemaV1},
+	{Value: PrivateCallSnapshotV1{}, Family: "private-call-snapshot-v1", Schema: PrivateCallSnapshotSchemaV1},
+	{Value: ListPrivateCallsResponseV1{}, Family: "list-private-calls-response-v1"},
+
 	// The body of every refusal.
 	{Value: Error{}, Name: "ErrorV0", Family: "error"},
 }
@@ -706,12 +733,18 @@ var TSVocabularyModes = map[string]TSVocabularyMode{
 	// act on, so the document is refused and the page says so, rather than
 	// read as some known value. PrincipalRole in particular: ADR-010 refused
 	// a third value because every client switches on it.
-	"ActivityKind":          TSStrict,
-	"ApprovalState":         TSStrict,
-	"ChannelVisibility":     TSStrict,
-	"DMAcceptPolicy":        TSStrict,
-	"DMState":               TSStrict,
-	"DMOrder":               TSStrict,
+	"ActivityKind":      TSStrict,
+	"ApprovalState":     TSStrict,
+	"ChannelVisibility": TSStrict,
+	"DMAcceptPolicy":    TSStrict,
+	"DMState":           TSStrict,
+	"DMOrder":           TSStrict,
+	// Private calls (issue #2029): the state and role are closed, so a client
+	// never reads a state it does not know as live; a reason it does not know
+	// is shown by its name.
+	"PrivateCallState":      TSStrict,
+	"PrivateCallRole":       TSStrict,
+	"PrivateCallReason":     TSTolerant,
 	"CredentialScope":       TSStrict,
 	"GuestEndReason":        TSStrict,
 	"GuestOrigin":           TSStrict,
