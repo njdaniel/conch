@@ -16,10 +16,15 @@
 //! the speakers inside a session: `docs/design/tui-voice.md` §20.5): the old one is dropped,
 //! which closes its stream, and the mix goes to the new one only. The task says whether the
 //! speakers it plays to are playing ([`Playing`]), so that the session can tell its owner.
-//! With `audio.echo_cancellation` on (issue #186) each frame handed to the speakers is also
-//! handed to the echo canceller as its reference ([`crate::echo`]), so that it can take that
-//! audio out of what the microphone captures; while the speakers are not playing it is given
-//! silence, which is what they play.
+//! With `audio.echo_cancellation` on (issue #186) what the speakers send to the room is handed
+//! to the echo canceller as its reference ([`crate::echo`]), so that it can take that audio
+//! out of what the microphone captures. The speakers say what that is
+//! ([`Speakers::play_heard`], [`Speakers::heard`]): speakers that play what they are given at
+//! once say so as they are given it (silence while they are not playing); the PipeWire
+//! speakers say what their stream has taken from their ring, and the silence it played when
+//! the ring ran short, so a frame they dropped is never in the reference and what they had
+//! queued when they are replaced is not either. The reference goes to the canceller through
+//! a queue this task never waits on ([`EchoReference`]).
 //! What `--json` reports as `stats` is counted and
 //! measured by this task, per speaker and for the mix, and what this task keeps per speaker
 //! has a bound: a speaker is kept while a track of theirs is mixed, and the last
@@ -35,7 +40,7 @@ use conch_voice_audio::{
 };
 use tokio::sync::mpsc;
 
-use crate::echo::EchoCanceller;
+use crate::echo::EchoReference;
 use crate::pace::Pace;
 
 /// The most frames one look mixes for a sink paced by its ring. A sink asks for what its
@@ -163,6 +168,22 @@ pub trait Speakers: SpeakerSink {
     fn playing(&self) -> bool {
         true
     }
+
+    /// Plays `frame`, as [`SpeakerSink::play`] does, and hands `heard` what has reached the
+    /// room since: the echo canceller's reference (issue #186). Called in place of `play`
+    /// only while echo cancellation is on. The default is for speakers that play what they
+    /// are given at once: the frame, while they are playing, and silence, which is what they
+    /// play, while they are not. Speakers with a queue of their own hand on nothing here and
+    /// say it in [`Self::heard`] once it has been played.
+    fn play_heard(&mut self, frame: &Frame, heard: &mut dyn FnMut(&Frame)) {
+        self.play(frame);
+        heard(if self.playing() { frame } else { &SILENCE });
+    }
+
+    /// Hands `heard`, in order, what has reached the room since it was last asked, of frames
+    /// given to [`Self::play_heard`] before. Asked once each time the task looks, and once
+    /// more before the speakers are replaced. The default: nothing, `play_heard` said it all.
+    fn heard(&mut self, _heard: &mut dyn FnMut(&Frame)) {}
 }
 
 impl Speakers for CountingSink {}
@@ -255,9 +276,9 @@ struct Task {
     mix_window: Window,
     /// A meter that has measured nothing, copied for each new window.
     blank: SignalMeter,
-    /// The echo canceller, with `audio.echo_cancellation` on: given each frame the speakers
-    /// are given.
-    echo: Option<EchoCanceller>,
+    /// The echo canceller's reference, with `audio.echo_cancellation` on: given what the
+    /// speakers say reached the room. Never waited on.
+    echo: Option<EchoReference>,
 }
 
 /// Speakers that can be moved into the task.
@@ -274,7 +295,7 @@ pub fn spawn(tones: &[f32], sink: BoxedSink) -> Result<Receiver, AudioError> {
     spawn_with_echo(tones, sink, None)
 }
 
-/// As [`spawn`], handing each frame the speakers are given to `echo` as well, the echo
+/// As [`spawn`], handing what the speakers say reached the room to `echo` as well, the echo
 /// canceller's reference (`audio.echo_cancellation`, issue #186).
 ///
 /// # Errors
@@ -283,7 +304,7 @@ pub fn spawn(tones: &[f32], sink: BoxedSink) -> Result<Receiver, AudioError> {
 pub fn spawn_with_echo(
     tones: &[f32],
     sink: BoxedSink,
-    echo: Option<EchoCanceller>,
+    echo: Option<EchoReference>,
 ) -> Result<Receiver, AudioError> {
     let blank = SignalMeter::new(tones)?;
     let (commands, command_rx) = mpsc::unbounded_channel();
@@ -345,6 +366,7 @@ impl Task {
         for _ in 0..frames {
             self.mix();
         }
+        self.heard();
         let playing = self.sink.playing();
         if playing != self.playing {
             self.playing = playing;
@@ -390,6 +412,9 @@ impl Task {
             }
             MixCommand::Deafen(deafened) => self.mixer.set_deafened(deafened),
             MixCommand::Speakers(sink) => {
+                // What the old speakers played since the last look is the canceller's too;
+                // what they had queued and not played never reaches the room, nor it.
+                self.heard();
                 // The old speakers are dropped here, which closes their stream; the mix goes
                 // to the new ones only, at their pace.
                 self.pace = Pace::new(sink.pacing());
@@ -445,13 +470,23 @@ impl Task {
             }
         }
         self.mixer.finish(&mut frame);
-        self.sink.play(&frame);
-        if let Some(echo) = &self.echo {
-            // What the speakers play is what the microphone can pick up again; speakers
-            // that are not playing play nothing.
-            echo.played(if self.playing { &frame } else { &SILENCE });
+        match &self.echo {
+            // What reaches the room is what the microphone can pick up again: the speakers
+            // say what that is, now or once they have played it ([`Speakers::play_heard`]).
+            Some(echo) => self
+                .sink
+                .play_heard(&frame, &mut |heard| echo.played(heard)),
+            None => self.sink.play(&frame),
         }
         self.mix_window.push(&frame);
+    }
+
+    /// With echo cancellation on, what the speakers have played since they were last asked
+    /// goes to the canceller ([`Speakers::heard`]).
+    fn heard(&mut self) {
+        if let Some(echo) = &self.echo {
+            self.sink.heard(&mut |heard| echo.played(heard));
+        }
     }
 
     fn report(&mut self) {
@@ -866,5 +901,175 @@ mod tests {
         }
         taken([&frames]).await;
         assert_eq!(old.audible(), 0);
+    }
+
+    /// What the echo canceller was given, so far.
+    struct Reference(mpsc::Receiver<Frame>, Vec<Frame>);
+
+    impl Reference {
+        fn spawn(sink: BoxedSink) -> (Receiver, Self) {
+            let (reference, received) = EchoReference::for_test(1_024);
+            let receiver = spawn_with_echo(&[440.0], sink, Some(reference)).unwrap();
+            (receiver, Self(received, Vec::new()))
+        }
+
+        fn given(&mut self) -> &[Frame] {
+            while let Ok(frame) = self.0.try_recv() {
+                self.1.push(frame);
+            }
+            &self.1
+        }
+
+        async fn until(&mut self, what: &str, count: usize) {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            while self.given().len() < count {
+                assert!(tokio::time::Instant::now() < deadline, "timed out: {what}");
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        }
+    }
+
+    /// Speakers with a queue of their own, like the PipeWire ones: what they are given is
+    /// queued while they are playing and dropped while they are not, and is heard only once
+    /// the test lets them play it (`take`).
+    #[derive(Clone, Default)]
+    struct Queue {
+        queued: Arc<std::sync::Mutex<VecDeque<Frame>>>,
+        playing: Arc<AtomicBool>,
+        wanted: Arc<AtomicUsize>,
+        take: Arc<AtomicUsize>,
+        given: Arc<AtomicUsize>,
+    }
+
+    impl Queue {
+        fn playing() -> Self {
+            let queue = Self::default();
+            queue.playing.store(true, Ordering::SeqCst);
+            queue
+        }
+
+        fn sink(&self) -> BoxedSink {
+            Box::new(QueueSink(self.clone()))
+        }
+
+        fn queued(&self) -> usize {
+            self.queued.lock().unwrap().len()
+        }
+
+        fn given(&self) -> usize {
+            self.given.load(Ordering::SeqCst)
+        }
+    }
+
+    struct QueueSink(Queue);
+
+    impl SpeakerSink for QueueSink {
+        fn play(&mut self, _frame: &Frame) {
+            unreachable!("with echo cancellation on the task calls play_heard");
+        }
+
+        fn pacing(&self) -> Pacing {
+            Pacing::Ring
+        }
+
+        fn frames_wanted(&mut self) -> usize {
+            self.0.wanted.swap(0, Ordering::SeqCst)
+        }
+    }
+
+    impl Speakers for QueueSink {
+        fn playing(&self) -> bool {
+            self.0.playing.load(Ordering::SeqCst)
+        }
+
+        fn play_heard(&mut self, frame: &Frame, _heard: &mut dyn FnMut(&Frame)) {
+            self.0.given.fetch_add(1, Ordering::SeqCst);
+            if self.playing() {
+                self.0.queued.lock().unwrap().push_back(*frame);
+            }
+        }
+
+        fn heard(&mut self, heard: &mut dyn FnMut(&Frame)) {
+            for _ in 0..self.0.take.swap(0, Ordering::SeqCst) {
+                let Some(frame) = self.0.queued.lock().unwrap().pop_front() else {
+                    break;
+                };
+                heard(&frame);
+            }
+        }
+    }
+
+    /// Issue #186's review: with echo cancellation on, the canceller is given what the
+    /// speakers played and when, across a switch of speakers and an unplugging: what the old
+    /// ones had queued and not played when they were replaced is never given; what the new
+    /// ones play is, once they play it; and what speakers not playing were given and dropped
+    /// is not.
+    #[tokio::test]
+    async fn with_echo_cancellation_on_the_reference_is_what_the_speakers_played_across_a_switch() {
+        let (old, new) = (Queue::playing(), Queue::playing());
+        let (mut receiver, mut reference) = Reference::spawn(old.sink());
+        let frames = add(&receiver, 64);
+        for _ in 0..20 {
+            frames.send(loud()).await.unwrap();
+        }
+        old.wanted.store(10, Ordering::SeqCst);
+        until("the old speakers to queue ten", || old.queued() == 10).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(reference.given().is_empty(), "queued is not played");
+        old.take.store(3, Ordering::SeqCst);
+        reference.until("three played", 3).await;
+
+        receiver.replace_speakers(new.sink());
+        until("the old speakers to be dropped", || {
+            Arc::strong_count(&old.queued) == 1
+        })
+        .await;
+        assert_eq!(old.queued(), 7, "seven never played");
+        new.wanted.store(5, Ordering::SeqCst);
+        until("the new speakers to queue five", || new.queued() == 5).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(reference.given().len(), 3, "nothing of the old queue");
+        new.take.store(5, Ordering::SeqCst);
+        reference.until("the new speakers' five", 8).await;
+
+        // Unplugged: what they are given is dropped, and never reaches the canceller.
+        new.playing.store(false, Ordering::SeqCst);
+        new.wanted.store(4, Ordering::SeqCst);
+        until("four more given", || new.given() == 9).await;
+        new.take.store(4, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(reference.given().len(), 8);
+        assert!(
+            reference.given().iter().any(is_audible),
+            "the speaker's audio is in it"
+        );
+    }
+
+    /// Speakers that play what they are given at once say so as it is given: the frame while
+    /// they are playing, and silence, which is what they play, while they are not, by their
+    /// word at that moment and not at the task's last look.
+    #[tokio::test]
+    async fn with_echo_cancellation_on_speakers_not_playing_give_the_canceller_silence() {
+        let speakers = Played::default();
+        let (receiver, mut reference) = Reference::spawn(speakers.sink());
+        let frames = add(&receiver, 256);
+        for _ in 0..30 {
+            frames.send(loud()).await.unwrap();
+        }
+        until("the mix to be audible", || speakers.audible() > 5).await;
+        assert!(
+            !reference.given().iter().any(is_audible),
+            "not playing: silence"
+        );
+        speakers.playing.store(true, Ordering::SeqCst);
+        let from = reference.given().len();
+        for _ in 0..30 {
+            frames.send(loud()).await.unwrap();
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !reference.given()[from..].iter().any(is_audible) {
+            assert!(tokio::time::Instant::now() < deadline, "no audible frame");
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
     }
 }

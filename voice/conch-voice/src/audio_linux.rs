@@ -31,8 +31,10 @@
 //! The decisions that are this file's own are small functions of plain values, so that they
 //! are tested without PipeWire: [`availability`] (when the microphone counts as there),
 //! [`take_frame`] (what a read does with the capture ring), [`frames_wanted`] (how many
-//! frames the playback ring is short of) and [`put_frame`] (what a write does with it).
+//! frames the playback ring is short of), [`put_frame`] (what a write does with it) and
+//! [`PlayedReference`] (what the speakers played, for the echo canceller).
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -173,6 +175,7 @@ impl AudioSystem {
             ring,
             status,
             idle: IdleClock::default(),
+            reference: PlayedReference::default(),
         })
     }
 }
@@ -473,6 +476,72 @@ pub fn frames_wanted(ring: &impl Room, playing: bool, idle: &mut IdleClock, now:
         .div_ceil(FRAME_LEN)
 }
 
+/// What the speakers have played, for the echo canceller's reference (issue #186): the
+/// frames written to the ring are kept here too, and handed on once the stream has taken
+/// them, with the silence it played when the ring ran short. So the canceller is given what
+/// the room heard, when it heard it (to within a look at the ring, [`RING_LOOK`]), and not
+/// what the mix made: a frame [`put_frame`] dropped is not in it, what was still queued when
+/// the speakers are replaced or the session ends is not either, and a stretch of underrun
+/// is silence in it as it was in the room.
+///
+/// How far it can still differ from the room: the ring is read for how much it holds and
+/// the stream's count of silence for how much was played short, each a moment apart, so a
+/// frame of silence can be handed on a frame early or late beside the audio around it; and
+/// at most [`Self::MAX_SILENCE_PER_LOOK`] frames of silence are handed on at a look, the
+/// rest, after a stall, left out. The canceller finds the echo path again after either.
+///
+/// [`RING_LOOK`]: crate::pace::RING_LOOK
+#[derive(Debug, Default)]
+pub struct PlayedReference {
+    /// Samples written to the ring, oldest first, not yet handed on: the ring's own, and the
+    /// first part of a frame the stream has taken only some of. Never more than the ring
+    /// holds and one frame: what is written is pushed here, and what the stream takes is
+    /// handed on at the next look.
+    written: VecDeque<f32>,
+    /// The stream's count of silence played ([`PlaybackStatus::silence`]) when last read;
+    /// `None` before the first look.
+    silence_seen: Option<u64>,
+    /// Silence played and not yet handed on, in samples: less than a frame, between looks.
+    silence_owed: u64,
+}
+
+impl PlayedReference {
+    /// The most frames of silence handed on at one look: 160 ms. After a longer stretch,
+    /// which only a stall makes, the rest is left out.
+    pub const MAX_SILENCE_PER_LOOK: u64 = 16;
+
+    /// `frame` was written to the ring whole ([`Put::Queued`]).
+    pub fn written(&mut self, frame: &Frame) {
+        self.written.extend(frame);
+    }
+
+    /// Hands `heard`, in order, what the stream has played since the last look: the whole
+    /// frames it has taken from the ring, which holds `ring_queued` samples now, and then
+    /// the silence it has played, `silence_total` in all ([`PlaybackStatus::silence`]). The
+    /// ring runs short only once it is empty, so its silence follows what it held.
+    pub fn look(&mut self, ring_queued: usize, silence_total: u64, heard: &mut dyn FnMut(&Frame)) {
+        let mut taken = self.written.len().saturating_sub(ring_queued);
+        while taken >= FRAME_LEN {
+            let mut frame = SILENCE;
+            for (out, sample) in frame.iter_mut().zip(self.written.drain(..FRAME_LEN)) {
+                *out = sample;
+            }
+            heard(&frame);
+            taken -= FRAME_LEN;
+        }
+        // A count that went back is a stream started again, whose count starts again.
+        let seen = self.silence_seen.unwrap_or(silence_total);
+        self.silence_seen = Some(silence_total);
+        self.silence_owed += silence_total.saturating_sub(seen);
+        let frame_len = FRAME_LEN as u64;
+        let frames = (self.silence_owed / frame_len).min(Self::MAX_SILENCE_PER_LOOK);
+        for _ in 0..frames {
+            heard(&SILENCE);
+        }
+        self.silence_owed %= frame_len;
+    }
+}
+
 /// The speakers: PipeWire's default output, or the one named in the configuration. The
 /// stream is open from [`AudioSystem::speakers`] until it is dropped.
 pub struct PipeWireSpeakers {
@@ -485,6 +554,8 @@ pub struct PipeWireSpeakers {
     ring: PlaybackWriter,
     status: Arc<PlaybackStatus>,
     idle: IdleClock,
+    /// What has been played, for the echo canceller: kept only while it is on.
+    reference: PlayedReference,
 }
 
 impl PipeWireSpeakers {
@@ -525,6 +596,20 @@ impl SpeakerSink for PipeWireSpeakers {
 impl Speakers for PipeWireSpeakers {
     fn playing(&self) -> bool {
         PipeWireSpeakers::playing(self)
+    }
+
+    /// The frame is queued, if [`put_frame`] takes it, and handed on once the stream has
+    /// played it ([`Self::heard`]); one it drops is never handed on.
+    fn play_heard(&mut self, frame: &Frame, _heard: &mut dyn FnMut(&Frame)) {
+        let playing = PipeWireSpeakers::playing(self);
+        if put_frame(&mut self.ring, playing, frame) == Put::Queued {
+            self.reference.written(frame);
+        }
+    }
+
+    fn heard(&mut self, heard: &mut dyn FnMut(&Frame)) {
+        let queued = Room::queued(&self.ring);
+        self.reference.look(queued, self.status.silence(), heard);
     }
 }
 
@@ -846,5 +931,92 @@ mod tests {
         assert!(TARGET_FILL + FRAME_LEN <= ring_samples(PLAYBACK_RING_MS));
         assert!(ring_samples(PLAYBACK_RING_MS).is_multiple_of(FRAME_LEN));
         assert!(FRAME_LEN <= ring_samples(CAPTURE_RING_MS));
+    }
+
+    /// The stream taking `n` samples from the front of the ring, as PipeWire's callback does.
+    fn drain(ring: &mut Fake, n: usize) {
+        let mut out = vec![0.0; n];
+        assert_eq!(Samples::pop(ring, &mut out), n);
+    }
+
+    /// A frame each of whose samples is `n`, so that the reference says which it was.
+    fn numbered(n: usize) -> Frame {
+        [n as f32; FRAME_LEN]
+    }
+
+    /// Issue #186's review: the echo canceller is given what the stream played, when it
+    /// played it, and nothing it did not: a frame is handed on only once the stream has taken
+    /// all of it, in order; one `put_frame` dropped (not playing, no room) never is; and
+    /// what is still queued is not.
+    #[test]
+    fn the_reference_is_what_the_stream_took_from_the_ring_in_order() {
+        let mut ring = Fake {
+            room: Some(3 * FRAME_LEN),
+            ..Fake::default()
+        };
+        let mut reference = PlayedReference::default();
+        let mut heard = Vec::new();
+        let put = |ring: &mut Fake, reference: &mut PlayedReference, n, playing| {
+            let frame = numbered(n);
+            let put = put_frame(ring, playing, &frame);
+            if put == Put::Queued {
+                reference.written(&frame);
+            }
+            put
+        };
+        assert_eq!(put(&mut ring, &mut reference, 1, true), Put::Queued);
+        assert_eq!(put(&mut ring, &mut reference, 2, true), Put::Queued);
+        assert_eq!(put(&mut ring, &mut reference, 3, false), Put::NotPlaying);
+        assert_eq!(put(&mut ring, &mut reference, 4, true), Put::Queued);
+        assert_eq!(put(&mut ring, &mut reference, 5, true), Put::NoRoom);
+        let look = |ring: &Fake, reference: &mut PlayedReference, heard: &mut Vec<f32>| {
+            reference.look(Room::queued(ring), 0, &mut |frame| heard.push(frame[0]));
+        };
+        look(&ring, &mut reference, &mut heard);
+        assert!(heard.is_empty(), "nothing is played yet");
+        // Part of a frame taken: not yet handed on.
+        drain(&mut ring, FRAME_LEN / 2);
+        look(&ring, &mut reference, &mut heard);
+        assert!(heard.is_empty());
+        drain(&mut ring, FRAME_LEN);
+        look(&ring, &mut reference, &mut heard);
+        assert_eq!(heard, [1.0], "the first frame, once all of it was taken");
+        drain(&mut ring, FRAME_LEN + FRAME_LEN / 2);
+        look(&ring, &mut reference, &mut heard);
+        assert_eq!(heard, [1.0, 2.0, 4.0], "the dropped frames are not in it");
+    }
+
+    /// The silence the stream played because the ring ran short is in the reference, after
+    /// what it held; a part of a frame waits for the rest; a long stretch is cut at
+    /// `MAX_SILENCE_PER_LOOK`; and a count that starts again is not taken for silence.
+    #[test]
+    fn the_silence_the_stream_played_is_in_the_reference() {
+        let mut reference = PlayedReference::default();
+        let mut heard = Vec::new();
+        let look = |reference: &mut PlayedReference, queued, silence| {
+            let mut frames = Vec::new();
+            reference.look(queued, silence, &mut |frame: &Frame| frames.push(frame[0]));
+            frames
+        };
+        // The first look sets where the count starts: what was played before it is not
+        // the canceller's.
+        assert!(look(&mut reference, 0, 5_000).is_empty());
+        reference.written(&numbered(7));
+        heard.extend(look(&mut reference, 0, 5_000 + FRAME_LEN as u64 + 100));
+        assert_eq!(heard, [7.0, 0.0], "what the ring held, then the silence");
+        heard.extend(look(&mut reference, 0, 5_000 + 2 * FRAME_LEN as u64 - 1));
+        assert_eq!(heard.len(), 2, "short of a frame");
+        heard.extend(look(&mut reference, 0, 5_000 + 2 * FRAME_LEN as u64 + 100));
+        assert_eq!(heard, [7.0, 0.0, 0.0]);
+        let stall = 5_000 + 100 * FRAME_LEN as u64;
+        let after_stall = look(&mut reference, 0, stall).len() as u64;
+        assert_eq!(after_stall, PlayedReference::MAX_SILENCE_PER_LOOK);
+        assert!(
+            look(&mut reference, 0, stall).is_empty(),
+            "the rest is left out"
+        );
+        // The stream started again: its count is back at zero.
+        assert!(look(&mut reference, 0, 10).is_empty());
+        assert_eq!(look(&mut reference, 0, 10 + FRAME_LEN as u64).len(), 1);
     }
 }

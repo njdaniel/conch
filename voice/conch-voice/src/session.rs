@@ -1015,16 +1015,17 @@ impl<T: Transport> Session<T> {
             share_audio,
             timings,
         } = settings;
-        // With `audio.echo_cancellation` on, one canceller for the session: the mix task gives
-        // it what the speakers play, and the transmit task runs each captured frame through
-        // it before the gate. Off, there is none.
-        let echo = EchoCanceller::if_enabled(echo_cancellation);
+        // With `audio.echo_cancellation` on, one canceller for the session, owned by the
+        // transmit task, which runs each captured frame through it before the gate; the mix
+        // task hands it what the speakers played through its reference, never waiting on it.
+        // Off, there is none.
+        let (echo, reference) = EchoCanceller::if_enabled(echo_cancellation).unzip();
         let transmitter = transmit::spawn_with_press_cap(
             transmit::gate_config(release_tail_ms, max_transmit),
             Some(transmit::press_cap_ms(max_transmit, push_to_talk_max)),
             level,
             timings.transmit_clock.clone(),
-            echo.clone(),
+            echo,
         )?;
         let output = Device::configured(output.as_deref());
         let speakers = match output.opened_as() {
@@ -1036,7 +1037,7 @@ impl<T: Transport> Session<T> {
         } else {
             Playback::Unavailable
         };
-        let receiver = receive::spawn_with_echo(&sink_tones, speakers, echo)?;
+        let receiver = receive::spawn_with_echo(&sink_tones, speakers, reference)?;
         let reports = Reports::spawn(
             conchd.report_client,
             channel.clone(),

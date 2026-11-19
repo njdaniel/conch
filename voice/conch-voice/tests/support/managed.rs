@@ -99,6 +99,8 @@ pub struct ManagedSetup {
     pub start_timeout: Duration,
     /// Start the helper with `--no-mute-key` (#1631).
     pub no_mute_key: bool,
+    /// Start the helper with `--echo-cancellation-default` (#186), as the desktop app does.
+    pub echo_cancellation_default: bool,
     /// Microphones and speakers opened by name, as the test arranges them; `None` for the
     /// tone and the counting sink, whatever is asked for.
     pub world: Option<World>,
@@ -121,6 +123,7 @@ impl Default for ManagedSetup {
             keyboard_unplugged: false,
             start_timeout: Duration::from_secs(10),
             no_mute_key: false,
+            echo_cancellation_default: false,
             world: None,
             share: None,
         }
@@ -530,7 +533,7 @@ impl ManagedRig {
             share_audio_owner: ShareAudioOwner::Helper,
             transmit_ceiling_secs: None,
             no_mute_key: setup.no_mute_key,
-            echo_cancellation_default: false,
+            echo_cancellation_default: setup.echo_cancellation_default,
             timings,
             key_timings: quick_keys(),
             start_timeout: setup.start_timeout,

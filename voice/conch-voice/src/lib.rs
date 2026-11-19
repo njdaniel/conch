@@ -46,8 +46,9 @@
 //! process's logger ([`logger`]); and the tasks that hold the transmit gate ([`transmit`]),
 //! the mix ([`receive`]), the report queue ([`reports`]) and the presence socket
 //! ([`presence`]); with `audio.echo_cancellation` on, the SDK's echo canceller, which the
-//! mix hands what the speakers play and the transmit task runs each captured frame
-//! through before the gate, and which opens no device and sends nothing ([`echo`]); the connection to PipeWire and the microphone and speaker streams
+//! transmit task owns and runs each captured frame through before the gate, given what the
+//! speakers played through a queue the mix task never waits on, and which opens no device
+//! and sends nothing ([`echo`]); the connection to PipeWire and the microphone and speaker streams
 //! opened through it ([`audio`]), the microphone's from the moment a session first allows
 //! publishing until the session ends, the speakers' for the whole session. A switch of
 //! either to another device inside the session closes the old stream and opens one for the
