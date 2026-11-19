@@ -17,9 +17,9 @@ use conch_voice::receive::{BoxedSink, Speakers};
 use conch_voice::sdk::DisconnectReason;
 use conch_voice::session::Timings;
 use conch_voice::transmit::BoxedMic;
-use conch_voice_audio::{FRAME_LEN, Frame, MicRead, MicSource, SpeakerSink};
+use conch_voice_audio::{FRAME_LEN, FRAME_MS, Frame, MicRead, MicSource, SpeakerSink};
 use conch_voice_control::LineCommand::{Down, Mute, Up};
-use conch_voice_control::TalkMode;
+use conch_voice_control::{DEFAULT_OPEN_HANG_MS, TalkMode};
 use serde_json::json;
 use tokio::sync::Notify;
 
@@ -360,8 +360,8 @@ async fn a_switch_during_the_release_tail_cuts_it_and_nothing_follows() {
     assert_frames_only_while_unmuted(&rig.sdk.calls());
 }
 
-/// The hang, in frames: the configuration's default of 400 ms.
-const HANG: u64 = 40;
+/// The configured default hang, in frames.
+const HANG: u64 = (DEFAULT_OPEN_HANG_MS / FRAME_MS) as u64;
 
 /// In open mode a switch ends what was being sent, and the new microphone opens nothing
 /// however loud it is: a whole hang of quiet heard on it, and then a fresh onset, are
@@ -369,7 +369,7 @@ const HANG: u64 = 40;
 #[tokio::test]
 #[cfg_attr(
     windows,
-    ignore = "timing: it counts frames against a hang of 40 ms, and a Windows \
+    ignore = "timing: it depends on 10 ms frames, and a Windows \
               timer ticks every 15.6 ms by default, so an extra onset is reported on the runner"
 )]
 async fn in_open_mode_a_new_microphone_needs_a_whole_hang_of_quiet_and_a_fresh_onset() {
