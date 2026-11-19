@@ -8,6 +8,9 @@
 # for the SDK under ~/.cache/conch only. Nick accepted it for this spike on
 # #1389. Set CONCH_ACCEPT_ANDROID_LICENCES=1 to confirm you have, too.
 #
+# CONCH_ANDROID_NO_EMULATOR=1 skips the emulator and the system image (CI sets
+# it: building the APK needs neither). This script creates no AVD either way.
+#
 # usage: toolchain.sh        then:  source "$HOME/.cache/conch/android-env.sh"
 set -euo pipefail
 
@@ -53,10 +56,41 @@ fi
 
 export JAVA_HOME="$JDK_DIR"
 export PATH="$JAVA_HOME/bin:$PATH"
-yes | "$SDKMANAGER" --sdk_root="$SDK" --licenses >/dev/null || true
-"$SDKMANAGER" --sdk_root="$SDK" \
-    "platform-tools" "platforms;android-35" "build-tools;36.0.0" \
-    "emulator" "$SYSTEM_IMAGE" "$NDK" "$CMAKE"
+
+packages=("platform-tools" "platforms;android-35" "build-tools;36.0.0" "$NDK" "$CMAKE")
+if [ "${CONCH_ANDROID_NO_EMULATOR:-}" != 1 ]; then
+    packages+=("emulator" "$SYSTEM_IMAGE")
+fi
+
+# The pinned command line tools' sdkmanager is a shim over Google's Android CLI
+# (cmdline-tools/latest/bin/android): it runs `android --sdk=<root> sdk install`
+# with the ids' ';' turned into '/', and rejects any flag it does not know, so
+# the CLI's --no-metrics (no environment variable turns metrics off) can only
+# be given by calling the CLI directly. Older command line tools have no
+# `android` and take the licences through sdkmanager.
+ANDROID_CLI="$SDK/cmdline-tools/latest/bin/android"
+sdk_install() {
+    if [ -x "$ANDROID_CLI" ]; then
+        "$ANDROID_CLI" --no-metrics --sdk="$SDK" sdk install "${@//;//}"
+    else
+        yes | "$SDKMANAGER" --sdk_root="$SDK" --licenses >/dev/null || true
+        "$SDKMANAGER" --sdk_root="$SDK" "$@"
+    fi
+}
+
+# One flaky download should not fail the run (#2007: a CI run lost the system
+# image to a closed connection). The tools' exit status does not say why an
+# install failed, so any failure is retried, at most three attempts in all.
+attempt=1
+until sdk_install "${packages[@]}"; do
+    if [ "$attempt" -ge 3 ]; then
+        echo "toolchain: SDK package install failed $attempt times; giving up" >&2
+        exit 1
+    fi
+    echo "toolchain: SDK package install failed (attempt $attempt of 3); retrying in $((attempt * 15))s" >&2
+    sleep $((attempt * 15))
+    attempt=$((attempt + 1))
+done
 
 cat >"$CACHE/android-env.sh" <<ENV
 # Source this: the spike's JDK, Android SDK and Gradle cache, all under $CACHE.
