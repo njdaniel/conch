@@ -225,7 +225,7 @@ var Vocabularies = map[string][]string{
 
 	// Phone push and notification preferences (issue #1712,
 	// docs/design/mobile-notifications.md §9.1).
-	"NotificationKind":   values(NotificationKindMessage, NotificationKindMention, NotificationKindWhisper),
+	"NotificationKind":   values(NotificationKindMessage, NotificationKindMention, NotificationKindWhisper, NotificationKindDirect),
 	"NotificationPolicy": values(NotificationPolicyOff, NotificationPolicyMentions, NotificationPolicyAll),
 	"PushPlatform":       values(PushPlatformIOS, PushPlatformAndroid, PushPlatformWeb),
 	"PushProvider":       values(PushProviderAPNs, PushProviderFCM),
@@ -234,6 +234,12 @@ var Vocabularies = map[string][]string{
 		PushRegistrationEndProviderRejected, PushRegistrationEndStale,
 	),
 	"PushTransport": values(PushTransportWebPush, PushTransportRelay),
+
+	// Local direct messages (issue #2016, DRAFT pending ADR-017).
+	"DMState":            values(DMStateOpen, DMStateArchived, DMStateHidden),
+	"DMAcceptPolicy":     values(DMAcceptEveryone, DMAcceptSharedChannel, DMAcceptNobody),
+	"DMChangeKind":       values(DMChangeOpened, DMChangeRead, DMChangeState, DMChangeParticipant),
+	"MessageContextKind": values(MessageContextChannel, MessageContextDirect),
 }
 
 // values lists a vocabulary by its constants, so an entry above cannot hold a

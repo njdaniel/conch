@@ -1,0 +1,25 @@
+{
+  "messages": [
+    {
+      "schema": "conch.dm_message.v1",
+      "id": 4301,
+      "conversation_id": 12,
+      "author_id": 5,
+      "created_at": "2026-11-19T09:01:00.000Z",
+      "body": "Got a minute after standup?"
+    },
+    {
+      "schema": "conch.dm_message.v1",
+      "id": 4305,
+      "conversation_id": 12,
+      "author_id": 3,
+      "created_at": "2026-11-19T09:05:12.000Z",
+      "body": "Sure. Here is the draft.",
+      "file_ids": [
+        41
+      ],
+      "client_nonce": "q7Zr0dXv3mJ8wq1P5kLc2A"
+    }
+  ],
+  "next_after": 4305
+}

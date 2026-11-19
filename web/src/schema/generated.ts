@@ -56,6 +56,13 @@ export const DEFAULT_ADMIN_QUORUM = 1;
 export const DEFAULT_ADMIN_MAX_PENDING = 8;
 export const MAX_ADMIN_MAX_PENDING = 32;
 export const MAX_ADMIN_REASON_CHARS = 500;
+export const DEFAULT_DM_PAGE_SIZE = 50;
+export const MAX_DM_PAGE_SIZE = 100;
+export const MAX_DM_CONVERSATIONS_PAGE = 50;
+export const MAX_DM_SNAPSHOT_CONVERSATIONS = 200;
+export const MAX_DM_CLIENT_NONCE_BYTES = 64;
+export const DM_CLIENT_NONCE_WINDOW_SECONDS = 86400;
+export const MAX_DM_CURSOR_BYTES = 128;
 
 // schema.PrincipalKind
 export type PrincipalKind = 'human' | 'agent';
@@ -3118,6 +3125,7 @@ export interface PrincipalAdminV1 {
   guest_state?: GuestState;
   voice_allowed?: boolean;
   may_invite?: boolean;
+  dm_allowed?: boolean;
 }
 
 export const principalAdminV1 = object<PrincipalAdminV1>({
@@ -3135,6 +3143,7 @@ export const principalAdminV1 = object<PrincipalAdminV1>({
   guest_state: optional(guestState),
   voice_allowed: optional(bool),
   may_invite: optional(bool),
+  dm_allowed: optional(bool),
 });
 
 // schema.ListPrincipalsResponseV1
@@ -5138,13 +5147,14 @@ export const putNotificationPreferencesRequestV1 = object<PutNotificationPrefere
 
 // schema.NotificationKind: closed on the server and client-tolerant, so a value this
 // bundle does not know is kept and shown by its name; KnownNotificationKind is the known ones.
-export type KnownNotificationKind = 'message' | 'mention' | 'whisper';
+export type KnownNotificationKind = 'message' | 'mention' | 'whisper' | 'direct';
 export type NotificationKind = KnownNotificationKind | (string & {});
 
 export const notificationKind = tolerant<KnownNotificationKind>({
   message: true,
   mention: true,
   whisper: true,
+  direct: true,
 });
 
 // schema.NotificationSummaryV1
@@ -5184,6 +5194,417 @@ export interface ListPendingNotificationsResponseV1 {
 export const listPendingNotificationsResponseV1 = object<ListPendingNotificationsResponseV1>({
   summaries: array(notificationSummaryV1),
   cursor: int,
+  more: bool,
+});
+
+// schema.DMState
+export type DMState = 'open' | 'archived' | 'hidden';
+
+export const dmState = vocab<DMState>({ open: true, archived: true, hidden: true });
+
+// schema.DMConversationV1
+export const dmConversationV1Schema = 'conch.dm_conversation.v1';
+
+export interface DMConversationV1 {
+  schema: typeof dmConversationV1Schema;
+  id: number;
+  participant_ids: number[];
+  created_at: string;
+  peer_id: number;
+  peer_name?: string;
+  peer_available: boolean;
+  state: DMState;
+  last_message_id: number;
+  last_message_at?: string;
+  last_read_id: number;
+  unread: number;
+}
+
+export const dmConversationV1 = object<DMConversationV1>({
+  schema: vocab<typeof dmConversationV1Schema>({ [dmConversationV1Schema]: true }),
+  id: int,
+  participant_ids: array(int),
+  created_at: timestamp,
+  peer_id: int,
+  peer_name: optional(str),
+  peer_available: bool,
+  state: dmState,
+  last_message_id: int,
+  last_message_at: optional(timestamp),
+  last_read_id: int,
+  unread: int,
+});
+
+// schema.OpenDMRequestV1
+export interface OpenDMRequestV1 {
+  peer_id: number;
+}
+
+export const openDMRequestV1 = object<OpenDMRequestV1>({
+  peer_id: int,
+});
+
+// schema.OpenDMResponseV1
+export interface OpenDMResponseV1 {
+  conversation: DMConversationV1;
+  created: boolean;
+}
+
+export const openDMResponseV1 = object<OpenDMResponseV1>({
+  conversation: dmConversationV1,
+  created: bool,
+});
+
+// schema.ListDMConversationsResponseV1
+export interface ListDMConversationsResponseV1 {
+  conversations: DMConversationV1[];
+  next_cursor?: string;
+}
+
+export const listDMConversationsResponseV1 = object<ListDMConversationsResponseV1>({
+  conversations: array(dmConversationV1),
+  next_cursor: optional(str),
+});
+
+// schema.DMMessageV1
+export const dmMessageV1Schema = 'conch.dm_message.v1';
+
+export interface DMMessageV1 {
+  schema: typeof dmMessageV1Schema;
+  id: number;
+  conversation_id: number;
+  author_id: number;
+  created_at: string;
+  body: string;
+  file_ids?: number[];
+  edited_at?: string;
+  removed?: boolean;
+  client_nonce?: string;
+}
+
+export const dmMessageV1 = object<DMMessageV1>({
+  schema: vocab<typeof dmMessageV1Schema>({ [dmMessageV1Schema]: true }),
+  id: int,
+  conversation_id: int,
+  author_id: int,
+  created_at: timestamp,
+  body: str,
+  file_ids: optional(array(int)),
+  edited_at: optional(timestamp),
+  removed: optional(bool),
+  client_nonce: optional(str),
+});
+
+// schema.PostDMMessageRequestV1
+export interface PostDMMessageRequestV1 {
+  body: string;
+  file_ids?: number[];
+  client_nonce: string;
+}
+
+export const postDMMessageRequestV1 = object<PostDMMessageRequestV1>({
+  body: str,
+  file_ids: optional(array(int)),
+  client_nonce: str,
+});
+
+// schema.PostDMMessageResponseV1
+export interface PostDMMessageResponseV1 {
+  message: DMMessageV1;
+  replayed?: boolean;
+}
+
+export const postDMMessageResponseV1 = object<PostDMMessageResponseV1>({
+  message: dmMessageV1,
+  replayed: optional(bool),
+});
+
+// schema.ListDMMessagesResponseV1
+export interface ListDMMessagesResponseV1 {
+  messages: DMMessageV1[];
+  next_before?: number;
+  next_after?: number;
+}
+
+export const listDMMessagesResponseV1 = object<ListDMMessagesResponseV1>({
+  messages: array(dmMessageV1),
+  next_before: optional(int),
+  next_after: optional(int),
+});
+
+// schema.SearchDMMessagesResponseV1
+export interface SearchDMMessagesResponseV1 {
+  messages: DMMessageV1[];
+  next_before?: number;
+}
+
+export const searchDMMessagesResponseV1 = object<SearchDMMessagesResponseV1>({
+  messages: array(dmMessageV1),
+  next_before: optional(int),
+});
+
+// schema.DMReadStateV1
+export const dmReadStateV1Schema = 'conch.dm_read_state.v1';
+
+export interface DMReadStateV1 {
+  schema: typeof dmReadStateV1Schema;
+  conversation_id: number;
+  last_read_id: number;
+  unread: number;
+  updated_at?: string;
+}
+
+export const dmReadStateV1 = object<DMReadStateV1>({
+  schema: vocab<typeof dmReadStateV1Schema>({ [dmReadStateV1Schema]: true }),
+  conversation_id: int,
+  last_read_id: int,
+  unread: int,
+  updated_at: optional(timestamp),
+});
+
+// schema.SetDMStateRequestV1
+export interface SetDMStateRequestV1 {
+  state: DMState;
+}
+
+export const setDMStateRequestV1 = object<SetDMStateRequestV1>({
+  state: dmState,
+});
+
+// schema.DMAcceptPolicy
+export type DMAcceptPolicy = 'everyone' | 'shared_channel' | 'nobody';
+
+export const dmAcceptPolicy = vocab<DMAcceptPolicy>({
+  everyone: true,
+  shared_channel: true,
+  nobody: true,
+});
+
+// schema.DMPreferencesV1
+export interface DMPreferencesV1 {
+  accept: DMAcceptPolicy;
+}
+
+export const dmPreferencesV1 = object<DMPreferencesV1>({
+  accept: dmAcceptPolicy,
+});
+
+// schema.EditDMMessageRequestV1
+export interface EditDMMessageRequestV1 {
+  body: string;
+}
+
+export const editDMMessageRequestV1 = object<EditDMMessageRequestV1>({
+  body: str,
+});
+
+// schema.EditDMMessageResponseV1
+export interface EditDMMessageResponseV1 {
+  message: DMMessageV1;
+}
+
+export const editDMMessageResponseV1 = object<EditDMMessageResponseV1>({
+  message: dmMessageV1,
+});
+
+// schema.DMMessageEditedV1
+export const dmMessageEditedV1Schema = 'conch.dm_message_edited.v1';
+
+export interface DMMessageEditedV1 {
+  schema: typeof dmMessageEditedV1Schema;
+  message: DMMessageV1;
+}
+
+export const dmMessageEditedV1 = object<DMMessageEditedV1>({
+  schema: vocab<typeof dmMessageEditedV1Schema>({ [dmMessageEditedV1Schema]: true }),
+  message: dmMessageV1,
+});
+
+// schema.DMMessageRemovedV1
+export const dmMessageRemovedV1Schema = 'conch.dm_message_removed.v1';
+
+export interface DMMessageRemovedV1 {
+  schema: typeof dmMessageRemovedV1Schema;
+  message: DMMessageV1;
+}
+
+export const dmMessageRemovedV1 = object<DMMessageRemovedV1>({
+  schema: vocab<typeof dmMessageRemovedV1Schema>({ [dmMessageRemovedV1Schema]: true }),
+  message: dmMessageV1,
+});
+
+// schema.DMServerSettingsV1
+export interface DMServerSettingsV1 {
+  dms_enabled: boolean;
+}
+
+export const dmServerSettingsV1 = object<DMServerSettingsV1>({
+  dms_enabled: bool,
+});
+
+// schema.DMPermissionRequestV1
+export interface DMPermissionRequestV1 {
+  dm_allowed: boolean;
+}
+
+export const dmPermissionRequestV1 = object<DMPermissionRequestV1>({
+  dm_allowed: bool,
+});
+
+// schema.DMPermissionResponseV1
+export interface DMPermissionResponseV1 {
+  principal_id: number;
+  dm_allowed: boolean;
+  changed: boolean;
+}
+
+export const dmPermissionResponseV1 = object<DMPermissionResponseV1>({
+  principal_id: int,
+  dm_allowed: bool,
+  changed: bool,
+});
+
+// schema.DMFileV1
+export const dmFileV1Schema = 'conch.dm_file.v1';
+
+export interface DMFileV1 {
+  schema: typeof dmFileV1Schema;
+  id: number;
+  conversation_id: number;
+  uploader_id: number;
+  filename: string;
+  media_type: string;
+  size: number;
+  sha256: string;
+  created_at: string;
+}
+
+export const dmFileV1 = object<DMFileV1>({
+  schema: vocab<typeof dmFileV1Schema>({ [dmFileV1Schema]: true }),
+  id: int,
+  conversation_id: int,
+  uploader_id: int,
+  filename: str,
+  media_type: str,
+  size: int,
+  sha256: str,
+  created_at: timestamp,
+});
+
+// schema.DMChangeKind: closed on the server and client-tolerant, so a value this
+// bundle does not know is kept and shown by its name; KnownDMChangeKind is the known ones.
+export type KnownDMChangeKind = 'opened' | 'read' | 'state' | 'participant';
+export type DMChangeKind = KnownDMChangeKind | (string & {});
+
+export const dmChangeKind = tolerant<KnownDMChangeKind>({
+  opened: true,
+  read: true,
+  state: true,
+  participant: true,
+});
+
+// schema.DMChangedV1
+export const dmChangedV1Schema = 'conch.dm_changed.v1';
+
+export interface DMChangedV1 {
+  schema: typeof dmChangedV1Schema;
+  conversation_id: number;
+  kind: DMChangeKind;
+}
+
+export const dmChangedV1 = object<DMChangedV1>({
+  schema: vocab<typeof dmChangedV1Schema>({ [dmChangedV1Schema]: true }),
+  conversation_id: int,
+  kind: dmChangeKind,
+});
+
+// schema.DMSnapshotV1
+export const dmSnapshotV1Schema = 'conch.dm_snapshot.v1';
+
+export interface DMSnapshotV1 {
+  schema: typeof dmSnapshotV1Schema;
+  conversations: DMConversationV1[];
+  more: boolean;
+  high_water: number;
+  taken_at: string;
+  dms_enabled: boolean;
+}
+
+export const dmSnapshotV1 = object<DMSnapshotV1>({
+  schema: vocab<typeof dmSnapshotV1Schema>({ [dmSnapshotV1Schema]: true }),
+  conversations: array(dmConversationV1),
+  more: bool,
+  high_water: int,
+  taken_at: timestamp,
+  dms_enabled: bool,
+});
+
+// schema.MessageContextKind
+export type MessageContextKind = 'channel' | 'direct';
+
+export const messageContextKind = vocab<MessageContextKind>({ channel: true, direct: true });
+
+// schema.MessageContext, by kind.
+export type MessageContext = ChannelMessageContext | DirectMessageContext;
+
+export interface ChannelMessageContext {
+  kind: 'channel';
+  channel_id: number;
+  channel_name: string;
+}
+
+export interface DirectMessageContext {
+  kind: 'direct';
+  conversation_id: number;
+}
+
+export const messageContext = tagged<MessageContext, 'kind'>('kind', {
+  channel: object<ChannelMessageContext>({
+    kind: vocab<'channel'>({ channel: true }),
+    channel_id: int,
+    channel_name: str,
+  }),
+  direct: object<DirectMessageContext>({
+    kind: vocab<'direct'>({ direct: true }),
+    conversation_id: int,
+  }),
+});
+
+// schema.NotificationSummaryV2
+export const notificationSummaryV2Schema = 'conch.notification_summary.v2';
+
+export interface NotificationSummaryV2 {
+  schema: typeof notificationSummaryV2Schema;
+  context: MessageContext;
+  message_id: number;
+  posted_at: string;
+  kind: NotificationKind;
+  author_id: number;
+  author_name?: string;
+  text?: string;
+}
+
+export const notificationSummaryV2 = object<NotificationSummaryV2>({
+  schema: vocab<typeof notificationSummaryV2Schema>({ [notificationSummaryV2Schema]: true }),
+  context: messageContext,
+  message_id: int,
+  posted_at: timestamp,
+  kind: notificationKind,
+  author_id: int,
+  author_name: optional(str),
+  text: optional(str),
+});
+
+// schema.ListPendingNotificationsResponseV2
+export interface ListPendingNotificationsResponseV2 {
+  summaries: NotificationSummaryV2[];
+  cursor?: string;
+  more: boolean;
+}
+
+export const listPendingNotificationsResponseV2 = object<ListPendingNotificationsResponseV2>({
+  summaries: array(notificationSummaryV2),
+  cursor: optional(str),
   more: bool,
 });
 

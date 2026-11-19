@@ -1,0 +1,38 @@
+{
+  "conversations": [
+    {
+      "schema": "conch.dm_conversation.v1",
+      "id": 12,
+      "participant_ids": [
+        3,
+        5
+      ],
+      "created_at": "2026-11-19T09:00:00.000Z",
+      "peer_id": 5,
+      "peer_name": "Grace",
+      "peer_available": true,
+      "state": "open",
+      "last_message_id": 4310,
+      "last_message_at": "2026-11-19T09:14:30.000Z",
+      "last_read_id": 4305,
+      "unread": 1
+    },
+    {
+      "schema": "conch.dm_conversation.v1",
+      "id": 14,
+      "participant_ids": [
+        3,
+        9
+      ],
+      "created_at": "2026-11-19T10:00:00.000Z",
+      "peer_id": 9,
+      "peer_name": "Linus",
+      "peer_available": true,
+      "state": "open",
+      "last_message_id": 0,
+      "last_read_id": 0,
+      "unread": 0
+    }
+  ],
+  "next_cursor": "c4MTAtMTQ"
+}

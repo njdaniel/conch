@@ -94,6 +94,14 @@ type PrincipalAdminV1 struct {
 	// by one that predates it, and for agents, which hold neither.
 	VoiceAllowed *bool `json:"voice_allowed,omitempty"`
 	MayInvite    *bool `json:"may_invite,omitempty"`
+	// DMAllowed is the person's "direct messages off" switch (ADR-017
+	// Decision 9; PUT /v1/principals/{id}/dm-permission), true while DMs are
+	// on for them, which is the default. Filled for humans by a server that
+	// has direct messages and omitted by one that predates them, and for
+	// agents, which hold none. It is the switch alone: it shows an operator
+	// nothing of any conversation, and the server-wide switch is not folded
+	// in. Additive.
+	DMAllowed *bool `json:"dm_allowed,omitempty"`
 }
 
 // ListPrincipalsResponseV1 is one page of the principal list, newest first.

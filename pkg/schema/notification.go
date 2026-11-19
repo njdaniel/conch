@@ -152,7 +152,8 @@ func validateNotificationPreferences(policy NotificationPolicy, muted []int64) e
 // A message has one kind, and it does not depend on the policy: whisper
 // before mention before message. A whisper to the reader is "whisper" even
 // when its body also mentions them, and a message that mentions them is
-// "mention" under the policy "all" as under "mentions".
+// "mention" under the policy "all" as under "mentions". A direct message is
+// always "direct" (NotificationSummaryV2 only).
 type NotificationKind string
 
 const (
@@ -165,12 +166,18 @@ const (
 	// NotificationKindWhisper: a whisper addressed to the reader. It counts
 	// as a mention under the policy "mentions" (Q3 on #1116).
 	NotificationKindWhisper NotificationKind = "whisper"
+	// NotificationKindDirect: a direct message to the reader (issue #2016,
+	// DRAFT pending ADR-017). It is carried only by NotificationSummaryV2,
+	// whose context is then direct; a v1 summary never holds one, so a
+	// client of v1 never sees it. It counts as a mention under the policy
+	// "mentions", as a whisper does.
+	NotificationKindDirect NotificationKind = "direct"
 )
 
 // Valid reports whether k is a recognized kind.
 func (k NotificationKind) Valid() bool {
 	switch k {
-	case NotificationKindMessage, NotificationKindMention, NotificationKindWhisper:
+	case NotificationKindMessage, NotificationKindMention, NotificationKindWhisper, NotificationKindDirect:
 		return true
 	default:
 		return false
@@ -233,7 +240,9 @@ func (s NotificationSummaryV1) Validate() error {
 	if s.PostedAt.IsZero() {
 		return errors.New("schema: notification summary posted_at must be set")
 	}
-	if !s.Kind.Valid() {
+	// NotificationKindDirect is valid in the vocabulary but is v2's alone:
+	// a DM has no channel for a v1 summary to name.
+	if !s.Kind.Valid() || s.Kind == NotificationKindDirect {
 		return fmt.Errorf("schema: notification summary kind %q is not one of message, mention, whisper", s.Kind)
 	}
 	if s.AuthorID <= 0 {
