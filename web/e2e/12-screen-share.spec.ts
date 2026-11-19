@@ -1141,7 +1141,10 @@ test.describe('screen share with LiveKit', () => {
           if (d === null) throw new Error(`${where}: no dock`);
           expect(Math.abs(d.y + d.height - height), `${where}: the dock's bottom is at ${String(d.y + d.height)}`).toBeLessThanOrEqual(1);
         }).toPass({ timeout: 5000 });
-        expect(await picture(), `${where}: the picture drawn`).toBeGreaterThanOrEqual(200);
+        // The strip takes about 53 px of the window, so the picture is smaller than in
+        // the browser case above (CI drew 192 px at 1215x900). 160 px still rejects a
+        // collapsed picture (#1980).
+        expect(await picture(), `${where}: the picture drawn`).toBeGreaterThanOrEqual(160);
       }
       await voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' }).click();
     } finally {
