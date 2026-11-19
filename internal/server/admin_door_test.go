@@ -593,6 +593,7 @@ func TestAdminCatalogParity(t *testing.T) {
 		schema.AdminActionBanChannelMember:       {target: gen, params: aliceIs(`{"principal_id":%d}`)},
 		schema.AdminActionUnbanChannelMember:     {target: gen, params: aliceIs(`{"principal_id":%d}`)},
 		schema.AdminActionSetChannelTopic:        {target: side, params: fixed(`{"topic":"plans"}`)},
+		schema.AdminActionRemoveMessage:          {target: gen, params: fixed(`{"message_id":999}`)},
 	}
 	answer := func(status int, body []byte) string {
 		if status < 400 {
