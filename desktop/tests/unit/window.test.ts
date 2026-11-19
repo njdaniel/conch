@@ -91,3 +91,35 @@ it('remembers maximize across window creation and persists unmaximize across res
   expect(open(normal).maximize).not.toHaveBeenCalled();
   expect(log).not.toHaveBeenCalled();
 });
+
+it('coalesces 100 maximize and restore transitions while a write is in flight', async () => {
+  let finishFirst = () => {};
+  let finishLast = () => {};
+  const first = new Promise<void>((resolve) => { finishFirst = resolve; });
+  const last = new Promise<void>((resolve) => { finishLast = resolve; });
+  const write = vi.fn<(text: string) => Promise<void>>()
+    .mockResolvedValue(undefined)
+    .mockReturnValueOnce(first)
+    .mockReturnValueOnce(last);
+  const maximized = new WindowMaximized({ read: () => Promise.resolve({ kind: 'absent' }), write }, vi.fn());
+  maximized.set(true);
+  await vi.waitFor(() => {
+    expect(write).toHaveBeenCalledExactlyOnceWith('true\n');
+  });
+  for (let i = 1; i < 100; i++) maximized.set(i % 2 === 0);
+  const flushed = vi.fn();
+  const done = maximized.flush().then(flushed);
+  expect(maximized.value).toBe(false);
+  expect(write).toHaveBeenCalledTimes(1);
+  expect(flushed).not.toHaveBeenCalled();
+
+  finishFirst();
+  await vi.waitFor(() => {
+    expect(write).toHaveBeenCalledTimes(2);
+  });
+  expect(write).toHaveBeenLastCalledWith('false\n');
+  expect(flushed).not.toHaveBeenCalled();
+  finishLast();
+  await done;
+  expect(write).toHaveBeenCalledTimes(2);
+});

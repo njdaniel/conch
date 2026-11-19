@@ -1,11 +1,14 @@
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, readdirSync, mkdirSync, symlinkSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, readdirSync, mkdirSync, symlinkSync } from 'node:fs';
+import * as fs from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { Autostart, entryText, type AutostartResult } from '../../main/autostart.ts';
 import { closeAction, createSettingsFiles, DEFAULT_SETTINGS, DETECT_CACHE_MS, parseSettings, SettingsService, type SettingsFiles } from '../../main/settings.ts';
+
+vi.mock('node:fs/promises', { spy: true });
 
 const dirs: string[] = [];
 function tmp(): string {
@@ -113,6 +116,30 @@ describe('settings.json', () => {
     const linked = new SettingsService({ files: createSettingsFiles(other), autostart: fakeAutostart(), trayWorking: () => false, log: () => undefined });
     await linked.load();
     expect(linked.current).toEqual(DEFAULT_SETTINGS);
+  });
+
+  it('rejects a file that grows past the read limit after the handle is checked', async () => {
+    const root = tmp();
+    const file = join(root, 'settings.json');
+    writeFileSync(file, '{"closeToTray":true}');
+    const { open } = await vi.importActual<typeof fs>('node:fs/promises');
+    const spy = vi.mocked(fs.open).mockClear().mockImplementationOnce(async (...args) => {
+      const handle = await open(...args);
+      const stat = handle.stat.bind(handle);
+      vi.spyOn(handle, 'stat').mockImplementationOnce(async () => {
+        const checked = await stat();
+        appendFileSync(file, ' '.repeat(4096));
+        return checked;
+      });
+      return handle;
+    });
+    try {
+      expect(await createSettingsFiles(root).read()).toEqual({ kind: 'unreadable' });
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(statSync(file).size).toBeGreaterThan(4096);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 

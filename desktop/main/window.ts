@@ -57,7 +57,8 @@ export function preloadPath(appPath: string): string {
 // destroying the window for a profile switch do not replace the preference.
 export class WindowMaximized {
   #value = false;
-  #writes = Promise.resolve();
+  #inFlight: Promise<void> | undefined;
+  #pending: Promise<void> | undefined;
 
   constructor(private readonly files: SettingsFiles, private readonly log: (line: string) => void) {}
 
@@ -73,13 +74,29 @@ export class WindowMaximized {
   set(value: boolean): void {
     if (value === this.#value) return;
     this.#value = value;
-    this.#writes = this.#writes.then(() => this.files.write(`${String(value)}\n`)).catch(() => {
-      this.log('conch-desktop: window-state.json could not be written');
+    if (this.#pending !== undefined) return;
+    if (this.#inFlight === undefined) {
+      void this.#write(value);
+      return;
+    }
+    // Keep one pending write and take the latest value when it starts.
+    this.#pending = this.#inFlight.then(() => {
+      this.#pending = undefined;
+      return this.#write(this.#value);
     });
   }
 
+  #write(value: boolean): Promise<void> {
+    this.#inFlight = Promise.resolve().then(() => this.files.write(`${String(value)}\n`)).catch(() => {
+      this.log('conch-desktop: window-state.json could not be written');
+    }).finally(() => {
+      this.#inFlight = undefined;
+    });
+    return this.#inFlight;
+  }
+
   flush(): Promise<void> {
-    return this.#writes;
+    return this.#pending ?? this.#inFlight ?? Promise.resolve();
   }
 }
 

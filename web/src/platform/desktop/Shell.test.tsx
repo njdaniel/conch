@@ -721,7 +721,10 @@ describe('opening an invite link (issue #1591)', () => {
     const field = await screen.findByLabelText('Invite link');
     fireEvent.change(field, { target: { value: LINK } });
     fireEvent.click(screen.getByRole('button', { name: 'Check link' }));
+    const address = screen.getByLabelText('Server address');
+    address.focus();
     const group = await screen.findByRole('group', { name: 'Open this invite' });
+    expect(document.activeElement).toBe(address);
     expect(group.textContent).toContain('This invite is for https://chat.example.org.');
     expect(inviteCheck).toHaveBeenCalledWith(LINK);
     // The link and its code are gone from the page; nothing has happened.
@@ -920,8 +923,9 @@ describe('opening an invite link (issue #1591)', () => {
       },
       inviteCancel,
     });
-    render(<DesktopShell>{child}</DesktopShell>);
-    await screen.findByText('the client');
+    render(<DesktopShell><textarea aria-label="Message" /></DesktopShell>);
+    const message = await screen.findByRole('textbox', { name: 'Message' });
+    message.focus();
     expect(screen.queryByLabelText('Invite link')).toBeNull();
     // The ask at mount has been answered (nothing waiting) before main speaks.
     await waitFor(() => {
@@ -929,6 +933,7 @@ describe('opening an invite link (issue #1591)', () => {
     });
     tell();
     const group = await screen.findByRole('group', { name: 'Open this invite' });
+    expect(document.activeElement).toBe(message);
     expect(group.textContent).toContain('https://chat.example.org');
     tell();
     await waitFor(() => {

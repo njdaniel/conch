@@ -10,7 +10,8 @@
 // joins voice or resumes capture: a start at login opens the app as any launch
 // does.
 import { randomBytes } from 'node:crypto';
-import { lstat, mkdir, open, readFile, rename, rm } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { lstat, mkdir, open, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import type { DesktopSettingsView, SettingsChange, SettingsResult } from '../../web/src/platform/desktop/bridge.ts';
@@ -80,9 +81,28 @@ export function createSettingsFiles(root: string, name: typeof FILE_NAME | 'wind
   return {
     async read() {
       try {
-        const st = await lstat(file);
-        if (!st.isFile() || st.size > MAX_BYTES) return { kind: 'unreadable' };
-        return { kind: 'text', text: await readFile(file, 'utf8') };
+        const windows = process.platform === 'win32';
+        // Windows lacks O_NOFOLLOW. Keep the path check there to reject links.
+        if (windows && !(await lstat(file)).isFile()) return { kind: 'unreadable' };
+        const flags = windows ? constants.O_RDONLY : constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
+        const fh = await open(file, flags);
+        try {
+          const st = await fh.stat();
+          if (!st.isFile() || st.size > MAX_BYTES) return { kind: 'unreadable' };
+          const buffer = Buffer.alloc(MAX_BYTES);
+          let size = 0;
+          while (size < buffer.length) {
+            const { bytesRead } = await fh.read(buffer, size, buffer.length - size, size);
+            if (bytesRead === 0) break;
+            size += bytesRead;
+          }
+          // A file can grow after the initial stat. Keep the read bounded and
+          // check the size again if it filled the buffer.
+          if (size === buffer.length && (await fh.stat()).size > MAX_BYTES) return { kind: 'unreadable' };
+          return { kind: 'text', text: buffer.toString('utf8', 0, size) };
+        } finally {
+          await fh.close();
+        }
       } catch (err) {
         return isCode(err, 'ENOENT') ? { kind: 'absent' } : { kind: 'unreadable' };
       }

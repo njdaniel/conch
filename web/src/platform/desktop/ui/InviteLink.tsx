@@ -133,12 +133,13 @@ export function InviteLink({ clientMounted, arrival, onArrivalTaken }: Props) {
     onArrivalTaken?.();
   }, [arrival]);
 
-  // A checked invite can appear below the saved server list. Move keyboard
-  // focus with the viewport so the next Tab reaches the invite's choices.
+  // A checked invite can appear below the saved server list. Bring it into
+  // view and give it keyboard focus only when nothing else has focus.
   useEffect(() => {
     const card = choice.current;
     if (checked === null || card === null) return;
-    card.focus({ preventScroll: true });
+    const active = document.activeElement;
+    if (active === null || active === document.body) card.focus({ preventScroll: true });
     if (typeof card.scrollIntoView === 'function') card.scrollIntoView({ block: 'nearest' });
   }, [checked]);
 
