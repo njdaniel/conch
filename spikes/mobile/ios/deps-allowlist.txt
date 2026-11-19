@@ -23,3 +23,12 @@ react-native
 @react-native/typescript-config
 @types/react
 typescript
+
+# Voice (M5-C, #1395): the LiveKit React Native SDK 3.1.0, its WebRTC peer
+# (^150.1.0; 150.1.1 is what npm resolves) and livekit-client 2.22.3, the
+# repository's version (web/package.json). The same three lines, at the same
+# versions, as the Android spike (#1391). The CocoaPods they pull (WebRTC) are
+# inventoried on the Mac.
+@livekit/react-native
+@livekit/react-native-webrtc
+livekit-client

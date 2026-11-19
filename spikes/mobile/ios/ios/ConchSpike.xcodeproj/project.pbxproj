@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A1C0DE012CB0000100A1C001 /* ConchVoice.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C0DE022CB0000100A1C001 /* ConchVoice.swift */; };
+		A1C0DE032CB0000100A1C001 /* ConchVoice.m in Sources */ = {isa = PBXBuildFile; fileRef = A1C0DE042CB0000100A1C001 /* ConchVoice.m */; };
 		0C80B921A6F3F58F76C31292 /* libPods-ConchSpike.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 5DCACB8F33CDC322A6C60F78 /* libPods-ConchSpike.a */; };
 		13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 13B07FB51A68108700A75B9A /* Images.xcassets */; };
 		761780ED2CA45674006654EE /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 761780EC2CA45674006654EE /* AppDelegate.swift */; };
@@ -25,6 +27,9 @@
 		761780EC2CA45674006654EE /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AppDelegate.swift; path = ConchSpike/AppDelegate.swift; sourceTree = "<group>"; };
 		761780EE2CA45674006654EF /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SceneDelegate.swift; path = ConchSpike/SceneDelegate.swift; sourceTree = "<group>"; };
 		81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = LaunchScreen.storyboard; path = ConchSpike/LaunchScreen.storyboard; sourceTree = "<group>"; };
+		A1C0DE022CB0000100A1C001 /* ConchVoice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ConchVoice.swift; path = ConchSpike/ConchVoice.swift; sourceTree = "<group>"; };
+		A1C0DE042CB0000100A1C001 /* ConchVoice.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = ConchVoice.m; path = ConchSpike/ConchVoice.m; sourceTree = "<group>"; };
+		A1C0DE052CB0000100A1C001 /* ConchSpike-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = "ConchSpike-Bridging-Header.h"; path = "ConchSpike/ConchSpike-Bridging-Header.h"; sourceTree = "<group>"; };
 		ED297162215061F000B7C4FE /* JavaScriptCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
@@ -46,6 +51,9 @@
 				13B07FB51A68108700A75B9A /* Images.xcassets */,
 				761780EC2CA45674006654EE /* AppDelegate.swift */,
 				761780EE2CA45674006654EF /* SceneDelegate.swift */,
+				A1C0DE022CB0000100A1C001 /* ConchVoice.swift */,
+				A1C0DE042CB0000100A1C001 /* ConchVoice.m */,
+				A1C0DE052CB0000100A1C001 /* ConchSpike-Bridging-Header.h */,
 				13B07FB61A68108700A75B9A /* Info.plist */,
 				81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */,
 				13B07FB81A68108700A75B9A /* PrivacyInfo.xcprivacy */,
@@ -249,6 +257,8 @@
 			files = (
 				761780ED2CA45674006654EE /* AppDelegate.swift in Sources */,
 				761780EF2CA45674006654EF /* SceneDelegate.swift in Sources */,
+				A1C0DE012CB0000100A1C001 /* ConchVoice.swift in Sources */,
+				A1C0DE032CB0000100A1C001 /* ConchVoice.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -279,6 +289,7 @@
 				PRODUCT_NAME = ConchSpike;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_OBJC_BRIDGING_HEADER = "ConchSpike/ConchSpike-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				VERSIONING_SYSTEM = "apple-generic";
@@ -307,6 +318,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "com.conchspike";
 				PRODUCT_NAME = ConchSpike;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_OBJC_BRIDGING_HEADER = "ConchSpike/ConchSpike-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				VERSIONING_SYSTEM = "apple-generic";
