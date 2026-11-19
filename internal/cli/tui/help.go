@@ -87,6 +87,7 @@ func (m Model) helpEntries() []helpEntry {
 				helpEntry{"/emoji text|unicode", "explicit shortcode fallback or Unicode reaction glyphs; no font detection"},
 			)
 		}
+		entries = append(entries, helpEntry{"/remove-own-message [ID]", "remove your own message; received copies are not recalled"})
 		if m.moderationStanding() {
 			entries = append(entries,
 				helpEntry{"/voice-kick ID", "remove a principal from current voice; they may rejoin"},

@@ -27,6 +27,7 @@ func TestModerationCommandsYesAndExactRoutes(t *testing.T) {
 		{"ban repeat", []string{"admin", "ban", "add", "general", "7", "--yes"}, http.MethodPut, "/v1/channels/general/bans/7", "it may already have been"},
 		{"unban", []string{"admin", "ban", "remove", "general", "7", "--yes"}, http.MethodDelete, "/v1/channels/general/bans/7", "membership and rights are not restored"},
 		{"unban repeat", []string{"admin", "ban", "remove", "general", "7", "--yes"}, http.MethodDelete, "/v1/channels/general/bans/7", "or was already not banned"},
+		{"own message remove", []string{"remove-message", "general", "42", "--yes"}, http.MethodDelete, "/v2/channels/general/messages/42/own", "received copies are not erased"},
 		{"message remove", []string{"admin", "message", "remove", "general", "42", "--yes"}, http.MethodDelete, "/v2/channels/general/messages/42", "received copies are not erased"},
 	}
 	for _, tt := range tests {
@@ -63,6 +64,7 @@ func TestModerationCommandsRequireYesNonInteractively(t *testing.T) {
 		{"ban add", []string{"admin", "ban", "add", "general", "7"}},
 		{"unban", []string{"admin", "ban", "remove", "general", "7"}},
 		{"message remove", []string{"admin", "message", "remove", "general", "42"}},
+		{"own message remove", []string{"remove-message", "general", "42"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -3431,7 +3431,7 @@ export async function stopVoiceShare(channel: string, startedAt?: string): Promi
 export async function listChannelBans(channel: string) {
   return readSent(await authedSend(call('listBans', { channel })), listChannelBansResponseV1);
 }
-export async function moderate(channel: string, op: 'kickVoice' | 'banMember' | 'unbanMember' | 'removeMessage', id: number): Promise<InviteResult<null>> {
+export async function moderate(channel: string, op: 'kickVoice' | 'banMember' | 'unbanMember' | 'removeMessage' | 'removeOwnMessage', id: number): Promise<InviteResult<null>> {
   return readDone(await authedSend(call(op, { channel, principal: id, id })));
 }
 const removalWatchers = new Set<(message: MessageV2) => void>();

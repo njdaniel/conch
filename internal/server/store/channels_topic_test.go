@@ -207,6 +207,9 @@ func TestMigrationChannelTopic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.db.Exec("ALTER TABLE message_removals DROP COLUMN by_author"); err != nil { // migration 50 (#1828)
+		t.Fatal(err)
+	}
 	if _, err := s.db.Exec("ALTER TABLE channels DROP COLUMN topic"); err != nil {
 		t.Fatal(err)
 	}

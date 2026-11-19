@@ -134,10 +134,12 @@ type mcpMessageOutput struct {
 	// GuestAuthor is the guest attribution a message carries when it was
 	// posted during a guest visit; absent otherwise (ADR-009 section 4.4).
 	GuestAuthor *schema.GuestAttributionV1 `json:"guest_author,omitempty"`
-	// Removed is true for a message a moderator removed (issue #849,
+	// Removed is true for a message its author or a moderator removed (#1828,
 	// docs/design/moderation.md section 7): the body is then the fixed
 	// tombstone text and there is no payload. Absent otherwise.
 	Removed bool `json:"removed,omitempty"`
+	// RemovedByAuthor mirrors MessageV2: the author route, rather than moderation.
+	RemovedByAuthor bool `json:"removed_by_author,omitempty"`
 }
 
 type mcpPostMessageOutput struct {

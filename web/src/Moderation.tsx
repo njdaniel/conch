@@ -8,14 +8,15 @@ import type { MessageV2 } from './schema/message';
 // Standing is the viewer's moderation standing: here, in the channel on screen
 // (from its members), and the two facts that carry to another channel, which
 // the channel list then settles: a signed-in human, and an operator.
-interface StandingValue { readonly here: boolean; readonly human: boolean; readonly operator: boolean }
-const Standing = createContext<StandingValue>({ here: false, human: false, operator: false });
+interface StandingValue { readonly here: boolean; readonly human: boolean; readonly operator: boolean; readonly author: boolean }
+const Standing = createContext<StandingValue>({ here: false, human: false, operator: false, author: false });
 export function ModerationScope({ who, members, guest, children }: { readonly who: WhoAmIResponseV1; readonly members: readonly ChannelMemberV1[]; readonly guest: boolean; readonly children: ReactNode }) {
   const human = !guest && who.kind === 'human';
   const operator = human && canDo(who, 'manage_channels');
   const here = human && members.some((m) => m.principal_id === who.id && (m.manages === true || operator));
-  return <Standing.Provider value={{ here, human, operator }}>{children}</Standing.Provider>;
+  return <Standing.Provider value={{ here, human, operator, author: who.kind === 'human' }}>{children}</Standing.Provider>;
 }
+export const useMayRemoveOwn = () => useContext(Standing).author;
 export const useMayModerate = () => useContext(Standing).here;
 // useMayModerateIn is the standing in a named channel that may not be the one
 // on screen (the voice channel a roster belongs to): the screen's own answer
@@ -26,12 +27,13 @@ export function useMayModerateIn(channel: string | null, viewed: string | null, 
   if (channel === viewed) return standing.here;
   return standing.human && (standing.operator || channels.find((c) => c.name === channel)?.manages === true);
 }
-export type ModerationOperation = 'kickVoice' | 'banMember' | 'unbanMember' | 'removeMessage';
+export type ModerationOperation = 'kickVoice' | 'banMember' | 'unbanMember' | 'removeMessage' | 'removeOwnMessage';
 export function moderationQuestion(op: ModerationOperation, name: string, channel: string): string {
   switch (op) {
     case 'kickVoice': return `Remove ${name} from voice in #${channel} now. They can rejoin; chat access is unchanged.`;
     case 'banMember': return `Remove ${name} from #${channel} and its nets and block this principal from being added again. Other channels are unaffected. A new account or guest visit is not identified by this ban.`;
     case 'unbanMember': return `Lift the ban on ${name} in #${channel}? Unban does not re-add them to the channel or its nets.`;
+    case 'removeOwnMessage': return `Remove ${name} in #${channel} for everyone in its audience. Text stays in the database and backups; copies already received cannot be recalled.`;
     case 'removeMessage': return `Remove ${name} in #${channel} for everyone in its audience. Future reads show a tombstone; server backups and copies already received cannot be recalled.`;
   }
 }

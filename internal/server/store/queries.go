@@ -221,10 +221,12 @@ type Message struct {
 	// EditedAt is when the author last changed Body (issue #845); zero for
 	// a message never edited. It is always after CreatedAt and only grows.
 	EditedAt time.Time
-	// Removed is true for a message a moderator removed (docs/design/
-	// moderation.md section 7). Body is then MessageRemovedBody, Payload is
+	// Removed is true for a message its author or a moderator removed
+	// (docs/design/moderation.md section 7). Body is the fixed tombstone, Payload is
 	// nil and EditedAt zero: the store never hands out the original.
 	Removed bool
+	// RemovedByAuthor records use of the author route, rather than moderation.
+	RemovedByAuthor bool
 }
 
 // AuditEvent is one append-only entry in the audit log. Actor is free text

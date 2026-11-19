@@ -18,6 +18,8 @@ func TestModerationGoldenFixtures(t *testing.T) {
 		{name: "ban without creator", file: "channel-ban-v1-no-creator.json", new: func() any { return &ChannelBanV1{} }},
 		{name: "ban list", file: "list-channel-bans-response-v1.json", new: func() any { return &ListChannelBansResponseV1{} }},
 		{name: "ban list empty", file: "list-channel-bans-response-v1-empty.json", new: func() any { return &ListChannelBansResponseV1{} }},
+		{name: "author removal", file: "message-v2-removed-author.json", new: func() any { return &MessageV2{} }},
+		{name: "author removal frame", file: "message-removed-v1-author.json", new: func() any { return &MessageRemovedV1{} }},
 		{name: "removed message", file: "message-v2-removed.json", new: func() any { return &MessageV2{} }},
 		// A removed reply keeps its thread and its guest attribution.
 		{name: "removed reply", file: "message-v2-removed-reply.json", new: func() any { return &MessageV2{} }},

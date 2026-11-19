@@ -212,8 +212,9 @@ type MessageV2 struct {
 	// current text with no marker. A frame carrying it on a message socket
 	// is an update of a message already sent, not a new message.
 	EditedAt *Timestamp `json:"edited_at,omitempty"`
-	// Removed is true for a message a moderator removed (moderation.md §7):
-	// the tombstone. Body is then MessageRemovedBody; payload, attachments
+	// Removed is true for a message its author or a moderator removed
+	// (moderation.md §7): the tombstone. Body is MessageRemovedBody or
+	// MessageRemovedByAuthorBody; payload, attachments
 	// and edited_at are omitted; id, channel, author, guest_author, audience,
 	// thread_root_id and created_at stay, so position and attribution hold.
 	// Omitted when false. Additive: a client that predates it renders the
@@ -221,6 +222,10 @@ type MessageV2 struct {
 	// already sent, never a new message; a removed copy is never replaced by
 	// one that is not.
 	Removed bool `json:"removed,omitempty"`
+	// RemovedByAuthor distinguishes the author route from moderation. It is
+	// omitted for moderator removals (including old tombstones), and requires
+	// Removed and MessageRemovedByAuthorBody when true.
+	RemovedByAuthor bool `json:"removed_by_author,omitempty"`
 }
 
 // Validate reports whether the envelope is structurally well-formed. It
@@ -229,7 +234,8 @@ type MessageV2 struct {
 // normalized read-back form: sorted ascending, distinct, including the
 // author, and including at least one other principal. A present edited_at
 // must be strictly after created_at. A removed message carries
-// MessageRemovedBody and no payload or edited_at; a message that is not
+// the fixed body selected by RemovedByAuthor and no payload or edited_at;
+// a message that is not
 // removed may say anything, that sentence included. Unknown payload schemas
 // are tolerated by design (forward compatibility); unknown audience kinds are
 // not (fail closed).
@@ -274,9 +280,16 @@ func (m MessageV2) Validate() error {
 	if m.EditedAt != nil && !m.EditedAt.Time().After(m.CreatedAt.Time()) {
 		return errors.New("schema: message edited_at must be after created_at")
 	}
+	if m.RemovedByAuthor && !m.Removed {
+		return errors.New("schema: removed_by_author requires removed")
+	}
 	if m.Removed {
-		if m.Body != MessageRemovedBody {
-			return fmt.Errorf("schema: removed message body must be %q", MessageRemovedBody)
+		body := MessageRemovedBody
+		if m.RemovedByAuthor {
+			body = MessageRemovedByAuthorBody
+		}
+		if m.Body != body {
+			return fmt.Errorf("schema: removed message body must be %q", body)
 		}
 		if m.Payload != nil {
 			return errors.New("schema: removed message must not carry a payload")

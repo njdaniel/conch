@@ -192,3 +192,145 @@ func TestRemovedMessageIsATombstoneOnEveryRead(t *testing.T) {
 		t.Errorf("the stored row = %q, %v; the original must stay in the database", body, err)
 	}
 }
+
+func TestRemoveOwnMessageRules(t *testing.T) {
+	f := newAudienceFixture(t)
+	ctx := context.Background()
+	wide := f.wide(t, f.alice, "SECRET author's text")
+	whisper := f.whisper(t, f.alice, "SECRET whisper", f.dave)
+	net, _ := f.toNet(t, f.alice, f.n1, "SECRET net")
+	for _, tt := range []struct {
+		name string
+		who  Principal
+		id   int64
+		want error
+	}{
+		{"non-author visible", f.dave, wide, ErrManagerRefused},
+		{"non-author invisible", f.frank, whisper, ErrMessageNotFound},
+		{"unknown", f.alice, 999999, ErrMessageNotFound},
+		{"non-member", f.carol, wide, ErrNotChannelMember},
+		{"own channel-wide", f.alice, wide, nil},
+		{"own whisper", f.alice, whisper, nil},
+		{"own net", f.alice, net, nil},
+		{"repeat", f.alice, wide, nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := f.s.RemoveOwnMessage(ctx, f.ch.ID, rdr(tt.who), tt.id, principalActor(tt.who.ID), time.Now().Add(24*time.Hour))
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("error %v, want %v", err, tt.want)
+			}
+			if err == nil && (!got.Message.RemovedByAuthor || got.Message.Body != schema.MessageRemovedByAuthorBody) {
+				t.Fatalf("wrong tombstone: %+v", got)
+			}
+			if tt.name == "repeat" && got.Changed {
+				t.Fatal("repeat wrote a removal")
+			}
+		})
+	}
+	if n := f.countRows(t, "SELECT COUNT(*) FROM audit_events WHERE action = ? AND detail = ?", AuditMessageRemoved, fmt.Sprintf("channel=%d removed_by=author", f.ch.ID)); n != 3 {
+		t.Fatalf("%d author audits, want 3", n)
+	}
+	// The projection, not only the write answer, carries the author kind.
+	got, err := f.s.ListVisibleMessages(ctx, f.ch.ID, rdr(f.alice), 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range got {
+		if !m.RemovedByAuthor || m.Body != schema.MessageRemovedByAuthorBody || m.Payload != nil || !m.EditedAt.IsZero() {
+			t.Fatalf("unsafe projection: %+v", m)
+		}
+	}
+}
+
+func TestRemoveOwnMessageProtectsCardsAndHistory(t *testing.T) {
+	f := newAudienceFixture(t)
+	ctx := context.Background()
+	for _, name := range []string{schema.ApprovalV1Name, schema.AdminActionV1Name, "conch.approval.v2"} {
+		row, err := f.s.db.Exec("INSERT INTO messages(channel_id, author_id, body, created_at, payload_schema, payload_json) VALUES (?, ?, 'SECRET card', 1, ?, '{}')", f.ch.ID, f.alice.ID, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, err := row.LastInsertId()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.s.RemoveOwnMessage(ctx, f.ch.ID, rdr(f.alice), id, "alice", time.Now()); !errors.Is(err, ErrManagerRefused) {
+			t.Fatalf("card %s: %v", name, err)
+		}
+	}
+	id := f.wide(t, f.alice, "before bound")
+	if _, err := f.s.db.Exec("UPDATE channel_members SET history_after = ? WHERE channel_id = ? AND principal_id = ?", id, f.ch.ID, f.alice.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.s.RemoveOwnMessage(ctx, f.ch.ID, rdr(f.alice), id, "alice", time.Now()); !errors.Is(err, ErrMessageNotFound) {
+		t.Fatalf("before bound: %v", err)
+	}
+}
+
+func TestAuthorRemovalRejectsAgentsAndPreservesModeration(t *testing.T) {
+	f := newAudienceFixture(t)
+	ctx := context.Background()
+	agent, err := f.s.CreatePrincipal(ctx, PrincipalAgent, "agent-remover")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.s.AddChannelMember(ctx, "system", f.ch.ID, agent.ID, 0); err != nil {
+		t.Fatal(err)
+	}
+	id := f.wide(t, agent, "agent text")
+	if _, err := f.s.RemoveOwnMessage(ctx, f.ch.ID, rdr(agent), id, "agent", time.Now()); !errors.Is(err, ErrManagerRefused) {
+		t.Fatalf("agent can remove own: %v", err)
+	}
+	yes, no := true, false
+	if _, err := f.s.PutChannelMember(ctx, "system", f.ch.ID, f.alice.ID, 0, &no, &yes); err != nil {
+		t.Fatal(err)
+	}
+	own := f.wide(t, f.alice, "manager's own text")
+	removed, err := f.removeAs(f.alice, own)
+	if err != nil || removed.Message.RemovedByAuthor || removed.Message.Body != schema.MessageRemovedBody {
+		t.Fatalf("moderator's own removal changed: %+v %v", removed, err)
+	}
+	repeated, err := f.s.RemoveOwnMessage(ctx, f.ch.ID, rdr(f.alice), own, "alice", time.Now())
+	if err != nil || repeated.Changed || repeated.Message.RemovedByAuthor || repeated.Message.Body != schema.MessageRemovedBody {
+		t.Fatalf("author retry changed moderator removal: %+v %v", repeated, err)
+	}
+}
+
+func TestAuthorRemovalMigrationPreservesOldModeratorTombstone(t *testing.T) {
+	ctx := context.Background()
+	path := t.TempDir() + "/conch.db"
+	s := openTestStoreAt(t, path)
+	ch, err := s.CreateChannel(ctx, "old-removal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	person, err := s.CreatePrincipal(ctx, PrincipalHuman, "old-moderator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, err := s.InsertMessageV1(ctx, ch.ID, person.ID, "SECRET old text", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Reconstruct the previous schema, including a moderator's own removal.
+	if _, err := s.db.Exec("ALTER TABLE message_removals DROP COLUMN by_author"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec("INSERT INTO message_removals(message_id, channel_id, removed_by, removed_at) VALUES (?, ?, ?, 1)", msg.ID, ch.ID, person.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec("PRAGMA user_version = 49"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	migrated := openTestStoreAt(t, path)
+	messages, err := migrated.ListVisibleMessages(ctx, ch.ID, Reader{}, 0, 10)
+	if err != nil || len(messages) != 1 {
+		t.Fatalf("read migrated removal: %+v %v", messages, err)
+	}
+	if messages[0].RemovedByAuthor || messages[0].Body != schema.MessageRemovedBody {
+		t.Fatalf("migration relabeled old removal: %+v", messages[0])
+	}
+}

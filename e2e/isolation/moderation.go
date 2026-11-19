@@ -867,9 +867,9 @@ func (f liveFrame) isMessage() bool {
 func (f liveFrame) tombstone(id int64) bool {
 	switch {
 	case f.Schema == schema.MessageRemovedSchemaV1:
-		return f.Message != nil && f.Message.ID == id && f.Message.Removed && f.Message.Body == schema.MessageRemovedBody && f.Message.Payload == nil
+		return f.Message != nil && f.Message.ID == id && f.Message.Removed && (f.Message.Body == schema.MessageRemovedBody || f.Message.Body == schema.MessageRemovedByAuthorBody) && f.Message.Payload == nil
 	case f.isMessage() && f.ID == id:
-		return f.Body == schema.MessageRemovedBody && f.Payload == nil && (f.Schema != schema.MessageSchemaV2 || f.Removed)
+		return (f.Body == schema.MessageRemovedBody || f.Body == schema.MessageRemovedByAuthorBody) && f.Payload == nil && (f.Schema != schema.MessageSchemaV2 || f.Removed)
 	}
 	return false
 }

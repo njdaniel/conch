@@ -356,7 +356,7 @@ const notRemovedCond = `NOT ` + removedCond
 // messageColumns is the column list scanMessages reads. A removed message is
 // projected as a tombstone in the statement itself: its body, payload and
 // edit time are never selected, so no reader of these rows can hold them. The
-// last column says which rows are tombstones.
+// last columns say which rows are tombstones and which use the author route.
 const messageColumns = `m.id, m.channel_id, m.author_id,
 	CASE WHEN ` + removedCond + ` THEN '' ELSE m.body END,
 	CASE WHEN ` + removedCond + ` THEN NULL ELSE m.payload_schema END,
@@ -365,7 +365,8 @@ const messageColumns = `m.id, m.channel_id, m.author_id,
 	(SELECT g.handle FROM message_guest_attribution g WHERE g.message_id = m.id),
 	(SELECT g.label FROM message_guest_attribution g WHERE g.message_id = m.id),
 	CASE WHEN ` + removedCond + ` THEN NULL ELSE m.edited_at END,
-	` + removedCond
+	` + removedCond + `,
+	EXISTS (SELECT 1 FROM message_removals mra WHERE mra.message_id = m.id AND mra.by_author = 1)`
 
 // The visibility rule for which messages a reader may see, as SQL conditions
 // over the messages table aliased m. The list and the search both embed the
@@ -503,13 +504,16 @@ func scanMessagesWith(ctx context.Context, q execer, rows *sql.Rows) ([]Message,
 		var netID, threadRoot, editedAt sql.NullInt64
 		var createdAt int64
 		if err := rows.Scan(&m.ID, &m.ChannelID, &m.AuthorID, &m.Body, &payloadSchema, &payloadJSON, &createdAt, &kind, &netID, &threadRoot,
-			&guestHandle, &guestLabel, &editedAt, &m.Removed); err != nil {
+			&guestHandle, &guestLabel, &editedAt, &m.Removed, &m.RemovedByAuthor); err != nil {
 			return nil, err
 		}
 		if m.Removed {
 			// The tombstone (moderation.md section 7.3): the statement
 			// selected no original, and this is the only body there is.
 			m.Body = schema.MessageRemovedBody
+			if m.RemovedByAuthor {
+				m.Body = schema.MessageRemovedByAuthorBody
+			}
 			payloadSchema, payloadJSON, editedAt = sql.NullString{}, nil, sql.NullInt64{}
 		}
 		if editedAt.Valid {
@@ -2561,6 +2565,17 @@ func visibleMessageTx(ctx context.Context, tx execer, channelID int64, reader Re
 // An archived channel allows it (Q1, reduce-only). The original body and
 // payload are never read into the answer or the audit row.
 func (s *Store) RemoveMessage(ctx context.Context, channelID int64, reader Reader, messageID int64, actor string, now time.Time) (MessageRemoval, error) {
+	return s.removeMessage(ctx, channelID, reader, messageID, actor, now, false)
+}
+
+// RemoveOwnMessage has no time limit. People (including active guests) may
+// remove only their own visible messages, excluding reserved approval/admin
+// cards. Membership, identity and visibility are rechecked under the lock.
+func (s *Store) RemoveOwnMessage(ctx context.Context, channelID int64, reader Reader, messageID int64, actor string, now time.Time) (MessageRemoval, error) {
+	return s.removeMessage(ctx, channelID, reader, messageID, actor, now, true)
+}
+
+func (s *Store) removeMessage(ctx context.Context, channelID int64, reader Reader, messageID int64, actor string, now time.Time, byAuthor bool) (MessageRemoval, error) {
 	var out MessageRemoval
 	err := s.withImmediateTx(ctx, func(tx execer) error {
 		if reader.PrincipalID > 0 {
@@ -2568,12 +2583,20 @@ func (s *Store) RemoveMessage(ctx context.Context, channelID int64, reader Reade
 				return err
 			}
 		}
-		if _, err := memberActorStandingTx(ctx, tx, channelID, reader.PrincipalID); err != nil {
+		if byAuthor {
+			var kind string
+			if err := tx.QueryRowContext(ctx, "SELECT kind FROM principals WHERE id = ? AND disabled_at IS NULL", reader.PrincipalID).Scan(&kind); err != nil || kind != string(PrincipalHuman) {
+				return ErrManagerRefused
+			}
+		} else if _, err := memberActorStandingTx(ctx, tx, channelID, reader.PrincipalID); err != nil {
 			return err
 		}
 		msg, err := visibleMessageTx(ctx, tx, channelID, reader, messageID)
 		if err != nil {
 			return err
+		}
+		if byAuthor && (msg.AuthorID != reader.PrincipalID || (msg.Payload != nil && schema.ReservedMessagePayload(msg.Payload.Schema))) {
+			return ErrManagerRefused
 		}
 		if msg.Removed {
 			out = MessageRemoval{Message: msg}
@@ -2585,12 +2608,16 @@ func (s *Store) RemoveMessage(ctx context.Context, channelID int64, reader Reade
 		}
 		at := now.Truncate(time.Millisecond)
 		if _, err := tx.ExecContext(ctx,
-			"INSERT INTO message_removals (message_id, channel_id, removed_by, removed_at) VALUES (?, ?, ?, ?)",
-			messageID, channelID, by, at.UnixMilli()); err != nil {
+			"INSERT INTO message_removals (message_id, channel_id, removed_by, removed_at, by_author) VALUES (?, ?, ?, ?, ?)",
+			messageID, channelID, by, at.UnixMilli(), byAuthor); err != nil {
 			return fmt.Errorf("store: remove message %d: %w", messageID, err)
 		}
+		detail := fmt.Sprintf("channel=%d", channelID)
+		if byAuthor {
+			detail += " removed_by=author"
+		}
 		if err := appendAuditEventTx(ctx, tx, actor, AuditMessageRemoved, messageSubject(messageID),
-			fmt.Sprintf("channel=%d", channelID), at); err != nil {
+			detail, at); err != nil {
 			return err
 		}
 		var recipients []int64
@@ -2601,6 +2628,10 @@ func (s *Store) RemoveMessage(ctx context.Context, channelID int64, reader Reade
 		}
 		// The projection of the row as it now reads.
 		msg.Removed, msg.Body, msg.Payload, msg.EditedAt = true, schema.MessageRemovedBody, nil, time.Time{}
+		msg.RemovedByAuthor = byAuthor
+		if byAuthor {
+			msg.Body = schema.MessageRemovedByAuthorBody
+		}
 		out = MessageRemoval{Message: msg, Recipients: recipients, Changed: true}
 		return nil
 	})
