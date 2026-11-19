@@ -611,33 +611,46 @@ function schemeOf(url: string): string {
 }
 
 // cspRefusals listens, while the companion connects, for the page's CSP
-// refusing a request (issue #1992). Such a refusal never reaches main's
+// refusing a connection (issue #1992). Such a refusal never reaches main's
 // request filter, so main cannot log it, and the SDK reports it as it would
-// any network failure. last is the latest as `csp:<directive>:<scheme>`:
-// never the address.
-function cspRefusals(): { readonly last: () => string | null; readonly stop: () => void } {
-  if (typeof document === 'undefined') return { last: () => null, stop: () => undefined };
+// any network failure. Only connect-src counts: another directive's refusal
+// at the same moment is not why a connection failed. last is the latest as
+// `csp:connect-src:<scheme>`, never the address, and is forgotten once the
+// connection is made, so a later disconnect is not blamed on it.
+function cspRefusals(): { readonly last: () => string | null; readonly stop: () => void; readonly connected: () => void } {
+  if (typeof document === 'undefined') return { last: () => null, stop: () => undefined, connected: () => undefined };
   let last: string | null = null;
   const on = (e: SecurityPolicyViolationEvent): void => {
-    const directive = /^[a-z-]{1,32}$/.test(e.effectiveDirective) ? e.effectiveDirective : 'other';
-    last = `csp:${directive}:${schemeOf(e.blockedURI)}`;
+    if (e.effectiveDirective !== 'connect-src') return;
+    last = `csp:connect-src:${schemeOf(e.blockedURI)}`;
   };
   document.addEventListener('securitypolicyviolation', on);
+  const stop = (): void => {
+    document.removeEventListener('securitypolicyviolation', on);
+  };
   return {
     last: () => last,
-    stop: () => {
-      document.removeEventListener('securitypolicyviolation', on);
+    stop,
+    connected: () => {
+      stop();
+      last = null;
     },
   };
 }
 
+// The grammar main's parseCompanionEnd accepts for a detail
+// (desktop/main/ipc.ts). A detail outside it would get the whole end refused,
+// and main would keep the companion: so one is sent only when it fits.
+const PAGE_END_DETAIL = /^[A-Za-z][A-Za-z0-9_:-]{0,63}$/u;
+
 // pageEndDetail is an error's name and LiveKit's reason name, for main's log
-// (CompanionPageEnd.detail): never its message.
+// (CompanionPageEnd.detail): never its message, and nothing main would refuse.
 function pageEndDetail(err: unknown): string | undefined {
   const name = errorName(err);
   if (typeof name !== 'string') return undefined;
   const reason = typeof err === 'object' && err !== null && 'reasonName' in err ? err.reasonName : undefined;
-  return typeof reason === 'string' && /^[A-Za-z]{1,32}$/.test(reason) ? `${name}:${reason}` : name;
+  const detail = typeof reason === 'string' && /^[A-Za-z]{1,32}$/.test(reason) ? `${name}:${reason}` : name;
+  return PAGE_END_DETAIL.test(detail) ? detail : undefined;
 }
 
 export const initialVoice: VoiceState = {
@@ -2260,7 +2273,7 @@ export class VoiceClient {
       this.act(why === null ? { kind: 'retry' } : { kind: 'stop', why }, next);
       return;
     }
-    refusals?.stop();
+    refusals?.connected();
     if (mine !== this.attempt) {
       void room.close().catch(() => undefined);
       return;

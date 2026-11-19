@@ -3559,6 +3559,33 @@ describe('the screen companion', () => {
       expect(t.native.state.whys).toHaveLength(1);
     });
 
+    it('an error name main would refuse is left out, so the end itself still reaches main', async () => {
+      for (const name of ['My$Error', 'Dotted.Error', 'x'.repeat(70)]) {
+        const t = companionSetup([], (room) => {
+          room.connectFailure = Object.assign(new Error('boom'), { name });
+        });
+        t.client.watchCompanionStream('general', 9);
+        await settle();
+        expect(t.native.state.whys).toEqual([{ kind: 'connect-failed' }]);
+      }
+    });
+
+    it('only a connect-src refusal is blamed, and one before a connection that was made is forgotten', async () => {
+      const t = companionSetup([], (room) => {
+        const connect = room.connect;
+        room.connect = (url, token, roomName, publish, events, audio) => {
+          document.dispatchEvent(Object.assign(new Event('securitypolicyviolation'), { effectiveDirective: 'img-src', blockedURI: 'https://x.example/a.png' }));
+          document.dispatchEvent(Object.assign(new Event('securitypolicyviolation'), { effectiveDirective: 'connect-src', blockedURI: 'wss://other.example/' }));
+          return connect(url, token, roomName, publish, events, audio);
+        };
+      });
+      t.client.startCompanionShare('general');
+      await settle();
+      t.rooms[0]?.events?.onDisconnected('lost');
+      await settle();
+      expect(t.native.state.whys).toEqual([{ kind: 'disconnected', detail: 'lost' }]);
+    });
+
     it('a connection LiveKit ends says the cause, and a Stop with nothing left says left', async () => {
       const t = companionSetup();
       t.client.startCompanionShare('general');
