@@ -29,12 +29,14 @@ pub const DEFAULT_SERVER: &str = "http://127.0.0.1:8080";
 pub const DEFAULT_RELEASE_TAIL_MS: u32 = 100;
 /// The longest a single press may transmit. It catches a stuck key.
 pub const DEFAULT_MAX_TRANSMIT_SECS: u32 = 120;
-/// The level, in dBFS, at or above which one frame is sound in open mode
-/// (`docs/design/tui-voice.md` §20.6).
-pub const DEFAULT_OPEN_THRESHOLD_DB: i32 = -40;
-/// How long, in open mode, with no frame at or above the level before the gate shuts. The
-/// browser's open mode holds for as long.
-pub const DEFAULT_OPEN_HANG_MS: u32 = 400;
+/// The level in dBFS that must be exceeded for a sustained open-mic onset
+/// (`docs/design/tui-voice.md` §20.6). It was -40 until #2001, where room noise kept a
+/// desktop's gate flicking open; -34 leaves a noise floor near -40 dBFS 6 dB below
+/// onset and 2 dB below the closing level. The real floor depends on microphone gain.
+pub const DEFAULT_OPEN_THRESHOLD_DB: i32 = -34;
+/// Time below the closing threshold before the release tail. At 800 ms, pauses
+/// between words can run longer than the former 400 ms without splitting an utterance.
+pub const DEFAULT_OPEN_HANG_MS: u32 = 800;
 
 /// The whole configuration, with defaults filled in where the design note states one.
 ///
@@ -1189,8 +1191,8 @@ open_hang_ms = 650
                 release_tail_ms: 100,
                 max_transmit_secs: 120,
                 talk_mode: TalkMode::PushToTalk,
-                open_threshold_db: -40,
-                open_hang_ms: 400,
+                open_threshold_db: -34,
+                open_hang_ms: 800,
             },
         };
         for text in ["", "\n", "# nothing set\n", "[keys]\n", "[audio]\n[keys]\n"] {
@@ -2055,24 +2057,24 @@ open_hang_ms = 650
                 defaults.open_threshold_db,
                 defaults.open_hang_ms
             ),
-            (TalkMode::PushToTalk, -40, 400)
+            (TalkMode::PushToTalk, -34, 800)
         );
-        assert_eq!(defaults.open_hang(), Duration::from_millis(400));
+        assert_eq!(defaults.open_hang(), Duration::from_millis(800));
 
         // (the text, the mode, the level, the hang)
         let accepted = [
             (
                 "talk_mode = \"push_to_talk\"",
                 TalkMode::PushToTalk,
-                -40,
-                400,
+                -34,
+                800,
             ),
-            ("talk_mode = \"open\"", TalkMode::Open, -40, 400),
-            ("talk_mode = 'open'", TalkMode::Open, -40, 400),
-            ("open_threshold_db = -80", TalkMode::PushToTalk, -80, 400),
-            ("open_threshold_db = -10", TalkMode::PushToTalk, -10, 400),
-            ("open_hang_ms = 100", TalkMode::PushToTalk, -40, 100),
-            ("open_hang_ms = 2000", TalkMode::PushToTalk, -40, 2000),
+            ("talk_mode = \"open\"", TalkMode::Open, -34, 800),
+            ("talk_mode = 'open'", TalkMode::Open, -34, 800),
+            ("open_threshold_db = -80", TalkMode::PushToTalk, -80, 800),
+            ("open_threshold_db = -10", TalkMode::PushToTalk, -10, 800),
+            ("open_hang_ms = 100", TalkMode::PushToTalk, -34, 100),
+            ("open_hang_ms = 2000", TalkMode::PushToTalk, -34, 2000),
             (
                 "talk_mode = \"open\"\nopen_threshold_db = -60\nopen_hang_ms = 250",
                 TalkMode::Open,
