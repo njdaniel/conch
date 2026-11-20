@@ -14,6 +14,7 @@
 
   It changes neither [ADR-006](ADR-006-rust-voice-client.md) (the native Linux client) nor single-tenancy. ADR-004's gate, that #87's by-hand checks close before V4, stays on the native client. Browser voice is held to the alpha's own exit instead (plan item A16).
 - **Design:** [docs/design/private-alpha.md](../design/private-alpha.md)
+- **Amended 2026-11-19 by [ADR-017](ADR-017-local-direct-messages-and-calls.md)** (Proposed; effective when Nick merges it): Decision 5's "a one-on-one is a private channel with two members (D12 holds: no standalone DMs)" (line 61) and the Unchanged line "No standalone human DMs before P7" (line 78) are superseded for local 1:1 DMs and private voice calls. Decision 5's group separation and Decision 3 (screen share into a channel's voice room) stand. The text below is unchanged.
 
 ## Context
 

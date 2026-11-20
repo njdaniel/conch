@@ -4,6 +4,7 @@
 - **Date:** 2026-10-05
 - **Deciders:** Nick (Tier-H)
 - **Proposal:** #76 · **Amends:** [ADR-000](ADR-000-charter.md) non-goals (voice line); [ADR-002](ADR-002-single-binary-sqlite.md) LiveKit bullet
+- **Amended 2026-11-19 by [ADR-017](ADR-017-local-direct-messages-and-calls.md)** (Proposed; effective when Nick merges it): beside one room per net and the channel-wide room (line 18), a private call is a third room kind: one fresh room per call attempt, outside every channel, voice only. The text below is unchanged.
 
 ## Context
 
