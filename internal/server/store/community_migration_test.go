@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -28,7 +29,7 @@ func rewindToBeforeCommunity(t *testing.T, path string) {
 		t.Fatal(err)
 	}
 	defer func() { _ = db.Close() }()
-	for _, stmt := range []string{
+	for _, stmt := range slices.Concat(dmDropStatements, []string{
 		"DROP TABLE push_registrations",          // migration 49 (issue #1714)
 		"DROP TABLE notification_preferences",    // migration 48 (issue #1713)
 		"ALTER TABLE channels DROP COLUMN topic", // migration 47 (issue #1503)
@@ -50,7 +51,7 @@ func rewindToBeforeCommunity(t *testing.T, path string) {
 		"ALTER TABLE invites DROP COLUMN link",
 		"DELETE FROM server_settings WHERE key IN ('open_signup', 'member_link_default_expiry_seconds')",
 		fmt.Sprintf("PRAGMA user_version = %d", communityMigration-1),
-	} {
+	}) {
 		if _, err := db.Exec(stmt); err != nil {
 			t.Fatalf("rewind %q: %v", stmt, err)
 		}

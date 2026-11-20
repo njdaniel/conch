@@ -207,6 +207,11 @@ func TestMigrationChannelTopic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	for _, stmt := range dmDropStatements { // migration 51 (issue #2017)
+		if _, err := s.db.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if _, err := s.db.Exec("ALTER TABLE message_removals DROP COLUMN by_author"); err != nil { // migration 50 (#1828)
 		t.Fatal(err)
 	}

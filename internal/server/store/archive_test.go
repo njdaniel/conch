@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -61,7 +62,7 @@ func TestMigration41ArchivedAt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, stmt := range []string{
+	for _, stmt := range slices.Concat(dmDropStatements, []string{
 		// Migration 45 (issue #849) first, then 43 (issue #1326), then 42's
 		// columns, then 41's.
 		"DROP TABLE push_registrations",          // migration 49 (issue #1714)
@@ -77,7 +78,7 @@ func TestMigration41ArchivedAt(t *testing.T) {
 		"ALTER TABLE hooks DROP COLUMN issued_by",       // migration 42 (issue #1024)
 		"ALTER TABLE channels DROP COLUMN archived_at",
 		fmt.Sprintf("PRAGMA user_version = %d", archiveMigration-1),
-	} {
+	}) {
 		if _, err := rewind.Exec(stmt); err != nil {
 			t.Fatalf("rewind %q: %v", stmt, err)
 		}

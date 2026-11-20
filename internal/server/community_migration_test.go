@@ -85,6 +85,14 @@ func TestCommunityMigrationApprovalChain(t *testing.T) {
 	for _, stmt := range []string{
 		// Undo migration 41's DDL (archived_at), then migration 40's: the
 		// database is as a server at 39 held it.
+		"DROP TABLE direct_messages_fts", // migration 51 (issue #2017); children before parents
+		"DROP TABLE dm_read_marks",
+		"DROP TABLE dm_files",
+		"DROP TABLE direct_message_removals",
+		"DROP TABLE direct_message_revisions",
+		"DROP TABLE direct_messages",
+		"DROP TABLE dm_viewer_state",
+		"DROP TABLE dm_conversations",
 		"DROP TABLE push_registrations",          // migration 49 (issue #1714)
 		"DROP TABLE notification_preferences",    // migration 48 (issue #1713)
 		"ALTER TABLE channels DROP COLUMN topic", // migration 47 (issue #1503)
