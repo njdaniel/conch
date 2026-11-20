@@ -4,7 +4,8 @@
 // (logic/diagnostics.ts). Sharing hands the text to Android's share sheet.
 import { useState } from 'react';
 import { ScrollView, Share, Text } from 'react-native';
-import { controller, diagnostics } from '../services';
+import { developmentNotice } from '../../logic/development';
+import { client, controller, diagnostics } from '../services';
 import { useVoiceState } from './useVoiceState';
 import { Button, Screen, styles } from './common';
 
@@ -18,7 +19,10 @@ export function Diagnostics(props: { onBack: () => void }) {
     `deafened ${voice.deafened}`,
     `gate ${voice.gateOpen ? 'open' : 'shut'}`,
     `blocked ${voice.blocked.length === 0 ? 'no' : voice.blocked.join('+')}`,
-  ].join('\n');
+    developmentNotice(client.server, 'diagnostics'),
+  ]
+    .filter((line) => line !== null)
+    .join('\n');
   return (
     <Screen title="Diagnostics">
       <Text style={styles.small}>Sign-in details, addresses, device IDs, room names and IDs, and participant IDs are redacted.</Text>

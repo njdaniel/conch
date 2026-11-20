@@ -2,6 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ApiClient, signInCode, signInTarget, type Fetch, type HttpInit } from '../src/app/client';
+import { developmentLine, developmentNotice, developmentState } from '../src/logic/development';
 import { cameraTiles } from '../src/app/camera/tiles';
 import { PeopleSession } from '../src/app/peopleSession';
 import { FakeClock, settle } from './fakes';
@@ -278,4 +279,27 @@ test('a refused camera claim carries its code; a bad body is invalid; a 401 sign
   body = {};
   await api.claimCamera('general');
   assert.equal(signals.length, 1);
+});
+
+test('development marking: http:// sign-in marks each screen, https:// marks none (M-R1)', () => {
+  const screens = ['channels', 'voice', 'diagnostics'] as const;
+  const cases: { origin: string; development: boolean }[] = [
+    { origin: 'http://192.168.1.20:8080/', development: true },
+    { origin: ' HTTP://nas.local:8080', development: true },
+    { origin: 'https://chat.example.test', development: false },
+    { origin: 'HTTPS://chat.example.test/', development: false },
+    { origin: '', development: false },
+  ];
+  for (const c of cases) {
+    const { api } = client(() => ({ status: 200, body: {} }));
+    api.setServer(c.origin);
+    assert.equal(api.development, c.development, c.origin);
+    for (const screen of screens) {
+      const want = !c.development ? null : screen === 'diagnostics' ? developmentState : developmentLine;
+      assert.equal(developmentNotice(api.server, screen), want, `${c.origin} ${screen}`);
+    }
+  }
+  assert.match(developmentLine, /development server/i);
+  assert.match(developmentLine, /not encrypted/);
+  assert.equal(developmentState, 'server development');
 });

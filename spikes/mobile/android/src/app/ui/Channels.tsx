@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { FlatList, Pressable, Text, View } from 'react-native';
 import type { ChannelV0 } from '../../logic/schema/generated';
+import { developmentNotice } from '../../logic/development';
 import { client, principal } from '../services';
 import { Button, Note, Screen, colours, styles } from './common';
 
@@ -41,6 +42,7 @@ export function Channels(props: { onOpen: (channel: string) => void; onDiagnosti
         )}
         ListEmptyComponent={<Text style={styles.small}>No channels.</Text>}
       />
+      <Note text={developmentNotice(client.server, 'channels')} kind="warn" />
       <Note text={problem} kind="warn" />
       <View style={styles.row}>
         <View style={styles.grow}>
