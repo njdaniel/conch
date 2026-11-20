@@ -87,7 +87,9 @@ func metricsSocketKind(pattern string) string {
 	switch pattern {
 	case "GET /v0/ws", "GET /v1/ws", "GET /v2/ws":
 		return "hub"
-	case "GET /v1/events/ws":
+	// The per-person stream (issue #2040) is an events socket to the metric,
+	// as to the diagnostic ring: no new label value.
+	case "GET /v1/events/ws", "GET /v1/events/person/ws":
 		return "events"
 	case "GET /v1/voice/ws", "GET /v1/voice/occupancy/ws":
 		return "voice"

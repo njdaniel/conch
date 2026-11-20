@@ -133,6 +133,7 @@ func (s *Server) handleRevokeIssued(w http.ResponseWriter, r *http.Request) {
 func (s *Server) principalDisabled(ctx context.Context, id int64) {
 	s.hub.DropPrincipalAll(id)
 	s.events.dropPrincipalAll(id)
+	s.person.dropPrincipalAll(id)
 	// Disabling ends the principal's sessions.
 	s.events.notifyRosters()
 	s.voicePrincipalLostAccess(ctx, id, voiceReasonPrincipalOff)
@@ -229,6 +230,7 @@ func (s *Server) handleRevokeAllCredentials(w http.ResponseWriter, r *http.Reque
 	}
 	s.hub.DropPrincipalAll(id)
 	s.events.dropPrincipalAll(id)
+	s.person.dropPrincipalAll(id)
 	// Revoking every credential ends the principal's sessions.
 	s.events.notifyRosters()
 	s.voicePrincipalLostAccess(ctx, id, voiceReasonCredsRevoked)

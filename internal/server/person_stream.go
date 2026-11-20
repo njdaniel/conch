@@ -1,0 +1,566 @@
+package server
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/coder/websocket"
+
+	"github.com/njdaniel/conch/internal/server/store"
+	"github.com/njdaniel/conch/pkg/schema"
+)
+
+// The per-person events stream (issue #2040, child of #2013; ADR-017 and
+// docs/design/direct-messages.md §2.3).
+//
+// GET /v1/events/person/ws is scoped to one signed-in person, not to a
+// channel. A member with no channel open still gets their direct-message
+// frames on it and, when the call frames land (#2029), incoming-call rings.
+//
+// Why a route of its own, not /v1/events/ws without ?channel=: the channel
+// socket's hub, its subscription and every frame it builds are keyed by a
+// channel, and its checks (membership, manifest, roster) are the channel's.
+// Making channel optional would put a second, person-scoped mode inside code
+// whose one job is to carry channel documents, and "this socket never carries
+// a channel frame" would depend on a branch inside it. Here it is structural:
+// this file has no channel in any signature, and the only way a frame reaches
+// a socket is publish(principal, doc) with a doc of a registered kind
+// (personFrameKinds). The channel socket's behaviour and code are unchanged.
+//
+// What a socket sends, in order: conch.person_stream_hello.v1 (its own
+// instance id), conch.dm_snapshot.v1, then the registered frames addressed to
+// its principal as they are published, and the heartbeat every socket gets
+// (conch.heartbeat.v1, keepalive.go), which a client's silence watchdog lives
+// on and which names no one. Frames are addressed by principal id:
+// a frame published for principal 7 reaches only 7's sockets. A frame that
+// arrives while the snapshot is being taken is held and sent after it; a DM
+// message at or below the snapshot's high-water mark is a duplicate of the
+// snapshot and is not sent (DMSnapshotV1).
+//
+// Who may open it: a verified human member's own credential. An agent
+// (403 human_required) and a guest (403 guest_not_allowed) are refused before
+// the upgrade, as on other people-only routes, and nothing is upgraded for a
+// refusal.
+//
+// Revocation: principalDisabled, authChanged, guestsEnded and
+// credentialRevoked close the sockets at once through dropPrincipalAll and
+// dropCredential, as for channel sockets; and the interval re-check and the
+// re-check before every batch of frames close a socket whose credential or
+// principal lapsed without a drop reaching it (fail closed).
+//
+// This file holds no DM visibility rule and no SQL beyond the credential and
+// principal re-checks. The DM issues compute recipients against current state
+// and call publish; the snapshot comes from a source they install
+// (Server.dmSnapshotSource).
+
+const (
+	// personQueueMax bounds the frames waiting for one socket. A socket that
+	// falls this far behind is closed (slow consumer) rather than allowed to
+	// hold memory or slow a writer; it reconnects and gets a fresh snapshot.
+	personQueueMax = 256
+)
+
+// personDoc is a document the stream can carry.
+type personDoc interface{ Validate() error }
+
+// personFrameKind is one entry of the stream's frame-kind registry. A frame
+// kind is a schema this stream may carry; publish refuses a document no entry
+// accepts, so a channel document (or any other) cannot be sent on it by
+// mistake. The call frames of #2029 are one more entry here, and need no
+// change to the hub or the socket.
+type personFrameKind struct {
+	// schema is the schema name the frame carries, for logs.
+	schema string
+	// accept reports whether doc is this kind's document, and the DM message
+	// id it carries (0 for a kind that carries none; used to drop a message
+	// the snapshot already holds).
+	accept func(doc personDoc) (messageID int64, ok bool)
+}
+
+// kindOf builds the registry entry for document type T.
+func kindOf[T personDoc](name string, messageID func(T) int64) personFrameKind {
+	return personFrameKind{schema: name, accept: func(doc personDoc) (int64, bool) {
+		d, ok := doc.(T)
+		if !ok {
+			return 0, false
+		}
+		if messageID == nil {
+			return 0, true
+		}
+		return messageID(d), true
+	}}
+}
+
+// personFrameKinds is the registry. Only the frames of ADR-017 that are
+// addressed to one person belong here. The hello and the snapshot are the
+// socket's own and are not published, so they are not in it.
+var personFrameKinds = []personFrameKind{
+	kindOf(schema.DMMessageSchemaV1, func(m schema.DMMessageV1) int64 { return m.ID }),
+	kindOf[schema.DMMessageEditedV1](schema.DMMessageEditedSchemaV1, nil),
+	kindOf[schema.DMMessageRemovedV1](schema.DMMessageRemovedSchemaV1, nil),
+	kindOf[schema.DMChangedV1](schema.DMChangedSchemaV1, nil),
+	// TODO(#2029): the call frames (call.state) are registered here.
+}
+
+// personFrame is one encoded, validated frame in a socket's queue.
+type personFrame struct {
+	raw       []byte
+	messageID int64 // the DM message it carries, 0 for none
+}
+
+var errPersonFrameKind = errors.New("server: a document that is not a person-stream frame")
+
+// newPersonFrame validates and encodes doc if a registered kind accepts it.
+func newPersonFrame(doc personDoc) (personFrame, error) {
+	for _, k := range personFrameKinds {
+		id, ok := k.accept(doc)
+		if !ok {
+			continue
+		}
+		if err := doc.Validate(); err != nil {
+			return personFrame{}, fmt.Errorf("server: person stream %s frame: %w", k.schema, err)
+		}
+		raw, err := json.Marshal(doc)
+		if err != nil {
+			return personFrame{}, fmt.Errorf("server: encode person stream %s frame: %w", k.schema, err)
+		}
+		return personFrame{raw: raw, messageID: id}, nil
+	}
+	return personFrame{}, fmt.Errorf("%w: %T", errPersonFrameKind, doc)
+}
+
+// personHub is the registry of person-stream sockets.
+type personHub struct {
+	mu     sync.Mutex
+	subs   map[*personSub]struct{}
+	closed bool
+}
+
+func newPersonHub() *personHub {
+	return &personHub{subs: make(map[*personSub]struct{})}
+}
+
+// personSub is one socket's subscription. queue and gone are guarded by
+// hub.mu.
+type personSub struct {
+	hub          *personHub
+	principalID  int64
+	credentialID int64
+	// instanceID is the socket's own id (PersonStreamHelloV1).
+	instanceID string
+	// wake has room for one signal; writers only ever send non-blocking.
+	wake    chan struct{}
+	dropped chan struct{}
+	queue   []personFrame
+	gone    bool
+}
+
+// newInstanceID is 128 random bits as lowercase hex.
+func newInstanceID() (string, error) {
+	var b [schema.PersonStreamInstanceIDLen / 2]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("server: person stream instance id: %w", err)
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
+// subscribe registers a socket. After closeAll it returns one that is
+// already dropped.
+func (h *personHub) subscribe(principalID, credentialID int64, instanceID string) *personSub {
+	sub := &personSub{hub: h, principalID: principalID, credentialID: credentialID, instanceID: instanceID, wake: make(chan struct{}, 1), dropped: make(chan struct{})}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		sub.gone = true
+		close(sub.dropped)
+		return sub
+	}
+	h.subs[sub] = struct{}{}
+	return sub
+}
+
+func (sub *personSub) cancel() {
+	sub.hub.mu.Lock()
+	defer sub.hub.mu.Unlock()
+	delete(sub.hub.subs, sub)
+}
+
+// dropLocked closes sub's dropped channel once. h.mu is held.
+func (h *personHub) dropLocked(sub *personSub) {
+	if sub.gone {
+		return
+	}
+	sub.gone = true
+	sub.queue = nil
+	close(sub.dropped)
+}
+
+// publish queues doc for every socket of principalID and for no one else. It
+// never blocks and never reads the store. A socket whose queue is full is
+// dropped (slow consumer). It reports an error, and sends nothing, for a
+// document no registered kind accepts or that fails its Validate.
+func (h *personHub) publish(principalID int64, doc personDoc) error {
+	if principalID <= 0 {
+		return errors.New("server: person stream frame has no addressee")
+	}
+	f, err := newPersonFrame(doc)
+	if err != nil {
+		return err
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for sub := range h.subs {
+		if sub.principalID != principalID || sub.gone {
+			continue
+		}
+		if len(sub.queue) >= personQueueMax {
+			h.dropLocked(sub)
+			continue
+		}
+		sub.queue = append(sub.queue, f)
+		select {
+		case sub.wake <- struct{}{}:
+		default:
+		}
+	}
+	return nil
+}
+
+// take returns what is waiting and empties it, or live=false once dropped.
+func (sub *personSub) take() (frames []personFrame, live bool) {
+	sub.hub.mu.Lock()
+	defer sub.hub.mu.Unlock()
+	if sub.gone {
+		return nil, false
+	}
+	frames, sub.queue = sub.queue, nil
+	return frames, true
+}
+
+// dropPrincipalAll closes principalID's person sockets. A zero principal
+// matches nothing.
+func (h *personHub) dropPrincipalAll(principalID int64) {
+	if principalID == 0 {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for sub := range h.subs {
+		if sub.principalID == principalID {
+			h.dropLocked(sub)
+		}
+	}
+}
+
+// dropCredential closes the person sockets opened with credentialID; the
+// principal's sockets through its other credentials stay. A zero credential
+// matches nothing.
+func (h *personHub) dropCredential(credentialID int64) {
+	if credentialID == 0 {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for sub := range h.subs {
+		if sub.credentialID == credentialID {
+			h.dropLocked(sub)
+		}
+	}
+}
+
+// closeAll drops every socket and refuses new ones: shutdown.
+func (h *personHub) closeAll() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.closed = true
+	for sub := range h.subs {
+		h.dropLocked(sub)
+	}
+}
+
+func (h *personHub) isClosed() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.closed
+}
+
+// dmSnapshotSource builds the reader's DM snapshot (unread counts, and later
+// the active call attempts). The DM conversation issues install the real one;
+// the stream does not know how DM state is stored. It is called after the
+// socket is subscribed, so a frame published while it runs is held, not lost.
+type dmSnapshotSource func(ctx context.Context, principalID int64) (schema.DMSnapshotV1, error)
+
+// emptyDMSnapshot is the source until the DM store is installed: no
+// conversations, and DMs not available (dms_enabled false), which is the
+// truth while no DM backend exists on this server.
+func (s *Server) emptyDMSnapshot(_ context.Context, _ int64) (schema.DMSnapshotV1, error) {
+	return schema.DMSnapshotV1{
+		Schema:        schema.DMSnapshotSchemaV1,
+		Conversations: []schema.DMConversationV1{},
+		TakenAt:       schema.NewTimestamp(s.now()),
+	}, nil
+}
+
+func (s *Server) personSnapshot(ctx context.Context, principalID int64) (schema.DMSnapshotV1, error) {
+	src := s.dmSnapshotSource
+	if src == nil {
+		src = s.emptyDMSnapshot
+	}
+	snap, err := src(ctx, principalID)
+	if err != nil {
+		return schema.DMSnapshotV1{}, err
+	}
+	if err := snap.Validate(); err != nil {
+		return schema.DMSnapshotV1{}, err
+	}
+	return snap, nil
+}
+
+// personStreamCaller is the check before the upgrade: a verified person with
+// a credential. An agent and a guest are refused (403, audited as any refused
+// people-only route is); with authentication off there is no person.
+func (s *Server) personStreamCaller(w http.ResponseWriter, r *http.Request) (store.Principal, int64, bool) {
+	caller, ok := callerFrom(r.Context())
+	if !ok {
+		writeError(w, http.StatusBadRequest, schema.ErrorCodeDMRequireAuth, "the person stream requires authentication")
+		return store.Principal{}, 0, false
+	}
+	credID, ok := credentialIDFrom(r.Context())
+	if !ok {
+		writeUnauthenticated(w)
+		return store.Principal{}, 0, false
+	}
+	switch {
+	case caller.Kind != store.PrincipalHuman:
+		s.denyForbidden(w, r, caller, schema.ErrorCodeHumanRequired, "the person stream is for people")
+		return store.Principal{}, 0, false
+	case caller.IsGuest():
+		s.denyForbidden(w, r, caller, schema.ErrorCodeGuestNotAllowed, "a guest cannot do this")
+		return store.Principal{}, 0, false
+	case caller.DisabledAt != nil || caller.HiddenAt != nil:
+		writeUnauthenticated(w)
+		return store.Principal{}, 0, false
+	}
+	// TODO(#2047): refuse an act-as credential here (403 own_sign_in_required,
+	// ADR-017 Decision 7) with the credential provenance guard that PR #2047
+	// adds, in the way it guards the other self-made-credential routes
+	// (selfMadeCredentialRoutes). Until that merges this stream does NOT
+	// refuse a credential an operator minted for the person: it carries that
+	// person's DM frames and must not ship to a release before the guard is
+	// wired in. Deliberately not copied from #2047.
+	return caller, credID, true
+}
+
+// personStillAllowed reports whether the principal and the credential are
+// still good: a live credential, and a person who is human, enabled, visible
+// and not a guest. It fails closed: a store error is "no".
+func (s *Server) personStillAllowed(ctx context.Context, principalID, credID int64) (ok bool, reason schema.SocketCloseReason, text string, err error) {
+	cctx, cancel := context.WithTimeout(ctx, wsRecheckTimeout)
+	defer cancel()
+	live, err := s.store.CredentialLive(cctx, credID)
+	if err != nil {
+		return false, schema.SocketCloseError, "credential check failed", err
+	}
+	if !live {
+		return false, schema.SocketCloseRevoked, reasonCredentialInvalid, nil
+	}
+	p, err := s.store.PrincipalByID(cctx, principalID)
+	switch {
+	case errors.Is(err, store.ErrPrincipalNotFound):
+		return false, schema.SocketCloseRevoked, reasonCredentialInvalid, nil
+	case err != nil:
+		return false, schema.SocketCloseError, "principal check failed", err
+	case p.Kind != store.PrincipalHuman || p.IsGuest() || p.DisabledAt != nil || p.HiddenAt != nil:
+		return false, schema.SocketCloseRevoked, reasonCredentialInvalid, nil
+	}
+	return true, "", "", nil
+}
+
+// handlePersonEventsWS serves GET /v1/events/person/ws. The route takes a
+// ticket, as the channel socket does: it is the socket a browser opens.
+//
+// It follows events_ws.go: the subscription is registered before the last
+// checks, so a disable or a revoke that commits in between closes it, and
+// nothing is upgraded for a refusal.
+func (s *Server) handlePersonEventsWS(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	caller, credID, ok := s.personStreamCaller(w, r)
+	if !ok {
+		return
+	}
+	instanceID, err := newInstanceID()
+	if err != nil {
+		slog.ErrorContext(ctx, "person stream: no instance id", "error", err)
+		writeInternalError(w)
+		return
+	}
+	sub := s.person.subscribe(caller.ID, credID, instanceID)
+	defer sub.cancel()
+	allowed, _, _, err := s.personStillAllowed(ctx, caller.ID, credID)
+	switch {
+	case err != nil:
+		slog.ErrorContext(ctx, "person stream: check failed", "principal", caller.ID, "error", err)
+		writeInternalError(w)
+		return
+	case !allowed:
+		writeUnauthenticated(w)
+		return
+	}
+	// The snapshot is taken after the subscription, so a frame published
+	// while it is being built is queued, and sent after it unless the
+	// snapshot already holds it (high-water).
+	snap, err := s.personSnapshot(ctx, caller.ID)
+	if err != nil {
+		slog.ErrorContext(ctx, "person stream: snapshot failed", "principal", caller.ID, "error", err)
+		writeInternalError(w)
+		return
+	}
+	conn, ctx, done, ok := s.acceptSocket(w, r)
+	if !ok {
+		return
+	}
+	defer done()
+	ticker := time.NewTicker(s.credRecheckInterval)
+	defer ticker.Stop()
+	ps := &personStream{s: s, conn: conn, sub: sub, principalID: caller.ID, credID: credID, highWater: snap.HighWater}
+	ps.run(ctx, snap, ticker.C)
+}
+
+// personStream is one open person socket.
+type personStream struct {
+	s           *Server
+	conn        *websocket.Conn
+	sub         *personSub
+	principalID int64
+	credID      int64
+	highWater   int64 // DM messages at or below it are in the snapshot
+}
+
+// run sends the hello, the snapshot and then frames until the peer leaves,
+// the subscription is dropped or the credential or person lapses.
+func (p *personStream) run(ctx context.Context, snap schema.DMSnapshotV1, recheck <-chan time.Time) {
+	ctx = p.s.keepAlive(ctx, p.conn, true)
+	hello := schema.PersonStreamHelloV1{Schema: schema.PersonStreamHelloSchemaV1, InstanceID: p.sub.instanceID}
+	if !p.sendDoc(ctx, hello) || !p.sendDoc(ctx, snap) {
+		return
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			closeWS(ctx, p.conn, schema.SocketCloseClient, websocket.StatusNormalClosure, "")
+			return
+		case <-recheck:
+			if !p.stillAllowed(ctx) {
+				return
+			}
+		case <-p.sub.wake:
+			if !p.flush(ctx) {
+				return
+			}
+		case <-p.sub.dropped:
+			p.s.closePersonDropped(ctx, p.conn, p.principalID, p.credID)
+			return
+		}
+	}
+}
+
+// stillAllowed closes the socket and reports false if the credential or the
+// person lapsed.
+func (p *personStream) stillAllowed(ctx context.Context) bool {
+	ok, reason, text, err := p.s.personStillAllowed(ctx, p.principalID, p.credID)
+	if err != nil && ctx.Err() == nil {
+		slog.ErrorContext(ctx, "person stream: recheck failed", "principal", p.principalID, "error", err)
+	}
+	if !ok {
+		code := websocket.StatusPolicyViolation
+		if reason == schema.SocketCloseError {
+			code = websocket.StatusInternalError
+		}
+		closeWS(ctx, p.conn, reason, code, text)
+	}
+	return ok
+}
+
+// flush sends what is waiting, after asking again whether the person may
+// still read it: a socket sends nothing to someone who has lost access.
+func (p *personStream) flush(ctx context.Context) bool {
+	frames, live := p.sub.take()
+	if !live {
+		p.s.closePersonDropped(ctx, p.conn, p.principalID, p.credID)
+		return false
+	}
+	if len(frames) == 0 {
+		return true
+	}
+	if !p.stillAllowed(ctx) {
+		return false
+	}
+	for _, f := range frames {
+		if f.messageID != 0 && f.messageID <= p.highWater {
+			continue // the snapshot already reflects it
+		}
+		if !p.write(ctx, f.raw) {
+			return false
+		}
+	}
+	return true
+}
+
+func (p *personStream) sendDoc(ctx context.Context, doc personDoc) bool {
+	if err := doc.Validate(); err != nil {
+		slog.ErrorContext(ctx, "person stream: built an invalid document", "principal", p.principalID, "error", err)
+		closeWS(ctx, p.conn, schema.SocketCloseError, websocket.StatusInternalError, "internal error")
+		return false
+	}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		slog.ErrorContext(ctx, "person stream: encode failed", "principal", p.principalID, "error", err)
+		closeWS(ctx, p.conn, schema.SocketCloseError, websocket.StatusInternalError, "internal error")
+		return false
+	}
+	return p.write(ctx, raw)
+}
+
+func (p *personStream) write(ctx context.Context, raw []byte) bool {
+	// The last point a drop can stop a frame: one being sent when a revoke
+	// or a disable dropped the subscription is not sent.
+	select {
+	case <-p.sub.dropped:
+		p.s.closePersonDropped(ctx, p.conn, p.principalID, p.credID)
+		return false
+	default:
+	}
+	wctx, cancel := context.WithTimeout(ctx, wsWriteTimeout)
+	defer cancel()
+	if err := countFrame(ctx, p.conn.Write(wctx, websocket.MessageText, raw)); err != nil {
+		closeWS(ctx, p.conn, schema.SocketCloseError, websocket.StatusInternalError, "write failed")
+		_ = p.conn.CloseNow()
+		return false
+	}
+	return true
+}
+
+// closePersonDropped closes conn after its subscription was dropped, saying
+// why: shutdown, a revoked credential or a disabled person, or falling too
+// far behind.
+func (s *Server) closePersonDropped(ctx context.Context, conn *websocket.Conn, principalID, credID int64) {
+	if s.person.isClosed() {
+		closeWS(ctx, conn, schema.SocketCloseServerShutdown, websocket.StatusGoingAway, "server shutting down")
+		return
+	}
+	// The request context may already be done; the reason is advisory.
+	bg := context.WithoutCancel(ctx)
+	if ok, _, _, err := s.personStillAllowed(bg, principalID, credID); err == nil && !ok {
+		closeWS(ctx, conn, schema.SocketCloseRevoked, websocket.StatusPolicyViolation, reasonCredentialInvalid)
+		return
+	}
+	closeWS(ctx, conn, schema.SocketCloseSlowConsumer, websocket.StatusPolicyViolation, "subscriber too slow")
+}

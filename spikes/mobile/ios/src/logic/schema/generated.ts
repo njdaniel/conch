@@ -5555,6 +5555,19 @@ export const dmSnapshotV1 = object<DMSnapshotV1>({
   dms_enabled: bool,
 });
 
+// schema.PersonStreamHelloV1
+export const personStreamHelloV1Schema = 'conch.person_stream_hello.v1';
+
+export interface PersonStreamHelloV1 {
+  schema: typeof personStreamHelloV1Schema;
+  instance_id: string;
+}
+
+export const personStreamHelloV1 = object<PersonStreamHelloV1>({
+  schema: vocab<typeof personStreamHelloV1Schema>({ [personStreamHelloV1Schema]: true }),
+  instance_id: str,
+});
+
 // schema.MessageContextKind
 export type MessageContextKind = 'channel' | 'direct';
 

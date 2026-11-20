@@ -30,6 +30,9 @@
 //     frames of the per-person stream (issue #2016, DRAFT pending ADR-017;
 //     dm.go). A DM document names its conversation by conversation_id and
 //     never carries a channel_id.
+//   - PersonStreamHelloV1 (conch.person_stream_hello.v1), the first frame of
+//     the per-person events stream: the socket's own instance id (issue
+//     #2040; person_stream.go).
 //
 // Their request and response bodies (CreateSessionRequestV1,
 // CreateRunRequestV1, SetRunStateRequestV1, ListRunsResponseV1,

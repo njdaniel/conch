@@ -77,6 +77,7 @@ func (s *Server) handleSetRole(w http.ResponseWriter, r *http.Request) {
 		// does (disable.go).
 		s.hub.DropPrincipalAll(id)
 		s.events.dropPrincipalAll(id)
+		s.person.dropPrincipalAll(id)
 		s.events.notifyRosters()
 		s.voicePrincipalLostAccess(ctx, id, voiceReasonCredsRevoked)
 	} else if res.Changed {

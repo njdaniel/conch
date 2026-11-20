@@ -570,6 +570,7 @@ var TSTypes = []TSType{
 	{Value: DMFileV1{}, Family: "dm-file-v1", Schema: DMFileSchemaV1},
 	{Value: DMChangedV1{}, Family: "dm-changed-v1", Schema: DMChangedSchemaV1},
 	{Value: DMSnapshotV1{}, Family: "dm-snapshot-v1", Schema: DMSnapshotSchemaV1},
+	{Value: PersonStreamHelloV1{}, Family: "person-stream-hello-v1", Schema: PersonStreamHelloSchemaV1},
 	{Value: NotificationSummaryV2{}, Family: "notification-summary-v2", Schema: NotificationSummarySchemaV2},
 	{Value: ListPendingNotificationsResponseV2{}, Family: "list-pending-notifications-response-v2"},
 
