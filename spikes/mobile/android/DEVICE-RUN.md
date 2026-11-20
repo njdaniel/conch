@@ -416,10 +416,11 @@ otherwise.
   still on in the foreground, and that a "stale" answer stopped the camera.
 - **M-R1.** This needs a development build and a test server on your home
   network over plain `http://`. Sign in over Wi-Fi. Expect it to work, and the
-  app to mark it as a development setup. This build has no such marking yet
-  (only the hint in the **Server** box mentions development), so the marking
-  half of M-R1 is expected to fail: write **fail** and say whether sign-in
-  over `http://` worked. (The standalone APK only allows `https://`; with it,
+  app to mark it as a development setup: **Channels** and the voice screen
+  show "Development server: this connection is not encrypted (plain http).",
+  and **Diagnostics** has the line `server development`. Write **pass** only
+  if sign-in worked and all three show it; otherwise write **fail** and say
+  which part failed. Against an `https://` server none of the three shows it. (The standalone APK only allows `https://`; with it,
   write **not run**.)
 - **M-R2.** On mobile data, sign in and join voice through the server's
   public `https://` address. Expect chat and voice to work. The operator
