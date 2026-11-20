@@ -2,7 +2,7 @@
 // lines, its bound, the bundle's size cap, and the shown-before-saved rule.
 import { describe, expect, it } from 'vitest';
 
-import { BUNDLE_MAX_BYTES, buildBundle, Diagnostics, LINE_MAX_CHARS, LogRing, RING_LINES, scrubLine } from '../../main/diagnostics.ts';
+import { BUNDLE_MAX_BYTES, buildBundle, Diagnostics, diagnosticsLogger, LINE_MAX_CHARS, LogRing, RING_LINES, scrubLine } from '../../main/diagnostics.ts';
 
 const NOW = new Date('2026-11-20T10:00:00Z');
 
@@ -53,12 +53,38 @@ describe('scrubLine', () => {
     }
   });
 
-  it('bounds a line', () => {
-    expect(scrubLine(`conch-desktop: ${'word '.repeat(200)}`).length).toBeLessThanOrEqual(LINE_MAX_CHARS + 1);
+  it.each([
+    ['password="red fox"', '[redacted]'],
+    ['key="two words"', '[redacted]'],
+    [String.raw`helper failed: "first \"escaped quote\" still private"`, 'helper failed: "[text]"'],
+    ['[2001:db8::9]:8443', '[address]'],
+    ['2001:db8::9', '[address]'],
+    ['2001:db8:0:0:0:0:0:9', '[address]'],
+    ['::ffff:192.0.2.1', '[address]'],
+    ['a conch: invite link arrived', 'a conch: invite link arrived'],
+    ['refused conch:invite/example', 'refused [url]'],
+  ])('scrubs %s to %s', (line, expected) => {
+    expect(scrubLine(line)).toBe(expected);
+  });
+
+  it('counts the ellipsis within the line bound', () => {
+    const line = scrubLine(`conch-desktop: ${'word '.repeat(200)}`);
+    expect(line).toHaveLength(LINE_MAX_CHARS);
+    expect(line.endsWith('…')).toBe(true);
   });
 });
 
 describe('LogRing', () => {
+  it('keeps local-only details entirely out of the ring', () => {
+    const ring = new LogRing();
+    const local: string[] = [];
+    const log = diagnosticsLogger(ring, (line) => local.push(line));
+    log('voice: helper 1 reconnecting: connect_failed');
+    log('voice: helper 1 stderr: private device words', { ring: false });
+    expect(local).toEqual(['voice: helper 1 reconnecting: connect_failed', 'voice: helper 1 stderr: private device words']);
+    expect(ring.lines()).toEqual(['voice: helper 1 reconnecting: connect_failed']);
+  });
+
   it('holds the last 500 lines, oldest first', () => {
     const ring = new LogRing();
     for (let n = 0; n < RING_LINES + 25; n += 1) ring.record(`conch-desktop: line ${String(n)}`);
@@ -138,41 +164,53 @@ function fixture(chosen: string | null = '/tmp/out/diag.txt') {
 }
 
 describe('Diagnostics', () => {
-  it('saves exactly the text it showed, not a rebuilt one', async () => {
+  it('writes the preview selected by ID even after a newer preview', async () => {
     const f = fixture();
     f.ring.record('conch-desktop: before');
     const shown = f.diagnostics.preview();
     f.ring.record('conch-desktop: after the preview');
-    expect(await f.diagnostics.save()).toBe('saved');
-    expect(f.written).toEqual([['/tmp/out/diag.txt', shown]]);
-    expect(shown).not.toContain('after the preview');
+    const newer = f.diagnostics.preview();
+    expect(newer.text).toContain('after the preview');
+    expect(newer.id).not.toBe(shown.id);
+    expect(await f.diagnostics.save(shown.id)).toBe('saved');
+    expect(f.written).toEqual([['/tmp/out/diag.txt', shown.text]]);
+    expect(shown.text).not.toContain('after the preview');
   });
 
   it('refuses a save nobody was shown, and writes nothing', async () => {
     const f = fixture();
-    expect(await f.diagnostics.save()).toBe('failed');
+    expect(await f.diagnostics.save('unknown')).toBe('failed');
     expect(f.asked).toEqual([]);
     expect(f.written).toEqual([]);
   });
 
+  it('keeps only the last four previews', async () => {
+    const f = fixture();
+    const first = f.diagnostics.preview();
+    const retained = Array.from({ length: 4 }, () => f.diagnostics.preview());
+    expect(await f.diagnostics.save(first.id)).toBe('failed');
+    expect(f.asked).toEqual([]);
+    for (const { id } of retained) expect(await f.diagnostics.save(id)).toBe('saved');
+  });
+
   it('suggests a plain name in the downloads directory', async () => {
     const f = fixture();
-    f.diagnostics.preview();
-    await f.diagnostics.save();
+    const { id } = f.diagnostics.preview();
+    await f.diagnostics.save(id);
     expect(f.asked).toEqual(['/home/p/Downloads/conch-diagnostics-2026-11-20.txt']);
   });
 
   it('writes nothing when the dialog is closed, or gives no usable path, or the write fails', async () => {
     const f = fixture(null);
-    f.diagnostics.preview();
-    expect(await f.diagnostics.save()).toBe('cancelled');
+    const { id } = f.diagnostics.preview();
+    expect(await f.diagnostics.save(id)).toBe('cancelled');
     for (const bad of ['', 'relative/path', '/tmp/a\u0000b']) {
       f.state.chosen = bad;
-      expect(await f.diagnostics.save(), bad).toBe('failed');
+      expect(await f.diagnostics.save(id), bad).toBe('failed');
     }
     f.state.chosen = '/tmp/ok.txt';
     f.state.fail = true;
-    expect(await f.diagnostics.save()).toBe('failed');
+    expect(await f.diagnostics.save(id)).toBe('failed');
     expect(f.written).toEqual([]);
     expect(f.logs).not.toContain(expect.stringContaining('/tmp'));
   });

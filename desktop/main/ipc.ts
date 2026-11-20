@@ -88,7 +88,7 @@ export interface IpcDeps {
   // What works on this desktop (issue #1593): read-only. Absent: main answers
   // no rows at all (NO_INTEGRATIONS), and the page shows no list.
   readonly integrations?: IntegrationsApi;
-  // The diagnostics bundle (issue #2084). Absent: the preview is empty and a
+  // The diagnostics bundle (issue #2084). Absent: the preview is null and a
   // save fails (NO_DIAGNOSTICS).
   readonly diagnostics?: DiagnosticsApi;
   // The screen companion (issue #1579). Absent: every grant is refused as
@@ -123,8 +123,8 @@ export interface IntegrationsApi {
 export type CompanionApi = Pick<Companion, 'grant' | 'stop' | 'end'>;
 export type ShareSoundApi = Pick<ShareSound, 'start' | 'choose' | 'mute' | 'end' | 'shareEnded'>;
 
-export type DiagnosticsApi = Pick<Diagnostics, 'preview' | 'save'>;
-const NO_DIAGNOSTICS: DiagnosticsApi = { preview: () => '', save: () => Promise.resolve('failed') };
+export type DiagnosticsApi = Pick<Diagnostics, 'save'> & { preview(): ReturnType<Diagnostics['preview']> | null };
+const NO_DIAGNOSTICS: DiagnosticsApi = { preview: () => null, save: () => Promise.resolve('failed') };
 const NO_INTEGRATIONS: IntegrationsApi = { view: () => Promise.resolve({ rows: [] }) };
 
 const NO_COMPANION: CompanionApi = {
@@ -462,13 +462,27 @@ function parseCompanionGrant(args: readonly unknown[]): readonly unknown[] | nul
   return isChannel(channel) ? [{ channel }] : null;
 }
 
-// The page's reason for ending its companion (issue #1992), for main's log
-// alone: none (an end as before), or exactly a kind of the closed vocabulary
-// and at most one short word of detail (an error's name and LiveKit's reason
-// name, a disconnect's cause, a URL's scheme). Nothing that could hold an
-// address, a message or a token passes, since it is written to the log.
+// The page's reason for ending its companion (issue #1992) is logged.
 const PAGE_END_KINDS: readonly CompanionPageEndKind[] = ['left', 'connect-failed', 'disconnected', 'dropped', 'insecure-address', 'cannot-share'];
 const isPageEndKind = (value: unknown): value is CompanionPageEndKind => typeof value === 'string' && (PAGE_END_KINDS as readonly string[]).includes(value);
+
+// connection.ts supplies these causes, CSP schemes and SDK error names.
+// A short word can still contain private text, so only recognized details
+// reach the log. Unknown details still let the companion end.
+const CONNECTION_ERRORS = ['LiveKitError', 'ConnectionError'];
+const CONNECTION_REASONS = ['NotAllowed', 'ServerUnreachable', 'InternalError', 'Cancelled', 'LeaveRequest', 'Timeout', 'WebSocket', 'ServiceNotFound'];
+const PAGE_END_DETAILS: Record<CompanionPageEndKind, readonly string[]> = {
+  left: [],
+  'connect-failed': [
+    'Error', 'TypeError', 'AbortError',
+    ...CONNECTION_ERRORS,
+    ...CONNECTION_ERRORS.flatMap((name) => CONNECTION_REASONS.map((reason) => `${name}:${reason}`)),
+  ],
+  disconnected: ['room_deleted', 'participant_removed', 'duplicate_identity', 'server_shutdown', 'lost'],
+  dropped: ['reconnect-timeout'],
+  'insecure-address': ['csp:connect-src:ws', 'csp:connect-src:http'],
+  'cannot-share': ['no-portal', 'not-wayland', 'capture-unsupported'],
+};
 
 export function parseCompanionEnd(args: readonly unknown[]): readonly unknown[] | null {
   if (args.length === 0) return args;
@@ -478,7 +492,7 @@ export function parseCompanionEnd(args: readonly unknown[]): readonly unknown[] 
   if (!isPageEndKind(kind)) return null;
   if (hasExactKeys(why, ['kind'])) return [{ kind } satisfies CompanionPageEnd];
   if (!hasExactKeys(why, ['kind', 'detail']) || typeof detail !== 'string' || !/^[A-Za-z][A-Za-z0-9_:-]{0,63}$/u.test(detail)) return null;
-  return [{ kind, detail } satisfies CompanionPageEnd];
+  return [{ kind, detail: PAGE_END_DETAILS[kind].includes(detail) ? detail : 'other' } satisfies CompanionPageEnd];
 }
 
 // The share sound's choice is exactly one of the two words of its vocabulary:
@@ -753,10 +767,16 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
     gesture: true,
   },
   // The diagnostics bundle (issue #2084). The preview is read-only text main
-  // built from its own redacted ring; the save writes that same text where the
-  // person chooses, so it is the person's act alone.
+  // built from its own redacted ring; the ID selects that text for the save.
+  // The save writes it to the path the person chooses after their own input.
   diagnosticsPreview: { limit: 30, maxBytes: 0, parse: none, run: ({ diagnostics }) => diagnostics.preview() },
-  diagnosticsSave: { limit: 10, maxBytes: 0, parse: none, run: ({ diagnostics }) => diagnostics.save(), gesture: true },
+  diagnosticsSave: {
+    limit: 10,
+    maxBytes: 64,
+    parse: (args) => (args.length === 1 && typeof args[0] === 'string' && /^[0-9a-f]{32}$/u.test(args[0]) ? args : null),
+    run: ({ diagnostics }, [id]) => diagnostics.save(id as string),
+    gesture: true,
+  },
   // The update family (issue #1600). Restart is the person's act alone: it
   // runs only right after a click or key in the window, and nothing else
   // restarts the app.

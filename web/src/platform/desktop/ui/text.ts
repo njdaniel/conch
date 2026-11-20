@@ -137,14 +137,14 @@ export const integrationsText = {
 // file the person picks. Nothing is sent.
 export const diagnosticsText = {
   heading: 'Diagnostics',
-  intro: 'Save a file of this app’s recent log and its versions, to share outside Conch. It has no sign-in, address, room, channel or message text, and nothing is sent.',
+  intro: 'Save a file containing build versions and recent diagnostic events. Read it before sharing. Nothing is sent automatically.',
   open: 'Save diagnostics…',
   shown: 'What the file will contain',
   save: 'Save to a file…',
   close: 'Close',
   saved: 'Saved.',
   cancelled: '',
-  failed: 'Could not save the file. Try another place.',
+  failed: 'Could not save the diagnostics. Open a new preview and try again.',
   unavailable: 'Could not read the diagnostics.',
 } as const;
 

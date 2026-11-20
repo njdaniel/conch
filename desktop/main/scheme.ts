@@ -5,6 +5,7 @@
 // content type) that build/manifest.ts wrote beside the files. Output: a
 // Response. This module owns what may be served; it owns no Electron object,
 // so the unit tests run it without Electron.
+import type { MainLog } from './diagnostics.ts';
 import { createHash } from 'node:crypto';
 
 import { CONTENT_SECURITY_POLICY } from './csp.ts';
@@ -115,7 +116,7 @@ export interface SchemeDeps {
   // packaged files.
   readonly readFile: (path: string) => Promise<Uint8Array>;
   // One line, never the file's bytes.
-  readonly log: (line: string) => void;
+  readonly log: MainLog;
 }
 
 // handle answers one request: GET and HEAD for a file the manifest lists whose
@@ -132,11 +133,13 @@ export async function handle(request: { readonly url: string; readonly method: s
   try {
     bytes = await deps.readFile(found.path);
   } catch {
-    deps.log(`conch-desktop: ${found.path} is listed in the manifest but could not be read`);
+    deps.log('conch-desktop: a file listed in the manifest could not be read');
+    deps.log(`conch-desktop: ${found.path} is listed in the manifest but could not be read`, { ring: false });
     return text(500, 'internal error');
   }
   if (createHash('sha256').update(bytes).digest('hex') !== found.entry.sha256) {
-    deps.log(`conch-desktop: ${found.path} no longer has the hash the manifest lists`);
+    deps.log('conch-desktop: a file no longer has the hash the manifest lists');
+    deps.log(`conch-desktop: ${found.path} no longer has the hash the manifest lists`, { ring: false });
     return text(500, 'internal error');
   }
   return new Response(request.method === 'HEAD' ? null : bytes, { status: 200, headers: headers(found.entry.type) });

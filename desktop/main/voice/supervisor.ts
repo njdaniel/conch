@@ -39,6 +39,7 @@
 //     Not even the nonce's shape: on Windows any 43-character base64url run in
 //     the stderr tail is replaced, so that nothing needs to keep the nonce
 //     after the attach has spent it.
+import type { MainLog } from '../diagnostics.ts';
 import { randomBytes } from 'node:crypto';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { Socket } from 'node:net';
@@ -182,7 +183,7 @@ export interface SupervisorDeps {
   readonly resources: string;
   // main's environment: XDG_RUNTIME_DIR, and the allowlisted names.
   readonly env: NodeJS.ProcessEnv;
-  readonly log: (line: string) => void;
+  readonly log: MainLog;
   readonly spawn?: SpawnFn;
   // The platform whose rules apply: process.platform by default. A test
   // stands in for Windows on Linux.
@@ -312,7 +313,7 @@ function printable(line: string, secrets: readonly string[], nonceShape: boolean
 const JWT_SHAPE = /[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{8,}/g;
 const TOKEN_QUERY = /\b((?:[a-z0-9]+_)*token)=[^\s&"')\]]*/gi;
 
-// The reasons whose words a person may be shown, and the log keeps.
+// The reasons whose words may be shown to the person and logged locally.
 // internal_error is not among them: the helper writes no status line for it,
 // so any line that seemed to give its words would be someone else's.
 const DETAIL_REASONS: ReadonlySet<string> = new Set(['connect_failed', 'server_unreachable']);
@@ -441,8 +442,8 @@ export class Supervisor {
     }
   }
 
-  private log(line: string): void {
-    this.deps.log(line);
+  private log(...args: Parameters<MainLog>): void {
+    this.deps.log(...args);
   }
 
   // start starts one helper and joins the channel's voice. It resolves with
@@ -613,10 +614,10 @@ export class Supervisor {
   private unavailable(err: unknown): VoiceState {
     if (err instanceof HelperError || err instanceof EndpointError) {
       const reason = err.reason as HelperRefusal | EndpointRefusal;
-      // A HelperError's words name the folder or file that failed: a path,
-      // which is no secret, kept to main's log and off the page.
-      const why = err instanceof HelperError ? `: ${printable(err.why, [], false)}` : '';
-      this.log(`voice: unavailable: ${reason}${why}`);
+      this.log(`voice: unavailable: ${reason}`);
+      // A HelperError can name the folder or file that failed. Keep that
+      // path in main's local log.
+      if (err instanceof HelperError) this.log(`voice: unavailable: ${reason}: ${printable(err.why, [], false)}`, { ring: false });
       const next: VoiceState = { status: 'unavailable', reason, ...(err instanceof HelperError && err.trustCause !== undefined ? { cause: err.trustCause } : {}) };
       this.set(next);
       return next;
@@ -657,7 +658,8 @@ export class Supervisor {
   // noteDetail logs a connection reason once for each time the helper gives
   // it, with the helper's words for it if its standard error has them, and
   // returns those words. The helper's connect error is written to its
-  // standard error only if the helper does so; the log says when it did not.
+  // standard error only if the helper does so. The export keeps the phase
+  // and reason, and the free-form words stay in the local log.
   private noteDetail(run: Run, view: HelperView): string | undefined {
     const reason = view.reason ?? '';
     if (!DETAIL_REASONS.has(reason)) return undefined;
@@ -665,7 +667,13 @@ export class Supervisor {
     const key = `${view.phase}:${reason}:${detail ?? ''}`;
     if (run.noted !== key) {
       run.noted = key;
-      this.log(`voice: helper ${String(run.generation)} ${finalPhase(view.phase) ? 'ended' : view.phase}: ${reason}: ${detail ?? 'no detail from the helper'}`);
+      const summary = `voice: helper ${String(run.generation)} ${finalPhase(view.phase) ? 'ended' : view.phase}: ${reason}`;
+      if (detail === undefined) {
+        this.log(`${summary}: no detail from the helper`);
+      } else {
+        this.log(summary);
+        this.log(`${summary}: ${detail}`, { ring: false });
+      }
     }
     return detail;
   }
@@ -722,14 +730,16 @@ export class Supervisor {
     run.markReaped();
   }
 
-  // logStderr writes the helper's redacted stderr tail to the log when it
+  // logStderr writes the helper's redacted stderr tail to the local log when it
   // went wrong: it exited unexpectedly, was lost, failed, or ended in a
   // failed phase. A helper that was asked to stop writes nothing.
   private logStderr(run: Run): void {
     const o = run.outcome;
     const wrong = o === null ? !run.stopping : o.status === 'lost' || o.status === 'failed' || (o.status === 'ended' && o.helper.phase === 'failed');
     if (!wrong) return;
-    for (const line of run.stderr.lines) this.log(`voice: helper ${String(run.generation)} stderr: ${line}`);
+    const prefix = `voice: helper ${String(run.generation)} stderr`;
+    if (run.stderr.lines.length > 0) this.log(`voice: helper ${String(run.generation)} omitted ${String(run.stderr.lines.length)} stderr line(s) from diagnostics`);
+    for (const line of run.stderr.lines) this.log(`${prefix}: ${line}`, { ring: false });
   }
 
   private readEvents(run: Run, socket: Socket, rest: Buffer): void {

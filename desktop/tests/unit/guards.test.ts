@@ -113,7 +113,7 @@ describe('guardSession', () => {
     const cb = vi.fn();
     ses.beforeRequest?.({ url: 'https://example.com/secret/path?q=1' }, cb);
     expect(cb).toHaveBeenCalledExactlyOnceWith({ cancel: true });
-    expect(logs).toEqual(['conch-desktop: blocked a request to https://example.com']);
+    expect(logs).toEqual(['conch-desktop: blocked a request', 'conch-desktop: blocked a request to https://example.com']);
   });
 
   it('lets the app, data: and blob: through', () => {
@@ -203,7 +203,7 @@ describe('the request filter and the live companion grant', () => {
     for (const url of ['wss://lk.example.test/rtc', 'https://lk.example.test/twirp/livekit.RoomService', 'wss://other.example.test/', 'https://example.com/', 'ws://127.0.0.1:7880/rtc', 'http://127.0.0.1/']) {
       expect(verdict(url), url).toBe('cancelled');
     }
-    expect(logs).toHaveLength(6);
+    expect(logs.filter((line) => line === 'conch-desktop: blocked a request')).toHaveLength(6);
   });
 
   it('still lets the app, data: and blob: through with no grant', () => {

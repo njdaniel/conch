@@ -12,6 +12,7 @@
 // and touches no other profile's file. A provider that cannot answer is a
 // retryable state, never an erase. Plain-text mode is never switched on, and
 // nothing here logs a secret, ciphertext or a path.
+import type { MainLog } from '../diagnostics.ts';
 import { classify, type Classification, type SafeStorageProbe } from './classify.ts';
 import {
   readCredential,
@@ -35,7 +36,7 @@ export interface VaultDeps {
   readonly platform: NodeJS.Platform;
   readonly isReady: () => boolean;
   // Receives fixed event names and a profile id. Never a secret.
-  readonly log: (line: string) => void;
+  readonly log: MainLog;
   // Test seam for the directory fsync (see files.ts).
   readonly syncDir?: (dir: string) => Promise<void>;
 }
@@ -89,7 +90,8 @@ export function createVault(deps: VaultDeps): Vault {
     writeCredential(deps.root, id, data, { syncDir: deps.syncDir });
 
   const event = (name: string, profileId: string): void => {
-    deps.log(`vault: ${name} profile=${profileId}`);
+    deps.log(`vault: ${name}`);
+    deps.log(`vault: ${name} profile=${profileId}`, { ring: false });
   };
 
   async function doPut(profileId: string, secret: string): Promise<PutResult> {

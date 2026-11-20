@@ -8,6 +8,7 @@
 // Input: the app's fixed environment and the profile to open with the
 // credential main found for it. Output: an Activation for the switch sequence,
 // and a Live that the one IPC registry reads its current parts from.
+import type { MainLog } from '../diagnostics.ts';
 import type { BrowserWindow } from 'electron';
 
 import { FEED_EVENTS } from '../../shared/bridge-names.ts';
@@ -40,7 +41,7 @@ export interface ActivationEnv {
   readonly guard: GuardDeps;
   readonly makeFiles: (client: Client, session: Session) => Files;
   readonly now: () => number;
-  readonly log: (line: string) => void;
+  readonly log: MainLog;
 }
 
 // What the one IPC registry calls into: always the newest activation's parts.

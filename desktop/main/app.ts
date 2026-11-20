@@ -59,7 +59,7 @@ import { Autostart } from './autostart.ts';
 import { Notifications } from './notifications.ts';
 import { createSettingsFiles, memorySettingsFiles, SettingsService } from './settings.ts';
 import { WindowMaximized } from './window.ts';
-import { Diagnostics, LogRing } from './diagnostics.ts';
+import { Diagnostics, diagnosticsLogger, LogRing } from './diagnostics.ts';
 import { saveChosenFile } from './save-file.ts';
 import { parseManifest, SCHEME, SCHEME_PRIVILEGES } from './scheme.ts';
 import { electronStorage } from './vault/electron-storage.ts';
@@ -75,14 +75,10 @@ export function registerScheme(): void {
   protocol.registerSchemesAsPrivileged([{ scheme: SCHEME, privileges: { ...SCHEME_PRIVILEGES } }]);
 }
 
-// The last lines logged, kept in memory for the diagnostics bundle (issue
-// #2084). Every line main logs goes through record(), scrubbed as it is kept.
+// The diagnostics ring (issue #2084) keeps only main's fixed diagnostic
+// context. Call sites mark lines containing free-form data as local only.
 const ring = new LogRing();
-
-function log(line: string): void {
-  ring.record(line);
-  console.error(line);
-}
+const log = diagnosticsLogger(ring, (line) => { console.error(line); });
 
 // A vault that stores nothing, for a data root that is not private to this user.
 function refusingVault(): Vault {
@@ -270,7 +266,6 @@ export async function start(): Promise<void> {
   // The first receipt: what this build really is.
   const versions = { app: app.getVersion(), electron: process.versions.electron, chrome: process.versions.chrome, node: process.versions.node, platform: process.platform };
   const versionsLine = `conch-desktop: versions ${JSON.stringify({ electron: versions.electron, chrome: versions.chrome, node: versions.node })}`;
-  ring.record(versionsLine);
   console.log(versionsLine);
 
   const appPath = app.getAppPath();

@@ -395,11 +395,12 @@ describe('the desktop app settings (issue #1587)', () => {
   });
 
   describe('Save diagnostics (issue #2084)', () => {
+    const snapshotId = '0123456789abcdef0123456789abcdef';
     const bundle = 'Conch desktop diagnostics\nconch-desktop: one';
 
     it('shows the exact text first, and writes nothing until Save is clicked', async () => {
       installSettings(settings(), () => Promise.reject(new Error('unexpected')));
-      const diagnosticsPreview = vi.fn(() => Promise.resolve(bundle));
+      const diagnosticsPreview = vi.fn(() => Promise.resolve({ id: snapshotId, text: bundle }));
       const diagnosticsSave = vi.fn(() => Promise.resolve('saved' as const));
       Object.defineProperty(window, 'conchDesktop', { value: { ...window.conchDesktop, diagnosticsPreview, diagnosticsSave }, configurable: true, writable: true });
       await open();
@@ -411,7 +412,7 @@ describe('the desktop app settings (issue #1587)', () => {
       expect(diagnosticsSave).not.toHaveBeenCalled();
       fireEvent.click(screen.getByRole('button', { name: 'Save to a file…' }));
       await waitFor(() => {
-        expect(diagnosticsSave).toHaveBeenCalledOnce();
+        expect(diagnosticsSave).toHaveBeenCalledExactlyOnceWith(snapshotId);
       });
       expect(await screen.findByText('Saved.')).toBeDefined();
     });
@@ -419,12 +420,12 @@ describe('the desktop app settings (issue #1587)', () => {
     it('says so when the save fails, and shows nothing when the bridge has no diagnostics', async () => {
       installSettings(settings(), () => Promise.reject(new Error('unexpected')));
       const diagnosticsSave = vi.fn(() => Promise.resolve('failed' as const));
-      Object.defineProperty(window, 'conchDesktop', { value: { ...window.conchDesktop, diagnosticsPreview: () => Promise.resolve(bundle), diagnosticsSave }, configurable: true, writable: true });
+      Object.defineProperty(window, 'conchDesktop', { value: { ...window.conchDesktop, diagnosticsPreview: () => Promise.resolve({ id: snapshotId, text: bundle }), diagnosticsSave }, configurable: true, writable: true });
       await open();
       fireEvent.click(screen.getByRole('button', { name: 'Save diagnostics…' }));
       await screen.findByRole('textbox', { name: 'What the file will contain' });
       fireEvent.click(screen.getByRole('button', { name: 'Save to a file…' }));
-      expect(await screen.findByText('Could not save the file. Try another place.')).toBeDefined();
+      expect(await screen.findByText('Could not save the diagnostics. Open a new preview and try again.')).toBeDefined();
     });
 
     it('is absent where main has no diagnostics', async () => {

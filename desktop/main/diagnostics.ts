@@ -1,27 +1,17 @@
-// The desktop's diagnostics bundle (issue #2084). Input: every line main logs
-// (the ring records each one as it is written to the standard error log), the
-// versions of this build, and the person's two acts: look at the bundle, then
-// save it. Output: a plain-text bundle, and that same text written to the one
-// file the person chose in the native save dialog.
+// The desktop's diagnostics bundle (issue #2084). Input: fixed diagnostic
+// lines chosen by main, build versions, and the person's acts of previewing
+// and saving. Output: the preview and those same bytes in the file the person
+// chose in the native save dialog.
 //
-// What it guarantees:
-//  - the ring holds the last RING_LINES lines and nothing more, each scrubbed
-//    again as it is recorded (scrubLine): the log's lines are fixed words by
-//    construction, and this is the second wall behind that, so the ring holds
-//    nothing a stdout line would not. No token, URL, address, path, quoted
-//    name (a room, channel or profile label), #channel or message text
-//    survives it, whatever a call site interpolates;
-//  - the bundle is at most BUNDLE_MAX_BYTES, the oldest lines dropped first;
-//  - what the person is shown (preview) is what Save writes: the text is held
-//    from the preview and written as it was, not rebuilt, so a line logged in
-//    between is not in a file the person did not see. A save with no preview
-//    first is refused;
-//  - the page names no path: the dialog gives it (the same rule as
-//    attachments, files.ts), the write is save-file.ts's, and the caller
-//    (ipc.ts) allows it only right after the person's own input.
-// Nothing here is sent anywhere. Attaching it to Report a problem is a wire
-// change (pkg/schema), not made here.
-import type { SaveOutcome } from '../../web/src/platform/desktop/bridge.ts';
+// Main keeps free-form details in its local log. The ring scrubs the remaining
+// lines again, holds at most RING_LINES, and drops the oldest lines first to
+// fit BUNDLE_MAX_BYTES. Each preview is held by ID so later previews cannot
+// change a pending save. The caller (ipc.ts) requires recent native input;
+// the dialog supplies the path (as in files.ts) and save-file.ts owns the write.
+// Export is local. Report a problem attachments would need a pkg/schema change.
+import { randomBytes } from 'node:crypto';
+import { isIP } from 'node:net';
+import type { DiagnosticsPreview, SaveOutcome } from '../../web/src/platform/desktop/bridge.ts';
 
 export const RING_LINES = 500;
 export const LINE_MAX_CHARS = 300;
@@ -30,41 +20,43 @@ export const BUNDLE_MAX_BYTES = 256 * 1024;
 // Written in two parts: this file's source holds no absolute URL.
 const SCHEMES = ['https', 'http', 'wss', 'ws', 'file', 'conch'];
 
-// What a call site must never be able to leak. Applied in this order: a URL
-// first (it holds tokens and names inside it), then the rest.
+// Defense in depth for lines admitted by main. Handle quotes before shorter
+// matches can consume their opening delimiter and expose the rest.
 const RULES: readonly (readonly [RegExp, string])[] = [
-  // Any scheme://..., and the bare conch: link form, to the next space.
-  [new RegExp(`\\b(?:[a-z][a-z0-9+.-]*:\\/\\/|(?:${SCHEMES.join('|')}):)\\S*`, 'giu'), '[url]'],
-  // An Authorization value, and name=value or name: value for a secret's name.
+  [/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|“(?:\\.|[^”\\])*”|‘(?:\\.|[^’\\])*’/gu, '"[text]"'],
+  // Keep a bare scheme name used as a label in a fixed diagnostic.
+  [new RegExp(`\\b(?:[a-z][a-z0-9+.-]*:\\/\\/|(?:${SCHEMES.join('|')}):)\\S+`, 'giu'), '[url]'],
+  // Authorization and named secrets. Quoted values are now one token.
   [/\b(?:bearer|basic)\s+\S+/giu, '[redacted]'],
-  // Named for what holds a secret, not for any word with 'code', 'session'
-  // or 'key' in it: an exit code, a session phase or the talk key is what a
-  // diagnosis needs, and is never a secret.
   [/\b[\w-]*(?:token|secret|password|passwd|credential|authorization|cookie|ticket|api[_-]?key|access[_-]?key|private[_-]?key|session[_-]?id|invite[_-]?code)[\w-]*\s*[=:]\s*\S+/giu, '[redacted]'],
-  // A quoted string: a label, a name, a message.
-  [/"[^"]*"|'[^']*'|`[^`]*`|“[^”]*”|‘[^’]*’/gu, '"[text]"'],
+  // A bare key assignment is a secret. Keep fixed labels such as 'talk key:'.
+  [/\bkey\s*=\s*\S+/giu, '[redacted]'],
   // A channel or room as #name or @name.
   [/(?<![\w&])[#@][\w.-]+/gu, '[name]'],
-  // A host:port or a dotted address.
-  [/\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b/gu, '[address]'],
   [/\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|org|net|io|dev|app|local|lan|internal|test|example)\b(?::\d+)?/giu, '[host]'],
   // A path of the machine: a Windows drive path, or two or more segments.
   [/\b[a-z]:\\\S*/giu, '[path]'],
   [/(?<![\w.:])~?(?:\/[^\s/]+){2,}/gu, '[path]'],
-  // Any long run that looks like a key, a JWT or a hash.
-  [/[A-Za-z0-9_+/=-]{24,}/gu, '[redacted]'],
 ];
 
 // Controls, and the invisible and direction-changing characters (as files.ts).
 const CONTROLS = new RegExp('[\\u0000-\\u001f\\u007f-\\u009f\\u200b-\\u200f\\u2028-\\u202e\\u2060-\\u206f\\ufeff]', 'gu');
 
-// scrubLine makes one log line safe to hold: no control or direction
-// character (a line cannot become two), the rules above, a length bound.
+// scrubLine applies another pass of redaction and bounds each line.
+// Control and direction characters cannot forge a second line.
 export function scrubLine(line: string): string {
   let out = line.replace(CONTROLS, ' ');
   for (const [pattern, replacement] of RULES) out = out.replace(pattern, replacement);
-  out = out.trim();
-  return out.length > LINE_MAX_CHARS ? `${out.slice(0, LINE_MAX_CHARS)}…` : out;
+  // IPv6 first so a mapped IPv4 suffix stays part of the address.
+  out = out.replace(/\[([a-f\d:.]+(?:%[\w.-]+)?)\](?::\d+)?|(?<![\w:.])(?:[a-f\d]*:){2,}[a-f\d:.]*(?:%[\w.-]+)?/giu, (match, bracketed: string | undefined) => {
+    const address = bracketed ?? match;
+    const candidate = bracketed === undefined ? address.replace(/\.+$/u, '') : address;
+    return isIP(candidate) === 6 ? `[address]${address.slice(candidate.length)}` : match;
+  });
+  out = out.replace(/\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b/gu, '[address]');
+  // Any long run that looks like a key, a JWT or a hash.
+  out = out.replace(/[A-Za-z0-9_+/=-]{24,}/gu, '[redacted]').trim();
+  return out.length > LINE_MAX_CHARS ? `${out.slice(0, LINE_MAX_CHARS - 1)}…` : out;
 }
 
 // The last RING_LINES lines, oldest first. Memory only: it is never written
@@ -87,6 +79,16 @@ export class LogRing {
   }
 }
 
+// Call sites opt out of the ring for any line with free-form details.
+export type MainLog = (line: string, options?: { readonly ring: false }) => void;
+
+export function diagnosticsLogger(ring: LogRing, writeLocal: (line: string) => void): MainLog {
+  return (line, options) => {
+    if (options?.ring !== false) ring.record(line);
+    writeLocal(line);
+  };
+}
+
 export interface BundleInput {
   // This build's versions: names and version strings main itself read.
   readonly versions: Readonly<Record<string, string>>;
@@ -102,7 +104,7 @@ export function buildBundle({ versions, lines, now }: BundleInput): string {
     `made: ${now.toISOString()}`,
     ...Object.entries(versions).map(([name, value]) => `${scrubLine(name)}: ${scrubLine(value)}`),
     '',
-    'This holds no sign-in, address, room, channel or message text. It was made on this computer and has not been sent anywhere.',
+    'This file contains build versions and recent diagnostic events. Read it before sharing. It was made on this computer and has not been sent anywhere.',
     '',
   ];
   const render = (from: number): string => {
@@ -134,26 +136,33 @@ export interface DiagnosticsDeps {
   readonly log: (line: string) => void;
 }
 
+const SNAPSHOT_LIMIT = 4;
+
 export class Diagnostics {
   readonly #deps: DiagnosticsDeps;
-  // The text last shown: what a save writes.
-  #shown: string | null = null;
+  // Insertion order lets a new preview evict the oldest snapshot.
+  readonly #shown = new Map<string, string>();
 
   constructor(deps: DiagnosticsDeps) {
     this.#deps = deps;
   }
 
-  // preview builds the bundle and holds it as the one a save will write.
-  preview(): string {
+  // Hold the exact text returned with each main-generated ID.
+  preview(): DiagnosticsPreview {
     const text = buildBundle({ versions: this.#deps.versions, lines: this.#deps.ring.lines(), now: this.#deps.now() });
-    this.#shown = text;
-    return text;
+    const id = randomBytes(16).toString('hex');
+    this.#shown.set(id, text);
+    if (this.#shown.size > SNAPSHOT_LIMIT) {
+      const oldest = this.#shown.keys().next();
+      if (!oldest.done) this.#shown.delete(oldest.value);
+    }
+    return { id, text };
   }
 
-  async save(): Promise<SaveOutcome> {
+  async save(id: string): Promise<SaveOutcome> {
     const { chooseSavePath, writeFile, log } = this.#deps;
-    const text = this.#shown;
-    if (text === null) return 'failed';
+    const text = this.#shown.get(id);
+    if (text === undefined) return 'failed';
     const stamp = this.#deps.now().toISOString().slice(0, 10);
     const chosen = await chooseSavePath(this.#deps.join(this.#deps.downloadsDir(), `conch-diagnostics-${stamp}.txt`));
     if (chosen === null) return 'cancelled';

@@ -10,7 +10,7 @@ import { useCallback, useContext, useEffect, useId, useRef, useState } from 'rea
 import { diagnosticsBridge, settingsBridge } from '../access';
 import { DesktopOS } from '../../os';
 import { copyText } from '../clipboard';
-import type { DesktopSettingsView, IntegrationsView, SettingsChange } from '../bridge';
+import type { DiagnosticsPreview, DesktopSettingsView, IntegrationsView, SettingsChange } from '../bridge';
 import { diagnosticsText, integrationNames, integrationSentence, integrationsPlainText, integrationsText, integrationStateWords, settingsRefusalLine, settingsText } from './text';
 
 // What works on this desktop (issue #1593): main's held states as a list, and
@@ -92,15 +92,15 @@ function Integrations({ settings }: { readonly settings: DesktopSettingsView }) 
 // main's, shown as text. Shown only when main answers.
 export function DiagnosticsExport() {
   const id = useId();
-  const [shown, setShown] = useState<string | null>(null);
+  const [shown, setShown] = useState<DiagnosticsPreview | null>(null);
   const [line, setLine] = useState('');
   const available = diagnosticsBridge()?.diagnosticsPreview !== undefined;
 
   async function open(): Promise<void> {
     setLine('');
     try {
-      const text = await diagnosticsBridge()?.diagnosticsPreview?.();
-      if (typeof text === 'string') setShown(text);
+      const preview = await diagnosticsBridge()?.diagnosticsPreview?.();
+      if (preview != null) setShown(preview);
       else setLine(diagnosticsText.unavailable);
     } catch {
       setLine(diagnosticsText.unavailable);
@@ -108,8 +108,9 @@ export function DiagnosticsExport() {
   }
 
   async function save(): Promise<void> {
+    if (shown === null) return;
     try {
-      const outcome = await diagnosticsBridge()?.diagnosticsSave?.();
+      const outcome = await diagnosticsBridge()?.diagnosticsSave?.(shown.id);
       setLine(outcome === 'saved' ? diagnosticsText.saved : outcome === 'cancelled' ? diagnosticsText.cancelled : diagnosticsText.failed);
     } catch {
       setLine(diagnosticsText.failed);
@@ -132,7 +133,7 @@ export function DiagnosticsExport() {
         </button>
       ) : (
         <div role="group" aria-label={diagnosticsText.shown}>
-          <textarea readOnly rows={12} cols={72} aria-label={diagnosticsText.shown} value={shown} />
+          <textarea readOnly rows={12} cols={72} aria-label={diagnosticsText.shown} value={shown.text} />
           <p>
             <button
               type="button"
