@@ -48,11 +48,11 @@ const STDERR_LINE_CHARS = 160;
 const USAGE_EXIT = 2;
 
 // The keys `config set` is given: the page's own choices (the devices and the
-// talk mode) and, from the talk-key setup alone, the key device and the talk
-// key (issue #1381). The page cannot name the latter: see PAGE_SAVE_KEYS.
+// talk mode) and, from key setup alone, the key device and talk or mute
+// binding (#1381, #2056). The page cannot name the latter: see PAGE_SAVE_KEYS.
 export type VoiceSaveKey = VoiceDeviceKey | VoiceBindingKey;
 export const PAGE_SAVE_KEYS: readonly VoiceDeviceKey[] = ['audio.input', 'audio.output', 'audio.talk_mode'];
-export const SAVE_KEYS: readonly VoiceSaveKey[] = [...PAGE_SAVE_KEYS, 'keys.device', 'keys.talk'];
+export const SAVE_KEYS: readonly VoiceSaveKey[] = [...PAGE_SAVE_KEYS, 'keys.device', 'keys.talk', 'keys.mute'];
 
 // The highest key code conch-voice takes for keys.talk.
 export const MAX_KEY_CODE = 767;
@@ -80,15 +80,16 @@ export function keyCodeText(code: unknown): string | null {
 // mark, backslash, control character or line separator (the device list's own
 // rule); for the talk mode, a word of its vocabulary; for keys.device, the
 // by-id path of a name fit for a udev rule (stricter than the helper, which
-// takes any clean path under /dev/input/); for keys.talk, a canonical decimal
+// takes any clean path under /dev/input/); for keys.talk and keys.mute, a canonical decimal
 // code from 1 to 767, or the closed Windows grammar (the helper also takes
 // KEY_* names on Linux). It is checked here,
 // in the IPC layer and again by the service, before anything is passed.
 export function saveValueFits(key: unknown, value: unknown): value is string {
   if (!isSaveKey(key) || typeof value !== 'string') return false;
   if (key === 'audio.talk_mode') return voiceControlTalkMode(value).length === 0;
-  if (key === 'keys.talk' && isWindowsBinding(value)) return true;
-  if (key === 'keys.talk') return /^[1-9]\d{0,2}$/u.test(value) && keyCodeText(Number(value)) === value;
+  if (key === 'keys.talk' || key === 'keys.mute') {
+    return isWindowsBinding(value) || (/^[1-9]\d{0,2}$/u.test(value) && keyCodeText(Number(value)) === value);
+  }
   if (key === 'keys.device') return value.startsWith(`${BY_ID_DIR}/`) && value.length <= BY_ID_DIR.length + 1 + 200 && fitForARule(value.slice(BY_ID_DIR.length + 1));
   return value === DEFAULT_DEVICE || (validDeviceName(value) && !NO_SEPARATOR.test(value));
 }
@@ -166,6 +167,13 @@ export class OneShot {
     // it and exit 0, which would look like a save.
     // A key device's path is a device's name: the helper's words are not logged.
     const ran = await this.#run(configDir, ['config', 'set', key, '--', value], 'config set', key === 'keys.device');
+    return ran.ok ? { ok: true } : ran;
+  }
+
+  // The helper validates both edits before replacing voice.toml once.
+  async saveMuteBinding(configDir: string, device: string, code: string): Promise<VoiceSaveResult> {
+    if (!saveValueFits('keys.device', device) || keyCodeText(Number(code)) !== code) return { ok: false, error: 'invalid' };
+    const ran = await this.#run(configDir, ['config', 'set-mute-binding', '--', device, code], 'config set-mute-binding', true);
     return ran.ok ? { ok: true } : ran;
   }
 

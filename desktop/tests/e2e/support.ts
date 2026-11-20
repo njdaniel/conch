@@ -204,6 +204,7 @@ export class Owner {
       oneShot: {
         devices: () => Promise.resolve({ ok: false, error: 'unsupported' } as const),
         save: () => Promise.resolve({ ok: false, error: 'unsupported' } as const),
+        saveMuteBinding: () => Promise.resolve({ ok: false, error: 'unsupported' } as const),
         cancel: () => Promise.resolve(),
       },
       identity: () =>

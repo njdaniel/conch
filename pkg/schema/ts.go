@@ -303,6 +303,7 @@ var TSTypes = []TSType{
 	// every case of cases.json against this validator.
 	{Value: VoiceDevice{}},
 	{Value: VoiceDevicesV1{}, Schema: VoiceDevicesSchemaV1},
+	{Value: MuteKeyEventV1{}, Schema: MuteKeyEventSchemaV1, Family: "mute-key-event-v1"},
 	// Invites: the way in (ADR-008 §4). The code is in the create response
 	// alone; the new principal is in the redeem response.
 	{Value: PrincipalV0{}, Family: "principal-v0"},

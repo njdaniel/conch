@@ -142,6 +142,33 @@ pub fn unset_keys(environment: &Environment, key: KeysKey) -> Result<(), Error> 
     unset_keys_in(&dir, key, &mut || {})
 }
 
+/// Saves the Linux mute binding and its device in one replacement of voice.toml.
+pub(crate) fn set_mute_binding(
+    environment: &Environment,
+    device: &str,
+    value: &str,
+) -> Result<(), Error> {
+    save_with(
+        &config_dir(environment)?,
+        &|old, name| {
+            let keys = Config::parse(old, name)?.keys;
+            // A mute save must not retarget an existing push-to-talk binding.
+            if keys.talk.is_some() && keys.device.as_deref().is_some_and(|path| path != device) {
+                return Err(conch_voice_control::Error::InvalidConfigValue {
+                    file: name.to_owned(),
+                    key: KeysKey::Device.dotted().to_owned(),
+                    message: "choose the same input device as the existing push-to-talk binding"
+                        .to_owned(),
+                }
+                .into());
+            }
+            let with_device = set_keys_value(old, name, KeysKey::Device, device)?;
+            Ok(set_keys_value(&with_device, name, KeysKey::Mute, value)?)
+        },
+        &mut || {},
+    )
+}
+
 fn config_dir(environment: &Environment) -> Result<PathBuf, Error> {
     default_config_dir(
         environment.conch_config_dir.as_deref(),
@@ -480,6 +507,43 @@ mod tests {
 
     fn save_now(dir: &Path, key: AudioKey, value: &str) -> Result<(), Error> {
         save(dir, key, value, &mut || {})
+    }
+
+    #[test]
+    fn mute_binding_save_preserves_the_existing_talk_device_and_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let environment = Environment {
+            conch_config_dir: Some(dir.path().as_os_str().to_owned()),
+            ..Environment::default()
+        };
+        let device = "/dev/input/by-id/old-event-kbd";
+        let original = format!("[keys]\ndevice = \"{device}\" # keep\ntalk = 97\n");
+        write(&path, &original, 0o600);
+        for (try_device, key) in [("/dev/input/by-id/new-event-kbd", "30"), (device, "97")] {
+            assert!(set_mute_binding(&environment, try_device, key).is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        }
+        set_mute_binding(&environment, device, "30").unwrap();
+        let config = crate::cli::read_config(&path).unwrap();
+        assert_eq!(config.keys.device.as_deref(), Some(device));
+        assert!(config.keys.talk.is_some());
+        assert!(config.keys.mute.is_some());
+        assert!(fs::read_to_string(path).unwrap().contains(" # keep"));
+    }
+
+    #[test]
+    fn invalid_mute_binding_does_not_save_the_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let environment = Environment {
+            conch_config_dir: Some(dir.path().as_os_str().to_owned()),
+            ..Environment::default()
+        };
+        let original = "[keys]\ndeafen = 30\n";
+        write(&path, original, 0o600);
+        assert!(set_mute_binding(&environment, "/dev/input/by-id/new-event-kbd", "30").is_err());
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
     }
 
     #[test]

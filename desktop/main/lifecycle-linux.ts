@@ -69,7 +69,9 @@ export type MonitorEvent =
   | { readonly kind: 'lock'; readonly locked: boolean }
   | { readonly kind: 'sleep'; readonly sleeping: boolean };
 
-export type ParsedLine = { readonly kind: 'event'; readonly event: MonitorEvent } | { readonly kind: 'ignored' } | { readonly kind: 'malformed' };
+export type ParsedLine =
+  | { readonly kind: 'event'; readonly event: MonitorEvent }
+  | { readonly kind: 'ignored' | 'malformed' | 'unavailable' };
 
 // A signal line: `<object path>: <interface>.<member> (<arguments>)`.
 const SIGNAL = /^(\/[A-Za-z0-9_/]*): ([A-Za-z0-9_.]+)\.([A-Za-z0-9_]+) \((.*)\)$/u;
@@ -79,6 +81,7 @@ const SESSION_PATH = /^\/org\/freedesktop\/login1\/session\/[A-Za-z0-9_]+$/u;
 // The line gdbus prints once it has subscribed and learned the owner of the
 // name: the first moment a signal can no longer be missed.
 const READY = /^The name org\.freedesktop\.login1 is owned by /u;
+const NO_OWNER = /^The name org\.freedesktop\.login1 (?:does not have an owner|has no owner)$/u;
 const SLEEP_ARGS = /^(true|false),$/u;
 
 // lockedHintOf reads the entries of a printed a{sv} dictionary (the text
@@ -157,7 +160,9 @@ export function parseLine(line: string, session: string): ParsedLine {
     if (!args.startsWith(head)) return { kind: 'ignored' };
     const hint = lockedHintOf(args.slice(head.length));
     if (hint === 'invalid') return { kind: 'malformed' };
-    return hint === 'absent' ? { kind: 'ignored' } : { kind: 'event', event: { kind: 'lock', locked: hint } };
+    if (hint !== 'absent') return { kind: 'event', event: { kind: 'lock', locked: hint } };
+    const tail = args.slice(valueEnd(args, head.length - 1) ?? args.length);
+    return /^, (?:@as )?\[[^\]]*'LockedHint'/u.test(tail) ? { kind: 'unavailable' } : { kind: 'ignored' };
   }
   return { kind: 'ignored' };
 }
@@ -277,6 +282,7 @@ export class LinuxLifecycle {
   #trying = false;
   #upSince = 0;
   #sawLock = false;
+  #lockLosses = 0;
   readonly #onSuspend = (): void => {
     void this.#deps.rules.suspend();
   };
@@ -289,7 +295,7 @@ export class LinuxLifecycle {
     this.#backoff = deps.backoffMs ?? RESTART_BACKOFF_MS;
   }
 
-  // The count of malformed lines the parser has ignored.
+  // The count of malformed lines on the monitor.
   get malformed(): number {
     return this.#malformed;
   }
@@ -308,13 +314,14 @@ export class LinuxLifecycle {
     this.#deps.powerMonitor.on('suspend', this.#onSuspend);
     this.#deps.powerMonitor.on('resume', this.#onResume);
     this.#poll = setInterval(() => {
-      let locked = false;
       try {
-        locked = this.#deps.powerMonitor.getSystemIdleState(1) === 'locked';
+        const idle = this.#deps.powerMonitor.getSystemIdleState(1);
+        if (idle === 'locked' || idle === 'active' || idle === 'idle') {
+          void this.#deps.rules.lockSignal('idle', idle === 'locked');
+        }
       } catch {
         // No idle state is no signal.
       }
-      void this.#deps.rules.lockSignal('idle', locked);
     }, this.#deps.idlePollMs ?? IDLE_POLL_MS);
     await this.#attach();
   }
@@ -323,6 +330,7 @@ export class LinuxLifecycle {
   stop(): void {
     this.#stopped = true;
     this.#trying = false;
+    this.#upSince = 0;
     clearTimeout(this.#timer);
     clearTimeout(this.#readyTimer);
     this.#cancelReady?.();
@@ -332,6 +340,9 @@ export class LinuxLifecycle {
     this.#deps.powerMonitor.removeListener('resume', this.#onResume);
     const child = this.#child;
     this.#child = null;
+    this.#deps.rules.observe('unavailable');
+    this.#deps.rules.dropSource('logind');
+    this.#deps.rules.dropSource('idle');
     child?.kill('SIGTERM');
   }
 
@@ -425,21 +436,48 @@ export class LinuxLifecycle {
       subscribed = resolve;
     });
     let pending = '';
+    let announced = false;
+    let skipping = false;
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => {
+      if (this.#child !== child) return;
       pending += chunk;
       // Complete lines first, however many this chunk brings: a burst of
       // other sessions' lines must not push a Lock line out of the buffer.
       let from = 0;
       for (let at = pending.indexOf('\n'); at >= 0; at = pending.indexOf('\n', from)) {
-        const text = pending.slice(from, at);
+        const text = pending.slice(from, at).trim();
         from = at + 1;
-        if (READY.test(text.trim())) subscribed(true);
+        if (skipping) {
+          skipping = false;
+          continue;
+        }
+        const owner = READY.test(text);
+        if (NO_OWNER.test(text) || (owner && announced)) {
+          // A monitor can stay alive across logind owner changes. Rediscover
+          // the session and its hint before treating lock state as known again.
+          this.#child = null;
+          this.#upSince = 0;
+          this.#forgetLock();
+          subscribed(false);
+          child.kill('SIGTERM');
+          this.#retry('the monitored logind owner changed');
+          return;
+        }
+        if (owner) {
+          announced = true;
+          subscribed(true);
+        }
         this.#line(text, session);
       }
       pending = pending.slice(from);
-      // Only a line that never ends is cut off: it is not a line.
-      if (pending.length > MAX_PENDING) pending = '';
+      // Drop an oversized fragment through its next line feed. It could
+      // have been a lock signal, so the last observation is now stale.
+      if (pending.length > MAX_PENDING) {
+        this.#forgetLock();
+        skipping = true;
+        pending = '';
+      }
     });
     child.stderr.resume();
     const ended = (): void => {
@@ -473,6 +511,7 @@ export class LinuxLifecycle {
       this.#retry('the monitor did not say it was subscribed');
       return;
     }
+    const lockLosses = this.#lockLosses;
     const hint = await run(gdbus, ['call', '--system', '--dest', LOGIND, '--object-path', session, '--method', 'org.freedesktop.DBus.Properties.Get', SESSION_IFACE, 'LockedHint'], CHILD_ENV);
     if (this.#halted() || this.#child !== child) return;
     const locked = hint !== null && hint.code === 0 ? parseLockedHint(hint.stdout) : null;
@@ -487,20 +526,33 @@ export class LinuxLifecycle {
     this.#upSince = Date.now();
     // The read came after the monitor started: a change the monitor has
     // already reported is newer than it.
-    if (!this.#lockSeen()) void this.#deps.rules.lockSignal('logind', locked);
+    if (!this.#lockSeen()) {
+      // A lost observation while reading the hint cannot authorize unmute.
+      // Still honor a locked hint so a possibly locked microphone is muted.
+      if (locked || lockLosses === this.#lockLosses) void this.#deps.rules.lockSignal('logind', locked);
+      if (lockLosses !== this.#lockLosses) return;
+    }
     this.#deps.rules.observe('available');
+  }
+
+  #forgetLock(): void {
+    this.#sawLock = false;
+    this.#lockLosses++;
+    this.#deps.rules.observe('unavailable');
   }
 
   #line(line: string, session: string): void {
     const parsed = parseLine(line, session);
-    if (parsed.kind === 'malformed') {
-      this.#malformed++;
+    if (parsed.kind !== 'event') {
+      if (parsed.kind === 'malformed') this.#malformed++;
+      if (parsed.kind !== 'ignored') this.#forgetLock();
       return;
     }
-    if (parsed.kind !== 'event') return;
-    if (parsed.event.kind === 'lock') this.#sawLock = true;
-    if (parsed.event.kind === 'lock') void this.#deps.rules.lockSignal('logind', parsed.event.locked);
-    else if (parsed.event.sleeping) void this.#deps.rules.suspend();
+    if (parsed.event.kind === 'lock') {
+      this.#sawLock = true;
+      void this.#deps.rules.lockSignal('logind', parsed.event.locked);
+      if (this.#upSince !== 0) this.#deps.rules.observe('available');
+    } else if (parsed.event.sleeping) void this.#deps.rules.suspend();
     else this.#deps.rules.resume();
   }
 

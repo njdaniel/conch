@@ -43,7 +43,7 @@ export const MOUSE_SUFFIX = '-event-mouse';
 // disclosure in short: the grant is to every program of this user.
 export const KEY_DEVICE_DISCLOSURE: readonly string[] = [
   'A rule below gives your user read access to one input device, and to nothing else. It is not for Conch alone: every program you run, as you, can then read that device, including what is typed on it.',
-  'Conch acts only on the keys you bind for talk, and discards every other key as it reads, but that is a property of its code, not of the permission.',
+  'Conch acts only on configured voice keys, and discards every other key as it reads, but that is a property of its code, not of the permission.',
   'Conch does not install the rule, change any permission or run anything as root. You install it yourself, as root, if you accept that.',
   'Do not widen this to a group that covers every input device on the machine: that would give every program you run access to all of them.',
 ];

@@ -422,25 +422,28 @@ function parseSaveDevice(args: readonly unknown[]): readonly unknown[] | null {
   const [request] = args;
   if (args.length !== 1 || !isRecord(request) || !hasExactKeys(request, ['key', 'value'])) return null;
   const { key, value } = request;
-  // keys.device and keys.talk are not the page's to name: see parseTalkBinding.
+  // Key bindings and their device are set by the binding request: see parseTalkBinding.
   if (!isPageSaveKey(key) || !saveValueFits(key, value)) return null;
   return [{ key, value }];
 }
 
-// A talk binding is exactly an id from the last listing (an opaque string, no
+// A voice key binding carries an id from the last listing (an opaque string, no
 // longer than a UUID plus a margin; the service looks it up) and a key code.
 // Windows accepts only an allowlisted physical code and a voice generation.
 function parseTalkBinding(args: readonly unknown[]): readonly unknown[] | null {
   const [request] = args;
   if (args.length !== 1 || !isRecord(request)) return null;
-  if (hasExactKeys(request, ['windowsCode', 'generation'])) {
+  const mute = request['binding'] === 'mute';
+  const fields = mute ? ['binding'] : [];
+  const binding = mute ? { binding: 'mute' } : {};
+  if (hasExactKeys(request, ['windowsCode', 'generation', ...fields])) {
     const { windowsCode, generation } = request;
-    return typeof windowsCode === 'string' && windowsKey(windowsCode) !== null && typeof generation === 'number' && Number.isSafeInteger(generation) && generation >= 0 ? [{ windowsCode, generation }] : null;
+    return typeof windowsCode === 'string' && windowsKey(windowsCode) !== null && typeof generation === 'number' && Number.isSafeInteger(generation) && generation >= 0 ? [{ windowsCode, generation, ...binding }] : null;
   }
-  if (!hasExactKeys(request, ['deviceId', 'code'])) return null;
+  if (!hasExactKeys(request, ['deviceId', 'code', ...fields])) return null;
   const { deviceId, code } = request;
   if (typeof deviceId !== 'string' || !/^[A-Za-z0-9-]{1,64}$/u.test(deviceId) || keyCodeText(code) === null) return null;
-  return [{ deviceId, code }];
+  return [{ deviceId, code, ...binding }];
 }
 
 // A companion grant is asked for exactly one channel, checked as a voice
@@ -731,7 +734,7 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
       return key !== 'audio.talk_mode' || value !== 'push_to_talk';
     },
   },
-  // Talk-key setup (issue #1381). The listing opens no device; a save writes
+  // Talk and mute key setup (#1381, #2056). The listing opens no device; a save writes
   // the person's voice.toml and is the person's act alone. Two processes in a
   // row, so the rate is low.
   voiceKeyDevices: { limit: 20, maxBytes: 0, parse: none, run: ({ voice }) => voice.keyDevices() },

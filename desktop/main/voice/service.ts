@@ -58,10 +58,10 @@ export const CEILING_ARGS: readonly string[] = ['--transmit-ceiling-secs', Strin
 // companion's identity from its own session response; main passes nothing else.
 export const SHARE_AUDIO_ARGS: readonly string[] = ['--share-audio-owner', 'companion'];
 
-// Main alone owns mute (#1631): the helper does not read keys.mute, so a hand-
-// edited voice.toml cannot bind a key that unmutes a session while the screen is
-// locked (VoiceService.setMute is the only way, and the lock path mutes through
-// it). The TUI passes nothing and keeps its mute key.
+// Main alone owns mute (#1631). Disable the managed helper's mute key so
+// a binding in voice.toml cannot bypass VoiceService.setMute while the screen
+// is locked. The lock path and the desktop hotkey both use setMute. The TUI
+// passes nothing and keeps its mute key.
 export const MUTE_OWNER_ARGS: readonly string[] = ['--no-mute-key'];
 
 // Echo cancellation is on for the desktop app (#186): on open speakers the
@@ -119,7 +119,7 @@ export interface VoiceIdentity {
 export interface VoiceServiceDeps {
   readonly supervisor: VoiceSupervisor;
   // The helper's one-shot runs: the device list and a save (issue #1378).
-  readonly oneShot: Pick<OneShot, 'devices' | 'save' | 'cancel'>;
+  readonly oneShot: Pick<OneShot, 'devices' | 'save' | 'saveMuteBinding' | 'cancel'>;
   // The identity in force, or null (no profile, signed out, no private data
   // directory).
   readonly identity: () => Promise<VoiceIdentity | null>;
@@ -139,6 +139,11 @@ export interface VoiceServiceDeps {
   // is, nothing unmutes and any join or retry starts muted. Required: a
   // caller that leaves it out would fail open (tests pass `() => false`).
   readonly locked: () => boolean;
+  readonly muteKey?: {
+    // Suspend or unavailable lock observation permits only muting by key.
+    readonly blocked: () => boolean;
+    readonly watch: (configDir: string, onPress: () => void) => () => void;
+  };
 }
 
 export interface JoinRequest {
@@ -234,6 +239,10 @@ export class VoiceService {
   private listing = new Map<string, string>();
   private bindingSave = false;
   private talkModeSave = false;
+  // Presses can arrive before the helper reports the effect of the previous
+  // command. Only toggle decisions use this pending intent; the view stays confirmed.
+  private pendingMute: { readonly muted: boolean } | undefined;
+  private stopMuteKey: (() => void) | undefined;
   // Set when main muted the person at a screen lock (issue #1588): the view
   // says so until they unmute or leave.
   private lockMuted = false;
@@ -250,6 +259,7 @@ export class VoiceService {
 
   // close detaches from the supervisor; the service reports nothing after.
   close(): void {
+    this.endMuteKeyWatch();
     this.unsubscribe?.();
     this.unsubscribe = null;
     this.listeners.clear();
@@ -321,7 +331,27 @@ export class VoiceService {
     };
   }
 
+  private endMuteKeyWatch(): void {
+    this.stopMuteKey?.();
+    this.stopMuteKey = undefined;
+  }
+
+  private startMuteKeyWatch(configDir: string, epoch: number, generation: number): void {
+    const muteKey = this.deps.muteKey;
+    if (muteKey === undefined) return;
+    this.endMuteKeyWatch();
+    this.stopMuteKey = muteKey.watch(configDir, () => {
+      if (epoch !== this.epoch || this.stopMuteKey === undefined) return;
+      const view = this.plain();
+      if (view.status !== 'running' || view.channel === null || view.helper === undefined || view.generation !== generation) return;
+      const muted = this.pendingMute?.muted ?? view.helper.muted;
+      void this.applyMute(!muted, true).catch(() => { this.deps.log('voice: the mute key command failed'); });
+    });
+  }
+
   private onSupervisor(s: VoiceState): void {
+    if (s.status !== 'running') this.endMuteKeyWatch();
+    if (s.status !== 'running' && s.status !== 'starting') this.pendingMute = undefined;
     // A join that sign-out, a switch or a 401 has overtaken reports nothing.
     if (this.active !== null && !this.active.current()) return;
     this.override = null;
@@ -455,6 +485,9 @@ export class VoiceService {
         return { status: 'idle', generation: this.lastGeneration, channel: null, retryable: false };
       }
       this.active = null;
+      if (result.status === 'running' && this.deps.supervisor.state.status === 'running' && !this.deps.updated?.()) {
+        this.startMuteKeyWatch(identity.configDir, epoch, result.generation);
+      }
       if (result.status === 'unavailable' || result.status === 'idle') this.channel = null;
       return this.view(result);
     } finally {
@@ -484,6 +517,8 @@ export class VoiceService {
   // logind watcher calls it too.
   async leave(): Promise<NativeVoiceView> {
     this.epoch++;
+    this.endMuteKeyWatch();
+    this.pendingMute = undefined;
     this.lockMuted = false;
     // The share's sound ends first: its stop is written before the helper's
     // leave (a helper that is leaving takes no command), and the withdrawal
@@ -534,7 +569,7 @@ export class VoiceService {
   // saveDevice runs `config set` for the profile in force. The key and value
   // are checked again here, whatever the caller.
   async saveDevice(request: { readonly key: VoiceDeviceKey; readonly value: string }): Promise<VoiceSaveResult> {
-    // The key device and the talk key are saved by saveTalkBinding alone.
+    // The key device and bindings are saved by saveTalkBinding alone.
     if (!isPageSaveKey(request.key) || !saveValueFits(request.key, request.value)) return { ok: false, error: 'invalid' };
     const begun = this.teardowns;
     if (await this.oneShotRefused()) return { ok: false, error: UPDATE_PENDING };
@@ -566,12 +601,13 @@ export class VoiceService {
   }
 
   // saveTalkBinding saves keys.device (the by-id path of a device of the
-  // current listing) and then keys.talk (a key code 1..767) for the profile in
-  // force, and says which of the two did not save. The id and the code are
-  // checked here again, whatever the caller. Windows uses only keys.talk,
-  // translated from an allowlisted physical code and fenced to the session.
+  // current listing) and the binding (a key code 1..767) for the profile in
+  // force. Linux mute setup saves both in a single replacement. The id and the code are
+  // checked again here. Windows saves only the binding, translated from an
+  // allowlisted physical code and fenced to the session.
   async saveTalkBinding(request: VoiceTalkBindingRequest): Promise<VoiceTalkBindingResult> {
-    if ('windowsCode' in request) return this.saveWindowsBinding(request);
+    const binding = request.binding === 'mute' ? 'mute' : 'talk';
+    if ('windowsCode' in request) return this.saveWindowsBinding(request, binding);
     if ((this.deps.platform ?? process.platform) === 'win32') return { ok: false, error: 'invalid' };
     const name = typeof request.deviceId === 'string' ? this.listing.get(request.deviceId) : undefined;
     const code = keyCodeText(request.code);
@@ -585,10 +621,16 @@ export class VoiceService {
       if (await this.oneShotRefused()) return { ok: false, error: UPDATE_PENDING };
       const identity = await this.deps.identity();
       if (identity === null || begun !== this.teardowns) return { ok: false, error: NOT_SIGNED_IN };
+      if (!identity.current()) return { ok: false, error: 'cancelled' };
+      if (binding === 'mute') {
+        const saved = await this.deps.oneShot.saveMuteBinding(identity.configDir, path, code);
+        return begun === this.teardowns && identity.current() ? saved : { ok: false, error: 'cancelled' };
+      }
       const device = await this.deps.oneShot.save(identity.configDir, 'keys.device', path);
       if (!device.ok) return { ok: false, error: device.error, failed: 'device' };
-      const talk = await this.deps.oneShot.save(identity.configDir, 'keys.talk', code);
-      return talk.ok ? { ok: true } : { ok: false, error: talk.error, failed: 'talk' };
+      if (begun !== this.teardowns || !identity.current()) return { ok: false, error: 'cancelled' };
+      const saved = await this.deps.oneShot.save(identity.configDir, 'keys.talk', code);
+      return saved.ok ? { ok: true } : { ok: false, error: saved.error, failed: 'talk' };
     } finally {
       this.bindingSave = false;
     }
@@ -597,7 +639,7 @@ export class VoiceService {
   // Configuration never restarts or retargets voice. A running helper keeps
   // its binding until an explicit leave/join. Fence every awaited step by the
   // activation, lifecycle epoch and generation that configuration began in.
-  private async saveWindowsBinding(request: { readonly windowsCode: string; readonly generation: number }): Promise<VoiceTalkBindingResult> {
+  private async saveWindowsBinding(request: { readonly windowsCode: string; readonly generation: number }, action: 'talk' | 'mute'): Promise<VoiceTalkBindingResult> {
     const binding = windowsKey(request.windowsCode);
     if ((this.deps.platform ?? process.platform) !== 'win32' || binding === null || request.generation !== this.state().generation) return { ok: false, error: 'invalid' };
     if (this.bindingSave) return { ok: false, error: 'busy' };
@@ -608,9 +650,9 @@ export class VoiceService {
       if (await this.oneShotRefused()) return { ok: false, error: UPDATE_PENDING };
       const identity = await this.deps.identity();
       if (identity === null || !identity.current() || !current()) return { ok: false, error: 'cancelled' };
-      const saved = await this.deps.oneShot.save(identity.configDir, 'keys.talk', binding.value);
+      const saved = await this.deps.oneShot.save(identity.configDir, `keys.${action}`, binding.value);
       if (!identity.current() || !current()) return { ok: false, error: 'cancelled' };
-      return saved.ok ? { ok: true } : { ok: false, error: saved.error, failed: 'talk' };
+      return saved.ok ? { ok: true } : { ok: false, error: saved.error, failed: action };
     } finally {
       this.bindingSave = false;
     }
@@ -641,15 +683,26 @@ export class VoiceService {
 
   // The commands resolve with the helper's own ack, never optimistically; the
   // view changes when the helper's state says so.
-  async setMute(muted: boolean): Promise<VoiceCommandResult> {
-    // Unmuting is the person's act after unlock, never during a lock.
-    if (!muted && this.deps.locked()) {
-      this.deps.log('voice: unmute refused: the screen is locked');
+  setMute(muted: boolean): Promise<VoiceCommandResult> {
+    return this.applyMute(muted, false);
+  }
+
+  private async applyMute(muted: boolean, byKey: boolean): Promise<VoiceCommandResult> {
+    // Make the decision and submit it to the supervisor without yielding.
+    if (!muted && (this.deps.locked() || (byKey && this.deps.muteKey?.blocked()))) {
+      if (!byKey) this.deps.log('voice: unmute refused: the screen is locked');
       return { ok: false, error: 'locked' };
     }
-    const r = await this.deps.supervisor.setMute(muted);
-    if (r.ok && this.last !== null) this.last = { ...this.last, muted };
-    return r;
+    const intent = { muted };
+    const epoch = this.epoch;
+    this.pendingMute = intent;
+    try {
+      const r = await this.deps.supervisor.setMute(muted);
+      if (r.ok && epoch === this.epoch && this.last !== null) this.last = { ...this.last, muted };
+      return r;
+    } finally {
+      if (this.pendingMute === intent) this.pendingMute = undefined;
+    }
   }
 
   async setDeafen(deafened: boolean): Promise<VoiceCommandResult> {

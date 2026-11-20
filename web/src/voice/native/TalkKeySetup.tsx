@@ -1,4 +1,4 @@
-// The talk-key setup of the desktop app (issue #1382, D3-11 of #771). Windows
+// The talk and mute key setup of the desktop app (#1382, #2056). Windows
 // dispatches to WindowsTalkKeySetup (#777), with no device grant or path.
 // On Linux, in this
 // order: what a read grant on a keyboard exposes (the person accepts it before
@@ -7,7 +7,7 @@
 // grants nothing); then the key, captured from the next key or Mouse 4 pressed
 // in this window while capture is on, or picked from a list; then Save.
 //
-// Capture: listeners exist only between "Set talk key" and the first accepted
+// Capture: listeners exist only between "Set talk/mute key" and the first accepted
 // key, Escape or Cancel. The event's code is turned at once into an evdev
 // number and a name; the event itself is not kept, logged or passed on. Only
 // the number and the name outlive the capture. Rule text is rendered as text
@@ -41,7 +41,7 @@ export const cantUse = "That key can't be used as a talk key.";
 
 // failedWords says which step did not save, and why.
 export function failedWords(result: Extract<VoiceTalkBindingResult, { ok: false }>): string {
-  const step = result.failed === 'device' ? 'The device was not saved. ' : result.failed === 'talk' ? 'The key was not saved. ' : 'Nothing was saved. ';
+  const step = result.failed === 'device' ? 'The device was not saved. ' : result.failed !== undefined ? 'The key was not saved. ' : 'Nothing was saved. ';
   return step + oneShotWords[result.error];
 }
 
@@ -97,16 +97,19 @@ function Rule({ device }: { readonly device: VoiceKeyDevice }) {
 export function TalkKeySetup({
   source,
   joined,
+  binding = 'talk',
   onSaved,
   onClose,
 }: {
   readonly source: NativeVoice;
   // Whether a voice session is on: a saved key then waits for the next join.
   readonly joined: boolean;
+  readonly binding?: 'talk' | 'mute';
   // The chosen key's name, once saved; Windows says if it waits for a join.
   readonly onSaved: (label: string, nextJoinOnly?: boolean) => void;
   readonly onClose: () => void;
 }) {
+  const title = binding === 'mute' ? 'Mute key' : 'Talk key';
   const [listing, setListing] = useState<VoiceKeyDevicesResult | null>(null);
   const [accepted, setAccepted] = useState(false);
   const [deviceId, setDeviceId] = useState<string | null>(null);
@@ -190,7 +193,8 @@ export function TalkKeySetup({
       setSaving(false);
       if (r.ok) {
         onSaved(key.label);
-        setOutcome(`Saved: hold ${key.label} to talk. ${joined ? takeEffect : ''}`.trim());
+        const action = binding === 'mute' ? `press ${key.label} to toggle mute` : `hold ${key.label} to talk`;
+        setOutcome(`Saved: ${action}. ${joined ? takeEffect : ''}`.trim());
       } else {
         setOutcome(failedWords(r));
       }
@@ -199,7 +203,7 @@ export function TalkKeySetup({
       done({ ok: false, error: 'unsupported' });
       return;
     }
-    call({ deviceId: device.id, code: key.code }).then(done, () => { done({ ok: false, error: 'failed' }); });
+    call({ deviceId: device.id, code: key.code, ...(binding === 'mute' ? { binding } : {}) }).then(done, () => { done({ ok: false, error: 'failed' }); });
   };
 
   const pick = (value: string) => {
@@ -213,16 +217,16 @@ export function TalkKeySetup({
     if (k !== undefined) setKey(k);
   };
 
-  if (listing?.ok && listing.platform === 'win32') return <WindowsTalkKeySetup source={source} onSaved={onSaved} onClose={onClose} />;
+  if (listing?.ok && listing.platform === 'win32') return <WindowsTalkKeySetup source={source} binding={binding} onSaved={onSaved} onClose={onClose} />;
 
   return (
     <section className="talk-setup" aria-labelledby={heading}>
-      <h3 id={heading}>Talk key</h3>
+      <h3 id={heading}>{title}</h3>
 
       {listing === null ? <p role="status" className="hint">Reading what is available…</p> : null}
       {listing !== null && !listing.ok ? (
         <>
-          <p role="status" className="hint">The talk key setup is not available: {oneShotWords[listing.error]}</p>
+          <p role="status" className="hint">The {binding} key setup is not available: {oneShotWords[listing.error]}</p>
           <button type="button" onClick={load}>Check again</button>
         </>
       ) : null}
@@ -244,6 +248,7 @@ export function TalkKeySetup({
         <>
           <fieldset className="talk-devices">
             <legend>Device</legend>
+            {binding === 'mute' ? <p className="hint">The talk and mute keys use the same device.</p> : null}
             {devices.length === 0 ? <p className="hint">No keyboard or mouse was found.</p> : null}
             {devices.map((d) => (
               <div key={d.id} className="talk-device">
@@ -265,7 +270,7 @@ export function TalkKeySetup({
 
           <div className="talk-binding">
             <p>
-              Talk key: <strong>{key === null ? 'none chosen' : <bdi>{key.label}</bdi>}</strong>
+              {title}: <strong>{key === null ? 'none chosen' : <bdi>{key.label}</bdi>}</strong>
             </p>
             {capturing ? (
               <>
@@ -273,9 +278,9 @@ export function TalkKeySetup({
                 <button type="button" onClick={() => { setCapturing(false); }}>Cancel</button>
               </>
             ) : (
-              <button type="button" onClick={() => { setRefused(false); setCapturing(true); }}>Set talk key</button>
+              <button type="button" onClick={() => { setRefused(false); setCapturing(true); }}>Set {binding} key</button>
             )}
-            {refused ? <p role="status" className="hint">{cantUse}</p> : null}
+            {refused ? <p role="status" className="hint">{binding === 'mute' ? "That key can't be used as a mute key." : cantUse}</p> : null}
             <label>
               Or pick one{' '}
               <select value={key?.label ?? ''} onChange={(e) => { pick(e.target.value); }}>

@@ -25,7 +25,10 @@ export class WindowsLifecycle {
       this.#deps.rules.observe('available');
     },
     suspend: () => { void this.#deps.rules.suspend(); },
-    resume: () => { this.#deps.rules.resume(); },
+    resume: () => {
+      this.#readLockState();
+      this.#deps.rules.resume();
+    },
   };
 
   constructor(deps: { readonly rules: Lifecycle; readonly powerMonitor: WindowsPowerMonitor }) {
@@ -35,11 +38,16 @@ export class WindowsLifecycle {
   start(): void {
     if (this.#started) return;
     this.#started = true;
-    const { rules, powerMonitor } = this.#deps;
+    const { powerMonitor } = this.#deps;
     for (const event of Object.keys(this.#listeners) as WindowsPowerEvent[]) powerMonitor.on(event, this.#listeners[event]);
-    // Subscribe before reading so startup on a locked screen also fails
-    // closed. An unknown initial state keeps notification text redacted;
-    // the next lock/unlock event establishes observation.
+    this.#readLockState();
+  }
+
+  #readLockState(): void {
+    const { rules, powerMonitor } = this.#deps;
+    // The listeners are installed before this check. An unknown read at
+    // startup or resume keeps notifications and the hotkey fail-closed
+    // until the next lock or unlock event establishes observation.
     let state = 'unknown';
     try {
       state = powerMonitor.getSystemIdleState(1);
@@ -49,6 +57,8 @@ export class WindowsLifecycle {
     if (state === 'locked' || state === 'active' || state === 'idle') {
       void rules.lockSignal('powerMonitor', state === 'locked');
       rules.observe('available');
+    } else {
+      rules.observe('unavailable');
     }
   }
 

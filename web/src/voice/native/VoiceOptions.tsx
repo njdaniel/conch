@@ -90,10 +90,12 @@ export function VoiceOptions({
   source,
   view,
   open,
+  onKeySetup,
 }: {
   readonly source: NativeVoice;
   readonly view: NativeVoiceView;
   readonly open: boolean;
+  readonly onKeySetup?: (binding: 'talk' | 'mute') => void;
 }) {
   const windows = useContext(DesktopOS) === 'win32';
   const [devices, setDevices] = useState<Listing>({ kind: 'loading' });
@@ -182,6 +184,12 @@ export function VoiceOptions({
 
   return (
     <div id="voice-options" className="voice-options" hidden={!open}>
+      {onKeySetup === undefined ? null : (
+        <div>
+          <button type="button" onClick={() => { onKeySetup('talk'); }}>Set up talk key</button>
+          <button type="button" onClick={() => { onKeySetup('mute'); }}>Set up mute key</button>
+        </div>
+      )}
       {devices.kind === 'pipewire' ? <p role="status" className="hint">{windows ? 'Audio devices could not be listed on Windows.' : noPipeWire}</p> : null}
       {devices.kind === 'failed' ? (
         <p role="status" className="hint">

@@ -493,7 +493,7 @@ export type VoiceTalkModeResult =
 // The keys main also saves, but only from the talk-key setup below: the page
 // never names them (issue #1381, D3-10). keys.mute and keys.deafen are not
 // set from here.
-export type VoiceBindingKey = 'keys.device' | 'keys.talk';
+export type VoiceBindingKey = 'keys.device' | 'keys.talk' | 'keys.mute';
 
 // A device the person could bind a talk key on, listed by name from
 // /dev/input/by-id without opening anything. id is opaque and valid only for
@@ -529,14 +529,15 @@ export type VoiceKeyDevicesResult =
 // Windows capture carries only an allowlisted physical code and the voice
 // generation shown during configuration. Main translates it; no event or text.
 export type VoiceTalkBindingRequest =
-  | { readonly deviceId: string; readonly code: number }
-  | { readonly windowsCode: string; readonly generation: number };
+  | { readonly deviceId: string; readonly code: number; readonly binding?: 'mute' }
+  | { readonly windowsCode: string; readonly generation: number; readonly binding?: 'mute' };
 
-// Linux saves keys.device then keys.talk; Windows saves only keys.talk.
-// failed says which write did not save.
+// Linux mute setup saves the shared device and binding in one operation.
+// Linux talk setup saves the device first. Windows saves only the binding.
+// An omitted binding selects keys.talk. failed identifies a separate write.
 export type VoiceTalkBindingResult =
   | { readonly ok: true }
-  | { readonly ok: false; readonly error: VoiceOneShotError; readonly failed?: 'device' | 'talk' };
+  | { readonly ok: false; readonly error: VoiceOneShotError; readonly failed?: 'device' | 'talk' | 'mute' };
 
 // The desktop log accepts only these fixed renderer diagnostics.
 export type VoiceDiagnostic = 'capture-stalled' | 'encoder-cpu' | 'sdp-retry' | 'sdp-rejected' | 'sdp-bundle-collision' | 'sdk-warning' | 'sdk-error';

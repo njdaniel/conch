@@ -147,7 +147,7 @@ export function NativeVoicePanel({
   // page owes it; undefined unless main's switch is on.
   const sound = useShareSound(source, companion, view);
   const session = hasSession(view);
-  const [setup, setSetup] = useState(false);
+  const [setup, setSetup] = useState<'talk' | 'mute' | null>(null);
   const joined = session ? view.channel : null;
   const shown = joined ?? (signedIn ? channel : null);
   const snapshot = usePresence({ channel: shown, joined, voiceAllowed, onUnauthorized });
@@ -332,7 +332,12 @@ export function NativeVoicePanel({
           </div>
         </div>
       </div>
-      {unavailable || actions === undefined ? null : <VoiceOptions source={source} view={view} open={options} />}
+      {unavailable || actions === undefined ? null : <VoiceOptions
+        source={source}
+        view={view}
+        open={options}
+        {...(source.keyDevices === undefined ? {} : { onKeySetup: setSetup })}
+      />}
       <div className="voice-notes">
         {why === null ? null : <p role="status" className="hint">{why}</p>}
         {view.detail === undefined ? null : (
@@ -350,21 +355,24 @@ export function NativeVoicePanel({
         {!session && warned !== null && warned === channel ? <p role="status" className="hint">{duplicateWarning}</p> : null}
         {!session && !unavailable && channel !== null && presence === null && idle === null ? <p className="hint">Checking whether voice is available.</p> : null}
         {unavailable || source.keyDevices === undefined || setup ? null : (
-          <button type="button" className="more" onClick={() => { setSetup(true); }}>
+          <button type="button" className="more" onClick={() => { setSetup('talk'); }}>
             {needsTalkSetup ? 'Set up the talk key' : 'Talk key'}
           </button>
         )}
       </div>
       {companion === null || unavailable ? null : <NativeStreams companion={companion} presence={presence} viewer={viewer} people={named} joined={joined} live={live} />}
-      {setup ? (
+      {setup !== null ? (
         <TalkKeySetup
+          key={setup}
+          binding={setup}
           source={source}
           joined={session}
           onSaved={(label, nextJoinOnly) => {
+            if (setup !== 'talk') return;
             if (nextJoinOnly === true) setPreviousBinding((old) => old ?? { generation: view.generation, label: binding });
             onBound?.(label);
           }}
-          onClose={() => { setSetup(false); }}
+          onClose={() => { setSetup(null); }}
         />
       ) : null}
     </section>
