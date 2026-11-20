@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/coder/websocket"
 
+	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
@@ -22,6 +24,20 @@ import (
 
 const personPath = "/v1/events/person/ws"
 
+// newPersonFixture supplies the provenance boundary until the shared store
+// guard is available. Each test that delivers DM frames installs its own
+// access rule.
+func newPersonFixture(t *testing.T) *runFixture {
+	t.Helper()
+	f := newRunFixture(t)
+	f.srv.person.ownSignIn = func(context.Context, int64, int64) (bool, error) { return true, nil }
+	return f
+}
+
+func allowPersonDMFixture(context.Context, int64, int64) (bool, error) {
+	return true, nil
+}
+
 // personClient is one open person socket.
 type personClient struct {
 	t    *testing.T
@@ -30,7 +46,7 @@ type personClient struct {
 
 // tryDialPerson dials the person stream and returns the socket, or the status
 // the server refused the upgrade with.
-func tryDialPerson(t *testing.T, base, path, token string) (*personClient, int) {
+func tryDialPerson(t *testing.T, base, path, token string) (*personClient, int, string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), eventsReadTimeout)
 	defer cancel()
@@ -43,18 +59,22 @@ func tryDialPerson(t *testing.T, base, path, token string) (*personClient, int) 
 		if resp == nil {
 			t.Fatalf("dial %s: %v", path, err)
 		}
-		defer func() { _ = resp.Body.Close() }()
-		return nil, resp.StatusCode
+		var body schema.Error
+		if resp.Body != nil {
+			defer func() { _ = resp.Body.Close() }()
+			_ = json.NewDecoder(resp.Body).Decode(&body)
+		}
+		return nil, resp.StatusCode, body.Code
 	}
 	t.Cleanup(func() { _ = conn.CloseNow() })
-	return &personClient{t: t, conn: conn}, http.StatusSwitchingProtocols
+	return &personClient{t: t, conn: conn}, http.StatusSwitchingProtocols, ""
 }
 
 func dialPerson(t *testing.T, base, token string) *personClient {
 	t.Helper()
-	c, status := tryDialPerson(t, base, personPath, token)
+	c, status, code := tryDialPerson(t, base, personPath, token)
 	if c == nil {
-		t.Fatalf("person stream refused with %d", status)
+		t.Fatalf("person stream refused with %d %s", status, code)
 	}
 	return c
 }
@@ -126,26 +146,24 @@ func (c *personClient) expectChanged(conversation int64) {
 	}
 }
 
-// closed reads until the socket is closed and returns how.
+// closed requires a close as the next frame.
 func (c *personClient) closed() websocket.CloseError {
 	c.t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), eventsReadTimeout)
 	defer cancel()
-	for {
-		_, _, err := c.conn.Read(ctx)
-		if err == nil {
-			continue
-		}
-		var ce websocket.CloseError
-		if !errors.As(err, &ce) {
-			c.t.Fatalf("the socket ended with %v, want a close frame", err)
-		}
-		return ce
+	_, raw, err := c.conn.Read(ctx)
+	var ce websocket.CloseError
+	if !errors.As(err, &ce) {
+		c.t.Fatalf("read %q, error %v, want a close frame", raw, err)
 	}
+	return ce
 }
 
-func changedDoc(conversation int64) schema.DMChangedV1 {
-	return schema.DMChangedV1{Schema: schema.DMChangedSchemaV1, ConversationID: conversation, Kind: schema.DMChangeRead}
+func changedDoc(reader, conversation int64) readerDMChange {
+	return readerDMChange{
+		DMChangedV1: schema.DMChangedV1{Schema: schema.DMChangedSchemaV1, ConversationID: conversation, Kind: schema.DMChangeRead},
+		readerID:    reader,
+	}
 }
 
 // dmMessageDoc is message id of conversation conv, as of revision rev.
@@ -169,13 +187,15 @@ func dmRemovedDoc(conv, id, rev int64) schema.DMMessageRemovedV1 {
 	return schema.DMMessageRemovedV1{Schema: schema.DMMessageRemovedSchemaV1, Message: m}
 }
 
-// snapshotConv is a conversation of the pair (3, 5) as the snapshot lists it,
+// snapshotConv is a conversation as a reader sees it,
 // at revision rev with its last message lastID.
-func snapshotConv(id, rev, lastID int64) schema.DMConversationV1 {
+func snapshotConv(reader, peer, id, rev, lastID int64) schema.DMConversationV1 {
 	at := schema.NewTimestamp(time.Date(2026, 11, 19, 9, 0, 0, 0, time.UTC))
+	pair := []int64{reader, peer}
+	slices.Sort(pair)
 	return schema.DMConversationV1{
-		Schema: schema.DMConversationSchemaV1, ID: id, ParticipantIDs: []int64{3, 5}, CreatedAt: &at,
-		PeerID: 5, State: schema.DMStateOpen, Revision: rev, LastMessageID: lastID, LastMessageAt: &at,
+		Schema: schema.DMConversationSchemaV1, ID: id, ParticipantIDs: pair, CreatedAt: &at,
+		PeerID: peer, State: schema.DMStateOpen, Revision: rev, LastMessageID: lastID, LastMessageAt: &at,
 	}
 }
 
@@ -194,7 +214,7 @@ func (c *personClient) expectMessage(id, rev int64) {
 // bearer or a ticket; an agent, a guest, a dead or missing credential and a
 // server with authentication off do not, and nothing is upgraded for them.
 func TestPersonStreamWhoMayOpen(t *testing.T) {
-	f := newRunFixture(t)
+	f := newPersonFixture(t)
 	g := newGuest(t, f.srv, "Pat", time.Hour, 2*time.Hour, f.general.ID)
 	revoked := f.credentialID(t, f.aliceTok2)
 	if err := f.srv.store.RevokeCredential(context.Background(), "system", revoked); err != nil {
@@ -202,8 +222,8 @@ func TestPersonStreamWhoMayOpen(t *testing.T) {
 	}
 	base := wsTestServer(t, f.srv)
 
-	ticket := func() string {
-		rec := f.do(t, "POST", "/v1/ws-tickets", f.aliceTok, "")
+	ticket := func(token string) string {
+		rec := f.do(t, "POST", "/v1/ws-tickets", token, "")
 		if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
 			t.Fatalf("ticket = %d %s", rec.Code, rec.Body)
 		}
@@ -214,28 +234,63 @@ func TestPersonStreamWhoMayOpen(t *testing.T) {
 		return tk.Ticket
 	}
 
+	ctx := context.Background()
+	actor := fmt.Sprintf("principal:%d", f.root.ID)
+	minted, mintedToken, err := f.srv.store.CreateCredential(ctx, actor, f.alice.ID, "operator issued", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	link, err := f.srv.store.CreateSignInLink(ctx, actor, f.root.ID, f.alice.ID, schema.CreateSignInLinkRequestV1{}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	redeemed, err := f.srv.store.RedeemSignInLink(ctx, store.HashSignInLinkCode(link.Code), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.srv.person.ownSignIn = func(_ context.Context, principalID, credID int64) (bool, error) {
+		switch credID {
+		case minted.ID, redeemed.Credential.ID:
+			if principalID != f.alice.ID {
+				t.Errorf("provenance checked principal %d, want %d", principalID, f.alice.ID)
+			}
+			return false, nil
+		default:
+			return true, nil
+		}
+	}
+
 	tests := []struct {
 		name   string
 		path   string
 		token  string
 		status int
+		code   string
 	}{
-		{"a person, bearer", personPath, f.aliceTok, http.StatusSwitchingProtocols},
-		{"another person", personPath, f.bobTok, http.StatusSwitchingProtocols},
-		{"a person, ticket", personPath + "?ticket=" + ticket(), "", http.StatusSwitchingProtocols},
-		{"an operator is a person too", personPath, f.rootTok, http.StatusSwitchingProtocols},
-		{"an agent", personPath, f.botTok, http.StatusForbidden},
-		{"another agent", personPath, f.rivalTok, http.StatusForbidden},
-		{"a guest", personPath, g.Token, http.StatusForbidden},
-		{"no credential", personPath, "", http.StatusUnauthorized},
-		{"a made-up credential", personPath, "not-a-token", http.StatusUnauthorized},
-		{"a revoked credential", personPath, f.aliceTok2, http.StatusUnauthorized},
+		{"a person, bearer", personPath, f.aliceTok, http.StatusSwitchingProtocols, ""},
+		{"another person", personPath, f.bobTok, http.StatusSwitchingProtocols, ""},
+		{"a person, ticket", personPath + "?ticket=" + ticket(f.aliceTok), "", http.StatusSwitchingProtocols, ""},
+		{"an operator is a person too", personPath, f.rootTok, http.StatusSwitchingProtocols, ""},
+		{"an agent", personPath, f.botTok, http.StatusForbidden, "forbidden"},
+		{"another agent", personPath, f.rivalTok, http.StatusForbidden, "forbidden"},
+		{"a guest", personPath, g.Token, http.StatusForbidden, schema.ErrorCodeGuestNotAllowed},
+		{"no credential", personPath, "", http.StatusUnauthorized, ""},
+		{"a made-up credential", personPath, "not-a-token", http.StatusUnauthorized, ""},
+		{"a revoked credential", personPath, f.aliceTok2, http.StatusUnauthorized, ""},
+		{"operator-issued bearer", personPath, mintedToken, http.StatusForbidden, schema.ErrorCodeOwnSignInRequired},
+		{"operator-issued ticket", personPath + "?ticket=" + ticket(mintedToken), "", http.StatusForbidden, schema.ErrorCodeOwnSignInRequired},
+		{"other-created link bearer", personPath, redeemed.Token, http.StatusForbidden, schema.ErrorCodeOwnSignInRequired},
+		{"other-created link ticket", personPath + "?ticket=" + ticket(redeemed.Token), "", http.StatusForbidden, schema.ErrorCodeOwnSignInRequired},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c, status := tryDialPerson(t, base, tt.path, tt.token)
+			c, status, code := tryDialPerson(t, base, tt.path, tt.token)
 			if status != tt.status {
 				t.Fatalf("status = %d, want %d", status, tt.status)
+			}
+			if tt.code != "" && code != tt.code {
+				t.Fatalf("code = %q, want %q", code, tt.code)
 			}
 			if tt.status == http.StatusSwitchingProtocols {
 				c.open()
@@ -243,12 +298,19 @@ func TestPersonStreamWhoMayOpen(t *testing.T) {
 		})
 	}
 
-	t.Run("a disabled person", func(t *testing.T) {
+	t.Run("missing provenance guard refuses every upgrade", func(t *testing.T) {
 		f := newRunFixture(t)
+		if _, status, code := tryDialPerson(t, wsTestServer(t, f.srv), personPath, f.aliceTok); status != http.StatusForbidden || code != schema.ErrorCodeOwnSignInRequired {
+			t.Fatalf("status and code = %d %q, want 403 own_sign_in_required", status, code)
+		}
+	})
+
+	t.Run("a disabled person", func(t *testing.T) {
+		f := newPersonFixture(t)
 		if _, err := f.srv.store.DisablePrincipal(context.Background(), "system", f.bob.ID); err != nil {
 			t.Fatal(err)
 		}
-		_, status := tryDialPerson(t, wsTestServer(t, f.srv), personPath, f.bobTok)
+		_, status, _ := tryDialPerson(t, wsTestServer(t, f.srv), personPath, f.bobTok)
 		if status != http.StatusUnauthorized {
 			t.Fatalf("status = %d, want 401", status)
 		}
@@ -256,7 +318,7 @@ func TestPersonStreamWhoMayOpen(t *testing.T) {
 
 	t.Run("authentication off has no person", func(t *testing.T) {
 		off := newAuthFixture(t, AuthOff)
-		_, status := tryDialPerson(t, wsTestServer(t, off.srv), personPath, "")
+		_, status, _ := tryDialPerson(t, wsTestServer(t, off.srv), personPath, "")
 		if status != http.StatusBadRequest {
 			t.Fatalf("status = %d, want 400", status)
 		}
@@ -268,7 +330,7 @@ func TestPersonStreamWhoMayOpen(t *testing.T) {
 // installed the snapshot is empty and says DMs are not available; an
 // installed source is what is sent.
 func TestPersonStreamOpens(t *testing.T) {
-	f := newRunFixture(t)
+	f := newPersonFixture(t)
 	base := wsTestServer(t, f.srv)
 
 	t.Run("two sockets of one person have two instance ids", func(t *testing.T) {
@@ -293,11 +355,11 @@ func TestPersonStreamOpens(t *testing.T) {
 
 	t.Run("the snapshot is the installed source's, for the caller", func(t *testing.T) {
 		var asked []int64
-		f.srv.dmSnapshotSource = func(_ context.Context, id int64) (schema.DMSnapshotV1, error) {
+		f.srv.dmSnapshotSource = func(_ context.Context, id int64) (personDMSnapshot, error) {
 			asked = append(asked, id)
 			s, _ := f.srv.emptyDMSnapshot(context.Background(), id)
 			s.DMsEnabled = true
-			return s, nil
+			return personDMSnapshot{doc: s}, nil
 		}
 		t.Cleanup(func() { f.srv.dmSnapshotSource = nil })
 		_, snap := dialPerson(t, base, f.bobTok).open()
@@ -311,13 +373,13 @@ func TestPersonStreamOpens(t *testing.T) {
 
 	t.Run("a source that fails or lies is a 500, not an upgrade", func(t *testing.T) {
 		for name, src := range map[string]dmSnapshotSource{
-			"error": func(context.Context, int64) (schema.DMSnapshotV1, error) {
-				return schema.DMSnapshotV1{}, errors.New("boom")
+			"error": func(context.Context, int64) (personDMSnapshot, error) {
+				return personDMSnapshot{}, errors.New("boom")
 			},
-			"invalid": func(context.Context, int64) (schema.DMSnapshotV1, error) { return schema.DMSnapshotV1{}, nil },
+			"invalid": func(context.Context, int64) (personDMSnapshot, error) { return personDMSnapshot{}, nil },
 		} {
 			f.srv.dmSnapshotSource = src
-			_, status := tryDialPerson(t, base, personPath, f.aliceTok)
+			_, status, _ := tryDialPerson(t, base, personPath, f.aliceTok)
 			if status != http.StatusInternalServerError {
 				t.Errorf("%s: status = %d, want 500", name, status)
 			}
@@ -326,15 +388,81 @@ func TestPersonStreamOpens(t *testing.T) {
 	})
 }
 
+func TestPersonStreamSnapshotPrivacy(t *testing.T) {
+	tests := []struct {
+		name   string
+		rows   func(f *runFixture) (schema.DMConversationV1, map[int64]int64)
+		status int
+	}{
+		{"peer's read projection", func(f *runFixture) (schema.DMConversationV1, map[int64]int64) {
+			row := snapshotConv(f.bob.ID, f.alice.ID, 12, 1, 1)
+			row.LastReadID = 1
+			return row, nil
+		}, http.StatusInternalServerError},
+		{"nonparticipant", func(f *runFixture) (schema.DMConversationV1, map[int64]int64) {
+			return snapshotConv(f.bob.ID, f.carol.ID, 12, 1, 1), nil
+		}, http.StatusInternalServerError},
+		{"peer's private open projected for caller", func(f *runFixture) (schema.DMConversationV1, map[int64]int64) {
+			row := snapshotConv(f.alice.ID, f.bob.ID, 12, 0, 0)
+			row.CreatedAt, row.LastMessageAt = nil, nil
+			return row, map[int64]int64{row.ID: f.bob.ID}
+		}, http.StatusInternalServerError},
+		{"caller's private open", func(f *runFixture) (schema.DMConversationV1, map[int64]int64) {
+			row := snapshotConv(f.alice.ID, f.bob.ID, 12, 0, 0)
+			row.CreatedAt, row.LastMessageAt = nil, nil
+			return row, map[int64]int64{row.ID: f.alice.ID}
+		}, http.StatusSwitchingProtocols},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newPersonFixture(t)
+			row, openers := tt.rows(f)
+			f.srv.dmSnapshotSource = func(ctx context.Context, id int64) (personDMSnapshot, error) {
+				doc, err := f.srv.emptyDMSnapshot(ctx, id)
+				doc.Conversations = []schema.DMConversationV1{row}
+				return personDMSnapshot{doc: doc, privateOpeners: openers}, err
+			}
+			c, status, _ := tryDialPerson(t, wsTestServer(t, f.srv), personPath, f.aliceTok)
+			if status != tt.status {
+				t.Fatalf("status = %d, want %d", status, tt.status)
+			}
+			if c != nil {
+				_, snap := c.open()
+				if len(snap.Conversations) != 1 || snap.Conversations[0].ID != row.ID {
+					t.Fatalf("snapshot = %+v, want the reader's private open", snap)
+				}
+			}
+		})
+	}
+}
+
+func TestPersonStreamRechecksAfterSnapshotBuild(t *testing.T) {
+	f := newPersonFixture(t)
+	credID := f.credentialID(t, f.aliceTok)
+	f.srv.dmSnapshotSource = func(ctx context.Context, id int64) (personDMSnapshot, error) {
+		// Revoke directly in the store, so there's no subscription drop.
+		if err := f.srv.store.RevokeCredential(ctx, "system", credID); err != nil {
+			return personDMSnapshot{}, err
+		}
+		doc, err := f.srv.emptyDMSnapshot(ctx, id)
+		doc.Conversations = []schema.DMConversationV1{snapshotConv(id, f.bob.ID, 12, 1, 1)}
+		return personDMSnapshot{doc: doc}, err
+	}
+	if _, status, _ := tryDialPerson(t, wsTestServer(t, f.srv), personPath, f.aliceTok); status != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", status)
+	}
+}
+
 // TestPersonStreamSnapshotOrdering: a frame published while the snapshot is
 // being taken is held and sent after it, unless the snapshot already reflects
 // it (a revision at or below the one the snapshot reported for that
 // conversation), so nothing falls between the two. The ordering is per
 // conversation: message ids of two conversations are not compared.
 func TestPersonStreamSnapshotOrdering(t *testing.T) {
-	f := newRunFixture(t)
+	f := newPersonFixture(t)
+	f.srv.dmFrameAccess = allowPersonDMFixture
 	base := wsTestServer(t, f.srv)
-	f.srv.dmSnapshotSource = func(ctx context.Context, id int64) (schema.DMSnapshotV1, error) {
+	f.srv.dmSnapshotSource = func(ctx context.Context, id int64) (personDMSnapshot, error) {
 		// Conversation 12 is at revision 41 in the snapshot, 13 at 3; 14 is not
 		// listed (hidden, or past More), so all of its frames are sent.
 		for _, d := range []personDoc{
@@ -345,15 +473,15 @@ func TestPersonStreamSnapshotOrdering(t *testing.T) {
 			dmEditedDoc(13, 900, 4),  // above: sent
 			dmRemovedDoc(12, 40, 43), // above: sent
 			dmMessageDoc(14, 7, 1),   // conversation not in the snapshot: sent
-			changedDoc(12),           // a signal has no revision: sent
+			changedDoc(id, 12),       // a signal has no revision: sent
 		} {
 			if err := f.srv.person.publish(id, d); err != nil {
 				t.Errorf("publish: %v", err)
 			}
 		}
 		s, _ := f.srv.emptyDMSnapshot(ctx, id)
-		s.Conversations = []schema.DMConversationV1{snapshotConv(12, 41, 41), snapshotConv(13, 3, 900)}
-		return s, nil
+		s.Conversations = []schema.DMConversationV1{snapshotConv(id, f.bob.ID, 12, 41, 41), snapshotConv(id, f.bob.ID, 13, 3, 900)}
+		return personDMSnapshot{doc: s}, nil
 	}
 	c := dialPerson(t, base, f.aliceTok)
 	c.open()
@@ -380,20 +508,38 @@ func TestPersonStreamSnapshotOrdering(t *testing.T) {
 	c.expectChanged(12) // nothing reflected by the snapshot was sent
 }
 
+func TestPersonStreamMissingAccessGateDropsDMs(t *testing.T) {
+	f := newPersonFixture(t)
+	f.srv.dmSnapshotSource = func(ctx context.Context, id int64) (personDMSnapshot, error) {
+		if err := f.srv.person.publish(id, dmMessageDoc(12, 1, 1)); err != nil {
+			return personDMSnapshot{}, err
+		}
+		doc, err := f.srv.emptyDMSnapshot(ctx, id)
+		return personDMSnapshot{doc: doc}, err
+	}
+	c := dialPerson(t, wsTestServer(t, f.srv), f.aliceTok)
+	c.open()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if _, raw, err := c.conn.Read(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("read %q, error %v, want no frame", raw, err)
+	}
+}
+
 // TestPersonStreamDeliveryNeedsCurrentAccess: the rule is asked for every DM
 // frame when it is written, for the person it is written to; a frame it
 // refuses is dropped (a blocked pair gets none of the pair's frames, on any
 // socket of either person, the author's own other devices included); a
 // failing rule closes the socket rather than letting a frame through.
 func TestPersonStreamDeliveryNeedsCurrentAccess(t *testing.T) {
-	f := newRunFixture(t)
+	f := newPersonFixture(t)
 	base := wsTestServer(t, f.srv)
 	blocked := map[int64]bool{} // principal -> blocked from conversation 12
 	f.srv.dmFrameAccess = func(_ context.Context, principal, conv int64) (bool, error) {
 		if conv == 99 {
 			return false, errors.New("store down")
 		}
-		return conv != 12 || !blocked[principal], nil
+		return conv != 12 || ((principal == f.alice.ID || principal == f.bob.ID) && !blocked[principal]), nil
 	}
 	alice1, alice2, bob := dialPerson(t, base, f.aliceTok), dialPerson(t, base, f.aliceTok2), dialPerson(t, base, f.bobTok)
 	for _, c := range []*personClient{alice1, alice2, bob} {
@@ -410,11 +556,20 @@ func TestPersonStreamDeliveryNeedsCurrentAccess(t *testing.T) {
 	alice2.expectMessage(1, 1)
 	bob.expectMessage(1, 1)
 
+	carol := dialPerson(t, base, f.carolTok)
+	carol.open()
+	for _, doc := range []personDoc{dmMessageDoc(12, 1, 1), dmMessageDoc(13, 2, 1)} {
+		if err := f.srv.person.publish(f.carol.ID, doc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	carol.expectMessage(2, 1)
+
 	// A block holds: neither side is sent a frame of the pair, the author's
 	// removal of their own message included, on all of the author's sockets.
 	blocked[f.alice.ID], blocked[f.bob.ID] = true, true
 	for _, id := range []int64{f.alice.ID, f.bob.ID} {
-		for _, d := range []personDoc{dmRemovedDoc(12, 1, 2), changedDoc(12), dmMessageDoc(13, 2, 1)} {
+		for _, d := range []personDoc{dmRemovedDoc(12, 1, 2), changedDoc(id, 12), dmMessageDoc(13, 2, 1)} {
 			if err := f.srv.person.publish(id, d); err != nil {
 				t.Fatal(err)
 			}
@@ -440,7 +595,7 @@ func TestPersonStreamDeliveryNeedsCurrentAccess(t *testing.T) {
 	if ce := bob.closed(); ce.Code != websocket.StatusInternalError {
 		t.Errorf("a failed access check closed with %d %q, want 1011", ce.Code, ce.Reason)
 	}
-	if err := f.srv.person.publish(f.alice.ID, changedDoc(5)); err != nil {
+	if err := f.srv.person.publish(f.alice.ID, changedDoc(f.alice.ID, 5)); err != nil {
 		t.Fatal(err)
 	}
 	alice1.expectChanged(5)
@@ -449,7 +604,8 @@ func TestPersonStreamDeliveryNeedsCurrentAccess(t *testing.T) {
 // TestPersonStreamCarriesOnlyFramesAddressedToIt: a frame goes to the sockets
 // of the principal it was published for, all of them, and to no one else.
 func TestPersonStreamCarriesOnlyFramesAddressedToIt(t *testing.T) {
-	f := newRunFixture(t)
+	f := newPersonFixture(t)
+	f.srv.dmFrameAccess = allowPersonDMFixture
 	base := wsTestServer(t, f.srv)
 	alice1, alice2 := dialPerson(t, base, f.aliceTok), dialPerson(t, base, f.aliceTok2)
 	bob := dialPerson(t, base, f.bobTok)
@@ -457,13 +613,13 @@ func TestPersonStreamCarriesOnlyFramesAddressedToIt(t *testing.T) {
 		c.open()
 	}
 	hub := f.srv.person
-	if err := hub.publish(f.alice.ID, changedDoc(1)); err != nil {
+	if err := hub.publish(f.alice.ID, changedDoc(f.alice.ID, 1)); err != nil {
 		t.Fatal(err)
 	}
-	if err := hub.publish(f.bob.ID, changedDoc(2)); err != nil {
+	if err := hub.publish(f.bob.ID, changedDoc(f.bob.ID, 2)); err != nil {
 		t.Fatal(err)
 	}
-	if err := hub.publish(f.alice.ID, changedDoc(3)); err != nil {
+	if err := hub.publish(f.alice.ID, changedDoc(f.alice.ID, 3)); err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range []*personClient{alice1, alice2} {
@@ -474,12 +630,44 @@ func TestPersonStreamCarriesOnlyFramesAddressedToIt(t *testing.T) {
 
 	// Addressed to no one, or to no one connected: nothing breaks.
 	for _, id := range []int64{0, -1} {
-		if err := hub.publish(id, changedDoc(4)); err == nil {
+		if err := hub.publish(id, changedDoc(id, 4)); err == nil {
 			t.Errorf("publish to principal %d succeeded", id)
 		}
 	}
-	if err := hub.publish(f.carol.ID, changedDoc(5)); err != nil {
+	if err := hub.publish(f.carol.ID, changedDoc(f.carol.ID, 5)); err != nil {
 		t.Errorf("publish to a principal with no socket: %v", err)
+	}
+}
+
+func TestPersonHubRejectsMisaddressedAndUnknownChanges(t *testing.T) {
+	hub := newPersonHub()
+	alice := hub.subscribe(1, 10, "alice")
+	bob := hub.subscribe(2, 20, "bob")
+	for _, kind := range []schema.DMChangeKind{schema.DMChangeOpened, schema.DMChangeRead, schema.DMChangeState, schema.DMChangeParticipant} {
+		doc := changedDoc(bob.principalID, 12)
+		doc.Kind = kind
+		if err := hub.publish(alice.principalID, doc); err == nil {
+			t.Errorf("misaddressed %q was accepted", kind)
+		}
+		if err := hub.publish(bob.principalID, doc.DMChangedV1); err == nil {
+			t.Errorf("unbound %q was accepted", kind)
+		}
+		if err := hub.publish(bob.principalID, doc); err != nil {
+			t.Errorf("correctly addressed %q: %v", kind, err)
+		}
+	}
+	for _, kind := range []schema.DMChangeKind{"blocked", "preference_changed"} {
+		doc := changedDoc(bob.principalID, 12)
+		doc.Kind = kind
+		if err := hub.publish(bob.principalID, doc); err == nil {
+			t.Errorf("unknown %q was accepted", kind)
+		}
+	}
+	if got, _ := alice.take(); len(got) != 0 {
+		t.Errorf("Alice received %d private changes", len(got))
+	}
+	if got, _ := bob.take(); len(got) != 4 {
+		t.Errorf("Bob received %d changes, want 4", len(got))
 	}
 }
 
@@ -489,7 +677,8 @@ func TestPersonStreamCarriesOnlyFramesAddressedToIt(t *testing.T) {
 // subscribe to.
 func TestPersonStreamNeverCarriesAChannelFrame(t *testing.T) {
 	t.Run("the registry refuses channel documents", func(t *testing.T) {
-		f := newRunFixture(t)
+		f := newPersonFixture(t)
+		f.srv.dmFrameAccess = allowPersonDMFixture
 		docs := map[string]personDoc{
 			"message":           schema.MessageV2{},
 			"channels changed":  schema.ChannelsChangedV1{Schema: schema.ChannelsChangedSchemaV1},
@@ -507,13 +696,14 @@ func TestPersonStreamNeverCarriesAChannelFrame(t *testing.T) {
 				t.Errorf("%s: publish = %v, want errPersonFrameKind", name, err)
 			}
 		}
-		if err := f.srv.person.publish(f.alice.ID, schema.DMChangedV1{}); err == nil || errors.Is(err, errPersonFrameKind) {
+		if err := f.srv.person.publish(f.alice.ID, readerDMChange{}); err == nil || errors.Is(err, errPersonFrameKind) {
 			t.Errorf("an invalid DM frame: publish = %v, want its validation error", err)
 		}
 	})
 
 	t.Run("channel activity does not reach the socket", func(t *testing.T) {
-		f := newRunFixture(t)
+		f := newPersonFixture(t)
+		f.srv.dmFrameAccess = allowPersonDMFixture
 		base := wsTestServer(t, f.srv)
 		person := dialPerson(t, base, f.aliceTok)
 		person.open()
@@ -540,7 +730,7 @@ func TestPersonStreamNeverCarriesAChannelFrame(t *testing.T) {
 		// on the person socket.
 		ch := dialEvents(t, base, "/v1/events/ws?channel=general", f.aliceTok)
 		ch.next()
-		if err := f.srv.person.publish(f.alice.ID, changedDoc(77)); err != nil {
+		if err := f.srv.person.publish(f.alice.ID, changedDoc(f.alice.ID, 77)); err != nil {
 			t.Fatal(err)
 		}
 		person.expectChanged(77)
@@ -586,7 +776,8 @@ func TestPersonStreamClosesWhenAccessIsLost(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			f := newRunFixture(t)
+			f := newPersonFixture(t)
+			f.srv.dmFrameAccess = allowPersonDMFixture
 			f.srv.credRecheckInterval = 20 * time.Millisecond // nothing sleeps: the read returns on close
 			base := wsTestServer(t, f.srv)
 			alice, bob := dialPerson(t, base, f.aliceTok), dialPerson(t, base, f.bobTok)
@@ -598,7 +789,7 @@ func TestPersonStreamClosesWhenAccessIsLost(t *testing.T) {
 			if ce.Code != websocket.StatusPolicyViolation || ce.Reason != reasonCredentialInvalid {
 				t.Errorf("bob's socket closed with %d %q, want 1008 %q", ce.Code, ce.Reason, reasonCredentialInvalid)
 			}
-			if err := f.srv.person.publish(f.alice.ID, changedDoc(1)); err != nil {
+			if err := f.srv.person.publish(f.alice.ID, changedDoc(f.alice.ID, 1)); err != nil {
 				t.Fatal(err)
 			}
 			alice.expectChanged(1)
@@ -606,7 +797,8 @@ func TestPersonStreamClosesWhenAccessIsLost(t *testing.T) {
 	}
 
 	t.Run("one credential revoked leaves the person's other socket", func(t *testing.T) {
-		f := newRunFixture(t)
+		f := newPersonFixture(t)
+		f.srv.dmFrameAccess = allowPersonDMFixture
 		base := wsTestServer(t, f.srv)
 		one, two := dialPerson(t, base, f.aliceTok), dialPerson(t, base, f.aliceTok2)
 		one.open()
@@ -618,25 +810,36 @@ func TestPersonStreamClosesWhenAccessIsLost(t *testing.T) {
 		if ce := two.closed(); ce.Reason != reasonCredentialInvalid {
 			t.Errorf("revoked credential's socket closed with %q", ce.Reason)
 		}
-		if err := f.srv.person.publish(f.alice.ID, changedDoc(1)); err != nil {
+		if err := f.srv.person.publish(f.alice.ID, changedDoc(f.alice.ID, 1)); err != nil {
 			t.Fatal(err)
 		}
 		one.expectChanged(1)
 	})
 
-	t.Run("a frame queued before a revoke is not sent after it", func(t *testing.T) {
-		f := newRunFixture(t)
-		base := wsTestServer(t, f.srv)
-		bob := dialPerson(t, base, f.bobTok)
+	t.Run("revoked during the access check for a pending frame", func(t *testing.T) {
+		f := newPersonFixture(t)
+		credID := f.credentialID(t, f.bobTok)
+		f.srv.dmFrameAccess = func(ctx context.Context, _, conv int64) (bool, error) {
+			if conv == 2 {
+				// No hub drop runs. Only the check immediately before writing
+				// can catch the revoke, after an earlier frame in the batch.
+				err := f.srv.store.RevokeCredential(ctx, "system", credID)
+				return err == nil, err
+			}
+			return true, nil
+		}
+		f.srv.dmSnapshotSource = func(ctx context.Context, id int64) (personDMSnapshot, error) {
+			for _, conv := range []int64{1, 2} {
+				if err := f.srv.person.publish(id, dmMessageDoc(conv, conv, 1)); err != nil {
+					return personDMSnapshot{}, err
+				}
+			}
+			doc, err := f.srv.emptyDMSnapshot(ctx, id)
+			return personDMSnapshot{doc: doc}, err
+		}
+		bob := dialPerson(t, wsTestServer(t, f.srv), f.bobTok)
 		bob.open()
-		// Behind the server's back, so no drop has run; the batch re-check
-		// is what must refuse.
-		if err := f.srv.store.RevokeCredential(context.Background(), "system", f.credentialID(t, f.bobTok)); err != nil {
-			t.Fatal(err)
-		}
-		if err := f.srv.person.publish(f.bob.ID, changedDoc(1)); err != nil {
-			t.Fatal(err)
-		}
+		bob.expectMessage(1, 1)
 		if ce := bob.closed(); ce.Reason != reasonCredentialInvalid {
 			t.Errorf("closed with %q", ce.Reason)
 		}
@@ -650,7 +853,7 @@ func TestPersonHub(t *testing.T) {
 		slow := h.subscribe(1, 10, "slow")
 		other := h.subscribe(1, 11, "other")
 		for i := 0; i < personQueueMax; i++ {
-			if err := h.publish(1, changedDoc(int64(i+1))); err != nil {
+			if err := h.publish(1, changedDoc(1, int64(i+1))); err != nil {
 				t.Fatal(err)
 			}
 			if i == 0 {
@@ -662,7 +865,7 @@ func TestPersonHub(t *testing.T) {
 			t.Fatal("dropped at the limit, not past it")
 		default:
 		}
-		if err := h.publish(1, changedDoc(1)); err != nil {
+		if err := h.publish(1, changedDoc(1, 1)); err != nil {
 			t.Fatal(err)
 		}
 		select {
