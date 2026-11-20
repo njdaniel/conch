@@ -261,8 +261,8 @@ export class ProfilesService {
     const { account } = checked.value;
     const bound = profile.principal;
     if (bound !== null && account.id === bound.id && account.lasting && !account.guest) return token;
-    this.#deps.log('conch-desktop: a stored sign-in did not match the account it is bound to; refused');
-    this.#deps.log(`conch-desktop: the stored sign-in of profile ${profile.id} is not the account it is bound to; refused`, { ring: false });
+    this.#deps.log('conch-desktop: a stored sign-in did not match the account it is bound to; refused', { ring: true });
+    this.#deps.log(`conch-desktop: the stored sign-in of profile ${profile.id} is not the account it is bound to; refused`);
     this.#notice = 'account-mismatch';
     this.#signedOut.add(profile.id);
     void within(this.#deps.revokeStored(profile.origin, token), this.#deps.revokeBoundMs ?? REVOKE_BOUND_MS);
@@ -283,8 +283,8 @@ export class ProfilesService {
       this.#signedOut.delete(id);
       return true;
     }
-    this.#deps.log('conch-desktop: could not delete a profile vault entry');
-    this.#deps.log(`conch-desktop: could not delete the vault entry of profile ${id}`, { ring: false });
+    this.#deps.log('conch-desktop: could not delete a profile vault entry', { ring: true });
+    this.#deps.log(`conch-desktop: could not delete the vault entry of profile ${id}`);
     return false;
   }
 
@@ -346,8 +346,8 @@ export class ProfilesService {
     try {
       return await this.#deps.store.setShareSound(id, choice, () => this.#switcher.current === activation && this.#switcher.generation === generation);
     } catch {
-      this.#deps.log('conch-desktop: could not keep a profile share sound choice');
-      this.#deps.log(`conch-desktop: could not keep the share sound choice of profile ${id}`, { ring: false });
+      this.#deps.log('conch-desktop: could not keep a profile share sound choice', { ring: true });
+      this.#deps.log(`conch-desktop: could not keep the share sound choice of profile ${id}`);
       return false;
     }
   }
@@ -484,8 +484,8 @@ export class ProfilesService {
     const bound = await store.bind(id, { id: account.id, name: account.name } satisfies Principal).catch(() => null);
     if (bound === null || !bound.ok) {
       const reason = bound === null ? 'not saved' : bound.reason;
-      this.#deps.log(`conch-desktop: a profile sign-in was refused: ${reason}`);
-      this.#deps.log(`conch-desktop: a sign-in on profile ${id} was refused: ${reason}`, { ring: false });
+      this.#deps.log(`conch-desktop: a profile sign-in was refused: ${reason}`, { ring: true });
+      this.#deps.log(`conch-desktop: a sign-in on profile ${id} was refused: ${reason}`);
       if (this.#switcher.current === current) {
         await current.signOut();
         // The client only sees a refusal it does not know; this says why.

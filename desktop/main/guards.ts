@@ -156,8 +156,8 @@ export function guardSession(ses: Session, deps: GuardDeps): void {
   // outside this filter and the CSP's connect-src alike.
   ses.webRequest.onBeforeRequest((details, callback) => {
     if (foreign(details.url) && !livekitAllowed(details.url, deps.liveOrigin?.() ?? null)) {
-      deps.log('conch-desktop: blocked a request');
-      deps.log(`conch-desktop: blocked a request to ${describe(details.url)}`, { ring: false });
+      deps.log('conch-desktop: blocked a request', { ring: true });
+      deps.log(`conch-desktop: blocked a request to ${describe(details.url)}`);
       callback({ cancel: true });
       return;
     }

@@ -133,13 +133,13 @@ export async function handle(request: { readonly url: string; readonly method: s
   try {
     bytes = await deps.readFile(found.path);
   } catch {
-    deps.log('conch-desktop: a file listed in the manifest could not be read');
-    deps.log(`conch-desktop: ${found.path} is listed in the manifest but could not be read`, { ring: false });
+    deps.log('conch-desktop: a file listed in the manifest could not be read', { ring: true });
+    deps.log(`conch-desktop: ${found.path} is listed in the manifest but could not be read`);
     return text(500, 'internal error');
   }
   if (createHash('sha256').update(bytes).digest('hex') !== found.entry.sha256) {
-    deps.log('conch-desktop: a file no longer has the hash the manifest lists');
-    deps.log(`conch-desktop: ${found.path} no longer has the hash the manifest lists`, { ring: false });
+    deps.log('conch-desktop: a file no longer has the hash the manifest lists', { ring: true });
+    deps.log(`conch-desktop: ${found.path} no longer has the hash the manifest lists`);
     return text(500, 'internal error');
   }
   return new Response(request.method === 'HEAD' ? null : bytes, { status: 200, headers: headers(found.entry.type) });

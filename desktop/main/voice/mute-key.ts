@@ -1,5 +1,6 @@
 // The input-only helper reuses evdev and Windows Raw Input. It reports only
 // presses of the configured mute binding. Main decides what each press does.
+import type { MainLog } from '../diagnostics.ts';
 import { muteKeyEventV1, type MuteKeyEventV1 } from '../../../web/src/schema/generated.ts';
 import { decodeObject, LineSplitter } from './protocol.ts';
 import { defaultSpawn, findHelper, oneShotEnv, spawnHelper } from './spawn.ts';
@@ -7,7 +8,7 @@ import { defaultSpawn, findHelper, oneShotEnv, spawnHelper } from './spawn.ts';
 export function watchMuteKey(
   resources: string,
   env: NodeJS.ProcessEnv,
-  log: (line: string) => void,
+  log: MainLog,
   configDir: string,
   onPress: () => void,
 ): () => void {

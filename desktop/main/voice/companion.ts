@@ -54,6 +54,7 @@
 //    which ends the share (Q-D4-2 on #1578).
 //
 // No log line carries a token, a channel, a room or a URL.
+import type { MainLog } from '../diagnostics.ts';
 import type {
   CompanionEndReason,
   CompanionEvent,
@@ -102,7 +103,7 @@ export interface CompanionDeps {
   // Sends the event to the owned web contents, if the given document still
   // shows there; else nothing.
   readonly tell: (document: number, event: CompanionEvent) => void;
-  readonly log: (line: string) => void;
+  readonly log: MainLog;
   // Whether the screen is locked (Lifecycle.locked, issue #1588): no grant
   // is given then. Required: a caller that leaves it out would fail open
   // (tests pass `() => false`).

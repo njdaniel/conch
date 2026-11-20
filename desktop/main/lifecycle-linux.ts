@@ -32,6 +32,7 @@
 // A watcher that has given up keeps trying, slowly (SLOW_RETRY_MS), until
 // stop(); and it drops its logind source from the rules, so a lock it saw
 // last cannot hold the app locked after it can no longer see the unlock.
+import type { MainLog } from './diagnostics.ts';
 import { stat } from 'node:fs/promises';
 
 import type { Lifecycle } from './lifecycle.ts';
@@ -232,7 +233,7 @@ export interface WatcherDeps {
   readonly rules: Pick<Lifecycle, 'lockSignal' | 'dropSource' | 'observe' | 'suspend' | 'resume'>;
   readonly powerMonitor: PowerMonitorLike;
   readonly pid: number;
-  readonly log: (line: string) => void;
+  readonly log: MainLog;
   // Test seams; the defaults are the real ones.
   readonly findGdbus?: () => Promise<string | null>;
   readonly run?: (file: string, args: readonly string[], env: Readonly<Record<string, string>>) => Promise<RunResult | null>;

@@ -1,5 +1,6 @@
 // The voice/share renderer sends a fixed code over the owned document's bridge.
 // Main supplies the severity and message without reading the renderer console.
+import type { MainLog } from '../diagnostics.ts';
 import type { VoiceDiagnostic } from '../../../web/src/platform/desktop/bridge.ts';
 
 const lines = {
@@ -16,7 +17,7 @@ export function isVoiceDiagnostic(value: unknown): value is VoiceDiagnostic {
   return typeof value === 'string' && Object.hasOwn(lines, value);
 }
 
-export function voiceDiagnosticLog(log: (line: string) => void, now: () => number): (diagnostic: VoiceDiagnostic) => void {
+export function voiceDiagnosticLog(log: MainLog, now: () => number): (diagnostic: VoiceDiagnostic) => void {
   // The IPC registry lives for the whole app, across profile/window changes.
   const last = new Map<VoiceDiagnostic, number>();
   return (diagnostic) => {
@@ -24,6 +25,6 @@ export function voiceDiagnosticLog(log: (line: string) => void, now: () => numbe
     const previous = last.get(diagnostic);
     if (previous !== undefined && at - previous < 10_000) return;
     last.set(diagnostic, at);
-    log(`conch-desktop: voice renderer ${lines[diagnostic]}`);
+    log(`conch-desktop: voice renderer ${lines[diagnostic]}`, { ring: true });
   };
 }

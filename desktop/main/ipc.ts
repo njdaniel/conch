@@ -15,6 +15,7 @@
 // (registerNotificationSupport), which Electron's ipcMain.on answers through
 // event.returnValue. notificationSupported() runs the same caller, rate and
 // shape checks and returns an Envelope too.
+import type { MainLog } from './diagnostics.ts';
 import { windowsKey } from '../../web/src/platform/desktop/windows-keys.ts';
 import type { IpcMain } from 'electron';
 
@@ -102,7 +103,7 @@ export interface IpcDeps {
   // every call is refused (the page cannot turn the switch on).
   readonly shareSound?: ShareSoundApi;
   readonly now: () => number;
-  readonly log: (line: string) => void;
+  readonly log: MainLog;
 }
 
 export type ProfilesApi = Pick<
@@ -939,7 +940,14 @@ export class Ipc {
 
   #refuse(reason: Refusal, log = true): Envelope {
     this.#refusals++;
-    if (log) this.#deps.log(`conch-desktop: refused an IPC call (${reason}); ${String(this.#refusals)} so far`);
+    if (log) {
+      // Sample exported refusals so a burst cannot crowd out recent history.
+      if (this.#refusals === 1 || this.#refusals % 100 === 0) {
+        this.#deps.log(`conch-desktop: refused an IPC call (${reason}); ${String(this.#refusals)} so far`, { ring: true });
+      } else {
+        this.#deps.log(`conch-desktop: refused an IPC call (${reason}); ${String(this.#refusals)} so far`);
+      }
+    }
     return { ok: false, kind: 'refused' };
   }
 

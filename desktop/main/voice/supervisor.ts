@@ -473,7 +473,7 @@ export class Supervisor {
     try {
       encodeCommand(startCommand(SCHEMA_V2, 1, params));
     } catch {
-      this.log('voice: the start is not one the helper could accept');
+      this.log('voice: the start is not one the helper could accept', { ring: true });
       return { status: 'failed', generation, reason: 'invalid-start' };
     }
     const windows = this.platform === 'win32';
@@ -488,16 +488,14 @@ export class Supervisor {
       } else {
         const runtime = await runtimeDir(this.deps.env, this.deps.endpoint);
         dir = await profileDir(runtime, req.profileId, this.deps.endpoint);
-        await sweep(dir, (l) => {
-          this.log(l);
-        });
+        await sweep(dir, this.deps.log);
       }
     } catch (err) {
       return this.unavailable(err);
     }
     let listening: Listening;
     try {
-      const deps = { ...this.deps.endpoint, log: (l: string) => { this.log(l); } };
+      const deps = { ...this.deps.endpoint, log: this.deps.log };
       listening = windows ? await listenPipe(deps) : await listen(dir, deps);
     } catch (err) {
       return this.unavailable(err);
@@ -525,7 +523,7 @@ export class Supervisor {
     const spawnedAt = Date.now();
     run.child = child;
     this.watchChild(run, child);
-    this.log(`voice: helper ${String(generation)} spawned`);
+    this.log(`voice: helper ${String(generation)} spawned`, { ring: true });
 
     // Attach: the one connection, its first line within the hello's
     // deadline, the nonce compared in constant time.
@@ -547,7 +545,7 @@ export class Supervisor {
       return this.settle(run);
     }
     run.socket = socket;
-    this.log(`voice: helper ${String(generation)} attached`);
+    this.log(`voice: helper ${String(generation)} attached`, { ring: true });
 
     const hello = new Promise<VoiceControlHelloV1 | LossReason | 'timeout'>((resolve) => {
       const timer = setTimeout(() => {
@@ -577,14 +575,14 @@ export class Supervisor {
     if (version === null) {
       // Nothing is written: the helper, never started, exits on the end of
       // its standard input having opened nothing.
-      this.log(`voice: helper ${String(generation)} offers no version this app speaks`);
+      this.log(`voice: helper ${String(generation)} offers no version this app speaks`, { ring: true });
       if (run.outcome === null) run.outcome = { status: 'failed', generation, reason: 'version-mismatch' };
       void this.stopRun(run, false);
       return this.settle(run);
     }
     run.version = version;
     run.tracker.version = version;
-    this.log(`voice: helper ${String(generation)} speaks ${version}`);
+    this.log(`voice: helper ${String(generation)} speaks ${version}`, { ring: true });
 
     if (run.stopping) return run.outcome ?? this.stateValue;
     const start = startCommand(version, run.nextId++, params);
@@ -614,15 +612,15 @@ export class Supervisor {
   private unavailable(err: unknown): VoiceState {
     if (err instanceof HelperError || err instanceof EndpointError) {
       const reason = err.reason as HelperRefusal | EndpointRefusal;
-      this.log(`voice: unavailable: ${reason}`);
+      this.log(`voice: unavailable: ${reason}`, { ring: true });
       // A HelperError can name the folder or file that failed. Keep that
       // path in main's local log.
-      if (err instanceof HelperError) this.log(`voice: unavailable: ${reason}: ${printable(err.why, [], false)}`, { ring: false });
+      if (err instanceof HelperError) this.log(`voice: unavailable: ${reason}: ${printable(err.why, [], false)}`);
       const next: VoiceState = { status: 'unavailable', reason, ...(err instanceof HelperError && err.trustCause !== undefined ? { cause: err.trustCause } : {}) };
       this.set(next);
       return next;
     }
-    this.log('voice: unavailable: the runtime directory could not be prepared');
+    this.log('voice: unavailable: the runtime directory could not be prepared', { ring: true });
     const next: VoiceState = { status: 'unavailable', reason: 'profile-dir-unsafe' };
     this.set(next);
     return next;
@@ -667,12 +665,12 @@ export class Supervisor {
     const key = `${view.phase}:${reason}:${detail ?? ''}`;
     if (run.noted !== key) {
       run.noted = key;
-      const summary = `voice: helper ${String(run.generation)} ${finalPhase(view.phase) ? 'ended' : view.phase}: ${reason}`;
+      const phase = finalPhase(view.phase) ? 'ended' : view.phase;
       if (detail === undefined) {
-        this.log(`${summary}: no detail from the helper`);
+        this.log(`voice: helper ${String(run.generation)} ${phase}: ${reason}: no detail from the helper`, { ring: true });
       } else {
-        this.log(summary);
-        this.log(`${summary}: ${detail}`, { ring: false });
+        this.log(`voice: helper ${String(run.generation)} ${phase}: ${reason}`, { ring: true });
+        this.log(`voice: helper ${String(run.generation)} ${phase}: ${reason}: ${detail}`);
       }
     }
     return detail;
@@ -712,7 +710,8 @@ export class Supervisor {
   private exitedRun(run: Run, code: number | null, signal: NodeJS.Signals | null): void {
     if (run.exited) return;
     run.exited = true;
-    this.log(`voice: helper ${String(run.generation)} exited (${signal === null ? `code ${String(code)}` : signal})`);
+    const exitStatus = signal ?? `code ${String(code)}`;
+    this.log(`voice: helper ${String(run.generation)} exited (${exitStatus})`, { ring: true });
     this.logStderr(run);
     run.listening?.close();
     run.socket?.destroy();
@@ -738,8 +737,8 @@ export class Supervisor {
     const wrong = o === null ? !run.stopping : o.status === 'lost' || o.status === 'failed' || (o.status === 'ended' && o.helper.phase === 'failed');
     if (!wrong) return;
     const prefix = `voice: helper ${String(run.generation)} stderr`;
-    if (run.stderr.lines.length > 0) this.log(`voice: helper ${String(run.generation)} omitted ${String(run.stderr.lines.length)} stderr line(s) from diagnostics`);
-    for (const line of run.stderr.lines) this.log(`${prefix}: ${line}`, { ring: false });
+    if (run.stderr.lines.length > 0) this.log(`voice: helper ${String(run.generation)} omitted ${String(run.stderr.lines.length)} stderr line(s) from diagnostics`, { ring: true });
+    for (const line of run.stderr.lines) this.log(`${prefix}: ${line}`);
   }
 
   private readEvents(run: Run, socket: Socket, rest: Buffer): void {
@@ -782,7 +781,7 @@ export class Supervisor {
       case 'unknown':
         return;
       case 'protocol_error':
-        this.log(`voice: helper ${String(run.generation)} reported ${ev.error.code}`);
+        this.log(`voice: helper ${String(run.generation)} reported ${ev.error.code}`, { ring: true });
         return;
       case 'state': {
         const previous = run.view;
@@ -791,7 +790,7 @@ export class Supervisor {
         // helper stderr are unnecessary to distinguish a removal from a stall.
         const { ptt, pttProblem, talkMode } = run.view;
         if (run.windows && ptt === 'lost' && (previous?.ptt !== ptt || previous.pttProblem !== pttProblem)) {
-          this.log(`voice: Windows talk key lost (${pttProblem ?? 'no reason'}, mode ${talkMode ?? 'unknown'})`);
+          this.log(`voice: Windows talk key lost (${pttProblem ?? 'no reason'}, mode ${talkMode ?? 'unknown'})`, { ring: true });
         }
         if (run.outcome === null) this.publish(run);
         break;
@@ -831,7 +830,7 @@ export class Supervisor {
       const timer = setTimeout(() => {
         run.waiters.delete(c.id);
         resolve({ ok: false, error: 'lost' });
-        this.log(`voice: helper ${String(run.generation)} did not answer ${c.kind} in time`);
+        this.log(`voice: helper ${String(run.generation)} did not answer ${c.kind} in time`, { ring: true });
         this.lose(run, 'ack-timeout');
       }, this.timings.ackTimeoutMs);
       run.waiters.set(c.id, { resolve, timer });
@@ -889,7 +888,7 @@ export class Supervisor {
   private lose(run: Run, reason: LossReason): void {
     if (run.outcome === null && !run.ownerStopped) {
       run.outcome = { status: 'lost', generation: run.generation, reason };
-      this.log(`voice: helper ${String(run.generation)} lost: ${reason}`);
+      this.log(`voice: helper ${String(run.generation)} lost: ${reason}`, { ring: true });
       if (this.current === run) this.set(run.outcome);
     }
     run.broken(reason);
@@ -941,13 +940,13 @@ export class Supervisor {
       const windows = this.platform === 'win32';
       const term = setTimeout(() => {
         if (!run.exited && !windows) {
-          this.log(`voice: helper ${String(run.generation)} still running; SIGTERM`);
+          this.log(`voice: helper ${String(run.generation)} still running; SIGTERM`, { ring: true });
           child.kill('SIGTERM');
         }
       }, this.timings.termAfterMs);
       const kill = setTimeout(() => {
         if (!run.exited) {
-          this.log(`voice: helper ${String(run.generation)} still running; ${windows ? 'killing it' : 'SIGKILL'}`);
+          this.log(`voice: helper ${String(run.generation)} still running; ${windows ? 'killing it' : 'SIGKILL'}`, { ring: true });
           if (windows) child.kill();
           else child.kill('SIGKILL');
         }
@@ -955,7 +954,7 @@ export class Supervisor {
       await run.reaped;
       clearTimeout(term);
       clearTimeout(kill);
-      this.log(`voice: helper ${String(run.generation)} reaped`);
+      this.log(`voice: helper ${String(run.generation)} reaped`, { ring: true });
     })();
     return run.stopped;
   }

@@ -108,6 +108,8 @@ export interface OneShotDeps {
   readonly drainGraceMs?: number;
 }
 
+type OneShotOperation = 'devices' | 'config set' | 'config set-mute-binding';
+
 type Ran = { readonly ok: true; readonly stdout: Buffer } | { readonly ok: false; readonly error: VoiceOneShotError };
 
 interface Active {
@@ -141,8 +143,8 @@ export class OneShot {
     if (!ran.ok) return ran;
     const parsed = parseVoiceDevices(ran.stdout);
     if (!parsed.ok) {
-      this.deps.log('voice: devices: the list was refused');
-      this.deps.log(`voice: devices: the list was refused: ${parsed.detail}`, { ring: false });
+      this.deps.log('voice: devices: the list was refused', { ring: true });
+      this.deps.log(`voice: devices: the list was refused: ${parsed.detail}`);
       return { ok: false, error: 'bad-output' };
     }
     const d = parsed.devices;
@@ -188,7 +190,7 @@ export class OneShot {
     await run.finished;
   }
 
-  async #run(configDir: string, args: readonly string[], what: string, quiet = false): Promise<Ran> {
+  async #run(configDir: string, args: readonly string[], what: OneShotOperation, quiet = false): Promise<Ran> {
     if (this.#active !== null) return { ok: false, error: 'busy' };
     // Taken before the first await: two calls cannot both pass the check.
     let release: () => void = () => undefined;
@@ -208,14 +210,14 @@ export class OneShot {
     }
   }
 
-  async #exec(run: Active, configDir: string, args: readonly string[], what: string, quiet: boolean): Promise<Ran> {
+  async #exec(run: Active, configDir: string, args: readonly string[], what: OneShotOperation, quiet: boolean): Promise<Ran> {
     let executable: string;
     try {
       executable = await findHelper(this.deps.resources, this.deps.find);
     } catch (err) {
       if (err instanceof HelperError) {
-        this.deps.log(`voice: ${what}: ${err.reason}`);
-        this.deps.log(`voice: ${what}: ${err.message}`, { ring: false });
+        this.deps.log(`voice: ${what}: ${err.reason}`, { ring: true });
+        this.deps.log(`voice: ${what}: ${err.message}`);
         return { ok: false, error: err.reason };
       }
       return { ok: false, error: 'untrusted' };
@@ -225,13 +227,13 @@ export class OneShot {
     try {
       child = (this.deps.spawn ?? defaultOneShotSpawn)(executable, args, oneShotSpawnOptions(oneShotEnv(this.deps.env, configDir, this.deps.find?.platform), this.deps.find?.platform));
     } catch {
-      this.deps.log(`voice: ${what}: the helper could not be started`);
+      this.deps.log(`voice: ${what}: the helper could not be started`, { ring: true });
       return { ok: false, error: 'spawn-failed' };
     }
     return this.#await(run, child, what, quiet);
   }
 
-  #await(run: Active, child: OneShotChild, what: string, quiet: boolean): Promise<Ran> {
+  #await(run: Active, child: OneShotChild, what: OneShotOperation, quiet: boolean): Promise<Ran> {
     const timeoutMs = this.deps.timeoutMs ?? ONE_SHOT_TIMEOUT_MS;
     const graceMs = this.deps.drainGraceMs ?? DRAIN_GRACE_MS;
     return new Promise<Ran>((resolve) => {
@@ -270,10 +272,10 @@ export class OneShot {
         child.stdout.destroy();
         child.stderr.destroy();
         const line = quiet ? '' : lastLine(tail);
-        const log = (reason: string): void => {
-          const summary = `voice: ${what}: ${reason}`;
-          this.deps.log(summary);
-          if (line !== '') this.deps.log(`${summary}: ${line}`, { ring: false });
+        const log = (outcome: VoiceOneShotError, code?: number): void => {
+          const exitNote = code === undefined ? '' : ` (exit status ${String(code)})`;
+          this.deps.log(`voice: ${what}: ${outcome}${exitNote}`, { ring: true });
+          if (line !== '') this.deps.log(`voice: ${what}: ${outcome}${exitNote}: ${line}`);
         };
         if (stopped !== null) {
           log(stopped);
@@ -281,10 +283,10 @@ export class OneShot {
         } else if (exit?.code === 0) {
           resolve({ ok: true, stdout: Buffer.concat(chunks) });
         } else if (exit?.code === USAGE_EXIT) {
-          log('unsupported (exit status 2)');
+          log('unsupported', USAGE_EXIT);
           resolve({ ok: false, error: 'unsupported' });
         } else {
-          log(exit?.code === null || exit === null ? 'failed' : `failed (exit status ${String(exit.code)})`);
+          log('failed', exit?.code ?? undefined);
           resolve({ ok: false, error: 'failed' });
         }
       };
