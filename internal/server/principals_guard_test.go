@@ -179,7 +179,7 @@ var principalReads = []principalRead{
 	{"store/sign_in_links.go", "Store.CreateSignInLink", 1, readOwnOrInternal},
 	{"store/sign_in_links.go", "liveSignInLinkTx", 1, readOwnOrInternal},
 	{"store/sign_in_links.go", "signInLinkCredentialLifetimeTx", 1, readOwnOrInternal},
-	{"store/voice.go", "Store.InvalidVoiceRooms", 1, readOperatorOrMaker},
+	{"store/voice.go", "Store.invalidVoiceRooms", 1, readOperatorOrMaker},
 	{"store/voice_permission.go", "Store.SetVoiceAllowed", 2, readOperatorOrMaker},
 }
 
