@@ -24,6 +24,7 @@
 // a pasted link, or a message for a refusal. Nothing is contacted, added or
 // switched by a URL. A refused scheme link yields only its refusal reason,
 // and a flag is never read as a link. argv is never logged.
+import type { MainLog } from './diagnostics.ts';
 import { randomBytes } from 'node:crypto';
 
 import type { DocumentGate } from './document.ts';
@@ -226,7 +227,7 @@ export interface InvitesDeps {
   readonly voiceRunning: () => boolean;
   readonly now: () => number;
   // A fixed event. Never a link, a code or an origin.
-  readonly log: (line: string) => void;
+  readonly log: MainLog;
   readonly newHandle?: () => string;
 }
 

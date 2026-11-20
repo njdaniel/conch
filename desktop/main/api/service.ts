@@ -8,6 +8,7 @@
 // token the answer holds, check it with whoami under a new identity, and hand
 // back the account. A credential that cannot be checked is revoked (best
 // effort) and forgotten.
+import type { MainLog } from '../diagnostics.ts';
 import type {
   BridgeReply,
   BridgeRequest,
@@ -35,7 +36,7 @@ export interface ServiceDeps {
   readonly session: Session;
   readonly now: () => number;
   // One line; never a body, a header or a credential.
-  readonly log: (line: string) => void;
+  readonly log: MainLog;
   // Told when an answer of an operation was not the document the table
   // promises (issue #946: shown as an incompatibility, not a network error).
   readonly onInvalid?: (op: OperationId) => void;

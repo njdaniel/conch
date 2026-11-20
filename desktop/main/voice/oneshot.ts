@@ -25,6 +25,7 @@
 //   - a run past ONE_SHOT_TIMEOUT_MS is SIGKILLed and reaped;
 //   - one run at a time: a second is refused 'busy', and cancel() (the
 //     profile-switch media hook) kills the one running and waits for it.
+import type { MainLog } from '../diagnostics.ts';
 import { isWindowsBinding } from '../../../web/src/platform/desktop/windows-keys.ts';
 import { VOICE_DEVICES_MAX_BYTES, voiceControlTalkMode } from '../../../web/src/schema/generated.ts';
 import type { NativeVoiceDevicesResult, VoiceBindingKey, VoiceDeviceKey, VoiceOneShotError, VoiceSaveResult } from '../../../web/src/platform/desktop/bridge.ts';
@@ -40,7 +41,7 @@ export const ONE_SHOT_TIMEOUT_MS = 10_000;
 // it started may hold a write end) before they are closed from our side.
 const DRAIN_GRACE_MS = 500;
 
-// The most of standard error kept, and shown in the log.
+// The most of standard error kept for the local log.
 const STDERR_TAIL_BYTES = 1024;
 const STDERR_LINE_CHARS = 160;
 
@@ -48,11 +49,11 @@ const STDERR_LINE_CHARS = 160;
 const USAGE_EXIT = 2;
 
 // The keys `config set` is given: the page's own choices (the devices and the
-// talk mode) and, from the talk-key setup alone, the key device and the talk
-// key (issue #1381). The page cannot name the latter: see PAGE_SAVE_KEYS.
+// talk mode) and, from key setup alone, the key device and talk or mute
+// binding (#1381, #2056). The page cannot name the latter: see PAGE_SAVE_KEYS.
 export type VoiceSaveKey = VoiceDeviceKey | VoiceBindingKey;
 export const PAGE_SAVE_KEYS: readonly VoiceDeviceKey[] = ['audio.input', 'audio.output', 'audio.talk_mode'];
-export const SAVE_KEYS: readonly VoiceSaveKey[] = [...PAGE_SAVE_KEYS, 'keys.device', 'keys.talk'];
+export const SAVE_KEYS: readonly VoiceSaveKey[] = [...PAGE_SAVE_KEYS, 'keys.device', 'keys.talk', 'keys.mute'];
 
 // The highest key code conch-voice takes for keys.talk.
 export const MAX_KEY_CODE = 767;
@@ -80,15 +81,16 @@ export function keyCodeText(code: unknown): string | null {
 // mark, backslash, control character or line separator (the device list's own
 // rule); for the talk mode, a word of its vocabulary; for keys.device, the
 // by-id path of a name fit for a udev rule (stricter than the helper, which
-// takes any clean path under /dev/input/); for keys.talk, a canonical decimal
+// takes any clean path under /dev/input/); for keys.talk and keys.mute, a canonical decimal
 // code from 1 to 767, or the closed Windows grammar (the helper also takes
 // KEY_* names on Linux). It is checked here,
 // in the IPC layer and again by the service, before anything is passed.
 export function saveValueFits(key: unknown, value: unknown): value is string {
   if (!isSaveKey(key) || typeof value !== 'string') return false;
   if (key === 'audio.talk_mode') return voiceControlTalkMode(value).length === 0;
-  if (key === 'keys.talk' && isWindowsBinding(value)) return true;
-  if (key === 'keys.talk') return /^[1-9]\d{0,2}$/u.test(value) && keyCodeText(Number(value)) === value;
+  if (key === 'keys.talk' || key === 'keys.mute') {
+    return isWindowsBinding(value) || (/^[1-9]\d{0,2}$/u.test(value) && keyCodeText(Number(value)) === value);
+  }
   if (key === 'keys.device') return value.startsWith(`${BY_ID_DIR}/`) && value.length <= BY_ID_DIR.length + 1 + 200 && fitForARule(value.slice(BY_ID_DIR.length + 1));
   return value === DEFAULT_DEVICE || (validDeviceName(value) && !NO_SEPARATOR.test(value));
 }
@@ -98,13 +100,15 @@ export interface OneShotDeps {
   readonly resources: string;
   // main's environment, read only for the allowlisted names.
   readonly env: NodeJS.ProcessEnv;
-  readonly log: (line: string) => void;
+  readonly log: MainLog;
   // Test seams.
   readonly spawn?: OneShotSpawnFn;
   readonly find?: FindDeps;
   readonly timeoutMs?: number;
   readonly drainGraceMs?: number;
 }
+
+type OneShotOperation = 'devices' | 'config set' | 'config set-mute-binding';
 
 type Ran = { readonly ok: true; readonly stdout: Buffer } | { readonly ok: false; readonly error: VoiceOneShotError };
 
@@ -118,7 +122,7 @@ interface Active {
 
 // lastLine is the last line of standard error that says something, cut to
 // printable ASCII: it is device-supplied or the helper's own text, and goes to
-// the log alone.
+// the local log alone.
 export function lastLine(tail: string): string {
   const lines = tail.split(/[\r\n]+/u);
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -139,6 +143,7 @@ export class OneShot {
     if (!ran.ok) return ran;
     const parsed = parseVoiceDevices(ran.stdout);
     if (!parsed.ok) {
+      this.deps.log('voice: devices: the list was refused', { ring: true });
       this.deps.log(`voice: devices: the list was refused: ${parsed.detail}`);
       return { ok: false, error: 'bad-output' };
     }
@@ -169,6 +174,13 @@ export class OneShot {
     return ran.ok ? { ok: true } : ran;
   }
 
+  // The helper validates both edits before replacing voice.toml once.
+  async saveMuteBinding(configDir: string, device: string, code: string): Promise<VoiceSaveResult> {
+    if (!saveValueFits('keys.device', device) || keyCodeText(Number(code)) !== code) return { ok: false, error: 'invalid' };
+    const ran = await this.#run(configDir, ['config', 'set-mute-binding', '--', device, code], 'config set-mute-binding', true);
+    return ran.ok ? { ok: true } : ran;
+  }
+
   // cancel kills the run in progress, if any, and resolves once it is reaped.
   async cancel(): Promise<void> {
     const run = this.#active;
@@ -178,7 +190,7 @@ export class OneShot {
     await run.finished;
   }
 
-  async #run(configDir: string, args: readonly string[], what: string, quiet = false): Promise<Ran> {
+  async #run(configDir: string, args: readonly string[], what: OneShotOperation, quiet = false): Promise<Ran> {
     if (this.#active !== null) return { ok: false, error: 'busy' };
     // Taken before the first await: two calls cannot both pass the check.
     let release: () => void = () => undefined;
@@ -198,12 +210,13 @@ export class OneShot {
     }
   }
 
-  async #exec(run: Active, configDir: string, args: readonly string[], what: string, quiet: boolean): Promise<Ran> {
+  async #exec(run: Active, configDir: string, args: readonly string[], what: OneShotOperation, quiet: boolean): Promise<Ran> {
     let executable: string;
     try {
       executable = await findHelper(this.deps.resources, this.deps.find);
     } catch (err) {
       if (err instanceof HelperError) {
+        this.deps.log(`voice: ${what}: ${err.reason}`, { ring: true });
         this.deps.log(`voice: ${what}: ${err.message}`);
         return { ok: false, error: err.reason };
       }
@@ -214,13 +227,13 @@ export class OneShot {
     try {
       child = (this.deps.spawn ?? defaultOneShotSpawn)(executable, args, oneShotSpawnOptions(oneShotEnv(this.deps.env, configDir, this.deps.find?.platform), this.deps.find?.platform));
     } catch {
-      this.deps.log(`voice: ${what}: the helper could not be started`);
+      this.deps.log(`voice: ${what}: the helper could not be started`, { ring: true });
       return { ok: false, error: 'spawn-failed' };
     }
     return this.#await(run, child, what, quiet);
   }
 
-  #await(run: Active, child: OneShotChild, what: string, quiet: boolean): Promise<Ran> {
+  #await(run: Active, child: OneShotChild, what: OneShotOperation, quiet: boolean): Promise<Ran> {
     const timeoutMs = this.deps.timeoutMs ?? ONE_SHOT_TIMEOUT_MS;
     const graceMs = this.deps.drainGraceMs ?? DRAIN_GRACE_MS;
     return new Promise<Ran>((resolve) => {
@@ -259,8 +272,10 @@ export class OneShot {
         child.stdout.destroy();
         child.stderr.destroy();
         const line = quiet ? '' : lastLine(tail);
-        const log = (reason: string): void => {
-          this.deps.log(`voice: ${what}: ${reason}${line === '' ? '' : `: ${line}`}`);
+        const log = (outcome: VoiceOneShotError, code?: number): void => {
+          const exitNote = code === undefined ? '' : ` (exit status ${String(code)})`;
+          this.deps.log(`voice: ${what}: ${outcome}${exitNote}`, { ring: true });
+          if (line !== '') this.deps.log(`voice: ${what}: ${outcome}${exitNote}: ${line}`);
         };
         if (stopped !== null) {
           log(stopped);
@@ -268,10 +283,10 @@ export class OneShot {
         } else if (exit?.code === 0) {
           resolve({ ok: true, stdout: Buffer.concat(chunks) });
         } else if (exit?.code === USAGE_EXIT) {
-          log('unsupported (exit status 2)');
+          log('unsupported', USAGE_EXIT);
           resolve({ ok: false, error: 'unsupported' });
         } else {
-          log(exit?.code === null || exit === null ? 'failed' : `failed (exit status ${String(exit.code)})`);
+          log('failed', exit?.code ?? undefined);
           resolve({ ok: false, error: 'failed' });
         }
       };

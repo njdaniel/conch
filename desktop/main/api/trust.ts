@@ -13,6 +13,7 @@
 // run. It owns the root set and nothing else; a failed certificate check is
 // never overridden here or anywhere (the source scan "no TLS override anywhere
 // in the shell", desktop/tests/unit/trust.test.ts).
+import type { MainLog } from '../diagnostics.ts';
 import type * as TlsModule from 'node:tls';
 
 type TlsApi = Pick<typeof TlsModule, 'getCACertificates' | 'setDefaultCACertificates'>;
@@ -31,7 +32,7 @@ export const PROXY_VARIABLE = ['NODE', 'USE', 'ENV', 'PROXY'].join('_');
 // turn certificate checks off or route it through a proxy. It catches a
 // developer shell or a launcher that exported one; like the debugging gate, it
 // is not a defence against a same-user attacker.
-export function transportVerdict(env: Readonly<Record<string, string | undefined>>, log: (line: string) => void): 'ok' | 'refused' {
+export function transportVerdict(env: Readonly<Record<string, string | undefined>>, log: MainLog): 'ok' | 'refused' {
   const noCheck = env[NO_CHECK_VARIABLE];
   const proxy = env[PROXY_VARIABLE];
   if (noCheck === '0') {

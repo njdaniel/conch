@@ -12,8 +12,24 @@ release that Nick publishes.
 
 **Upgrade `conch` together with the server.** Authors can now remove their own messages (#1828). The new tombstone ("This message was removed by its author.") makes an older `conch` TUI or CLI drop its events connection and reconnect on every author removal, and label the message "removed by a moderator". History is unaffected.
 
+**Desktop voice: echo cancellation and noise suppression are on in the desktop app** (#186, #2002). On open mic with speakers, the other person no longer hears themselves, and room noise is suppressed. `audio.echo_cancellation = false` in `voice.toml` turns it off. The standalone helper and the TUI keep it off unless the file turns it on. How well it cancels on a given room and speakers is still to be measured by hand.
+
+**The Windows installer is in the release** as an unsigned preview (#1991, #1996): `Conch-<version>-unsigned-preview-setup.exe`. Windows SmartScreen warns on first run. Screen sharing from Windows says it isn't available yet; watching a share works.
+
 ### Added
 - **An author removes their own message** (#1828). There's no time window. People and guests may; agents may not yet. A message carrying an approval or admin-action card stays moderator-only. Removal is soft: copies others already received are not recalled.
+- **An operator deletes a message through the AI admin door** (#1967): the approval-gated `remove_message` admin action, so Nick can remove a message from Claude Code.
+- **A mute key on the desktop** (#2056): set it in Voice options beside the talk key. It toggles mute in voice, does nothing outside voice, and can only mute, never unmute, while the screen is locked, during suspend or when lock status is unknown.
+- **The share says when the computer is too busy to send smoothly** (#2055), from the encoder's CPU limit, instead of silently dropping to about 1 fps. Detail mode now degrades resolution and frame rate together (`balanced`). The desktop log records fixed share and voice diagnostics, so a freeze can be diagnosed.
+- **Desktop sounds** (#1924): the optional message and call sounds now play in the desktop app too (`media-src 'self'` only).
+
+### Fixed
+- **The desktop's open microphone no longer chatters on room noise** (#2001): it needs 40 ms of sound to open, closes 4 dB lower than it opens, holds 800 ms between words, and fades instead of cutting. Defaults: threshold −34 dBFS (was −40), hang 800 ms (was 400). Mute still cuts at once.
+- **Choosing Open microphone during a desktop call is saved,** and choosing push-to-talk with the arrow keys works (#1993).
+- **Windows screen share** says why a connection can't be made instead of waiting forever, and Share says it isn't available yet (#1992).
+- **Windows polish** (#1994): the invite card comes into view and takes focus only when nothing else has it; "this app" wording in desktop Settings; the window remembers being maximized; the firewall prompts are documented for testers.
+- **Windows desktop** (#1978–#1980): `conch://invite/?` links parse; Windows-specific wording; under the desktop strip the lobby takes what's left of the window.
+- **MCP image posts** (#1849): one large-request slot per agent and a stricter probe on repeated keys.
 
 ## [0.1.0-alpha.21] - 2026-11-18
 

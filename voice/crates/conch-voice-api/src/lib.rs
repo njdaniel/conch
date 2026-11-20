@@ -56,6 +56,7 @@ mod control_v2;
 mod control_v3;
 mod error;
 mod login;
+mod mute_key_event;
 mod presence;
 mod server;
 mod types;
@@ -104,6 +105,7 @@ pub use error::{Error, Refusal, code};
 pub use login::{TOKEN_ENV, credentials_path, default_config_dir, resolve_token, stored_servers};
 #[cfg(windows)]
 pub use login::{Unfollowed, open_unfollowed};
+pub use mute_key_event::MuteKeyEventV1;
 pub use presence::{CLOSE_VOICE_REMOVED, PresenceEvent, PresenceStream, StreamEnd};
 pub use server::ServerAddress;
 pub use types::{

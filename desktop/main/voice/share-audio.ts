@@ -72,6 +72,7 @@
 //
 // No log line carries a token, a room, a channel, a path, a device or an
 // application name: reasons only.
+import type { MainLog } from '../diagnostics.ts';
 import { VOICE_CONTROL_CAPTURE_STOP_MS, voicePresenceV2, voicePresenceV2Schema, type VoiceCompanionAudioRequestV1, type VoiceControlShareAudioProblem, type VoicePresenceV2 } from '../../../web/src/schema/generated.ts';
 import type { NativeVoiceView, ShareSoundChooseResult, ShareSoundChoice, ShareSoundReason, ShareSoundStartResult, ShareSoundView, VoiceCommandResult } from '../../../web/src/platform/desktop/bridge.ts';
 import { fromServer } from '../../../web/src/schema/validate.ts';
@@ -80,6 +81,9 @@ import { currentName, isNotFound, isMoved, type CurrentName } from './channel-fo
 import { LINUX_SHARE_AUDIO_SCOPE, validApplicationName } from './protocol.ts';
 import type { CommandResult } from './supervisor.ts';
 import type { Companion, RemoveReason, ShareRef } from './companion.ts';
+
+// Why a share's sound record ends: the companion's RemoveReason, or main's own.
+type EndReason = RemoveReason | 'unused' | 'page' | 'page share end' | 'presence share end' | 'leave';
 import { COMPANION_PASS_MS } from './companion.ts';
 
 // The one switch, read by main alone: the exact value "1", on Linux. Never the
@@ -144,7 +148,7 @@ export interface ShareSoundDeps {
   readonly setChoice: (choice: ShareSoundChoice) => Promise<boolean>;
   // The registered application name (registeredApplicationName).
   readonly applicationName: string;
-  readonly log: (line: string) => void;
+  readonly log: MainLog;
   readonly consentRetryMs?: number;
   readonly publishRetryMs?: number;
   readonly stopAckBoundMs?: number;
@@ -586,7 +590,7 @@ export class ShareSound {
   // does (the stop, the DELETE attempt, the capture cleared).
   #channelLost(share: ShareRef): void {
     if (this.#presenceWanted()?.id !== share.id) return;
-    this.#deps.log('share sound: the share’s channel can no longer be named');
+    this.#deps.log('share sound: the share’s channel can no longer be named', { ring: true });
     this.#presenceEnd(share, this.#owned?.share.id === share.id ? this.#owned : null);
   }
 
@@ -681,7 +685,7 @@ export class ShareSound {
   // later choice can add sound to a share that has ended.
   #presenceEnd(share: ShareRef, o: Owned | null): void {
     this.#watch = null;
-    this.#deps.log('share sound: presence shows the share ended');
+    this.#deps.log('share sound: presence shows the share ended', { ring: true });
     if (o !== null) {
       void this.#end(o, 'presence share end').catch(() => undefined);
       return;
@@ -726,13 +730,14 @@ export class ShareSound {
   // is replacing this one (keepCapture). This covers a share that had a sound
   // record; one that never did (the choice none, a start refused before it
   // made one) is cleared by shareEnded.
-  #end(o: Owned, reason: string, keepCapture = false): Promise<void> {
+  // reason is a closed vocabulary: it reaches the diagnostics export (#2088).
+  #end(o: Owned, reason: EndReason, keepCapture = false): Promise<void> {
     if (this.#owned === o) this.#owned = null;
     if (!keepCapture && this.#capture?.companion === o.share.id) this.#capture = null;
     o.cancelled = true;
     for (const wake of [...o.wakers, ...o.repeatWakers]) wake();
     this.#changed();
-    this.#deps.log(`share sound: ending (${reason})`);
+    this.#deps.log(`share sound: ending (${reason})`, { ring: true });
     const done = this.#stopAndWithdraw(o);
     this.#tail = this.#tail.then(() => done);
     return done;
@@ -784,7 +789,7 @@ export class ShareSound {
     } finally {
       clearTimeout(bounded.timer);
     }
-    if (bounded.over) this.#deps.log('share sound: the helper did not answer the stop in time');
+    if (bounded.over) this.#deps.log('share sound: the helper did not answer the stop in time', { ring: true });
   }
 
   // #withdraw is the DELETE of the consent: once, never retried, bounded. A
@@ -818,7 +823,7 @@ export class ShareSound {
         }
       }
     }
-    if (!(exchange.kind === 'answer' && exchange.ok)) this.#deps.log('share sound: the withdrawal was not confirmed');
+    if (!(exchange.kind === 'answer' && exchange.ok)) this.#deps.log('share sound: the withdrawal was not confirmed', { ring: true });
   }
 
   // ----------------------------------------------------- enable and disable
@@ -875,7 +880,7 @@ export class ShareSound {
     const sent = await this.#deps.voice.setShareAudio({ capturing: true, applicationName: this.#deps.applicationName });
     if (this.#gone(o)) return 'ended';
     if (!sent.ok) {
-      this.#deps.log(`share sound: the helper refused the command (${sent.error})`);
+      this.#deps.log(`share sound: the helper refused the command (${sent.error})`, { ring: true });
       await this.#stopAndWithdraw(o);
       this.#fail(o, 'unavailable');
       return 'failed';
@@ -895,7 +900,7 @@ export class ShareSound {
   #fail(o: Owned, reason: ShareSoundReason): void {
     if (this.#owned !== o) return;
     o.problem = reason;
-    this.#deps.log(`share sound: not carried (${reason})`);
+    this.#deps.log(`share sound: not carried (${reason})`, { ring: true });
     this.#changed();
   }
 

@@ -9,7 +9,7 @@
 // leaving and signing out ending the local track and releasing the claim by
 // name; a denied browser permission leaving voice and chat usable; and one
 // person in two contexts (S5), the displaced one stopping its capture while
-// presence still says camera, until the claim ends idle.
+// the person's claim survives the handoff and ends idle.
 //
 // What it is not: a real camera, another browser engine, a phone, or a LAN
 // or remote deployment. Those are C8's by-hand checks. Without Docker the
@@ -316,12 +316,23 @@ test.describe('the camera with LiveKit', () => {
       expect(await camAsks(b.page)).toBe(0);
       await expect(voiceRegion(b.page)).not.toContainText('Sending video');
       await expect(voiceRegion(b.page)).not.toContainText('Camera in use');
-      // The claim ends idle, and camera leaves presence.
-      await expect.poll(() => cameraOf(member), { timeout: 30_000 }).toBe(false);
+      // The claim ends idle, and camera leaves presence. An absent participant
+      // during the handoff also clears the camera badge, so wait for the stop
+      // row before checking the final presence.
+      let stopped: string[] = [];
+      const principal = `principal=${String(member.id)}`;
+      await expect.poll(async () => {
+        stopped = (await vw.audit())
+          .filter((e) => e.action === 'voice_camera_stopped' && e.detail.split(' ').includes(principal))
+          .map((e) => e.detail);
+        return stopped.length;
+      }, { timeout: 30_000, message: 'S5 camera claim writes a stop row' }).toBeGreaterThan(0);
+      expect(stopped, 'S5 camera stop audit details').toHaveLength(1);
+      const [detail = ''] = stopped;
+      expect(detail, `S5 camera stop audit detail: ${detail}`).toMatch(/\breason=idle$/);
+      expect(a.cameraCalls.filter((call) => call.startsWith('DELETE ')), 'the displaced page leaves the claim for the replacement').toEqual([]);
+      expect(await cameraOf(member)).toBe(false);
       await expect(voiceRegion(b.page)).not.toContainText('Sending video');
-      const stopped = (await vw.audit()).filter((e) => e.action === 'voice_camera_stopped' && e.detail.includes(`principal=${String(member.id)}`));
-      expect(stopped.length).toBe(1);
-      expect(stopped[0]?.detail).toMatch(/reason=idle/);
     } finally {
       await a.close();
       await b.close();

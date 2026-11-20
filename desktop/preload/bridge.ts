@@ -427,6 +427,7 @@ export function createBridge(
     voiceSaveDevice: call('voiceSaveDevice'),
     voiceKeyDevices: call('voiceKeyDevices'),
     voiceSaveTalkBinding: call('voiceSaveTalkBinding'),
+    reportVoiceDiagnostic: call('reportVoiceDiagnostic'),
     // Opening an invite link (issue #1591). The code comes back from
     // inviteTake only, once.
     inviteCheck: call('inviteCheck'),
@@ -452,6 +453,9 @@ export function createBridge(
     updateState: call('updateState'),
     updateRestart: call('updateRestart'),
     onUpdateState,
+    // The diagnostics bundle (issue #2084): look, then save.
+    diagnosticsPreview: call('diagnosticsPreview'),
+    diagnosticsSave: call('diagnosticsSave'),
     // The Linux screen share's sound (issue #1854): requests only. Main builds
     // the scope and the application name, and answers only with its switch on.
     shareSoundStart: call('shareSoundStart'),
