@@ -25,6 +25,7 @@
 //   - a run past ONE_SHOT_TIMEOUT_MS is SIGKILLed and reaped;
 //   - one run at a time: a second is refused 'busy', and cancel() (the
 //     profile-switch media hook) kills the one running and waits for it.
+import type { MainLog } from '../diagnostics.ts';
 import { isWindowsBinding } from '../../../web/src/platform/desktop/windows-keys.ts';
 import { VOICE_DEVICES_MAX_BYTES, voiceControlTalkMode } from '../../../web/src/schema/generated.ts';
 import type { NativeVoiceDevicesResult, VoiceBindingKey, VoiceDeviceKey, VoiceOneShotError, VoiceSaveResult } from '../../../web/src/platform/desktop/bridge.ts';
@@ -40,7 +41,7 @@ export const ONE_SHOT_TIMEOUT_MS = 10_000;
 // it started may hold a write end) before they are closed from our side.
 const DRAIN_GRACE_MS = 500;
 
-// The most of standard error kept, and shown in the log.
+// The most of standard error kept for the local log.
 const STDERR_TAIL_BYTES = 1024;
 const STDERR_LINE_CHARS = 160;
 
@@ -99,7 +100,7 @@ export interface OneShotDeps {
   readonly resources: string;
   // main's environment, read only for the allowlisted names.
   readonly env: NodeJS.ProcessEnv;
-  readonly log: (line: string) => void;
+  readonly log: MainLog;
   // Test seams.
   readonly spawn?: OneShotSpawnFn;
   readonly find?: FindDeps;
@@ -119,7 +120,7 @@ interface Active {
 
 // lastLine is the last line of standard error that says something, cut to
 // printable ASCII: it is device-supplied or the helper's own text, and goes to
-// the log alone.
+// the local log alone.
 export function lastLine(tail: string): string {
   const lines = tail.split(/[\r\n]+/u);
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -140,7 +141,8 @@ export class OneShot {
     if (!ran.ok) return ran;
     const parsed = parseVoiceDevices(ran.stdout);
     if (!parsed.ok) {
-      this.deps.log(`voice: devices: the list was refused: ${parsed.detail}`);
+      this.deps.log('voice: devices: the list was refused');
+      this.deps.log(`voice: devices: the list was refused: ${parsed.detail}`, { ring: false });
       return { ok: false, error: 'bad-output' };
     }
     const d = parsed.devices;
@@ -212,7 +214,8 @@ export class OneShot {
       executable = await findHelper(this.deps.resources, this.deps.find);
     } catch (err) {
       if (err instanceof HelperError) {
-        this.deps.log(`voice: ${what}: ${err.message}`);
+        this.deps.log(`voice: ${what}: ${err.reason}`);
+        this.deps.log(`voice: ${what}: ${err.message}`, { ring: false });
         return { ok: false, error: err.reason };
       }
       return { ok: false, error: 'untrusted' };
@@ -268,7 +271,9 @@ export class OneShot {
         child.stderr.destroy();
         const line = quiet ? '' : lastLine(tail);
         const log = (reason: string): void => {
-          this.deps.log(`voice: ${what}: ${reason}${line === '' ? '' : `: ${line}`}`);
+          const summary = `voice: ${what}: ${reason}`;
+          this.deps.log(summary);
+          if (line !== '') this.deps.log(`${summary}: ${line}`, { ring: false });
         };
         if (stopped !== null) {
           log(stopped);

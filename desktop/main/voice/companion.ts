@@ -443,7 +443,8 @@ export class Companion {
   // still in flight is overtaken. why is the page's reason, already checked
   // by the IPC (parseCompanionPageEnd): it is logged and changes nothing, so
   // that an end the page alone saw (a connection the CSP refused, an SDK
-  // error) is visible in the app's log (issue #1992).
+  // error) is visible in the app's log (issue #1992). IPC reduces the
+  // detail to a fixed vocabulary before calling stop.
   async stop(why?: CompanionPageEnd): Promise<boolean> {
     if (why !== undefined) this.#deps.log(`companion: the page ended it: ${why.kind}${why.detail === undefined ? '' : ` (${why.detail})`}`);
     this.#epoch++;

@@ -59,6 +59,7 @@ import { Autostart } from './autostart.ts';
 import { Notifications } from './notifications.ts';
 import { createSettingsFiles, memorySettingsFiles, SettingsService } from './settings.ts';
 import { WindowMaximized } from './window.ts';
+import { Diagnostics, diagnosticsLogger, LogRing } from './diagnostics.ts';
 import { saveChosenFile } from './save-file.ts';
 import { parseManifest, SCHEME, SCHEME_PRIVILEGES } from './scheme.ts';
 import { electronStorage } from './vault/electron-storage.ts';
@@ -74,9 +75,10 @@ export function registerScheme(): void {
   protocol.registerSchemesAsPrivileged([{ scheme: SCHEME, privileges: { ...SCHEME_PRIVILEGES } }]);
 }
 
-function log(line: string): void {
-  console.error(line);
-}
+// The diagnostics ring (issue #2084) keeps only main's fixed diagnostic
+// context. Call sites mark lines containing free-form data as local only.
+const ring = new LogRing();
+const log = diagnosticsLogger(ring, (line) => { console.error(line); });
 
 // A vault that stores nothing, for a data root that is not private to this user.
 function refusingVault(): Vault {
@@ -262,7 +264,9 @@ export async function start(): Promise<void> {
   void portal.probe();
 
   // The first receipt: what this build really is.
-  console.log(`conch-desktop: versions ${JSON.stringify({ electron: process.versions.electron, chrome: process.versions.chrome, node: process.versions.node })}`);
+  const versions = { app: app.getVersion(), electron: process.versions.electron, chrome: process.versions.chrome, node: process.versions.node, platform: process.platform };
+  const versionsLine = `conch-desktop: versions ${JSON.stringify({ electron: versions.electron, chrome: versions.chrome, node: versions.node })}`;
+  console.log(versionsLine);
 
   const appPath = app.getAppPath();
   const ui = join(appPath, 'out', 'ui');
@@ -695,6 +699,22 @@ export async function start(): Promise<void> {
           voice: () => voice.state(),
         }),
     },
+    diagnostics: new Diagnostics({
+      ring,
+      versions,
+      now: () => new Date(),
+      chooseSavePath: async (suggested) => {
+        const options = { title: 'Save diagnostics', defaultPath: suggested, properties: ['showOverwriteConfirmation' as const, 'createDirectory' as const] };
+        const window = parent();
+        const chosen = await (window === null ? dialog.showSaveDialog(options) : dialog.showSaveDialog(window, options));
+        return chosen.canceled || chosen.filePath === '' ? null : chosen.filePath;
+      },
+      writeFile: saveChosenFile,
+      downloadsDir: () => app.getPath('downloads'),
+      join,
+      isAbsolute,
+      log,
+    }),
     companion,
     ...(sound === null ? {} : { shareSound: sound }),
     now: Date.now,

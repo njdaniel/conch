@@ -5,9 +5,10 @@ import { describe, expect, it } from 'vitest';
 import type { Feeds } from '../../main/api/feeds.ts';
 import type { Files } from '../../main/files.ts';
 import type { Service } from '../../main/api/service.ts';
+import { Diagnostics, LogRing } from '../../main/diagnostics.ts';
 import { DocumentGate } from '../../main/document.ts';
 import { Gestures, LINK_GESTURE_MS } from '../../main/gestures.ts';
-import { checkCaller, Ipc, parseRequest, plain, type CompanionApi, type InstalledApi, type IntegrationsApi, type InvitesApi, type NotificationsApi, type ProfilesApi, type VoiceApi, type SettingsApi, type ContentsLike, type FrameLike, type InvokeEvent } from '../../main/ipc.ts';
+import { checkCaller, Ipc, parseRequest, plain, type CompanionApi, type DiagnosticsApi, type InstalledApi, type IntegrationsApi, type InvitesApi, type NotificationsApi, type ProfilesApi, type VoiceApi, type SettingsApi, type ContentsLike, type FrameLike, type InvokeEvent } from '../../main/ipc.ts';
 import { COMPANION_FUNCTIONS, INVOKED_FUNCTIONS, TAG_MAX, VOICE_EVENTS, VOICE_FUNCTIONS } from '../../shared/bridge-names.ts';
 import { ShareAllowance } from '../../main/share-allowance.ts';
 import { deliverVoice } from '../../main/voice/events.ts';
@@ -35,7 +36,7 @@ interface Fixture {
   replaceWindow(): InvokeEvent;
 }
 
-function fixture(realGestures?: Gestures): Fixture {
+function fixture(realGestures?: Gestures, diagnostics?: DiagnosticsApi): Fixture {
   const main = frame();
   const contents = Object.assign(new EventEmitter(), { destroyed: false, mainFrame: main, isDestroyed() { return this.destroyed; } });
   const gate = new DocumentGate();
@@ -72,7 +73,7 @@ function fixture(realGestures?: Gestures): Fixture {
   const installed = new Proxy({} as InstalledApi, { get: (_t, name: string) => record(`installed.${name}`) });
   const share = new ShareAllowance({ now: () => clock.now, generation: () => gate.generation });
   let owned: ContentsLike = contents;
-  const ipc = new Ipc({ owned: () => owned, gate, service, feeds, files, gestures, profiles, voice, invites, notifications, settings, integrations, companion, share, installed, now: () => clock.now, log: (line) => logs.push(line) });
+  const ipc = new Ipc({ owned: () => owned, gate, service, feeds, files, gestures, profiles, voice, invites, notifications, settings, integrations, companion, share, installed, ...(diagnostics === undefined ? {} : { diagnostics }), now: () => clock.now, log: (line) => logs.push(line) });
   return {
     ipc, gate, contents, main, calls, logs, clock, permit, input, share, activation,
     event: (over = {}) => ({ sender: owned, senderFrame: owned.mainFrame, ...over }),
@@ -1071,12 +1072,19 @@ describe('the companion family (issue #1579)', () => {
     [{ kind: 'left' }],
     [{ kind: 'connect-failed', detail: 'ConnectionError:WebSocket' }],
     [{ kind: 'disconnected', detail: 'room_deleted' }],
-    [{ kind: 'insecure-address', detail: 'ws' }],
+    [{ kind: 'insecure-address', detail: 'csp:connect-src:ws' }],
     [{ kind: 'cannot-share', detail: 'capture-unsupported' }],
   ])('passes the page’s reason for ending the companion on to it, for the log (issue #1992): %j', async (why) => {
     const f = fixture();
     expect(await f.ipc.invoke(f.event(), 'companionEnd', [why])).toEqual({ ok: true, value: { ran: 'companion.stop' } });
     expect(f.calls).toEqual([['companion.stop', [why]]]);
+  });
+
+  it('replaces an unknown short companion detail before it can be logged', async () => {
+    const f = fixture();
+    const why = { kind: 'connect-failed', detail: 'Payroll-West' };
+    expect((await f.ipc.invoke(f.event(), 'companionEnd', [why])).ok).toBe(true);
+    expect(f.calls).toEqual([['companion.stop', [{ kind: 'connect-failed', detail: 'other' }]]]);
   });
 
   it('needs no gesture to end the companion', async () => {
@@ -1392,5 +1400,56 @@ describe('the settings family (issue #1587)', () => {
     f.input.recent = true;
     expect(await f.ipc.invoke(f.event(), 'settingsSet', args)).toEqual({ ok: false, kind: 'refused' });
     expect(f.calls).toEqual([]);
+  });
+});
+
+describe('the diagnostics bundle (issue #2084)', () => {
+  it('saves the preview selected by ID only after the person’s own input', async () => {
+    const ring = new LogRing();
+    const written: [string, string][] = [];
+    const diagnostics = new Diagnostics({
+      ring,
+      versions: {},
+      now: () => new Date(0),
+      chooseSavePath: () => Promise.resolve('/tmp/chosen.txt'),
+      writeFile: (path, bytes) => {
+        written.push([path, new TextDecoder().decode(bytes)]);
+        return Promise.resolve();
+      },
+      downloadsDir: () => '/tmp',
+      join: (...parts) => parts.join('/'),
+      isAbsolute: (path) => path.startsWith('/'),
+      log: () => undefined,
+    });
+    const f = fixture(new Gestures(() => 0), diagnostics);
+    ring.record('first preview');
+    const refusedPreview = { ok: false, kind: 'refused' };
+    // The preview is main's log: no page script reads it without the person's input.
+    expect(await f.ipc.invoke(f.event(), 'diagnosticsPreview', [])).toEqual(refusedPreview);
+    f.contents.emit('input-event', {}, { type: 'mouseUp' });
+    const first = await f.ipc.invoke(f.event(), 'diagnosticsPreview', []);
+    if (!first.ok) throw new Error('preview refused');
+    const shown = first.value as ReturnType<Diagnostics['preview']>;
+    expect(shown.text).toContain('first preview');
+    ring.record('second preview');
+    f.contents.emit('input-event', {}, { type: 'mouseUp' });
+    const second = await f.ipc.invoke(f.event(), 'diagnosticsPreview', []);
+    if (!second.ok) throw new Error('second preview refused');
+    const newer = second.value as ReturnType<Diagnostics['preview']>;
+    expect(newer.id).not.toBe(shown.id);
+    expect(newer.text).toContain('second preview');
+
+    const refused = { ok: false, kind: 'refused' };
+    expect(await f.ipc.invoke(f.event(), 'diagnosticsPreview', ['x'])).toEqual(refused);
+    expect(await f.ipc.invoke(f.event(), 'diagnosticsSave', [shown.id])).toEqual(refused);
+    f.contents.emit('input-event', {}, { type: 'mouseUp' });
+    for (const args of [[], ['/tmp/evil'], [shown.id, 'extra']]) {
+      expect(await f.ipc.invoke(f.event(), 'diagnosticsSave', args)).toEqual(refused);
+    }
+    expect(written).toEqual([]);
+    expect(await f.ipc.invoke(f.event(), 'diagnosticsSave', [shown.id])).toEqual({ ok: true, value: 'saved' });
+    expect(written).toEqual([['/tmp/chosen.txt', shown.text]]);
+    expect(shown.text).not.toContain('second preview');
+    expect(await f.ipc.invoke(f.event(), 'diagnosticsSave', [newer.id])).toEqual(refused);
   });
 });

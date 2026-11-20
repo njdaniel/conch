@@ -351,7 +351,8 @@ declare global {
       Partial<DesktopSettingsBridge> &
       Partial<DesktopCompanionBridge> &
       Partial<DesktopInviteBridge> &
-      Partial<DesktopShareSoundBridge>;
+      Partial<DesktopShareSoundBridge> &
+      Partial<DesktopDiagnosticsBridge>;
   }
 }
 
@@ -782,9 +783,9 @@ export interface CompanionEvent {
 // cannot-share: a Share whose grant said this desktop cannot share.
 export type CompanionPageEndKind = 'left' | 'connect-failed' | 'disconnected' | 'dropped' | 'insecure-address' | 'cannot-share';
 
-// detail is short words only, checked again by main: an error's name and
-// LiveKit's reason name (ConnectionError:WebSocket), a disconnect's cause, a
-// URL's scheme. Never an error's message, an address, a room or a token.
+// detail can carry an error name and a reason (ConnectionError:WebSocket),
+// a disconnect cause, or the scheme refused by CSP. Main logs recognized
+// details from a fixed vocabulary and records other short words as 'other'.
 export interface CompanionPageEnd {
   readonly kind: CompanionPageEndKind;
   readonly detail?: string;
@@ -890,6 +891,19 @@ export interface DesktopUpdateBridge {
   onUpdateState(listener: (view: InstalledView) => void): Unsubscribe;
 }
 
+// The diagnostics bundle (issue #2084): the build versions and recent
+// diagnostic events. Main holds the preview text by ID. Save takes that ID
+// after the person's own input and the native dialog supplies the path.
+export interface DiagnosticsPreview {
+  readonly id: string;
+  readonly text: string;
+}
+
+export interface DesktopDiagnosticsBridge {
+  diagnosticsPreview(): Promise<DiagnosticsPreview | null>;
+  diagnosticsSave(id: string): Promise<SaveOutcome>;
+}
+
 // The object the preload exposes: the bridge, the voice family, the settings,
 // the companion, the invite family and the update family. Still no press, release, gate or transmit function in any.
 export type ExposedDesktopBridge = ConchDesktopBridge &
@@ -898,4 +912,5 @@ export type ExposedDesktopBridge = ConchDesktopBridge &
   DesktopCompanionBridge &
   DesktopInviteBridge &
   DesktopUpdateBridge &
-  DesktopShareSoundBridge;
+  DesktopShareSoundBridge &
+  DesktopDiagnosticsBridge;

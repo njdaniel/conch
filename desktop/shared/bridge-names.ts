@@ -9,6 +9,7 @@
 import type {
   ConchDesktopBridge,
   DesktopCompanionBridge,
+  DesktopDiagnosticsBridge,
   DesktopInviteBridge,
   DesktopSettingsBridge,
   DesktopShareSoundBridge,
@@ -123,6 +124,12 @@ export const UPDATE_FUNCTIONS = ['updateState', 'updateRestart'] as const satisf
 
 export type UpdateFunction = (typeof UPDATE_FUNCTIONS)[number];
 
+// The diagnostics bundle (issue #2084): DesktopDiagnosticsBridge. The save is
+// the person's act alone (gesture-gated in main).
+export const DIAGNOSTICS_FUNCTIONS = ['diagnosticsPreview', 'diagnosticsSave'] as const satisfies readonly (keyof DesktopDiagnosticsBridge)[];
+
+export type DiagnosticsFunction = (typeof DIAGNOSTICS_FUNCTIONS)[number];
+
 export type BridgeFunction = (typeof BRIDGE_FUNCTIONS)[number];
 
 // The calls a subscription is made of: open a feed under a number the preload
@@ -142,7 +149,8 @@ export type InvokedFunction =
   | SettingsFunction
   | CompanionFunction
   | UpdateFunction
-  | ShareSoundFunction;
+  | ShareSoundFunction
+  | DiagnosticsFunction;
 
 export const INVOKED_FUNCTIONS: readonly InvokedFunction[] = [
   ...BRIDGE_FUNCTIONS.filter((name): name is Exclude<BridgeFunction, 'subscribe'> => name !== 'subscribe'),
@@ -155,6 +163,7 @@ export const INVOKED_FUNCTIONS: readonly InvokedFunction[] = [
   ...COMPANION_FUNCTIONS,
   ...UPDATE_FUNCTIONS,
   ...SHARE_SOUND_FUNCTIONS,
+  ...DIAGNOSTICS_FUNCTIONS,
 ];
 
 export function channelOf(name: InvokedFunction | typeof NOTIFICATION_SUPPORT): string {
