@@ -80,8 +80,8 @@ func (c MessageContext) Validate() error {
 			return errors.New("schema: message context of kind channel must not carry conversation_id")
 		}
 	case MessageContextDirect:
-		if c.ConversationID <= 0 {
-			return errors.New("schema: message context conversation_id must be positive")
+		if !validDMConversationID(c.ConversationID) {
+			return errors.New("schema: message context conversation_id must be a positive safe integer")
 		}
 		if c.ChannelID != 0 || c.ChannelName != "" {
 			return errors.New("schema: message context of kind direct must not carry a channel")
