@@ -578,6 +578,11 @@ func (s *Store) InvalidVoiceRooms(ctx context.Context, now time.Time) ([]VoiceVi
 // VoiceRoomHasInvalidHolder checks the rotation invariant for one live room.
 // Callers that need the room to be live must also check VoiceRoomLive.
 func (s *Store) VoiceRoomHasInvalidHolder(ctx context.Context, roomID int64, now time.Time) (bool, error) {
+	// 0 means every room to invalidVoiceRooms; an unset id here must not
+	// silently ask about all of them (#2066's security review).
+	if roomID <= 0 {
+		return false, fmt.Errorf("store: voice room has invalid holder: room id %d", roomID)
+	}
 	violations, err := s.invalidVoiceRooms(ctx, now, roomID)
 	return len(violations) != 0, err
 }
