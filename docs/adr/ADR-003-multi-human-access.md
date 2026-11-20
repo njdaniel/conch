@@ -4,6 +4,7 @@
 - **Date:** 2026-10-05
 - **Deciders:** Nick (Tier-H)
 - **Proposal:** #75 · **Amends:** [ADR-000](ADR-000-charter.md) non-goals (multi-human GUI line), D12
+- **Amended 2026-11-19 by [ADR-017](ADR-017-local-direct-messages-and-calls.md)** (Proposed; effective when Nick merges it): the Unchanged line "Standalone human-to-human DMs stay at P7" (line 23) is superseded for local 1:1 DMs and private voice calls. The text below is unchanged.
 
 ## Context
 

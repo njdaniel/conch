@@ -4,9 +4,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { VOICE_CONTROL_STOP_KILL_AFTER_MS, type VoiceControlTalkMode } from '../../../web/src/schema/generated.ts';
+import { DocumentGate } from '../../main/document.ts';
+import { Lifecycle } from '../../main/lifecycle.ts';
+import { trayModel } from '../../main/tray.ts';
+import { deliverVoice } from '../../main/voice/events.ts';
 import { Supervisor, type CommandResult, type StartRequest, type VoiceState } from '../../main/voice/supervisor.ts';
 import { CEILING_ARGS, DESKTOP_MISSED_RELEASE_SECS, ECHO_ARGS, HELPER_ARGS, MUTE_OWNER_ARGS, SHARE_AUDIO_ARGS, VoiceService, type VoiceIdentity, type VoiceSupervisor } from '../../main/voice/service.ts';
-import type { NativeVoiceDevicesResult, NativeVoiceView, VoiceDeviceKey, VoiceSaveResult } from '../../../web/src/platform/desktop/bridge.ts';
+import type { NativeVoiceDevicesResult, NativeVoiceView, VoiceBindingKey, VoiceDeviceKey, VoiceSaveResult } from '../../../web/src/platform/desktop/bridge.ts';
+import { VOICE_EVENTS } from '../../shared/bridge-names.ts';
 import { FAKE_TOKEN, fixture, scratch, until, type Scratch } from './voice-support.ts';
 
 const V2 = 'voice-control-v2/transcript-negotiation-v2-owner.json';
@@ -95,8 +100,12 @@ class FakeOneShot {
     this.calls.push(['devices', configDir]);
     return Promise.resolve(this.devicesAnswer);
   }
-  save(configDir: string, key: VoiceDeviceKey | 'keys.device' | 'keys.talk', value: string): Promise<VoiceSaveResult> {
+  save(configDir: string, key: VoiceDeviceKey | VoiceBindingKey, value: string): Promise<VoiceSaveResult> {
     this.calls.push(['save', configDir, key, value]);
+    return Promise.resolve(this.saveAnswer);
+  }
+  saveMuteBinding(configDir: string, device: string, code: string): Promise<VoiceSaveResult> {
+    this.calls.push(['saveMuteBinding', configDir, device, code]);
     return Promise.resolve(this.saveAnswer);
   }
   cancel(): Promise<void> {
@@ -125,6 +134,135 @@ afterEach(() => {
 });
 
 const join = (channel = 'general', muted = false, deafened = false) => svc.join({ channel, muted, deafened });
+
+describe('global mute key', () => {
+  function withMuteKey(locked?: () => boolean) {
+    svc.close();
+    const state = { locked: false, blocked: false };
+    let press: () => void = () => undefined;
+    const stop = vi.fn();
+    svc = new VoiceService({
+      locked: locked ?? (() => state.locked),
+      supervisor: fake,
+      oneShot,
+      identity: () => Promise.resolve(id),
+      log: (line) => { logs.push(line); },
+      stopBoundMs: 15,
+      muteKey: {
+        blocked: () => state.blocked,
+        watch: (configDir, onPress) => {
+          expect(configDir).toBe(id.configDir);
+          press = onPress;
+          return stop;
+        },
+      },
+    });
+    svc.subscribe((view) => { views.push(view); });
+    return { state, stop, press: () => { press(); } };
+  }
+
+  function showMute(muted: boolean): void {
+    fake.set({ status: 'running', generation: 1, helper: helper({ muted }) });
+  }
+
+  it('toggles through main using the state reported to the dock and tray', async () => {
+    const key = withMuteKey();
+    await join();
+    key.press();
+    expect(svc.state().helper?.muted).toBe(false);
+    showMute(true);
+    expect(views.at(-1)?.helper?.muted).toBe(true);
+    key.press();
+    expect(fake.calls).toEqual(['mute:true', 'mute:false']);
+    showMute(false);
+    expect(views.at(-1)?.helper?.muted).toBe(false);
+    await svc.leave();
+  });
+
+  it('toggles twice when two presses arrive before any helper state or ack', async () => {
+    const key = withMuteKey();
+    await join();
+    key.press();
+    key.press();
+    expect(fake.calls).toEqual(['mute:true', 'mute:false']);
+    await svc.leave();
+  });
+
+  it('queues a lock mute before an in-flight unmute ack, leaving the helper, dock and tray muted', async () => {
+    const key = withMuteKey(() => lifecycle.locked);
+    const lifecycle = new Lifecycle({
+      voice: svc,
+      companion: { end: () => Promise.resolve() },
+      notifications: { setLocked: () => undefined },
+      log: (line) => { logs.push(line); },
+    });
+    lifecycle.observe('available');
+    const gate = new DocumentGate();
+    gate.commit({ frameToken: 'dock' });
+    const send = vi.fn<(channel: string, view: NativeVoiceView) => void>();
+    svc.subscribe((view) => {
+      deliverVoice({ contents: () => ({ send }), gate: () => gate }, view);
+    });
+
+    const commands: { muted: boolean; apply: () => void }[] = [];
+    vi.spyOn(fake, 'setMute').mockImplementation((muted) => new Promise((ack) => {
+      commands.push({
+        muted,
+        apply: () => {
+          showMute(muted);
+          ack({ ok: true });
+        },
+      });
+    }));
+    fake.next = { status: 'running', generation: 1, helper: helper({ muted: true }) };
+    await join('general', true);
+    key.press();
+    expect(commands.map((command) => command.muted)).toEqual([false]);
+
+    const locked = lifecycle.lockSignal('logind', true);
+    key.press();
+    expect(commands.map((command) => command.muted)).toEqual([false, true]);
+    for (const command of commands) command.apply();
+    await locked;
+
+    expect(fake.state).toMatchObject({ status: 'running', helper: { muted: true } });
+    const [channel, view] = send.mock.lastCall ?? [];
+    expect(channel).toBe(VOICE_EVENTS);
+    expect(view?.helper?.muted).toBe(true);
+    expect(view?.mutedByLock).toBe(true);
+    expect(trayModel({ profile: 'Home', voice: svc.state(), sharing: false, pending: false }).stateLine).toBe('Muted');
+    await svc.leave();
+  });
+
+  it.each(['locked', 'blocked'] as const)('only mutes while %s', async (block) => {
+    const key = withMuteKey();
+    await join();
+    key.state[block] = true;
+    key.press();
+    showMute(true);
+    key.press();
+    expect(fake.calls).toEqual(['mute:true']);
+    key.state[block] = false;
+    key.press();
+    expect(fake.calls).toEqual(['mute:true', 'mute:false']);
+    await svc.leave();
+  });
+
+  it('ignores presses outside voice, including a late press during leave', async () => {
+    const key = withMuteKey();
+    key.press();
+    expect(fake.calls).toEqual([]);
+    await join();
+    fake.hangStop = true;
+    const leaving = svc.leave();
+    expect(key.stop).toHaveBeenCalledOnce();
+    key.press();
+    fake.set({ status: 'idle' });
+    await leaving;
+    key.press();
+    expect(fake.calls).toEqual(['stop']);
+  });
+});
 
 describe('join', () => {
   it('starts one helper with main-owned values, the token read now, and the 30 s ceiling', async () => {

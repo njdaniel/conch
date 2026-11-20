@@ -116,6 +116,8 @@ channel manager (ADR-010), passwords and guest identity (ADR-009), audit of ever
 The model applies identically in temporary mode (ADR-011): a temporary server is one
 community with the same links, directory and channels; only its lifetime differs.
 
+> **Note, 2026-11-19:** "no DMs" above is superseded by [ADR-017](../adr/ADR-017-local-direct-messages-and-calls.md) (Proposed until Nick merges it): local 1:1 DMs and private voice calls are a separate resource whose content boundary is the pair, not channel membership; `hide_members` still governs new contact. Design: [direct-messages.md](direct-messages.md).
+
 What goes: per-channel invites as the way in, the four `open_joining` modes, `join_voice`,
 `may_invite` as a grant (it becomes a brake), history bounds on members.
 

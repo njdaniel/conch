@@ -94,6 +94,10 @@ test.describe('the packaged shell', () => {
         'shareSoundStart', 'shareSoundChoose', 'shareSoundMute', 'shareSoundEnd', 'shareSoundShareEnded',
         // The installed files replaced under the running app (#1600).
         'updateState', 'updateRestart', 'onUpdateState',
+        // A fixed, redacted voice or share diagnostic for the main log (#2055).
+        'reportVoiceDiagnostic',
+        // The diagnostics bundle (#2084): look, then save.
+        'diagnosticsPreview', 'diagnosticsSave',
       ].sort(),
       true,
     ]);

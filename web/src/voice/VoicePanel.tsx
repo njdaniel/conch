@@ -67,6 +67,7 @@ import { endedNote, ownPageNote, resumedNote, resumingNote, sharedNote, shortSha
 import { ShareQualityMenu, autoNote, cautionFor, estimateWords, resolutionWords, shareFrameRates, shareResolutions } from './ShareQualityMenu';
 import { ShareCaptureWarning, ShareReadout, ShareView } from './ShareView';
 import { nobody, type InVoice } from './useOccupancy';
+import { VoiceDiagnostics } from './VoiceDiagnostics';
 import type { VoiceControl } from './useVoice';
 import { VoiceStatus } from './VoiceStatus';
 
@@ -713,6 +714,17 @@ export function VoicePanel({
             {canJoin && micTestShown ? <MicTest /> : null}
           </>
         )}
+        {joined !== null && !strip ? (
+          <VoiceDiagnostics
+            key={joined}
+            client={client}
+            participants={others}
+            sharing={state.share.kind === 'sharing'}
+            watched={theirStreams
+              .filter(({ principal }) => state.watched.has(principal))
+              .map(({ principal }) => ({ principal, name: nameOf(people, principal, viewer) }))}
+          />
+        ) : null}
       </div>
 
       {inVoice ? <Options voice={voice} open={options && !strip} sharable={sharable} about={about} others={others} cameraAllowed={cameraAllowed} /> : null}
@@ -1514,7 +1526,7 @@ function ShareNotes({ voice, onMore, othersShare }: { readonly voice: VoiceContr
       return (
         <>
           <p role="status" className="sharing-note">{sharedNote(share.audio, features)}</p>
-          <p className="hint voice-supplemental"><ShareReadout client={client} direction="sent" prefix="Sending: " asked={state.shareQuality.resolution === 'auto' ? share.settled : { resolution: state.shareQuality.resolution, frameRate: state.shareQuality.frameRate }} /></p>
+          <ShareReadout client={client} direction="sent" prefix="Sending: " asked={state.shareQuality.resolution === 'auto' ? share.settled : { resolution: state.shareQuality.resolution, frameRate: state.shareQuality.frameRate }} />
           <ShareCaptureWarning stalled={state.shareCaptureStalled} client={client} />
           {share.resumed === true ? <p className="hint">{resumedNote}</p> : null}
         </>

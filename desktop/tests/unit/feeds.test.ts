@@ -26,6 +26,7 @@ import {
 } from '../../main/api/feeds.ts';
 import { agentConstructor, connector, createNodeConnect } from '../../main/api/socket.ts';
 import { Session } from '../../main/api/session.ts';
+import { diagnosticsLogger, LogRing } from '../../main/diagnostics.ts';
 import { makePki, type Pki } from './support.ts';
 import type { FeedEvent } from '../../shared/bridge-names.ts';
 
@@ -143,6 +144,41 @@ const flush = async (): Promise<void> => {
 };
 
 const types = (r: Rig): string[] => r.events.map(([, e]) => (e.type === 'close' ? `close ${String(e.code)}` : e.type === 'frames' ? `frames ${String(e.frames.length)}` : e.type));
+
+// feedchurn.mjs used an immediate close handshake and could evict both
+// earlier lines with 167 cycles. The socket here never uses the network.
+it.each([167, 1_001])('keeps export history through %i feed churn cycles', async (cycles) => {
+  const session = new Session();
+  session.setOrigin('http://127.0.0.1:8080');
+  session.adopt(TOKEN);
+  const ring = new LogRing();
+  const local: string[] = [];
+  const history = ['voice: helper 1 lost: ack-timeout', 'conch-desktop: refused an IPC call (gesture); 1 so far'];
+  for (const line of history) ring.record(line);
+  const feeds = new Feeds({
+    session,
+    client: { send: () => Promise.resolve({ kind: 'answer', status: 200, ok: true }) },
+    connect: (_url, _headers, on) => ({
+      close: () => {
+        queueMicrotask(() => { on.close(1000, ''); });
+      },
+      destroy: () => true,
+    }),
+    deliver: () => undefined,
+    log: diagnosticsLogger(ring, (line) => local.push(line)),
+    setTimer: () => ({}),
+    clearTimer: () => undefined,
+  });
+  for (let i = 0; i < cycles; i++) {
+    expect(feeds.subscribe(1, 1, occupancy)).toBe(true);
+    expect(feeds.unsubscribe(1, 1)).toBe(true);
+    await flush();
+  }
+  expect(local).toHaveLength(3 * cycles);
+  const sampled: string[] = [];
+  for (let n = 1; n <= cycles; n *= 2) sampled.push(...local.slice(3 * (n - 1), 3 * n));
+  expect(ring.lines()).toEqual([...history, ...sampled]);
+});
 
 describe('what the renderer may ask for', () => {
   it.each<[unknown, FeedRequest | null]>([

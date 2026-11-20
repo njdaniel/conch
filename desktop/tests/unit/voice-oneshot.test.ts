@@ -9,6 +9,7 @@ import { join, resolve } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { diagnosticsLogger, LogRing } from '../../main/diagnostics.ts';
 import { VOICE_DEVICES_MAX_BYTES, VOICE_DEVICES_MAX_NAME_BYTES, voiceDevicesV1 } from '../../../web/src/schema/generated.ts';
 import { parseVoiceDevices } from '../../main/voice/devices.ts';
 import { ONE_SHOT_TIMEOUT_MS, OneShot, SAVE_KEYS, isSaveKey, lastLine, saveValueFits, type OneShotDeps } from '../../main/voice/oneshot.ts';
@@ -104,8 +105,8 @@ describe('the device list reader against pkg/schema/testdata/voice-devices/', ()
 
 describe('what may be saved', () => {
   it('knows the keys of the issue and no others', () => {
-    expect([...SAVE_KEYS]).toEqual(['audio.input', 'audio.output', 'audio.talk_mode', 'keys.device', 'keys.talk']);
-    for (const k of ['keys.mute', 'keys.deafen', 'server', 'channel', 'audio', 'toString', '', '--help']) expect(isSaveKey(k), k).toBe(false);
+    expect([...SAVE_KEYS]).toEqual(['audio.input', 'audio.output', 'audio.talk_mode', 'keys.device', 'keys.talk', 'keys.mute']);
+    for (const k of ['keys.deafen', 'server', 'channel', 'audio', 'toString', '', '--help']) expect(isSaveKey(k), k).toBe(false);
     expect(isSaveKey(5)).toBe(false);
   });
 
@@ -153,6 +154,7 @@ describe('what may be saved', () => {
 
 let s: Scratch;
 let logs: string[];
+let ring: LogRing;
 let oneshot: OneShot;
 let spawned: { command: string; args: readonly string[]; options: Parameters<OneShotSpawnFn>[2] }[];
 const children: { pid?: number | undefined }[] = [];
@@ -199,7 +201,7 @@ function make(over: Partial<OneShotDeps> = {}): OneShot {
   return new OneShot({
     resources: s.resources,
     env: { HOME: s.root, XDG_RUNTIME_DIR: s.run, CONCH_TOKEN: FAKE_TOKEN, CONCH_VOICE_ATTACH: 'nonce', CONCH_SERVER: 'https://x', LD_PRELOAD: '/evil.so', RUST_LOG: 'trace', LANG: 'C', PATH: '/usr/bin' },
-    log: (l) => logs.push(l),
+    log: diagnosticsLogger(ring, (line) => logs.push(line)),
     spawn,
     timeoutMs: 5000,
     drainGraceMs: 100,
@@ -210,6 +212,7 @@ function make(over: Partial<OneShotDeps> = {}): OneShot {
 beforeEach(() => {
   s = scratch();
   logs = [];
+  ring = new LogRing();
   spawned = [];
   oneshot = make();
 });
@@ -365,6 +368,7 @@ describe('devices()', () => {
     await oneshot.devices(s.config);
     const log = logs.join('\n');
     expect(log).toContain('voice.toml refused ?[31m');
+    expect(ring.lines()).toEqual(['voice: devices: failed (exit status 1)']);
     expect(log).not.toContain('\u001b');
     expect(log).not.toContain('old line');
     expect(log).not.toContain(FAKE_TOKEN);

@@ -1,6 +1,6 @@
 // The one place the desktop adapter reads window.conchDesktop, the object the
 // preload exposes (./bridge types it). It is absent outside the desktop shell.
-import type { ConchDesktopBridge, DesktopInviteBridge, DesktopSettingsBridge } from './bridge';
+import type { ConchDesktopBridge, DesktopDiagnosticsBridge, DesktopInviteBridge, DesktopSettingsBridge, DesktopVoiceBridge } from './bridge';
 
 export function bridge(): ConchDesktopBridge | undefined {
   return window.conchDesktop;
@@ -13,5 +13,14 @@ export function inviteBridge(): (ConchDesktopBridge & Partial<DesktopInviteBridg
 
 // The app's own settings (issue #1587): present when the preload exposes them.
 export function settingsBridge(): Partial<DesktopSettingsBridge> | undefined {
+  return window.conchDesktop;
+}
+
+export function voiceDiagnosticBridge(): Partial<Pick<DesktopVoiceBridge, 'reportVoiceDiagnostic'>> | undefined {
+  return window.conchDesktop;
+}
+
+// The diagnostics bundle (issue #2084): present when the preload exposes it.
+export function diagnosticsBridge(): Partial<DesktopDiagnosticsBridge> | undefined {
   return window.conchDesktop;
 }

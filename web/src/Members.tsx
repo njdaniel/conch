@@ -496,6 +496,7 @@ function CommunityRow({
   readonly onProfileDisappear: () => void;
 }) {
   const inviter = person.invited_by === undefined ? undefined : byId.get(person.invited_by);
+  const selfBadge = useId();
   const [menuOpen, setMenuOpen] = useState(false);
   const more = useRef<HTMLButtonElement>(null);
   const has = manage !== undefined && memberActions(manage.who, person).length > 0;
@@ -511,8 +512,10 @@ function CommunityRow({
   return (
     <li className={`community-member${has ? ' member-row has-actions' : ''}`} {...openers}>
       <Avatar id={person.id} name={person.name} />
-      <ProfileCard id={person.id} person={person} viewer={viewer} className="community-name" onDisappear={onProfileDisappear} />
-      <IdentityMarks {...person} id={person.id} viewer={viewer} />
+      {/* The row carries the You badge. The profile card is inside the row,
+          so giving it the viewer ID would add a second You badge when open. */}
+      <ProfileCard id={person.id} person={person} className="community-name" onDisappear={onProfileDisappear} describedBy={person.id === viewer ? selfBadge : undefined} />
+      <IdentityMarks {...person} id={person.id} viewer={viewer} markIds={{ you: selfBadge }} />
       {person.voice_allowed === undefined ? null : <span className="hint">{person.voice_allowed ? ' · voice on' : ' · voice off'}</span>}
       {person.may_invite === undefined ? null : <span className="hint">{person.may_invite ? ' · can invite' : ' · cannot invite'}</span>}
       {person.invited_by === undefined ? null : <span className="hint">{` · invited by ${inviter?.name ?? `#${String(person.invited_by)}`}`}</span>}

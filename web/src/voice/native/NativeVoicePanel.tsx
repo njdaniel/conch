@@ -16,8 +16,9 @@ import type { NativeVoiceView } from '../../platform/desktop/bridge';
 import type { NativeVoice, NativeVoiceError } from '../../platform/types';
 import type { ChannelV0 } from '../../schema/channel';
 import type { Person } from '../../useLiveChannel';
-import { occupants } from '../presence';
-import { Roster } from '../VoicePanel';
+import { occupants, sharers } from '../presence';
+import { nameOf, Roster } from '../VoicePanel';
+import { VoiceDiagnostics } from '../VoiceDiagnostics';
 import { useVoiceNames } from '../useVoiceNames';
 import { usePresence } from './usePresence';
 import { useNativeVoice } from './useNativeVoice';
@@ -147,7 +148,7 @@ export function NativeVoicePanel({
   // page owes it; undefined unless main's switch is on.
   const sound = useShareSound(source, companion, view);
   const session = hasSession(view);
-  const [setup, setSetup] = useState(false);
+  const [setup, setSetup] = useState<'talk' | 'mute' | null>(null);
   const joined = session ? view.channel : null;
   const shown = joined ?? (signedIn ? channel : null);
   const snapshot = usePresence({ channel: shown, joined, voiceAllowed, onUnauthorized });
@@ -332,7 +333,12 @@ export function NativeVoicePanel({
           </div>
         </div>
       </div>
-      {unavailable || actions === undefined ? null : <VoiceOptions source={source} view={view} open={options} />}
+      {unavailable || actions === undefined ? null : <VoiceOptions
+        source={source}
+        view={view}
+        open={options}
+        {...(source.keyDevices === undefined ? {} : { onKeySetup: setSetup })}
+      />}
       <div className="voice-notes">
         {why === null ? null : <p role="status" className="hint">{why}</p>}
         {view.detail === undefined ? null : (
@@ -350,21 +356,35 @@ export function NativeVoicePanel({
         {!session && warned !== null && warned === channel ? <p role="status" className="hint">{duplicateWarning}</p> : null}
         {!session && !unavailable && channel !== null && presence === null && idle === null ? <p className="hint">Checking whether voice is available.</p> : null}
         {unavailable || source.keyDevices === undefined || setup ? null : (
-          <button type="button" className="more" onClick={() => { setSetup(true); }}>
+          <button type="button" className="more" onClick={() => { setSetup('talk'); }}>
             {needsTalkSetup ? 'Set up the talk key' : 'Talk key'}
           </button>
         )}
+        {joined !== null && !unavailable ? (
+          <VoiceDiagnostics
+            key={joined}
+            desktop
+            client={companionClient}
+            sharing={companion?.state.share.kind === 'sharing'}
+            watched={sharers(presence)
+              .filter(({ principal }) => principal !== viewer && companion?.state.watched.has(principal))
+              .map(({ principal }) => ({ principal, name: nameOf(named, principal, viewer) }))}
+          />
+        ) : null}
       </div>
       {companion === null || unavailable ? null : <NativeStreams companion={companion} presence={presence} viewer={viewer} people={named} joined={joined} live={live} />}
-      {setup ? (
+      {setup !== null ? (
         <TalkKeySetup
+          key={setup}
+          binding={setup}
           source={source}
           joined={session}
           onSaved={(label, nextJoinOnly) => {
+            if (setup !== 'talk') return;
             if (nextJoinOnly === true) setPreviousBinding((old) => old ?? { generation: view.generation, label: binding });
             onBound?.(label);
           }}
-          onClose={() => { setSetup(false); }}
+          onClose={() => { setSetup(null); }}
         />
       ) : null}
     </section>

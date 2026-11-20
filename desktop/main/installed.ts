@@ -27,6 +27,7 @@
 //     starts one instance, not two;
 //   - nothing here stops a running helper: a call continues until the person
 //     restarts.
+import type { MainLog } from './diagnostics.ts';
 import type { InstalledView } from '../../web/src/platform/desktop/bridge.ts';
 import { UPDATE_EVENTS } from '../shared/bridge-names.ts';
 import type { DocumentGate } from './document.ts';
@@ -50,7 +51,7 @@ export interface InstalledDeps {
   // Tells the person in a native dialog that the page could not start after
   // the update, and resolves true when they chose Restart.
   readonly ask: (version: string | null) => Promise<boolean>;
-  readonly log: (line: string) => void;
+  readonly log: MainLog;
 }
 
 // parseStamp is the version in a stamp file's text, or null.
@@ -127,11 +128,11 @@ export class Installed {
   // restart is the person's click: the normal quit, then the relaunch.
   restart(): void {
     if (!this.updated()) {
-      this.deps.log('installed: restart refused: nothing was updated');
+      this.deps.log('installed: restart refused: nothing was updated', { ring: true });
       return;
     }
     if (this.#restarting) {
-      this.deps.log('installed: restart refused: already restarting');
+      this.deps.log('installed: restart refused: already restarting', { ring: true });
       return;
     }
     this.#restarting = true;
@@ -148,14 +149,14 @@ export class Installed {
     try {
       restart = await this.deps.ask(this.#latest);
     } catch {
-      this.deps.log('installed: the update dialog failed');
+      this.deps.log('installed: the update dialog failed', { ring: true });
     }
     if (restart) this.restart();
   }
 
   // pageStarted is a page that loaded after an update: measured, and logged.
   pageStarted(): void {
-    if (this.updated()) this.deps.log('installed: a page started after the update');
+    if (this.updated()) this.deps.log('installed: a page started after the update', { ring: true });
   }
 
   async #readStamp(): Promise<string | null> {
@@ -171,10 +172,10 @@ export class Installed {
     return stamp;
   }
 
-  #unreadable(why: string): void {
+  #unreadable(why: 'cannot be read' | 'is not a version'): void {
     if (this.#unreadableLogged) return;
     this.#unreadableLogged = true;
-    this.deps.log(`installed: the installed version stamp ${why}; updates cannot be noticed`);
+    this.deps.log(`installed: the installed version stamp ${why}; updates cannot be noticed`, { ring: true });
   }
 
   #emit(view: InstalledView): void {

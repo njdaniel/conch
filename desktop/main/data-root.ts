@@ -21,6 +21,7 @@
 // It is a guard against a mistaken launch, not against an attacker running as
 // this user (who can pass the override flag too), and it does not prove the
 // ACL: a profile directory whose ACL someone has widened passes.
+import type { MainLog } from './diagnostics.ts';
 import { lstatSync, realpathSync } from 'node:fs';
 import { win32 } from 'node:path';
 
@@ -57,7 +58,7 @@ export interface DataRootInputs {
   readonly lstat?: (path: string) => unknown;
 }
 
-export function dataRootVerdict(inputs: DataRootInputs, log: (line: string) => void): DataRootVerdict {
+export function dataRootVerdict(inputs: DataRootInputs, log: MainLog): DataRootVerdict {
   if (inputs.platform !== 'win32' || !inputs.hasSwitch(USER_DATA_SWITCH)) return 'unchecked';
   if (underPrivateBase(inputs.root, inputs.env, inputs.realpath ?? realpathSync.native, inputs.lstat ?? lstatSync)) return 'inside';
   if (inputs.hasSwitch(ALLOW_SHARED_SWITCH)) {
