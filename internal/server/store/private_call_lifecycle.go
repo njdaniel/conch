@@ -152,8 +152,8 @@ func restorePrivateCallsTx(ctx context.Context, tx execer, now time.Time) error 
 	})
 }
 
-// ObservePrivateCallEndpoints is the #2032 media poller seam. Submit
-// observations in poll order for the attempt revision observed. Each
+// ObservePrivateCallEndpoints applies media poller observations in poll
+// order for the attempt revision observed. Each
 // credential is the selected credential seen in the room, or zero when
 // absent. A late observation cannot resurrect an expired attempt.
 func (s *Store) ObservePrivateCallEndpoints(ctx context.Context, id string, revision, callerCredential, calleeCredential int64, clock func() time.Time) error {

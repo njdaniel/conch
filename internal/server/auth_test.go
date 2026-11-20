@@ -215,6 +215,7 @@ var routeExpectations = map[string]routeExpectation{
 	"POST /v1/calls/{call}/decline":     {classAuth, "/v1/calls/abcdefghijklmnopqrstuv/decline", `{"action_id":"decline","revision":1}`, 404},
 	"POST /v1/calls/{call}/cancel":      {classAuth, "/v1/calls/abcdefghijklmnopqrstuv/cancel", `{"action_id":"cancel","revision":1}`, 404},
 	"POST /v1/calls/{call}/hangup":      {classAuth, "/v1/calls/abcdefghijklmnopqrstuv/hangup", `{"action_id":"hangup","revision":1}`, 404},
+	"POST /v1/calls/{call}/session":     {classAuth, "/v1/calls/abcdefghijklmnopqrstuv/session", "", 404},
 	// Preview as member (issue #1515). Without the header it answers 400
 	// "preview target required"; the status is the same with AuthOff.
 	"GET /v1/preview":   {classAuth, "/v1/preview", "", 400},
