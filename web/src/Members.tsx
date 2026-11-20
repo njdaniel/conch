@@ -511,7 +511,9 @@ function CommunityRow({
   return (
     <li className={`community-member${has ? ' member-row has-actions' : ''}`} {...openers}>
       <Avatar id={person.id} name={person.name} />
-      <ProfileCard id={person.id} person={person} viewer={viewer} className="community-name" onDisappear={onProfileDisappear} />
+      {/* The row carries the You badge. The profile card is inside the row,
+          so giving it the viewer ID would add a second You badge when open. */}
+      <ProfileCard id={person.id} person={person} className="community-name" onDisappear={onProfileDisappear} />
       <IdentityMarks {...person} id={person.id} viewer={viewer} />
       {person.voice_allowed === undefined ? null : <span className="hint">{person.voice_allowed ? ' · voice on' : ' · voice off'}</span>}
       {person.may_invite === undefined ? null : <span className="hint">{person.may_invite ? ' · can invite' : ' · cannot invite'}</span>}
