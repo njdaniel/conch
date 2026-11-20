@@ -19,35 +19,47 @@ import {
   voiceControlAckV1,
   voiceControlAckV2,
   voiceControlAckV3,
+  voiceControlAckV4,
   voiceControlGetStateV1,
   voiceControlGetStateV2,
   voiceControlGetStateV3,
+  voiceControlGetStateV4,
   voiceControlHelloV1,
   voiceControlLeaveV1,
   voiceControlLeaveV2,
   voiceControlLeaveV3,
+  voiceControlLeaveV4,
   voiceControlPipeAttachedV1,
   voiceControlProtocolErrorV1,
   voiceControlProtocolErrorV2,
   voiceControlProtocolErrorV3,
+  voiceControlProtocolErrorV4,
   voiceControlSetDeafenV1,
   voiceControlSetDeafenV2,
   voiceControlSetDeafenV3,
+  voiceControlSetDeafenV4,
   voiceControlSetDevicesV2,
   voiceControlSetDevicesV3,
+  voiceControlSetDevicesV4,
   voiceControlSetMuteV1,
   voiceControlSetMuteV2,
   voiceControlSetMuteV3,
+  voiceControlSetMuteV4,
   voiceControlSetShareAudioMuteV3,
+  voiceControlSetShareAudioMuteV4,
   voiceControlSetShareAudioV3,
+  voiceControlSetShareAudioV4,
   voiceControlSetTalkModeV2,
   voiceControlSetTalkModeV3,
+  voiceControlSetTalkModeV4,
   voiceControlStartV1,
   voiceControlStartV2,
   voiceControlStartV3,
+  voiceControlStartV4,
   voiceControlStateV1,
   voiceControlStateV2,
   voiceControlStateV3,
+  voiceControlStateV4,
   type VoiceControlHelloV1,
 } from '../../../web/src/schema/generated.ts';
 import type { Validator } from '../../../web/src/schema/validate.ts';
@@ -118,6 +130,21 @@ const validators: Record<string, Record<string, Validator<unknown>>> = {
     'event-ack': voiceControlAckV3,
     'event-state': voiceControlStateV3,
     'event-protocol-error': voiceControlProtocolErrorV3,
+  },
+  'voice-control-v4': {
+    'command-start': voiceControlStartV4,
+    'command-set-mute': voiceControlSetMuteV4,
+    'command-set-deafen': voiceControlSetDeafenV4,
+    'command-get-state': voiceControlGetStateV4,
+    'command-leave': voiceControlLeaveV4,
+    'command-set-devices': voiceControlSetDevicesV4,
+    'command-set-talk-mode': voiceControlSetTalkModeV4,
+    'command-set-share-audio': voiceControlSetShareAudioV4,
+    'command-set-share-audio-mute': voiceControlSetShareAudioMuteV4,
+    'event-hello': voiceControlHelloV1,
+    'event-ack': voiceControlAckV4,
+    'event-state': voiceControlStateV4,
+    'event-protocol-error': voiceControlProtocolErrorV4,
   },
   'voice-control-pipe': {
     attached: voiceControlPipeAttachedV1,
@@ -223,6 +250,32 @@ function casesOf(dir: string, direction: string): (Case & { readonly dir: string
         .map((c) => ({ ...c, dir, file })),
     );
 }
+
+describe('the v4 TypeScript command validators match the Go destination cases', () => {
+  const cases = casesOf('voice-control-v4', 'command');
+
+  it('finds the destination cases', () => {
+    expect(cases.length).toBeGreaterThan(0);
+  });
+
+  it.each(cases)('$name', (c) => {
+    const doc: unknown = JSON.parse(lineOf(c.dir, c).toString('utf8'));
+    if (typeof doc !== 'object' || doc === null || !('kind' in doc) || typeof doc.kind !== 'string') {
+      throw new Error('expected a command kind in the fixture');
+    }
+    const family = `command-${doc.kind.replaceAll('_', '-')}`;
+    const check = validators[c.dir]?.[family];
+    if (c.want.result === 'accept') {
+      expect(check).toBeDefined();
+      expect(check?.(doc)).toEqual([]);
+    } else if (c.want.code === 'unknown_kind') {
+      expect(check).toBeUndefined();
+    } else {
+      expect(check).toBeDefined();
+      expect(check?.(doc)).not.toEqual([]);
+    }
+  });
+});
 
 describe.each([
   { dir: 'voice-control', parse: parseEventV1, field: 'retry_in_ms' },

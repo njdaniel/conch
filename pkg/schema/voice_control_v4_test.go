@@ -410,11 +410,9 @@ var voiceControlV4Transcripts = map[string]string{
 }
 
 // TestVoiceControlV4Transcripts reads every line of every transcript with the
-// reader of its direction and the session's version. A v4 session that has
-// nothing to do with a call (every line but the start's destination) is then
-// run through v3's ordering rules, written as v3: v4 changes no rule of the
-// session, so the rules of v3 are the rules of v4, kept once. The v3 owner's
-// session is v3's and is run as it is.
+// reader of its direction and the session's version. It checks the outcome
+// of sharing sound in a call, then runs the stream through v3's ordering
+// rules with the version boundary and destination translated.
 func TestVoiceControlV4Transcripts(t *testing.T) {
 	for name, version := range voiceControlV4Transcripts {
 		t.Run(name, func(t *testing.T) {
@@ -429,9 +427,15 @@ func TestVoiceControlV4Transcripts(t *testing.T) {
 				t.Error("no description")
 			}
 			callStarts := 0
+			shareRequest := -1
+			versionMismatch := false
 			asV3 := make([]voiceControlStep, len(doc.Steps))
 			for i, s := range doc.Steps {
 				asV3[i] = s
+				isShareOutcome := shareRequest >= 0 && i == shareRequest+1
+				if isShareOutcome && (s.From != "helper" || len(s.Message) == 0) {
+					t.Fatalf("step %d: want helper's share audio outcome", i)
+				}
 				if len(s.Message) == 0 {
 					continue
 				}
@@ -447,26 +451,57 @@ func TestVoiceControlV4Transcripts(t *testing.T) {
 						t.Errorf("step %d: %v", i, err)
 					}
 				case s.From == "helper" && schema == version:
-					read := func() error { _, err := ParseVoiceControlEventV4(line); return err }
 					if version == VoiceControlSchemaV3 {
-						read = func() error { _, err := ParseVoiceControlEventV3(line); return err }
+						if _, err := ParseVoiceControlEventV3(line); err != nil {
+							t.Fatalf("step %d: %v", i, err)
+						}
+						break
 					}
-					if err := read(); err != nil {
-						t.Errorf("step %d: %v", i, err)
+					ev, err := ParseVoiceControlEventV4(line)
+					if err != nil {
+						t.Fatalf("step %d: %v", i, err)
+					}
+					if callStarts > 0 && ev.State != nil && ev.State.ShareAudio == VoiceControlShareAudioOn {
+						t.Errorf("step %d: share audio is on during a private call", i)
+					}
+					if isShareOutcome &&
+						(ev.State == nil || ev.State.ShareAudio != VoiceControlShareAudioUnavailable ||
+							ev.State.ShareAudioProblem != VoiceControlShareAudioProblemUnsupported ||
+							ev.State.ShareAudioSources != 0) {
+						t.Errorf("step %d: want share audio unavailable/unsupported with no sources before the ack", i)
 					}
 				case s.From == "owner" && schema == version:
-					read := func() error { _, err := ParseVoiceControlCommandV4(line); return err }
 					if version == VoiceControlSchemaV3 {
-						read = func() error { _, err := ParseVoiceControlCommandV3(line); return err }
+						if _, err := ParseVoiceControlCommandV3(line); err != nil {
+							t.Fatalf("step %d: %v", i, err)
+						}
+						break
 					}
-					if err := read(); err != nil {
-						t.Errorf("step %d: %v", i, err)
+					cmd, err := ParseVoiceControlCommandV4(line)
+					if err != nil {
+						t.Fatalf("step %d: %v", i, err)
 					}
-				case s.From == "owner":
-					// A line of another version in the session: refused.
-					if _, err := ParseVoiceControlCommandV4(line); err == nil {
-						t.Errorf("step %d: a line of %s was accepted in a session of %s", i, schema, version)
+					if callStarts > 0 && cmd.SetShareAudio != nil && cmd.SetShareAudio.Capturing {
+						if shareRequest >= 0 {
+							t.Fatalf("step %d: a second request to share audio", i)
+						}
+						shareRequest = i
 					}
+				case s.From == "owner" && version == VoiceControlSchemaV4 && schema == VoiceControlSchemaV3:
+					if name != "transcript-version-fixed.json" || i != len(doc.Steps)-4 {
+						t.Fatalf("step %d: expected the wrong-version command immediately before the failure sequence", i)
+					}
+					_, err := ParseVoiceControlCommandV4(line)
+					var refusal *VoiceControlError
+					if !errors.As(err, &refusal) || refusal.Code != VoiceControlErrorUnknownSchema || refusal.ID != 0 {
+						t.Fatalf("step %d: got %v, want unknown_schema with no id", i, err)
+					}
+					versionMismatch = true
+					// In the translated v3 session, a v4 command has the
+					// same fatal error as the original v3 command in v4.
+					f["schema"] = json.RawMessage(`"` + VoiceControlSchemaV4 + `"`)
+				default:
+					t.Fatalf("step %d: unexpected schema %q from %q", i, schema, s.From)
 				}
 				if version == VoiceControlSchemaV4 && s.From == "owner" && schema == version {
 					if _, ok := f["call"]; ok {
@@ -491,10 +526,11 @@ func TestVoiceControlV4Transcripts(t *testing.T) {
 			if strings.Contains(name, "call") != (callStarts == 1) {
 				t.Errorf("%d call starts in %s", callStarts, name)
 			}
-			if strings.Contains(name, "version-fixed") {
-				// The v3 line in a v4 session is the point; it has no
-				// v3 reading to run.
-				return
+			if callStarts == 1 && shareRequest < 0 {
+				t.Error("the call session never requests share audio")
+			}
+			if name == "transcript-version-fixed.json" && !versionMismatch {
+				t.Error("the session never receives a wrong-version command")
 			}
 			if got := checkVoiceControlV3Transcript(t, asV3); got != VoiceControlSchemaV3 {
 				t.Errorf("the session read as v3 is in %q", got)
@@ -507,21 +543,6 @@ func TestVoiceControlV4Transcripts(t *testing.T) {
 	}
 	if len(files) != len(voiceControlV4Transcripts) {
 		t.Errorf("%d transcripts on disk, %d listed", len(files), len(voiceControlV4Transcripts))
-	}
-}
-
-// TestVoiceControlV4CallSessionHasNoShare: a call has no screen share, so a
-// share's sound is refused into the state with the problem a session with no
-// companion gets, with no word v3 does not have.
-func TestVoiceControlV4CallSessionHasNoShare(t *testing.T) {
-	st := VoiceControlStateV4{
-		Schema: VoiceControlSchemaV4, Kind: VoiceControlEventState, Seq: 5,
-		Phase: VoiceControlPhaseConnected, Capture: VoiceControlCaptureOn, Playback: VoiceControlPlaybackOn,
-		Blocked: []VoiceControlBlock{}, TalkMode: VoiceControlTalkModePushToTalk, PTT: VoiceControlPTTReady,
-		ShareAudio: VoiceControlShareAudioUnavailable, ShareAudioProblem: VoiceControlShareAudioProblemUnsupported,
-	}
-	if err := st.Validate(); err != nil {
-		t.Fatalf("a call session's refusal of a share's sound is invalid: %v", err)
 	}
 }
 
@@ -642,18 +663,25 @@ func TestVoiceControlStartV4Validate(t *testing.T) {
 		{"neither", func(s *VoiceControlStartV4) { s.Channel = "" }, false},
 		{"call too short", func(s *VoiceControlStartV4) { s.Channel, s.Call = "", "abc" }, false},
 		{"call with a slash", func(s *VoiceControlStartV4) { s.Channel, s.Call = "", "room/"+voiceControlV4CallID }, false},
+		{"call is a default room name", func(s *VoiceControlStartV4) { s.Channel, s.Call = "", "conch-mfqwcylbmfqwcylbmfqwcylbme" }, false},
+		{"call is a custom room name", func(s *VoiceControlStartV4) { s.Channel, s.Call = "", "alpha-2-mfqwcylbmfqwcylbmfqwcylbme" }, false},
 		{"v3 schema", func(s *VoiceControlStartV4) { s.Schema = VoiceControlSchemaV3 }, false},
 		{"no principal", func(s *VoiceControlStartV4) { s.PrincipalID = 0 }, false},
 		{"bad credential", func(s *VoiceControlStartV4) { s.Credential = "" }, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := good(tt.mod).Validate()
+			start := good(tt.mod)
+			err := start.Validate()
 			if (err == nil) != tt.ok {
 				t.Errorf("Validate() = %v, want ok=%v", err, tt.ok)
 			}
-			if err != nil && strings.Contains(err.Error(), voiceControlV4CallID) {
-				t.Errorf("the error repeats the call id: %v", err)
+			line, err := MarshalVoiceControlLine(start)
+			if (err == nil) != tt.ok || (len(line) != 0) != tt.ok {
+				t.Errorf("MarshalVoiceControlLine() wrote %d bytes, error %v, want ok=%v", len(line), err, tt.ok)
+			}
+			if err != nil && start.Call != "" && strings.Contains(err.Error(), start.Call) {
+				t.Error("the writer's error repeats the call value")
 			}
 		})
 	}

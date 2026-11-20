@@ -3,8 +3,17 @@ package schema
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 )
+
+// VoiceControlV4RoomNamePattern reserves the room namespace on the control
+// pipe. Conch generates room names with a configurable lower-case prefix
+// ending in '-' and a 26-character lower-case base32 suffix (store/voice.go).
+// This also covers rooms with a prefix from a previous configuration.
+const VoiceControlV4RoomNamePattern = `^[a-z0-9-]{0,31}-[a-z2-7]{26}$`
+
+var voiceControlV4RoomName = regexp.MustCompile(VoiceControlV4RoomNamePattern)
 
 // Version 4 of the managed voice-helper control protocol (issue #2039, child
 // of #2013; ADR-017 Decision 13, Nick's decision 12 of 2026-11-19). A v4
@@ -118,6 +127,9 @@ type VoiceControlStartV4 struct {
 	// ID): 16 to MaxPrivateCallIDBytes URL-safe characters. Absent for a
 	// channel. It is an id and never a room name, a token or a URL: the
 	// helper gets the media grant from the server, for its own side only.
+	// The owner takes this value from the server's attempt record. Validation
+	// excludes Conch's room namespace. The session route verifies the attempt
+	// exists and that the authenticated endpoint is authorized to join it.
 	Call        string                 `json:"call,omitempty"`
 	PrincipalID int64                  `json:"principal_id"`
 	Credential  VoiceControlCredential `json:"credential"`
@@ -148,6 +160,9 @@ func (s VoiceControlStartV4) Validate() error {
 	case s.Call != "":
 		if len(s.Call) < MinPrivateCallIDBytes || !validDMToken(s.Call, MaxPrivateCallIDBytes) {
 			return fmt.Errorf("schema: voice control start call must be %d to %d URL-safe characters", MinPrivateCallIDBytes, MaxPrivateCallIDBytes)
+		}
+		if voiceControlV4RoomName.MatchString(s.Call) {
+			return errors.New("schema: voice control start call matches a reserved room name")
 		}
 	default:
 		return errors.New("schema: voice control start must name a channel or a call")

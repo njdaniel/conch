@@ -2569,7 +2569,7 @@ export interface VoiceControlStartV4 {
   deafened: boolean;
 }
 
-export const voiceControlStartV4 = object<VoiceControlStartV4>({
+const voiceControlStartV4Shape = object<VoiceControlStartV4>({
   schema: vocab<typeof voiceControlStartV4Schema>({ [voiceControlStartV4Schema]: true }),
   kind: voiceControlCommandKindV4,
   id: int,
@@ -2581,6 +2581,31 @@ export const voiceControlStartV4 = object<VoiceControlStartV4>({
   muted: bool,
   deafened: bool,
 });
+const voiceControlRoomNameV4 = /^[a-z0-9-]{0,31}-[a-z2-7]{26}$/;
+
+export function voiceControlStartV4(value: unknown, path = '$'): string[] {
+  if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+    if (('channel' in value) === ('call' in value)) {
+      return [path + ': want exactly one of channel and call'];
+    }
+    if ('channel' in value && typeof value.channel === 'string' && (
+      /^\p{White_Space}*$/u.test(value.channel) || /[\p{Cc}\p{Cs}]/u.test(value.channel) ||
+      new TextEncoder().encode(value.channel).length > VOICE_CONTROL_MAX_CHANNEL_BYTES
+    )) {
+      return [path + '.channel: want a valid channel name'];
+    }
+    if ('call' in value && typeof value.call === 'string' && (
+      value.call.length < MIN_PRIVATE_CALL_ID_BYTES || value.call.length > MAX_PRIVATE_CALL_ID_BYTES ||
+      /[^A-Za-z0-9_-]/.test(value.call) || voiceControlRoomNameV4.test(value.call)
+    )) {
+      return [path + '.call: want a valid call attempt ID'];
+    }
+    if (!('kind' in value) || value.kind !== 'start') {
+      return [path + '.kind: want start'];
+    }
+  }
+  return voiceControlStartV4Shape(value, path);
+}
 
 // schema.VoiceControlSetMuteV4
 export const voiceControlSetMuteV4Schema = 'conch.voice_control.v4';

@@ -108,6 +108,26 @@
       }
     },
     {
+      "name": "start with a default Conch room name as the call",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"call\":\"conch-mfqwcylbmfqwcylbmfqwcylbme\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "start with a custom Conch room name as the call",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"call\":\"alpha-2-mfqwcylbmfqwcylbmfqwcylbme\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
       "name": "start with a call that is a URL",
       "direction": "command",
       "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"call\":\"https://conch.example.org/call/aaaaaaaaaa\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",

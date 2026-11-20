@@ -399,10 +399,45 @@ func (g *generator) writeStruct(d *decl) error {
 	}
 	g.writeInterface(d.name, fields, "")
 	b.WriteString("\n")
+	if d.typ == reflect.TypeFor[schema.VoiceControlStartV4]() {
+		g.writeVoiceControlStartV4(d, fields)
+		return nil
+	}
 	fmt.Fprintf(b, "export const %s = ", d.value)
 	g.writeObject(d.name, fields, "")
 	b.WriteString(";\n")
 	return nil
+}
+
+// writeVoiceControlStartV4 checks destination semantics before the shape
+// validator can strip undeclared keys in lenient mode.
+func (g *generator) writeVoiceControlStartV4(d *decl, fields []field) {
+	b := &g.body
+	fmt.Fprintf(b, "const %sShape = ", d.value)
+	g.writeObject(d.name, fields, "")
+	fmt.Fprintf(b, ";\nconst voiceControlRoomNameV4 = /%s/;\n", schema.VoiceControlV4RoomNamePattern)
+	b.WriteString("\nexport function voiceControlStartV4(value: unknown, path = '$'): string[] {\n")
+	b.WriteString("  if (typeof value === 'object' && value !== null && !Array.isArray(value)) {\n")
+	b.WriteString("    if (('channel' in value) === ('call' in value)) {\n")
+	b.WriteString("      return [path + ': want exactly one of channel and call'];\n")
+	b.WriteString("    }\n")
+	b.WriteString("    if ('channel' in value && typeof value.channel === 'string' && (\n")
+	b.WriteString("      /^\\p{White_Space}*$/u.test(value.channel) || /[\\p{Cc}\\p{Cs}]/u.test(value.channel) ||\n")
+	b.WriteString("      new TextEncoder().encode(value.channel).length > VOICE_CONTROL_MAX_CHANNEL_BYTES\n")
+	b.WriteString("    )) {\n")
+	b.WriteString("      return [path + '.channel: want a valid channel name'];\n")
+	b.WriteString("    }\n")
+	b.WriteString("    if ('call' in value && typeof value.call === 'string' && (\n")
+	b.WriteString("      value.call.length < MIN_PRIVATE_CALL_ID_BYTES || value.call.length > MAX_PRIVATE_CALL_ID_BYTES ||\n")
+	b.WriteString("      /[^A-Za-z0-9_-]/.test(value.call) || voiceControlRoomNameV4.test(value.call)\n")
+	b.WriteString("    )) {\n")
+	b.WriteString("      return [path + '.call: want a valid call attempt ID'];\n")
+	b.WriteString("    }\n")
+	b.WriteString("    if (!('kind' in value) || value.kind !== 'start') {\n")
+	b.WriteString("      return [path + '.kind: want start'];\n")
+	b.WriteString("    }\n")
+	b.WriteString("  }\n")
+	b.WriteString("  return voiceControlStartV4Shape(value, path);\n}\n")
 }
 
 func (g *generator) writeInterface(name string, fields []field, indent string) {

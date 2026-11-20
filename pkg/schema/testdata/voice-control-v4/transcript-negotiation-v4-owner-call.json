@@ -1,5 +1,5 @@
 {
-  "description": "The same helper and a v4 owner whose start names a private call attempt (by its opaque id, never a room name or token) instead of a channel. The session is otherwise a v4 channel session: the states, the acks and the leave are the same. The helper joins through the server's call session route for that attempt; the control channel carries only the id.",
+  "description": "A v4 owner joins by the opaque attempt ID through the call session route. The helper reports share_audio unavailable with problem unsupported before acknowledging the request to start sharing sound.",
   "steps": [
     {
       "from": "helper",
@@ -150,8 +150,11 @@
       "from": "owner",
       "message": {
         "schema": "conch.voice_control.v4",
-        "kind": "leave",
-        "id": 3
+        "kind": "set_share_audio",
+        "id": 3,
+        "capturing": true,
+        "scope": "system_excluding_call",
+        "application_name": "Conch"
       }
     },
     {
@@ -160,6 +163,45 @@
         "schema": "conch.voice_control.v4",
         "kind": "state",
         "seq": 8,
+        "phase": "connected",
+        "capture": "on",
+        "playback": "on",
+        "transmitting": false,
+        "muted": false,
+        "deafened": false,
+        "blocked": [],
+        "talk_mode": "push_to_talk",
+        "ptt": "ready",
+        "share_audio": "unavailable",
+        "share_audio_muted": false,
+        "share_audio_sources": 0,
+        "share_audio_problem": "unsupported"
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v4",
+        "kind": "ack",
+        "seq": 9,
+        "id": 3,
+        "ok": true
+      }
+    },
+    {
+      "from": "owner",
+      "message": {
+        "schema": "conch.voice_control.v4",
+        "kind": "leave",
+        "id": 4
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v4",
+        "kind": "state",
+        "seq": 10,
         "phase": "stopping",
         "reason": "left",
         "capture": "on",
@@ -182,8 +224,8 @@
       "message": {
         "schema": "conch.voice_control.v4",
         "kind": "ack",
-        "seq": 9,
-        "id": 3,
+        "seq": 11,
+        "id": 4,
         "ok": true
       }
     },
@@ -196,7 +238,7 @@
       "message": {
         "schema": "conch.voice_control.v4",
         "kind": "state",
-        "seq": 10,
+        "seq": 12,
         "phase": "stopped",
         "reason": "left",
         "capture": "off",
