@@ -435,14 +435,17 @@ export function useAgents({
           if (interrupted) {
             interrupted = false;
             onChannelsChanged?.();
+            // The block list is read again only when this socket was down: a
+            // block made on another device meanwhile sent its signal to no
+            // one here. A feed's first open (a channel opened) reads nothing:
+            // the list was read at sign-in, and opening a channel or a card
+            // sends no request for it (issue #1832).
+            onBlocksChanged?.();
           }
           // Every subscription that is established reads the permissions
           // again, the first of a feed too: a feed made after a channel was
           // selected has missed whatever changed before it, and no event says so.
           onPermissionsChanged?.();
-          // So does the block list: a block made on another device while
-          // this socket was down sent its signal to no one here.
-          onBlocksChanged?.();
           break;
         case 'waiting':
           interrupted = true;
