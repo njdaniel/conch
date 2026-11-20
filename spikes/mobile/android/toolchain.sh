@@ -14,8 +14,9 @@
 #
 # Nick signed off on Google's Android SDK licence for this spike in #1389.
 # CONCH_ACCEPT_ANDROID_LICENCES=1 confirms your acceptance of that agreement
-# before any download. The CLI shows the agreement on first use and records
-# the SDK package licences in android-sdk/licenses without prompting.
+# before any download. On first use the CLI shows the agreement and a metrics
+# notice even with --no-metrics. It records the SDK package licences in
+# android-sdk/licenses without prompting.
 #
 # CONCH_ANDROID_NO_EMULATOR=1 skips the emulator and the system image (CI sets
 # it: building the APK needs neither). This script creates no AVD either way.

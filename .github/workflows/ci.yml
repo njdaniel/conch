@@ -1185,11 +1185,9 @@ jobs:
           CONCH_ANDROID_NO_EMULATOR: '1'
         run: |
           install_home=$(mktemp -d "$TMPDIR/home.XXXXXX")
-          HOME="$install_home" ./toolchain.sh 2>&1 | tee "$TMPDIR/toolchain.log"
-          if grep -Fqi 'Disable Android CLI metrics collection' "$TMPDIR/toolchain.log"; then
-            echo "android-spike: Android CLI reported metrics collection" >&2
-            exit 1
-          fi
+          # toolchain.sh passes --no-metrics. The first-run licence notice
+          # describes the flag even when the CLI was invoked with it.
+          HOME="$install_home" ./toolchain.sh
           test ! -e "$install_home/.android"
           test -x "$CONCH_CACHE/android-user-home/bin/android-cli"
           test -d "$CONCH_CACHE/android-user-home/cli/bundles"
