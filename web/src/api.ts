@@ -1,4 +1,4 @@
-import { disablePrincipalResponseV1, listChannelBansResponseV1, messageV2, revokeIssuedResponseV1, type DisablePrincipalResponseV1, type RevokeIssuedResponseV1, messageRemovedV1, type MessageRemovedV1 } from './schema/generated';
+import { disablePrincipalResponseV1, listChannelBansResponseV1, listBlocksResponseV1, blockV1, messageV2, revokeIssuedResponseV1, type DisablePrincipalResponseV1, type RevokeIssuedResponseV1, messageRemovedV1, type MessageRemovedV1 } from './schema/generated';
 import { listOwnPushRegistrationsResponseV1, notificationPreferencesV1, pushConfigV1, pushRegistrationV1, type CreatePushRegistrationRequestV1, type NotificationPreferencesV1, type PushConfigV1, type PushRegistrationV1, type PutNotificationPreferencesRequestV1 } from './schema/generated';
 import { defaultShareQuality, type SettledQuality, type ShareQuality } from './voice/share';
 // The only module that holds the credential in use, and the only one that
@@ -3430,6 +3430,18 @@ export async function stopVoiceShare(channel: string, startedAt?: string): Promi
 
 export async function listChannelBans(channel: string) {
   return readSent(await authedSend(call('listBans', { channel })), listChannelBansResponseV1);
+}
+// Personal blocks (issue #1832, docs/design/blocks.md): the caller's own list.
+// A block is a preference of the caller's, stored on the server so it reaches
+// every device and quiets push; it is never shown to the person blocked.
+export async function listBlocks() {
+  return readSent(await authedSend(call('listBlocks')), listBlocksResponseV1);
+}
+export async function blockPrincipal(id: number) {
+  return readSent(await authedSend(call('putBlock', { principal: id })), blockV1);
+}
+export async function unblockPrincipal(id: number): Promise<InviteResult<null>> {
+  return readDone(await authedSend(call('deleteBlock', { principal: id })));
 }
 export async function moderate(channel: string, op: 'kickVoice' | 'banMember' | 'unbanMember' | 'removeMessage' | 'removeOwnMessage', id: number): Promise<InviteResult<null>> {
   return readDone(await authedSend(call(op, { channel, principal: id, id })));

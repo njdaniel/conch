@@ -1,3 +1,4 @@
+import { BlockConfirm, useBlocksContext } from './blocks';
 import { ModerationConfirm, type ModerationOperation } from './Moderation';
 import type { ChannelBanV1 } from './schema/generated';
 import { useCallback, useContext, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode, type SyntheticEvent } from 'react';
@@ -258,6 +259,8 @@ export function MemberRow({
   const confirming = ui.confirming;
   const setConfirming = (v: boolean) => { setUi({ confirming: v }); };
   const more = useRef<HTMLButtonElement>(null);
+  const blocks = useBlocksContext();
+  const [blocking, setBlocking] = useState(false);
   // Removal asks first (issue #1083): "Remove from channel" opens this
   // question in the row, with focus on Cancel; Escape and Cancel put focus
   // back on the row's ⋯ button.
@@ -328,6 +331,21 @@ export function MemberRow({
       });
     }
   }
+  // Block or unblock (issue #1832): the viewer's own preference, offered on
+  // anyone else's row whatever the viewer's standing. Unblock needs no
+  // question; Block asks first (BlockConfirm).
+  if (member !== undefined && member.principal_id !== viewer.id && blocks.loaded) {
+    const isBlocked = blocks.blocked.has(member.principal_id);
+    items.push({
+      key: 'block',
+      label: isBlocked ? 'Unblock' : 'Block…',
+      disabled: busy,
+      onSelect: () => {
+        if (isBlocked) void blocks.unblock(member.principal_id);
+        else setBlocking(true);
+      },
+    });
+  }
   const openers = useOpeners(items.length > 0, () => {
     setMenuOpen(true);
   });
@@ -376,6 +394,7 @@ export function MemberRow({
         </div>
       ) : null}
       {moderating === null || member === undefined || (!operator && !manager) ? null : <ModerationConfirm op={moderating} id={member.principal_id} name={displayName(member)} channel={channel.name} onUnauthorized={onUnauthorized} onDone={() => { controls.onModerated?.(moderating === 'banMember' ? 'Ban is in place, including if already banned.' : 'Removed from voice or already absent. They can rejoin.'); refreshMembers(); }} onClose={() => { setModerating(null); more.current?.focus(); }} />}
+      {blocking && member !== undefined ? <BlockConfirm id={member.principal_id} name={displayName(member)} onClose={() => { setBlocking(false); more.current?.focus(); }} /> : null}
       {line === null ? null : <span role="status" className="member-line">{line}</span>}
     </li>
   );
