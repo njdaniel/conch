@@ -2,14 +2,37 @@ package schema
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestNewPrivateCallID(t *testing.T) {
+	// Use the same reserved shape as voice_control v4, including custom
+	// prefixes, so any issued id can be sent to the voice helper.
+	roomName := regexp.MustCompile(`^[a-z0-9-]{0,31}-[a-z2-7]{26}$`)
+	for range 128 {
+		id := NewPrivateCallID()
+		if roomName.MatchString(id) {
+			t.Fatalf("issued attempt id %q matches the reserved room namespace", id)
+		}
+		decoded, err := base64.RawURLEncoding.Strict().DecodeString(id)
+		if err != nil || len(decoded) != 16 {
+			t.Fatalf("issued attempt id %q does not encode 128 bits of unpadded base64url: %v", id, err)
+		}
+		call := validCall(PrivateCallStateRinging)
+		call.ID = id
+		if err := call.Validate(); err != nil {
+			t.Fatalf("issued attempt id %q fails call validation: %v", id, err)
+		}
+	}
+}
 
 func TestPrivateCallGoldenFixtures(t *testing.T) {
 	calls := []string{
@@ -446,6 +469,31 @@ func TestPrivateCallAcceptRaceFixtures(t *testing.T) {
 	want.SelectedHere = false
 	if !reflect.DeepEqual(loser.Call, want) {
 		t.Errorf("competing accept = %+v, want %+v", loser.Call, want)
+	}
+}
+
+func TestPrivateCallInviteHTTPStatus(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "private-call-invite-status-v1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var statuses map[string]int
+	if err := json.Unmarshal(raw, &statuses); err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range []string{
+		"private-call-response-v1.json",
+		"private-call-response-v1-unavailable.json",
+		"private-call-response-v1-glare.json",
+		"private-call-response-v1-replayed.json",
+	} {
+		t.Run(file, func(t *testing.T) {
+			var response PrivateCallResponseV1
+			assertValidGoldenFixture(t, file, func() dmValidator { return &response })
+			if got, want := response.InviteHTTPStatus(), statuses[file]; got != want {
+				t.Errorf("invite HTTP status = %d, want %d", got, want)
+			}
+		})
 	}
 }
 

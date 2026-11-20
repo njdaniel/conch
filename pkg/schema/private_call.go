@@ -1,8 +1,11 @@
 package schema
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 )
 
@@ -44,12 +47,14 @@ import (
 // call document, a frame, a history page and a snapshot name none of them,
 // and a test pins that by walking the types' field names.
 //
-// Refusals. An invite to a callee who cannot be rung (busy, offline, blocked
-// either way, opted out, switched off, hidden) is not an error: it answers
-// 200 with an attempt in state PrivateCallStateUnavailable and no reason
-// (ADR-017 Decision 10). Only the inviting credential's HTTP response and
-// authorized retries of that invite carry the attempt. There is no stream
-// fan-out to either side, snapshot, call history entry or notification.
+// An invite that starts ringing answers HTTP 201. An invite to a callee
+// who cannot be rung (busy, offline, blocked either way, opted out, switched
+// off, hidden) answers HTTP 200 with an attempt in state
+// PrivateCallStateUnavailable and no reason (ADR-017 Decision 10). There is
+// no ringing attempt for the caller to act on. Only the inviting credential's
+// HTTP response and authorized retries of that invite carry the attempt. It
+// produces no stream fan-out to either side, snapshot, call history entry
+// or notification.
 // Every {call} route treats its id as absent. Only an invite that actually
 // rings can publish a DM conversation to the peer. An unavailable invite
 // leaves DM inboxes, conversation timestamps, revisions and unread counts
@@ -92,8 +97,7 @@ const (
 // Bounds of the call routes.
 const (
 	// MinPrivateCallIDBytes and MaxPrivateCallIDBytes bound an attempt id: an
-	// opaque URL-safe token (a random 128-bit value, base64url, is the intent
-	// and 22 bytes). A client never parses it.
+	// opaque URL-safe token minted by NewPrivateCallID. A client never parses it.
 	MinPrivateCallIDBytes = 16
 	MaxPrivateCallIDBytes = 64
 	// MaxPrivateCallActionIDBytes is the longest action id a request may carry.
@@ -101,6 +105,17 @@ const (
 	// MaxPrivateCallHistoryPage is the most calls one history page holds.
 	MaxPrivateCallHistoryPage = 50
 )
+
+// NewPrivateCallID mints an opaque attempt id from 128 random bits encoded as
+// 22 unpadded base64url characters. Conch reserves LiveKit room names matching
+// ^[a-z0-9-]{0,31}-[a-z2-7]{26}$, including the default conch- prefix and any
+// current or former configured prefix. Every reserved name is at least 27
+// characters long, so issued ids can cross the voice_control v4 boundary.
+func NewPrivateCallID() string {
+	var random [16]byte
+	_, _ = rand.Read(random[:]) // rand.Read fills the buffer or terminates the process.
+	return base64.RawURLEncoding.EncodeToString(random[:])
+}
 
 // Error codes of the call routes, additive on Error. The DM codes
 // ErrorCodeDMNotFound, ErrorCodeDMsOff and ErrorCodeOwnSignInRequired apply
@@ -556,6 +571,7 @@ func ValidatePrivateCallStep(prev, next PrivateCallV1) error {
 // retry. Within PrivateCallActionWindowSeconds, an authorized retry with the
 // same credential, action id and conversation returns the attempt associated
 // with the original invite, with Replayed set and no new fan-out.
+// See PrivateCallResponseV1.InviteHTTPStatus for the success status.
 type InvitePrivateCallRequestV1 struct {
 	ActionID string `json:"action_id"`
 }
@@ -604,7 +620,8 @@ func validateCallActionID(id string) error {
 
 // PrivateCallResponseV1 is the answer to an invite or an action: the attempt
 // as it now is. A fresh invite that starts ringing answers HTTP 201. An
-// unavailable invite, glare, an action success and a replay answer HTTP 200.
+// unavailable invite answers HTTP 200 without a ringing attempt the caller
+// can act on. Glare, an action success and a replay also answer HTTP 200.
 //
 // Glare: when the caller invites a person whose own invite to the caller is
 // ringing, no attempt is made. The answer is that other attempt, as the
@@ -618,6 +635,14 @@ type PrivateCallResponseV1 struct {
 	// Glare is true when Call is the other person's ringing invite to the
 	// caller, returned in place of a new attempt.
 	Glare bool `json:"glare,omitempty"`
+}
+
+// InviteHTTPStatus returns the HTTP status for a successful invite response.
+func (r PrivateCallResponseV1) InviteHTTPStatus() int {
+	if r.Call.State == PrivateCallStateRinging && !r.Replayed && !r.Glare {
+		return http.StatusCreated
+	}
+	return http.StatusOK
 }
 
 // Validate reports whether the response is well-formed.
