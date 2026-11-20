@@ -27,6 +27,7 @@ import { Client } from './api/client.ts';
 import { Session } from './api/session.ts';
 import { deliverVoice } from './voice/events.ts';
 import { Companion, stillHeldBy } from './voice/companion.ts';
+import { watchMuteKey } from './voice/mute-key.ts';
 import { OneShot } from './voice/oneshot.ts';
 import { OWNER_VERSIONS_SHARE_AUDIO } from './voice/protocol.ts';
 import { linuxShareAudioEnabled, registeredApplicationName, ShareSound } from './voice/share-audio.ts';
@@ -475,9 +476,16 @@ export async function start(): Promise<void> {
   if (shareAudio) log('conch-desktop: CONCH_LINUX_SHARE_AUDIO is on: the Linux screen share offers its sound (experimental)');
   // Set once Lifecycle exists (below); voice and the companion read it.
   let screenLocked: () => boolean = () => false;
+  let muteKeyBlocked: () => boolean = () => true;
   const voice = new VoiceService({
     locked: () => screenLocked(),
     supervisor: new Supervisor({ resources: process.resourcesPath, env: process.env, log, ...(shareAudio ? { versions: OWNER_VERSIONS_SHARE_AUDIO } : {}) }),
+    ...((process.platform === 'linux' || process.platform === 'win32') ? {
+      muteKey: {
+        blocked: () => muteKeyBlocked(),
+        watch: (configDir: string, onPress: () => void) => watchMuteKey(process.resourcesPath, process.env, log, configDir, onPress),
+      },
+    } : {}),
     // The device list and the saves run the same trusted helper, with no token.
     oneShot: new OneShot({ resources: process.resourcesPath, env: process.env, log }),
     identity: async () => {
@@ -612,6 +620,7 @@ export async function start(): Promise<void> {
     log,
   });
   screenLocked = () => lifecycle.locked;
+  muteKeyBlocked = () => lifecycle.suspended || lifecycle.lockObservation === 'unavailable';
   let watcher: LinuxLifecycle | WindowsLifecycle | null = null;
   if (process.platform === 'linux') {
     watcher = new LinuxLifecycle({ rules: lifecycle, powerMonitor, pid: process.pid, log });

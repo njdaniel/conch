@@ -274,6 +274,8 @@ pub enum Invocation {
         /// the text, and probe no keyboard.
         json: bool,
     },
+    /// `conch-voice watch-mute-key`: report presses to the desktop owner.
+    WatchMuteKey,
     /// `conch-voice keys <device>`.
     Keys {
         /// The keyboard's event device.
@@ -577,6 +579,7 @@ pub fn command() -> Command {
         .subcommand(managed)
         .subcommand(devices)
         .subcommand(keys)
+        .subcommand(Command::new("watch-mute-key").hide(true))
         .subcommand(config)
 }
 
@@ -751,6 +754,7 @@ where
             });
         }
         Some(("config", config)) => return config_set(config),
+        Some(("watch-mute-key", _)) => return Ok(Invocation::WatchMuteKey),
         Some(("keys", keys)) => {
             if let Some(device) = keys.get_one::<PathBuf>("device") {
                 return Ok(Invocation::Keys {

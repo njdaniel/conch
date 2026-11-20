@@ -743,3 +743,23 @@ it('keeps the active Windows binding label until a new helper generation, even w
   expect(await screen.findByText('mic on · hold Mouse 5 to talk')).toBeTruthy();
   expect(f.calls).toEqual([]);
 });
+
+it('opens the shared Windows capture from Voice options to save a mute key', async () => {
+  const f = new Fake(running());
+  const saveTalkBinding = vi.fn(() => Promise.resolve({ ok: true } as const));
+  const source: NativeVoice = { ...f.nv,
+    keyDevices: () => Promise.resolve({ ok: true, platform: 'win32', devices: [], disclosure: [] }),
+    saveTalkBinding,
+  };
+  const onBound = vi.fn();
+  render(<NativeVoicePanel source={source} onBound={onBound} signedIn channel="general" viewer={1} people={people} voiceAllowed channels={channels} onUnauthorized={() => undefined} onOpen={() => undefined} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Voice options' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Set up mute key' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'Set mute key' }));
+  fireEvent.mouseDown(window, { button: 4 });
+  fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  await waitFor(() => {
+    expect(saveTalkBinding).toHaveBeenCalledWith({ windowsCode: 'Mouse5', generation: f.nv.snapshot().generation, binding: 'mute' });
+  });
+  expect(onBound).not.toHaveBeenCalled();
+});

@@ -31,6 +31,9 @@
 //! endpoint named by `--events-pipe` (required on macOS and Windows). Its channel, server
 //! and login come from its owner's start.
 //!
+//! The desktop's input-only `watch-mute-key` command reads the configured mute binding
+//! and sends its presses to main while the owner's stdin pipe is open.
+//!
 //! A desktop owner speaking `conch.voice_control.v3` can also ask for the sound of its
 //! screen share (#1586, `docs/design/linux-share-audio.md`; [`share_audio`]): the input is
 //! then also, on Linux, the other applications' playback streams PipeWire lists, each
@@ -113,7 +116,7 @@ pub mod share_eligibility;
 pub mod status;
 pub mod transmit;
 
-use std::io::{IsTerminal, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -555,6 +558,68 @@ pub fn config_unset(
     key: conch_voice_control::KeysKey,
 ) -> Result<(), Error> {
     config_cmd::unset_keys(environment, key)
+}
+
+/// Watches the configured mute key for desktop main. A press writes one byte
+/// (`0x01`) to the private stdout pipe. No key code or audio leaves this process;
+/// the desktop owner decides whether a press mutes or unmutes.
+///
+/// Exit on owner pipe closure even if the device is idle or unavailable.
+///
+/// # Errors
+///
+/// A refused configuration, a failed thread start, or a failed output write.
+pub fn watch_mute_key(environment: &Environment) -> Result<(), Error> {
+    use conch_voice_control::{Key, KeyAction, KeyEvent};
+    use session::Input;
+
+    let Some(dir) = conch_voice_api::default_config_dir(
+        environment.conch_config_dir.as_deref(),
+        environment.xdg_config_home.as_deref(),
+        environment.home.as_deref(),
+        environment.appdata.as_deref(),
+    )?
+    else {
+        return Ok(());
+    };
+    let mut config = cli::read_config(&dir.join("voice.toml"))?;
+    if config.keys.mute.is_none() {
+        return Ok(());
+    }
+    config.keys.talk = None;
+    config.keys.deafen = None;
+    let Some((device, bindings)) = cli::key_device(&config, false)? else {
+        return Ok(());
+    };
+    std::thread::Builder::new()
+        .name("conch-voice-mute-owner".to_owned())
+        .spawn(|| {
+            let _ = std::io::stdin().lock().read_exact(&mut [0]);
+            lines::exit(0);
+        })
+        .map_err(Error::Runtime)?;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    keydev::spawn(
+        device,
+        bindings,
+        DeviceRule::EventDevice,
+        KeyTimings::default(),
+        tx,
+    )
+    .map_err(Error::Runtime)?;
+    let mut out = std::io::stdout();
+    while let Some(input) = rx.blocking_recv() {
+        if let Input::Key(KeyEvent {
+            key: Key::Mute,
+            action: KeyAction::Press,
+        }) = input
+        {
+            out.write_all(&[1])
+                .and_then(|()| out.flush())
+                .map_err(Error::Output)?;
+        }
+    }
+    Ok(())
 }
 
 /// `conch-voice keys <device>`: says that it will show every key pressed on the device,

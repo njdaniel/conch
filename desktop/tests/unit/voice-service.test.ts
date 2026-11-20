@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { VOICE_CONTROL_STOP_KILL_AFTER_MS, type VoiceControlTalkMode } from '../../../web/src/schema/generated.ts';
 import { Supervisor, type CommandResult, type StartRequest, type VoiceState } from '../../main/voice/supervisor.ts';
 import { CEILING_ARGS, DESKTOP_MISSED_RELEASE_SECS, ECHO_ARGS, HELPER_ARGS, MUTE_OWNER_ARGS, SHARE_AUDIO_ARGS, VoiceService, type VoiceIdentity, type VoiceSupervisor } from '../../main/voice/service.ts';
-import type { NativeVoiceDevicesResult, NativeVoiceView, VoiceDeviceKey, VoiceSaveResult } from '../../../web/src/platform/desktop/bridge.ts';
+import type { NativeVoiceDevicesResult, NativeVoiceView, VoiceBindingKey, VoiceDeviceKey, VoiceSaveResult } from '../../../web/src/platform/desktop/bridge.ts';
 import { FAKE_TOKEN, fixture, scratch, until, type Scratch } from './voice-support.ts';
 
 const V2 = 'voice-control-v2/transcript-negotiation-v2-owner.json';
@@ -95,7 +95,7 @@ class FakeOneShot {
     this.calls.push(['devices', configDir]);
     return Promise.resolve(this.devicesAnswer);
   }
-  save(configDir: string, key: VoiceDeviceKey | 'keys.device' | 'keys.talk', value: string): Promise<VoiceSaveResult> {
+  save(configDir: string, key: VoiceDeviceKey | VoiceBindingKey, value: string): Promise<VoiceSaveResult> {
     this.calls.push(['save', configDir, key, value]);
     return Promise.resolve(this.saveAnswer);
   }
@@ -125,6 +125,80 @@ afterEach(() => {
 });
 
 const join = (channel = 'general', muted = false, deafened = false) => svc.join({ channel, muted, deafened });
+
+describe('global mute key', () => {
+  function withMuteKey() {
+    svc.close();
+    const state = { locked: false, blocked: false };
+    let press: () => void = () => undefined;
+    const stop = vi.fn();
+    svc = new VoiceService({
+      locked: () => state.locked,
+      supervisor: fake,
+      oneShot,
+      identity: () => Promise.resolve(id),
+      log: (line) => { logs.push(line); },
+      stopBoundMs: 15,
+      muteKey: {
+        blocked: () => state.blocked,
+        watch: (configDir, onPress) => {
+          expect(configDir).toBe(id.configDir);
+          press = onPress;
+          return stop;
+        },
+      },
+    });
+    svc.subscribe((view) => { views.push(view); });
+    return { state, stop, press: () => { press(); } };
+  }
+
+  function showMute(muted: boolean): void {
+    fake.set({ status: 'running', generation: 1, helper: helper({ muted }) });
+  }
+
+  it('toggles through main using the state reported to the dock and tray', async () => {
+    const key = withMuteKey();
+    await join();
+    key.press();
+    expect(svc.state().helper?.muted).toBe(false);
+    showMute(true);
+    expect(views.at(-1)?.helper?.muted).toBe(true);
+    key.press();
+    expect(fake.calls).toEqual(['mute:true', 'mute:false']);
+    showMute(false);
+    expect(views.at(-1)?.helper?.muted).toBe(false);
+    await svc.leave();
+  });
+
+  it.each(['locked', 'blocked'] as const)('only mutes while %s', async (block) => {
+    const key = withMuteKey();
+    await join();
+    key.state[block] = true;
+    key.press();
+    showMute(true);
+    key.press();
+    expect(fake.calls).toEqual(['mute:true']);
+    key.state[block] = false;
+    key.press();
+    expect(fake.calls).toEqual(['mute:true', 'mute:false']);
+    await svc.leave();
+  });
+
+  it('ignores presses outside voice, including a late press during leave', async () => {
+    const key = withMuteKey();
+    key.press();
+    expect(fake.calls).toEqual([]);
+    await join();
+    fake.hangStop = true;
+    const leaving = svc.leave();
+    expect(key.stop).toHaveBeenCalledOnce();
+    key.press();
+    fake.set({ status: 'idle' });
+    await leaving;
+    key.press();
+    expect(fake.calls).toEqual(['stop']);
+  });
+});
 
 describe('join', () => {
   it('starts one helper with main-owned values, the token read now, and the 30 s ceiling', async () => {
