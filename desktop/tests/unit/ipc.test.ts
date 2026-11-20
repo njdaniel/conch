@@ -1423,11 +1423,16 @@ describe('the diagnostics bundle (issue #2084)', () => {
     });
     const f = fixture(new Gestures(() => 0), diagnostics);
     ring.record('first preview');
+    const refusedPreview = { ok: false, kind: 'refused' };
+    // The preview is main's log: no page script reads it without the person's input.
+    expect(await f.ipc.invoke(f.event(), 'diagnosticsPreview', [])).toEqual(refusedPreview);
+    f.contents.emit('input-event', {}, { type: 'mouseUp' });
     const first = await f.ipc.invoke(f.event(), 'diagnosticsPreview', []);
     if (!first.ok) throw new Error('preview refused');
     const shown = first.value as ReturnType<Diagnostics['preview']>;
     expect(shown.text).toContain('first preview');
     ring.record('second preview');
+    f.contents.emit('input-event', {}, { type: 'mouseUp' });
     const second = await f.ipc.invoke(f.event(), 'diagnosticsPreview', []);
     if (!second.ok) throw new Error('second preview refused');
     const newer = second.value as ReturnType<Diagnostics['preview']>;

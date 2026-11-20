@@ -769,7 +769,9 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
   // The diagnostics bundle (issue #2084). The preview is read-only text main
   // built from its own redacted ring; the ID selects that text for the save.
   // The save writes it to the path the person chooses after their own input.
-  diagnosticsPreview: { limit: 30, maxBytes: 0, parse: none, run: ({ diagnostics }) => diagnostics.preview() },
+  // Also gesture-gated: the preview is main's log, so a page script can't
+  // read it unasked; the click that opens it is the person's input.
+  diagnosticsPreview: { limit: 30, maxBytes: 0, parse: none, run: ({ diagnostics }) => diagnostics.preview(), gesture: true },
   diagnosticsSave: {
     limit: 10,
     maxBytes: 64,

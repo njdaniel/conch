@@ -16,6 +16,8 @@ import type { DiagnosticsPreview, SaveOutcome } from '../../web/src/platform/des
 export const RING_LINES = 500;
 export const LINE_MAX_CHARS = 300;
 export const BUNDLE_MAX_BYTES = 256 * 1024;
+// The longest line the ring scrubs; a longer one is kept as a marker.
+export const RECORD_MAX_CHARS = 2000;
 
 // Written in two parts: this file's source holds no absolute URL.
 const SCHEMES = ['https', 'http', 'wss', 'ws', 'file', 'conch'];
@@ -70,7 +72,11 @@ export class LogRing {
   }
 
   record(line: string): void {
-    this.#lines.push(scrubLine(line));
+    // The scrub is slow on a very long line (its patterns backtrack), and it
+    // runs on main's thread: such a line is kept as a fixed marker instead.
+    // Not sliced and then scrubbed: a cut could shorten a key below the
+    // long-run rule's length.
+    this.#lines.push(line.length > RECORD_MAX_CHARS ? `[a ${String(line.length)}-character line, not kept]` : scrubLine(line));
     if (this.#lines.length > this.#capacity) this.#lines.splice(0, this.#lines.length - this.#capacity);
   }
 

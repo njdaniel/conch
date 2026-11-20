@@ -101,6 +101,15 @@ describe('LogRing', () => {
     for (const [, , gone] of hostile) for (const secret of gone) expect(held, secret).not.toContain(secret);
   });
 
+  it('keeps a very long line as a fixed marker, without scrubbing it', () => {
+    const ring = new LogRing();
+    const start = Date.now();
+    const line = `conch-desktop: ${'\u201c'.repeat(64 * 1024)}`;
+    ring.record(line);
+    expect(Date.now() - start).toBeLessThan(500);
+    expect(ring.lines()).toEqual([`[a ${String(line.length)}-character line, not kept]`]);
+  });
+
   it('gives a copy: changing it does not change the ring', () => {
     const ring = new LogRing(2);
     ring.record('a');
