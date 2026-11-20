@@ -61,7 +61,8 @@ const (
 	voiceCameraTrackGone  = 5 * time.Second
 	// A LiveKit participant listing can fall between removing the displaced
 	// connection and listing its replacement. Allow one maximum poll gap
-	// from the first absence for the same principal to be seen again (S5).
+	// from the first missing listing for the same principal to be seen again
+	// (S5), bounded by the claim's existing idle deadline.
 	voiceCameraHandoffGrace = voicePassGapMax
 	// voiceCameraAdoptWindow is how long after a rotation ended a claim
 	// (reason=rotated) a request naming it may adopt it as a new claim in
@@ -110,9 +111,35 @@ type voiceCamera struct {
 	published bool
 	lastTrack time.Time
 	// missingSince is the first pass that listed no direct connection since
-	// the holder was last seen. A replacement clears it without renewing the
-	// claim or its idle deadline.
+	// the holder was last seen. Only a direct listing before both deadlines
+	// clears it. An on-time return without video leaves the idle deadline
+	// where it was.
 	missingSince time.Time
+}
+
+func (c *voiceCamera) idleDeadline() time.Time {
+	if c.published {
+		return c.lastTrack.Add(voiceCameraTrackGone)
+	}
+	return c.startedAt.Add(voiceCameraFirstTrack)
+}
+
+// missingEnd decides an observed absence before a returning connection can
+// renew the track time. If both deadlines passed, the earlier one decides
+// the reason, with left on a tie.
+func (c *voiceCamera) missingEnd(now time.Time) schema.VoiceCameraEndReason {
+	if c.missingSince.IsZero() {
+		return ""
+	}
+	left, idle := c.missingSince.Add(voiceCameraHandoffGrace), c.idleDeadline()
+	switch {
+	case idle.Before(left) && !now.Before(idle):
+		return voiceCameraStopIdle
+	case !now.Before(left):
+		return voiceCameraStopLeft
+	default:
+		return ""
+	}
 }
 
 // voiceCameraTrack is what the passes know of one track they found unclaimed
@@ -510,7 +537,7 @@ func (l *voiceCameraLimiter) logRefusal(principalID int64, now time.Time) bool {
 //   - named, and the end record of the caller's last claim in this channel says
 //     it ended rotated less than voiceCameraAdoptWindow ago: an adoption, a new
 //     claim with its own started_at and row; the record is consumed;
-//   - named, and anything else: errVoiceCameraStale, nothing changed;
+//   - named, and anything else: errVoiceCameraStale, no grant;
 //   - un-named while holding a claim: as a continue;
 //   - un-named: a new claim, unless the room holds voiceCameraCap
 //     (errVoiceCameraFull).
@@ -520,7 +547,8 @@ func (l *voiceCameraLimiter) logRefusal(principalID int64, now time.Time) bool {
 // it stays pending until its voice_camera_started row is written. If LiveKit
 // refuses or cannot be asked, or the re-read says no, the claim is undone. A
 // room retired during the grant takes the grant back, and the claim never
-// follows the channel to its new room.
+// follows the channel to its new room. An observed absence past its deadline
+// is settled before checking the requested name or the room's cap.
 func (p *voicePoller) claimCamera(ctx context.Context, room store.VoiceRoom, principalID int64, claim *schema.Timestamp) (schema.VoiceCameraV1, error) {
 	if !voiceRoomPublishes(room) {
 		return schema.VoiceCameraV1{}, errVoiceCameraNotChannelRoom
@@ -540,6 +568,7 @@ func (p *voicePoller) claimCamera(ctx context.Context, room store.VoiceRoom, pri
 	if p.claimSeam != nil {
 		p.claimSeam("claimed")
 	}
+	p.endRoomCameras(ctx, r, (*voiceCamera).missingEnd)
 
 	key := voiceShareEndKey{channelID: room.ChannelID, principalID: principalID}
 	r.order.Lock()
@@ -697,7 +726,8 @@ func (p *voicePoller) claimCamera(ctx context.Context, room store.VoiceRoom, pri
 //     store's permittedTx, which ANDs in use_voice): errVoiceCameraNotAllowed
 //     when it is not held;
 //   - the person's place in the room, as the passes read it
-//     (voiceEntitlement), and the room still live: errVoiceCameraGone.
+//     (voiceEntitlement), and the room still live with valid session holders:
+//     errVoiceCameraGone.
 //
 // A read that fails is an error too, never a yes.
 func (p *voicePoller) cameraEntitled(ctx context.Context, room store.VoiceRoom, principalID int64) error {
@@ -715,6 +745,13 @@ func (p *voicePoller) cameraEntitled(ctx context.Context, room store.VoiceRoom, 
 	case reason == voiceReasonVoiceOff:
 		return errVoiceCameraNotAllowed
 	case reason != "":
+		return errVoiceCameraGone
+	}
+	invalid, err := p.s.store.VoiceRoomHasInvalidHolder(ctx, room.ID, p.now())
+	switch {
+	case err != nil:
+		return fmt.Errorf("voice: read the room's session holders: %w", err)
+	case invalid:
 		return errVoiceCameraGone
 	}
 	live, err := p.s.store.VoiceRoomLive(ctx, room.ID)
@@ -843,6 +880,66 @@ func (p *voicePoller) endHeldCamera(ctx context.Context, r *voiceRoomState, prin
 	p.notify(r.channelID)
 	p.withdrawCamera(ctx, r, principalID)
 	return true
+}
+
+// endRoomCameras ends the claims selected by stopReason, recording all their
+// stops before withdrawing any grants. The caller holds the room's claims.
+func (p *voicePoller) endRoomCameras(ctx context.Context, r *voiceRoomState, stopReason func(*voiceCamera, time.Time) schema.VoiceCameraEndReason) {
+	r.order.Lock()
+	p.mu.Lock()
+	now := p.now()
+	var events []voiceEvent
+	var stopped []int64
+	for _, pid := range sortedCameraHolders(r) {
+		if reason := stopReason(r.cameras[pid], now); reason != "" {
+			rows := p.endCameraLocked(r, pid, reason, 0)
+			if len(rows) != 0 {
+				events = append(events, rows...)
+				stopped = append(stopped, pid)
+			}
+		}
+	}
+	p.mu.Unlock()
+	p.writeEvents(ctx, events...)
+	r.order.Unlock()
+	if len(stopped) != 0 {
+		p.notify(r.channelID)
+	}
+	for _, pid := range stopped {
+		p.withdrawCamera(ctx, r, pid)
+	}
+}
+
+// endCamerasAwaitingRotation is the fallback when the invariant check or a
+// rotation fails. A room with an invalid session holder cannot keep a camera
+// while rotation is retried, even if its camera holder still has use_camera.
+// An unreadable room also loses its cameras, as when use_camera cannot be read.
+// The grant path checks the same invariant under claims before granting again.
+func (p *voicePoller) endCamerasAwaitingRotation(ctx context.Context) {
+	p.mu.Lock()
+	var rooms []*voiceRoomState
+	for _, r := range p.rooms {
+		if len(r.cameras) != 0 {
+			rooms = append(rooms, r)
+		}
+	}
+	p.mu.Unlock()
+	ctx = context.WithoutCancel(ctx)
+	for _, r := range rooms {
+		read, cancel := context.WithTimeout(ctx, voiceEvictTimeout)
+		invalid, err := p.s.store.VoiceRoomHasInvalidHolder(read, r.id, p.now())
+		cancel()
+		if err != nil {
+			slog.ErrorContext(ctx, "voice: could not check room holders; ending cameras", "channel", r.channelID, "error", err)
+		} else if !invalid {
+			continue
+		}
+		r.claims.Lock()
+		p.endRoomCameras(ctx, r, func(*voiceCamera, time.Time) schema.VoiceCameraEndReason {
+			return voiceCameraStopAccessLost
+		})
+		r.claims.Unlock()
+	}
 }
 
 // endCamerasOf is the camera's stop path for every revocation of use_camera
@@ -1111,30 +1208,25 @@ func (p *voicePoller) judgeCamerasLocked(r *voiceRoomState, now time.Time, seen 
 		here = here && fold.direct[pid]
 		_, undecided := keep[pid]
 		var ended []voiceEvent
+		missingEnd := c.missingEnd(now)
+		// A muted camera sends nothing. One claim covers the first camera
+		// track LiveKit lists. Additional tracks are judged below as
+		// unclaimed so a single holder cannot bypass the cap (#1258).
 		switch {
-		case undecided:
 		case lost[pid]:
 			ended = p.endCameraLocked(r, pid, voiceCameraStopAccessLost, 0)
-		case !here:
-			if c.missingSince.IsZero() {
-				c.missingSince = now
-			} else if now.Sub(c.missingSince) >= voiceCameraHandoffGrace {
-				ended = p.endCameraLocked(r, pid, voiceCameraStopLeft, 0)
-			}
-		default:
+		case missingEnd != "":
+			ended = p.endCameraLocked(r, pid, missingEnd, 0)
+		case undecided:
+		case here && part.CameraLive():
 			c.missingSince = time.Time{}
-			// A muted camera sends nothing, and is not a camera on. A claim
-			// covers one camera track, the first LiveKit lists; any other is
-			// judged below as one nobody claimed (the security review of
-			// #1258: one claim must not carry the cap's worth of cameras).
-			live := part.CameraLive()
-			if live {
-				c.published, c.lastTrack = true, now
-			}
-			if (!c.published && now.Sub(c.startedAt) >= voiceCameraFirstTrack) ||
-				(c.published && !live && now.Sub(c.lastTrack) >= voiceCameraTrackGone) {
-				ended = p.endCameraLocked(r, pid, voiceCameraStopIdle, 0)
-			}
+			c.published, c.lastTrack = true, now
+		case !now.Before(c.idleDeadline()):
+			ended = p.endCameraLocked(r, pid, voiceCameraStopIdle, 0)
+		case here:
+			c.missingSince = time.Time{}
+		case c.missingSince.IsZero():
+			c.missingSince = now
 		}
 		if len(ended) > 0 {
 			events = append(events, ended...)

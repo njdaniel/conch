@@ -572,12 +572,22 @@ type VoiceViolation struct {
 // V5 adds net membership to them. Leaving net rooms out until then would let
 // their holders go unchecked the day a session is first issued for one.
 func (s *Store) InvalidVoiceRooms(ctx context.Context, now time.Time) ([]VoiceViolation, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+voiceRoomColumns+`, MIN(CASE
+	return s.invalidVoiceRooms(ctx, now, 0)
+}
+
+// VoiceRoomHasInvalidHolder checks the rotation invariant for one live room.
+// Callers that need the room to be live must also check VoiceRoomLive.
+func (s *Store) VoiceRoomHasInvalidHolder(ctx context.Context, roomID int64, now time.Time) (bool, error) {
+	violations, err := s.invalidVoiceRooms(ctx, now, roomID)
+	return len(violations) != 0, err
+}
+
+func (s *Store) invalidVoiceRooms(ctx context.Context, now time.Time, roomID int64) ([]VoiceViolation, error) {
+	const query = `SELECT ` + voiceRoomColumns + `, MIN(CASE
 		     WHEN p.id IS NULL OR p.disabled_at IS NOT NULL THEN 1
-		     WHEN NOT EXISTS (SELECT 1 FROM `+liveMembers+` m
+		     WHEN NOT EXISTS (SELECT 1 FROM ` + liveMembers + ` m
 		                      WHERE m.channel_id = r.channel_id AND m.principal_id = h.principal_id) THEN 2
-		     WHEN c.id IS NULL OR c.principal_id <> h.principal_id OR c.revoked_at IS NOT NULL OR NOT `+currentAuthSQL+` THEN 3
+		     WHEN c.id IS NULL OR c.principal_id <> h.principal_id OR c.revoked_at IS NOT NULL OR NOT ` + currentAuthSQL + ` THEN 3
 		     WHEN c.expires_at IS NOT NULL AND c.expires_at <= ? THEN 4
 		     WHEN p.kind <> 'human' THEN 5
 		   END) AS why
@@ -585,10 +595,18 @@ func (s *Store) InvalidVoiceRooms(ctx context.Context, now time.Time) ([]VoiceVi
 		 JOIN voice_room_holders h ON h.room_id = r.id
 		 LEFT JOIN credentials c ON c.id = h.credential_id
 		 LEFT JOIN principals p ON p.id = h.principal_id
-		 WHERE r.retired_at IS NULL
+		 WHERE r.retired_at IS NULL`
+	const group = `
 		 GROUP BY r.id
 		 HAVING why IS NOT NULL
-		 ORDER BY r.id ASC`, now.UnixMilli())
+		 ORDER BY r.id ASC`
+	var rows *sql.Rows
+	var err error
+	if roomID == 0 {
+		rows, err = s.db.QueryContext(ctx, query+group, now.UnixMilli())
+	} else {
+		rows, err = s.db.QueryContext(ctx, query+" AND r.id = ?"+group, now.UnixMilli(), roomID)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("store: find invalid voice rooms: %w", err)
 	}
