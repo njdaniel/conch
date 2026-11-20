@@ -1514,7 +1514,7 @@ function ShareNotes({ voice, onMore, othersShare }: { readonly voice: VoiceContr
       return (
         <>
           <p role="status" className="sharing-note">{sharedNote(share.audio, features)}</p>
-          <p className="hint voice-supplemental"><ShareReadout client={client} direction="sent" prefix="Sending: " asked={state.shareQuality.resolution === 'auto' ? share.settled : { resolution: state.shareQuality.resolution, frameRate: state.shareQuality.frameRate }} /></p>
+          <ShareReadout client={client} direction="sent" prefix="Sending: " asked={state.shareQuality.resolution === 'auto' ? share.settled : { resolution: state.shareQuality.resolution, frameRate: state.shareQuality.frameRate }} />
           <ShareCaptureWarning stalled={state.shareCaptureStalled} client={client} />
           {share.resumed === true ? <p className="hint">{resumedNote}</p> : null}
         </>

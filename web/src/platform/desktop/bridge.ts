@@ -538,6 +538,9 @@ export type VoiceTalkBindingResult =
   | { readonly ok: true }
   | { readonly ok: false; readonly error: VoiceOneShotError; readonly failed?: 'device' | 'talk' };
 
+// The desktop log accepts only these fixed renderer diagnostics.
+export type VoiceDiagnostic = 'capture-stalled' | 'encoder-cpu' | 'sdp-retry' | 'sdp-rejected' | 'sdp-bundle-collision' | 'sdk-warning' | 'sdk-error';
+
 export interface DesktopVoiceBridge {
   voiceState(): Promise<NativeVoiceView>;
   voiceJoin(request: { readonly channel: ChannelName; readonly muted: boolean; readonly deafened: boolean }): Promise<NativeVoiceView>;
@@ -548,6 +551,8 @@ export interface DesktopVoiceBridge {
   voiceSetDevices(devices: { readonly input?: string; readonly output?: string }): Promise<VoiceCommandResult>;
   voiceSetTalkMode(mode: VoiceControlTalkMode, save?: true): Promise<VoiceTalkModeResult>;
   voiceDevices(): Promise<NativeVoiceDevicesResult>;
+  // A fixed diagnostic from the renderer's voice or share code.
+  reportVoiceDiagnostic(diagnostic: VoiceDiagnostic): Promise<void>;
   voiceSaveDevice(request: { readonly key: VoiceDeviceKey; readonly value: string }): Promise<VoiceSaveResult>;
   voiceKeyDevices(): Promise<VoiceKeyDevicesResult>;
   voiceSaveTalkBinding(request: VoiceTalkBindingRequest): Promise<VoiceTalkBindingResult>;

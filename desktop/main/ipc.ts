@@ -6,8 +6,8 @@
 //
 // Input: an invoke event from Electron, a function name and its arguments.
 // Output: an Envelope: the function's value, or one opaque `refused`, which is
-// counted and logged by reason (never by content) and executes nothing. The
-// order is fixed: caller, name, rate, size and shape of the arguments, then
+// counted and normally logged by reason (never by content) and executes nothing.
+// The order is fixed: caller, name, rate, size and shape of the arguments, then
 // the function. Arguments are plain data checked here; the renderer cannot
 // name a channel, a URL, a header or a method.
 //
@@ -18,7 +18,7 @@
 import { windowsKey } from '../../web/src/platform/desktop/windows-keys.ts';
 import type { IpcMain } from 'electron';
 
-import type { BridgeReply, BridgeRequest, CompanionPageEnd, CompanionPageEndKind, FeedRequest, IntegrationsView, InviteTarget, NotifyRequest, SettingsChange, SignInOutcome, VoiceDeviceKey } from '../../web/src/platform/desktop/bridge.ts';
+import type { BridgeReply, BridgeRequest, CompanionPageEnd, CompanionPageEndKind, FeedRequest, IntegrationsView, InviteTarget, NotifyRequest, SettingsChange, SignInOutcome, VoiceDeviceKey, VoiceDiagnostic } from '../../web/src/platform/desktop/bridge.ts';
 import { VOICE_DEVICES_MAX_NAME_BYTES, voiceControlTalkMode, type VoiceControlTalkMode } from '../../web/src/schema/generated.ts';
 import { isPageSaveKey, keyCodeText, saveValueFits } from './voice/oneshot.ts';
 import { validChannel, validDeviceName } from './voice/protocol.ts';
@@ -40,6 +40,7 @@ import type { Installed } from './installed.ts';
 import type { VoiceService } from './voice/service.ts';
 import type { SettingsService } from './settings.ts';
 import type { Companion } from './voice/companion.ts';
+import { isVoiceDiagnostic, voiceDiagnosticLog } from './voice/renderer-diagnostics.ts';
 import type { ShareSound } from './voice/share-audio.ts';
 import type { ShareAllowance } from './share-allowance.ts';
 
@@ -229,6 +230,7 @@ interface Handlers {
   readonly settings: SettingsApi;
   readonly integrations: IntegrationsApi;
   readonly companion: CompanionApi;
+  readonly reportVoiceDiagnostic: (diagnostic: VoiceDiagnostic) => void;
   // Absent (the switch off): a share-sound function never reaches its run.
   readonly shareSound: ShareSoundApi | null;
   readonly document: number;
@@ -812,6 +814,14 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
   // Its one optional argument is the page's reason, for main's log alone
   // (issue #1992); stopping needs no act either way.
   companionEnd: { limit: 60, maxBytes: 256, parse: parseCompanionEnd, run: ({ companion }, args) => (args.length === 0 ? companion.stop() : companion.stop(args[0] as CompanionPageEnd)) },
+  reportVoiceDiagnostic: {
+    limit: 60,
+    maxBytes: 32,
+    parse: (args) => (args.length === 1 && isVoiceDiagnostic(args[0]) ? args : null),
+    run: ({ reportVoiceDiagnostic }, [diagnostic]) => {
+      reportVoiceDiagnostic(diagnostic as VoiceDiagnostic);
+    },
+  },
   // The Linux screen share's sound (issue #1854). Each is refused outright
   // unless main's own switch is on. None carries a scope, an application, a
   // process, a device or a gesture flag: main builds the first four, and the
@@ -875,12 +885,14 @@ function requireSound(sound: ShareSoundApi | null): ShareSoundApi {
 
 export class Ipc {
   readonly #deps: IpcDeps;
+  readonly #reportVoiceDiagnostic: (diagnostic: VoiceDiagnostic) => void;
   readonly #limits = new Map<InvokedFunction, RateLimit>(INVOKED_FUNCTIONS.map((name) => [name, new RateLimit(SPECS[name].limit)]));
   readonly #supportLimit = new RateLimit(120);
   #refusals = 0;
 
   constructor(deps: IpcDeps) {
     this.#deps = deps;
+    this.#reportVoiceDiagnostic = voiceDiagnosticLog(deps.log, deps.now);
   }
 
   // How many invocations have been refused since start.
@@ -888,9 +900,9 @@ export class Ipc {
     return this.#refusals;
   }
 
-  #refuse(reason: Refusal): Envelope {
+  #refuse(reason: Refusal, log = true): Envelope {
     this.#refusals++;
-    this.#deps.log(`conch-desktop: refused an IPC call (${reason}); ${String(this.#refusals)} so far`);
+    if (log) this.#deps.log(`conch-desktop: refused an IPC call (${reason}); ${String(this.#refusals)} so far`);
     return { ok: false, kind: 'refused' };
   }
 
@@ -900,7 +912,10 @@ export class Ipc {
     if (typeof name !== 'string' || !(INVOKED_FUNCTIONS as readonly string[]).includes(name)) return this.#refuse('name');
     const fn = name as InvokedFunction;
     const spec = SPECS[fn];
-    if (this.#limits.get(fn)?.allow(this.#deps.now()) !== true) return this.#refuse('rate');
+    if (this.#limits.get(fn)?.allow(this.#deps.now()) !== true) {
+      // A burst of diagnostics should not flood the log with rate refusals.
+      return this.#refuse('rate', fn !== 'reportVoiceDiagnostic');
+    }
     if (!plain(args)) return this.#refuse('shape');
     if (JSON.stringify(args).length > spec.maxBytes + 2) return this.#refuse('size');
     const owned = this.#deps.owned();
@@ -933,6 +948,7 @@ export class Ipc {
         settings: this.#deps.settings,
         integrations: this.#deps.integrations ?? NO_INTEGRATIONS,
         companion: this.#deps.companion ?? NO_COMPANION,
+        reportVoiceDiagnostic: this.#reportVoiceDiagnostic,
         shareSound: this.#deps.shareSound ?? null,
         document: this.#deps.gate.generation,
         arm: () => this.#deps.share?.arm(owned) ?? false,

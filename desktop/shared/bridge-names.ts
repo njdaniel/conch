@@ -89,6 +89,7 @@ export const VOICE_FUNCTIONS = [
   'voiceSaveDevice',
   'voiceKeyDevices',
   'voiceSaveTalkBinding',
+  'reportVoiceDiagnostic',
 ] as const satisfies readonly (keyof DesktopVoiceBridge)[];
 
 export type VoiceFunction = (typeof VOICE_FUNCTIONS)[number];

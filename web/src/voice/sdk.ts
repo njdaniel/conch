@@ -122,6 +122,7 @@ import {
   type TrackPublishOptions,
   type VideoCaptureOptions,
 } from 'livekit-client';
+import { platform } from '../platform';
 import type { DisconnectCause } from './disconnect';
 import type { Camera, CameraProfile, KeptCamera } from './camera';
 import type { CameraTrack, Microphone, Output, Processing, Room, RoomEvents, ShareSink } from './connection';
@@ -137,9 +138,9 @@ export const sdkLog = new LogRing(redactor);
 
 let logging = false;
 
-// quietSdk sets every SDK logger to warn and sends its records, redacted, to
-// the ring instead of the browser log. It runs when this module loads, so the
-// SDK says nothing to the console before the first connection either.
+// quietSdk sets every SDK logger to warn and keeps its redacted records in the
+// ring. The desktop also gets a fixed diagnostic without SDK data or context.
+// Install the logger at module load, before the first connection.
 //
 // The level is not persisted: setLevel is called with persist=false, and the
 // SDK's setLogLevel is not called at all, since it persists the level through
@@ -151,7 +152,25 @@ export function quietSdk(): void {
   for (const name of names) {
     const logger = getLogger(name);
     logger.methodFactory = (method) => (message: unknown, context?: unknown) => {
-      sdkLog.add(method, typeof message === 'string' ? message : '', context);
+      const text = typeof message === 'string' ? message : '';
+      sdkLog.add(method, text, context);
+      const report = platform.services.reportVoiceDiagnostic;
+      if (report === undefined) return;
+      if (method === 'warn') {
+        report(/^not able to set (offer|answer), falling back to unmodified sdp$/.test(text) ? 'sdp-retry' : 'sdk-warning');
+      } else if (method === 'error') {
+        if (!/^unable to set (offer|answer)$/.test(text)) {
+          report('sdk-error');
+          return;
+        }
+        // PCTransport reports the final setDescription rejection here.
+        // Match a known reason and leave SDP, credentials and error text out.
+        const fields = typeof context === 'object' && context !== null && 'fields' in context ? context.fields : undefined;
+        const error = typeof fields === 'object' && fields !== null && 'error' in fields ? fields.error : undefined;
+        report(typeof error === 'string' && /A BUNDLE group contains a codec collision between|Bundled payload type collision/.test(error)
+          ? 'sdp-bundle-collision'
+          : 'sdp-rejected');
+      }
     };
     logger.setLevel(LogLevel.warn, false);
   }
@@ -530,6 +549,7 @@ export function watchScreenCapture(capture: MediaStreamTrack, changed: (stalled:
       if (!capture.muted || capture.readyState === 'ended') return;
       stalled = true;
       console.warn('Screen capture stopped delivering frames (muted for 3 seconds).');
+      platform.services.reportVoiceDiagnostic?.('capture-stalled');
       changed(true);
     }, 3000);
   };
@@ -564,6 +584,12 @@ export function captureOptions(quality: ShareQuality = defaultShareQuality, soun
   };
 }
 
+// Detail lets the encoder trade frame rate or resolution under load.
+// The motion presets ask it to preserve frame rate.
+function shareDegradationPreference(quality: ShareQuality): RTCDegradationPreference {
+  return quality.frameRate === 15 ? 'balanced' : 'maintain-framerate';
+}
+
 // How the picture is published, from what was captured and the chosen caps.
 // The codec is the SDK's default, VP8.
 export function videoPublishOptions(captured: CapturedVideo, quality: ShareQuality = defaultShareQuality): TrackPublishOptions {
@@ -571,7 +597,7 @@ export function videoPublishOptions(captured: CapturedVideo, quality: ShareQuali
   return {
     source: Track.Source.ScreenShare,
     simulcast: true,
-    degradationPreference: quality.frameRate === 15 ? 'maintain-resolution' : 'maintain-framerate',
+    degradationPreference: shareDegradationPreference(quality),
     screenShareEncoding: new VideoPreset(top.width, top.height, top.maxBitrate, top.maxFramerate).encoding,
     screenShareSimulcastLayers: lower.map((l) => new VideoPreset(l.width, l.height, l.maxBitrate, l.maxFramerate)),
   };
@@ -628,7 +654,7 @@ export function shareSample(stats: Iterable<ShareStats>, direction: ShareDirecti
   }
   if (found === null) return null;
   const bytes = direction === 'received' ? found.bytesReceived : found.bytesSent;
-  const limitation = limitationOf(found.qualityLimitationReason);
+  const limitation = found.active === false ? undefined : limitationOf(found.qualityLimitationReason);
   const lost = direction === 'received' ? undefined : sentLoss(all, found);
   const off = direction === 'sent' ? inactiveAbove(all, found) : 'none';
   const capture = direction === 'sent' && captured !== undefined ? capturedOf(captured) : undefined;
@@ -1794,7 +1820,7 @@ class LiveKitAdapter implements Room {
     if (sender === undefined) return;
     const { top, lower } = shareEncodings(settings, quality);
     // A hint only: a browser that refuses it must not cost the encodings below.
-    await track.setDegradationPreference(quality.frameRate === 15 ? 'maintain-resolution' : 'maintain-framerate').catch(() => undefined);
+    await track.setDegradationPreference(shareDegradationPreference(quality)).catch(() => undefined);
     const parameters = sender.getParameters();
     const last = parameters.encodings.length - 1;
     // Smallest first: the order LiveKit builds them in.
