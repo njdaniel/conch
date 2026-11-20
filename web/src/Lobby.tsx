@@ -6,7 +6,7 @@ import { GroupsPanel } from './ChannelGroups';
 import { visualOrder } from './arrangement';
 import { useArrangement } from './useArrangement';
 import type { SettingsChange } from './ChannelSettingsAsk';
-import { leaveVoice, useInVoice } from './voice/useVoice';
+import { channelVoiceBusy, leaveVoice } from './voice/useVoice';
 import type { InVoice } from './voice/useOccupancy';
 import { headingId } from './Conversation';
 import { Avatar, Glyph } from './Icons';
@@ -378,7 +378,6 @@ export function Lobby({
     close();
   };
 
-  const inChannelVoice = useInVoice();
   const showCalls = privateCalls !== undefined && me > 0 && visit === undefined;
   const hasBand = band !== undefined || showCalls;
   const lobby = (
@@ -701,7 +700,7 @@ export function Lobby({
     </JoiningSettings.Provider>
   );
   return showCalls ? (
-    <PrivateCallProvider scope={{ origin, account: me }} options={privateCalls} channelVoice={{ joined: inChannelVoice, leave: leaveVoice }}>
+    <PrivateCallProvider scope={{ origin, account: me }} options={privateCalls} channelVoice={{ isBusy: channelVoiceBusy, leave: leaveVoice }}>
       {lobby}
     </PrivateCallProvider>
   ) : lobby;

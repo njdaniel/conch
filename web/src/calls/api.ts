@@ -39,6 +39,7 @@ export interface PrivateCallAPI {
 export interface PrivateCallMedia {
   // Called only after an explicit Join and a final check of the grant against
   // the current attempt. The adapter observes the signal before starting
-  // capture and tears down the connection on abort, including during startup.
+  // capture. On abort it stops local capture and playback immediately and
+  // tears down the connection, including during startup.
   connect(scope: CallScope, grant: PrivateCallSessionV1, signal: AbortSignal): Promise<void>;
 }

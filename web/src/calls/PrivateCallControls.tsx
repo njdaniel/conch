@@ -11,7 +11,7 @@ export interface PrivateCallOptions {
 }
 
 export interface ChannelVoice {
-  readonly joined: boolean;
+  readonly isBusy: () => boolean;
   readonly leave: () => Promise<void>;
 }
 
@@ -20,10 +20,13 @@ interface CallContext {
   readonly view: ReturnType<PrivateCalls['snapshot']>;
   readonly mediaAvailable: boolean;
   readonly channelVoice: ChannelVoice;
-  readonly channelVoiceJoined: () => boolean;
 }
 
 const Calls = createContext<CallContext | null>(null);
+
+export function usePrivateCalls() {
+  return useContext(Calls)?.calls;
+}
 
 export function PrivateCallProvider({ scope, options, channelVoice, children }: {
   readonly scope: CallScope;
@@ -35,12 +38,10 @@ export function PrivateCallProvider({ scope, options, channelVoice, children }: 
   const { api, media, alert = alertIncomingCall } = options;
   const calls = useMemo(() => new PrivateCalls({ origin, account }, api, media, alert), [origin, account, api, media, alert]);
   const view = useSyncExternalStore(calls.subscribe, calls.snapshot);
-  const voiceNow = useRef(channelVoice.joined);
-  useLayoutEffect(() => { voiceNow.current = channelVoice.joined; }, [channelVoice.joined]);
   useLayoutEffect(() => calls.start(), [calls]);
 
   return (
-    <Calls.Provider value={{ calls, view, mediaAvailable: media !== undefined && api.session !== undefined, channelVoice, channelVoiceJoined: () => voiceNow.current }}>
+    <Calls.Provider value={{ calls, view, mediaAvailable: media !== undefined && api.session !== undefined, channelVoice }}>
       {children}
     </Calls.Provider>
   );
@@ -140,7 +141,7 @@ function AttemptControls({ context, call, invitation }: {
   readonly call: PrivateCallV1;
   readonly invitation?: string;
 }) {
-  const { calls, view, channelVoice, channelVoiceJoined, mediaAvailable } = context;
+  const { calls, view, channelVoice, mediaAvailable } = context;
   const [confirm, setConfirm] = useState<{ action: 'accept' | 'join'; revision: number } | null>(null);
   const answer = useRef<HTMLButtonElement>(null);
   const keepVoice = useRef<HTMLButtonElement>(null);
@@ -155,10 +156,10 @@ function AttemptControls({ context, call, invitation }: {
   const proceed = (action: 'accept' | 'join', leave?: () => Promise<void>) => {
     setConfirm(null);
     if (action === 'accept') void calls.act(call, 'accept', leave);
-    else void calls.join(call, channelVoiceJoined, leave);
+    else void calls.join(call, channelVoice.isBusy, leave);
   };
   const ask = (action: 'accept' | 'join') => {
-    if (channelVoice.joined) setConfirm({ action, revision: call.revision });
+    if (channelVoice.isBusy()) setConfirm({ action, revision: call.revision });
     else proceed(action);
   };
   const keep = () => {

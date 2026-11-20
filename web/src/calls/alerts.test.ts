@@ -23,12 +23,20 @@ describe('private call alerts', () => {
     vi.spyOn(sink, 'ready').mockReturnValue(true);
     const play = vi.spyOn(sink, 'play').mockImplementation(() => undefined);
 
+    writeNotificationPreferences(scope.origin, scope.account, { policy: 'all', muted: [], native: false });
     alertIncomingCall(scope);
     expect(play).not.toHaveBeenCalled();
     setSoundPreferences({ ...silent, join: true, volume: 0.2 });
     sounds.unlock();
     alertIncomingCall(scope);
     expect(play).toHaveBeenCalledExactlyOnceWith('join', 0.2);
+    writeNotificationPreferences(scope.origin, scope.account, { policy: 'off', muted: [], native: true });
+    alertIncomingCall(scope);
+    expect(play).toHaveBeenCalledTimes(1);
+    writeNotificationPreferences(scope.origin, scope.account, { policy: 'mentions', muted: [], native: true });
+    alertIncomingCall(scope);
+    expect(play).toHaveBeenCalledTimes(1);
+    writeNotificationPreferences(scope.origin, scope.account, { policy: 'all', muted: [], native: false });
     setSoundPreferences({ ...silent, join: true, volume: 0 });
     alertIncomingCall(scope);
     expect(play).toHaveBeenCalledTimes(1);
@@ -45,6 +53,11 @@ describe('private call alerts', () => {
     const show = vi.spyOn(notifications, 'show').mockReturnValue(notification);
 
     expect(alertIncomingCall(scope)).toBeUndefined();
+    writeNotificationPreferences(scope.origin, scope.account, { policy: 'off', muted: [], native: true });
+    expect(alertIncomingCall(scope)).toBeUndefined();
+    writeNotificationPreferences(scope.origin, scope.account, { policy: 'mentions', muted: [], native: true });
+    expect(alertIncomingCall(scope)).toBeUndefined();
+    expect(show).not.toHaveBeenCalled();
     writeNotificationPreferences(scope.origin, scope.account, { policy: 'all', muted: [], native: true });
     const dismiss = alertIncomingCall(scope);
     expect(show).toHaveBeenCalledExactlyOnceWith('Incoming private call', 'Open Conch to answer.', expect.any(String), '');

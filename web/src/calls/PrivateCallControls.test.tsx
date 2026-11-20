@@ -7,6 +7,7 @@ import failedJSON from '../../../pkg/schema/testdata/private-call-v1-failed-join
 import glareJSON from '../../../pkg/schema/testdata/private-call-response-v1-glare.json';
 import historyJSON from '../../../pkg/schema/testdata/list-private-calls-response-v1.json';
 import idleJSON from '../../../pkg/schema/testdata/private-call-snapshot-v1-idle.json';
+import missedJSON from '../../../pkg/schema/testdata/private-call-v1-missed.json';
 import outgoingJSON from '../../../pkg/schema/testdata/private-call-response-v1.json';
 import ringingJSON from '../../../pkg/schema/testdata/private-call-ringing-v1.json';
 import sessionJSON from '../../../pkg/schema/testdata/private-call-session-v1.json';
@@ -20,6 +21,8 @@ import {
 } from '../schema/generated';
 import type { Validator } from '../schema/validate';
 import { initialChannels } from '../state/channels';
+import { VoiceClient } from '../voice/connection';
+import { channelVoiceBusy, leaveVoice, useVoice } from '../voice/useVoice';
 import { type CallEvent, type CallReply, type CallScope, type PrivateCallAPI, type PrivateCallMedia } from './api';
 import { DMCallControls, PrivateCallBanner, PrivateCallProvider } from './PrivateCallControls';
 
@@ -36,6 +39,7 @@ const failed = fixture(failedJSON, privateCallV1);
 const glare = fixture(glareJSON, privateCallResponseV1);
 const history = fixture(historyJSON, listPrivateCallsResponseV1);
 const idle = fixture(idleJSON, privateCallSnapshotV1);
+const missed = fixture(missedJSON, privateCallV1);
 const outgoing = fixture(outgoingJSON, privateCallResponseV1);
 const ringing = fixture(ringingJSON, privateCallRingingV1);
 const session = fixture(sessionJSON, privateCallSessionV1);
@@ -47,7 +51,7 @@ const callee = { origin: 'https://conch.example.test', account: 5 };
 const caller = { ...callee, account: 3 };
 const conversationId = 12;
 const ok = (value: Extract<CallReply, { kind: 'ok' }>['value']): CallReply => ({ kind: 'ok', value });
-const noVoice = { joined: false, leave: () => Promise.resolve() };
+const noVoice = { isBusy: () => false, leave: () => Promise.resolve() };
 const validGrant = () => ({ ...session, identity: 'p5', expires_at: new Date(Date.now() + 15_000).toISOString() });
 
 function fakeAPI() {
@@ -79,6 +83,16 @@ function controls(api: PrivateCallAPI, scope: CallScope = callee, media?: Privat
       <DMCallControls conversationId={conversationId} />
     </PrivateCallProvider>
   );
+}
+
+const ignoreUnauthorized = () => undefined;
+
+function ChannelVoiceButtons() {
+  const voice = useVoice({ signedIn: true, channel: 'general', voiceAllowed: true, reachable: false, onUnauthorized: ignoreUnauthorized });
+  return <>
+    <button type="button" onClick={voice.join}>Join voice</button>
+    <button type="button" onClick={() => { voice.watchOnly(); }}>Watch only</button>
+  </>;
 }
 
 const button = (name: string) => screen.getByRole('button', { name });
@@ -124,6 +138,46 @@ describe('private call controls', () => {
     click('Call');
     expect(await screen.findByText('Call unavailable')).toBeDefined();
     expect(api.session).not.toHaveBeenCalled();
+  });
+
+  it('retries a committed invite whose response was lost without ringing again', async () => {
+    const { api } = fakeAPI();
+    const inviteSent = vi.fn();
+    const sent = new Set<string>();
+    api.invite.mockImplementation((_scope, _conversation, { action_id }) => {
+      if (sent.has(action_id)) {
+        return Promise.resolve(ok({ call: { ...missed, role: 'caller' }, replayed: true }));
+      }
+      sent.add(action_id);
+      inviteSent();
+      return Promise.reject(new Error('Lost reply'));
+    });
+    render(controls(api, caller));
+    click('Call');
+    await screen.findByRole('alert');
+    click('Call');
+    expect(await screen.findByText('Call went unanswered')).toBeDefined();
+    expect(inviteSent).toHaveBeenCalledTimes(1);
+    click('Call');
+    await screen.findByRole('alert');
+    expect(inviteSent).toHaveBeenCalledTimes(2);
+  });
+
+  it('requires a separate Call click after the server retry window expires', async () => {
+    const { api } = fakeAPI();
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    api.invite.mockRejectedValueOnce(new Error('Lost reply'));
+    render(controls(api, caller));
+    click('Call');
+    await screen.findByRole('alert');
+    clock.mockReturnValue(now + 60 * 60 * 1000);
+    click('Call');
+    expect(screen.getByRole('alert').textContent).toContain('The call retry window expired.');
+    expect(api.invite).toHaveBeenCalledTimes(1);
+    click('Call');
+    expect(await screen.findByText('Calling…')).toBeDefined();
+    expect(api.invite.mock.calls[0]?.[2].action_id).not.toBe(api.invite.mock.calls[1]?.[2].action_id);
   });
 
   it('shows glare as incoming and supports decline without requesting audio', async () => {
@@ -189,7 +243,7 @@ describe('private call controls', () => {
     const { api, emit } = fakeAPI();
     const left = deferred<undefined>();
     const leave = vi.fn(() => left.promise);
-    render(controls(api, callee, undefined, { joined: true, leave }));
+    render(controls(api, callee, undefined, { isBusy: () => true, leave }));
     emit({ scope: callee, frame: ringing });
     click('Answer');
     const question = screen.getByRole('group', { name: 'Leave channel voice to answer this call?' });
@@ -205,6 +259,37 @@ describe('private call controls', () => {
     await act(async () => { left.resolve(undefined); await left.promise; });
     expect(await screen.findByText('Call audio is unavailable.')).toBeDefined();
     expect(api.session).not.toHaveBeenCalled();
+  });
+
+  it('blocks channel voice and watch-only joins while private audio connects and after it joins', async () => {
+    const { api, emit } = fakeAPI();
+    vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('No server'))));
+    vi.stubGlobal('AudioContext', undefined);
+    const connected = deferred<undefined>();
+    const connect = vi.fn<PrivateCallMedia['connect']>(() => connected.promise);
+    const channelJoin = vi.spyOn(VoiceClient.prototype, 'join').mockImplementation(() => undefined);
+    render(
+      <PrivateCallProvider scope={callee} options={{ api, media: { connect } }} channelVoice={{ isBusy: channelVoiceBusy, leave: leaveVoice }}>
+        <PrivateCallBanner />
+        <ChannelVoiceButtons />
+      </PrivateCallProvider>,
+    );
+    emit({ scope: callee, frame: ringing });
+    click('Answer');
+    fireEvent.click(await screen.findByRole('button', { name: 'Join call' }));
+    await waitFor(() => { expect(connect).toHaveBeenCalledOnce(); });
+    click('Join voice');
+    click('Watch only');
+    expect(channelJoin).not.toHaveBeenCalled();
+    await act(async () => { connected.resolve(undefined); await connected.promise; });
+    expect(screen.queryByRole('button', { name: 'Joining…' })).toBeNull();
+    click('Join voice');
+    click('Watch only');
+    expect(channelJoin).not.toHaveBeenCalled();
+    emit({ scope: callee, accessLost: true });
+    expect(connect.mock.calls[0]?.[2].aborted).toBe(true);
+    click('Join voice');
+    expect(channelJoin).toHaveBeenCalledExactlyOnceWith('general', expect.any(Object));
   });
 
   it('reconciles missed history after an idle snapshot and shows failed calls to the caller', async () => {
@@ -225,6 +310,31 @@ describe('private call controls', () => {
     expect(await screen.findByText('Call failed')).toBeDefined();
   });
 
+  it('retires a stop-ringing attempt on reconnect before a delayed Answer reply can revive it', async () => {
+    const { api, emit } = fakeAPI();
+    const answer = deferred<CallReply>();
+    const finished = deferred<typeof history>();
+    api.action.mockReturnValue(answer.promise);
+    api.history.mockReturnValue(finished.promise);
+    const connect = vi.fn<PrivateCallMedia['connect']>();
+    render(
+      <PrivateCallProvider scope={callee} options={{ api, media: { connect } }} channelVoice={noVoice}>
+        <PrivateCallBanner />
+      </PrivateCallProvider>,
+    );
+    emit({ scope: callee, frame: ringing });
+    click('Answer');
+    emit({ scope: callee, frame: stopped });
+    expect(screen.queryByRole('button', { name: 'Answer' })).toBeNull();
+    emit({ scope: callee, frame: { ...idle, taken_at: '2026-11-19T10:08:00.000Z' } });
+    expect(api.history).toHaveBeenCalledExactlyOnceWith(callee, conversationId, expect.any(AbortSignal));
+    await act(async () => { answer.resolve(ok(accepted)); await answer.promise; });
+    expect(screen.queryByRole('button', { name: 'Join call' })).toBeNull();
+    expect(api.session).not.toHaveBeenCalled();
+    await act(async () => { finished.resolve(history); await finished.promise; });
+    expect(screen.getByRole('status').textContent).toBe('Call ended');
+  });
+
   it('ignores an unseen late ring after an idle snapshot and announces a new missed call outside the DM', async () => {
     const { api, emit } = fakeAPI();
     render(
@@ -236,13 +346,12 @@ describe('private call controls', () => {
     emit({ scope: callee, frame: ringing });
     expect(screen.queryByRole('button', { name: 'Answer' })).toBeNull();
 
-    const fresh = { ...ringing.call, id: 'new-attempt', created_at: '2026-11-19T10:01:00.000Z' };
-    emit({ scope: callee, frame: { ...ringing, call: fresh } });
-    expect(button('Answer')).toBeDefined();
-    emit({ scope: callee, frame: { ...active, call: { ...fresh, revision: 2, state: 'missed' } } });
+    const fresh = { ...missed, id: 'new-attempt', created_at: '2026-11-19T10:01:00.000Z', ended_at: '2026-11-19T10:01:40.000Z' };
+    emit({ scope: callee, frame: { ...active, call: fresh } });
     expect(screen.getByRole('status').textContent).toBe('Missed call');
     expect(screen.queryByRole('button', { name: 'Answer' })).toBeNull();
     click('Dismiss');
+    emit({ scope: callee, frame: { ...active, call: fresh } });
     expect(screen.getByRole('status').textContent).toBe('');
     await act(async () => {});
   });

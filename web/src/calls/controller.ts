@@ -26,6 +26,8 @@ interface View {
 }
 
 const idle: View = { current: null, finished: [], notice: null, owned: false, available: false, pending: false, media: 'idle', problem: null };
+// Matches PrivateCallActionWindowSeconds in pkg/schema/private_call.go.
+const inviteRetryWindowMs = 60 * 60 * 1000;
 
 export class PrivateCalls {
   private view = idle;
@@ -33,6 +35,7 @@ export class PrivateCalls {
   private readonly calls = new Map<string, PrivateCallV1>();
   private readonly stopped = new Map<string, number>();
   private readonly retired = new Set<string>();
+  private readonly invites = new Map<number, { id: string; startedAt: number }>();
   private binding: AbortController | undefined;
   private capture: AbortController | undefined;
   private closeAlert: (() => void) | undefined;
@@ -47,6 +50,7 @@ export class PrivateCalls {
   ) {}
 
   snapshot = (): View => this.view;
+  audioBusy = (): boolean => this.capture !== undefined;
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
     return () => { this.listeners.delete(listener); };
@@ -78,6 +82,7 @@ export class PrivateCalls {
     this.calls.clear();
     this.stopped.clear();
     this.retired.clear();
+    this.invites.clear();
     this.update(idle);
   }
 
@@ -129,7 +134,8 @@ export class PrivateCalls {
       this.calls.set(call.id, call);
       if (current?.id === call.id) this.setCurrent(null);
       const lastNotice = this.view.notice;
-      const showNotice = (previous !== undefined || source === 'reply') &&
+      const showNotice = (previous !== undefined || source === 'reply' ||
+        (source === 'stream' && call.role === 'callee' && call.state === 'missed')) &&
         (lastNotice === null || Date.parse(call.created_at) >= Date.parse(lastNotice.created_at));
       // The caller can see that ringing went unanswered. Only the callee
       // gets a missed-call history entry.
@@ -167,14 +173,18 @@ export class PrivateCalls {
         this.snapshotAt = takenAt;
         const current = this.view.current;
         // A reconnect snapshot can account for a terminal transition this
-        // tab missed. History supplies the outcome, including missed calls.
-        if (current !== null && current.id !== frame.call?.id) {
-          if (Date.parse(current.created_at) > takenAt) return;
-          this.retired.add(current.id);
-          this.setCurrent(null);
-          void this.loadHistory(current.conversation_id);
+        // tab missed, even if a stop-ringing hint already cleared the UI.
+        const reconcile = new Set<number>();
+        for (const call of this.calls.values()) {
+          if (!live(call) || call.id === frame.call?.id || this.retired.has(call.id) || Date.parse(call.created_at) > takenAt) continue;
+          this.retired.add(call.id);
+          if (this.view.current?.id === call.id) this.setCurrent(null);
+          reconcile.add(call.conversation_id);
         }
-        if (frame.call !== undefined) this.record(frame.call, 'snapshot');
+        for (const conversation of reconcile) void this.loadHistory(conversation);
+        if (frame.call !== undefined && (current === null || current.id === frame.call.id || Date.parse(current.created_at) <= takenAt)) {
+          this.record(frame.call, 'snapshot');
+        }
         break;
       }
     }
@@ -195,9 +205,17 @@ export class PrivateCalls {
   }
 
   async invite(conversation: number): Promise<void> {
-    if (this.view.current !== null) return;
+    if (this.binding === undefined || this.view.current !== null || this.view.pending) return;
+    const now = Date.now();
+    const invite = this.invites.get(conversation) ?? { id: crypto.randomUUID(), startedAt: now };
+    if (now - invite.startedAt >= inviteRetryWindowMs) {
+      this.invites.delete(conversation);
+      this.update({ problem: 'The call retry window expired. Select Call to start a new attempt.' });
+      return;
+    }
+    this.invites.set(conversation, invite);
     await this.request(conversation, undefined, (signal) =>
-      this.api.invite(this.scope, conversation, { action_id: crypto.randomUUID() }, signal), 'caller');
+      this.api.invite(this.scope, conversation, { action_id: invite.id }, signal), 'caller');
   }
 
   async act(call: PrivateCallV1, action: CallAction, leaveVoice?: () => Promise<void>): Promise<void> {
@@ -241,6 +259,7 @@ export class PrivateCalls {
       if (!this.belongs(call) || call.conversation_id !== conversation || (attempt !== undefined && call.id !== attempt)) {
         throw new Error('Call response did not match the request');
       }
+      if (attempt === undefined) this.invites.delete(conversation);
       this.record(call, 'reply');
       // A state frame can arrive before this window's HTTP success.
       const current = this.view.current;
@@ -260,7 +279,7 @@ export class PrivateCalls {
     return this.view.current?.id === call.id && this.view.current.revision === call.revision;
   }
 
-  async join(call: PrivateCallV1, channelVoiceJoined: () => boolean, leaveVoice?: () => Promise<void>): Promise<void> {
+  async join(call: PrivateCallV1, channelVoiceBusy: () => boolean, leaveVoice?: () => Promise<void>): Promise<void> {
     const { media, api } = this;
     const binding = this.binding;
     if (media === undefined || api.session === undefined || binding === undefined ||
@@ -270,7 +289,7 @@ export class PrivateCalls {
     this.capture = capture;
     this.update({ media: 'joining', problem: null });
     const stillBound = () => !binding.signal.aborted && !capture.signal.aborted &&
-      this.isCurrent(call) && this.view.owned && !this.view.pending && !channelVoiceJoined();
+      this.isCurrent(call) && this.view.owned && !this.view.pending && !channelVoiceBusy();
 
     try {
       if (leaveVoice !== undefined) await leaveVoice();
