@@ -14,6 +14,9 @@ const url = (rest: string): string => ['https:', rest].join('//');
 // Exact expressions, scoped to their source file. New values need review at
 // the opt-in call site, even when a scrub rule would catch their current form.
 const ringValues: Readonly<Record<string, readonly string[]>> = {
+  'guards.ts': [
+    'String(blocked)', // Count of blocked requests since start.
+  ],
   'api/feeds.ts': [
     'sub.kind', // FeedKind selected by the IPC parser.
     'held.kind', // The socket's stored FeedKind.
@@ -460,10 +463,9 @@ describe('scrubLine', () => {
   });
 
   it.each([
-    'voice: helper 1 exited (exit code: 1)',
+    'voice: helper 1 exited (code 1)',
     'voice: session phase: joined',
     'voice: talk key: F9, mute key: F10',
-    'share: diagnostic code=capture_stalled',
   ])('keeps what a diagnosis needs: %s', (line) => {
     expect(scrubLine(line)).toBe(line);
   });

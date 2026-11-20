@@ -71,17 +71,18 @@ const RULES: readonly (readonly [RegExp, string | ((match: string) => string)])[
 ];
 
 // Whole fixed lines whose reviewed values resemble hosts, keys or addresses.
+// Digit runs are bounded (a generation, an exit status, a count), so a long
+// number can't ride through as an address or a key.
 // Anchoring the complete shape keeps an adjoining payload subject to the scrub.
 const FIXED_LINES = [
   /^conch-desktop: compat\.json is missing or malformed; no server release is supported$/u,
   /^conch-desktop: CONCH_LINUX_SHARE_AUDIO is on: the Linux screen share offers its sound \(experimental\)$/u,
-  /^voice: helper \d+ speaks conch\.voice_control\.v[123]$/u,
+  /^voice: helper \d{1,9} speaks conch\.voice_control\.v[123]$/u,
   /^voice: unavailable: runtime-dir-(?:unset|not-absolute|missing|symlink|not-directory|not-owned|not-private)$/u,
-  /^voice: helper \d+ exited \((?:code |exit code: )-?\d+\)$/u,
-  /^voice: (?:config (?:set|set-mute-binding)|devices): (?:failed|unsupported) \(exit status -?\d+\)$/u,
+  /^voice: helper \d{1,9} exited \(code -?\d{1,10}\)$/u,
+  /^voice: (?:config (?:set|set-mute-binding)|devices): (?:failed|unsupported) \(exit status -?\d{1,10}\)$/u,
   /^vault: temporarilyUnavailable$/u,
-  /^share: diagnostic code=capture_stalled$/u,
-  /^conch-desktop: refused an IPC call \((?:sender|destroyed|frame|subframe|origin|generation|name|rate|size|shape|gesture|disabled|error)\); \d+ so far$/u,
+  /^conch-desktop: refused an IPC call \((?:sender|destroyed|frame|subframe|origin|generation|name|rate|size|shape|gesture|disabled|error)\); \d{1,15} so far$/u,
 ];
 
 // Bound work before scrubbing and bound the result after redaction.
