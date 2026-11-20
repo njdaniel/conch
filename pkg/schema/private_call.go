@@ -34,8 +34,9 @@ import (
 // PrivateCallRingingV1 (a call is ringing for you: every one of your sockets),
 // PrivateCallStopRingingV1 (stop ringing: another device of yours answered or
 // declined, or the caller gave up), PrivateCallStateV1 (the attempt changed:
-// both people's sockets, on every transition) and, on every (re)connect, a
-// PrivateCallSnapshotV1 right after the DM snapshot.
+// both people's sockets for an attempt that rang, subject to current access)
+// and, on every (re)connect, a PrivateCallSnapshotV1 right after the DM
+// snapshot.
 //
 // What no client-visible shape carries: a LiveKit room name, a token, or a
 // URL. They exist in PrivateCallSessionV1 alone, the grant answer to the
@@ -45,9 +46,14 @@ import (
 //
 // Refusals. An invite to a callee who cannot be rung (busy, offline, blocked
 // either way, opted out, switched off, hidden) is not an error: it answers
-// with an attempt in state PrivateCallStateUnavailable, one state for all of
-// them, with no reason, to the caller alone (ADR-017 Decision 10; the callee
-// is told nothing and gets no missed-call entry). The route's real errors are
+// 200 with an attempt in state PrivateCallStateUnavailable and no reason
+// (ADR-017 Decision 10). Only the inviting credential's HTTP response and
+// authorized retries of that invite carry the attempt. There is no stream
+// fan-out to either side, snapshot, call history entry or notification.
+// Every {call} route treats its id as absent. Only an invite that actually
+// rings can publish a DM conversation to the peer. An unavailable invite
+// leaves DM inboxes, conversation timestamps, revisions and unread counts
+// untouched, and emits no DM event or push. The route's real errors are
 // the DM ones (ErrorCodeDMsOff, ErrorCodeOwnSignInRequired, 404 dm_not_found,
 // 400 invalid_request) and the call ones below; none names a reason about the
 // other person.
@@ -79,7 +85,7 @@ const (
 	// from an active call's room before the call ends (reason gone).
 	PrivateCallReconnectGraceSeconds = 20
 	// PrivateCallActionWindowSeconds is how long the server remembers an
-	// action id: a repeat inside the window is the same action.
+	// action id and the request it identifies, scoped to the credential.
 	PrivateCallActionWindowSeconds = 3600
 )
 
@@ -101,22 +107,23 @@ const (
 // to the invite route as to the others. ErrorCodeContactUnavailable does not
 // appear: an unreachable callee is the state unavailable, not an error.
 const (
-	// ErrorCodeCallNotFound: no such attempt, or the caller is neither side
-	// of it (HTTP 404). One answer, whatever the caller's role.
+	// ErrorCodeCallNotFound: no such visible attempt (HTTP 404). The same
+	// response covers an unknown id, a requester outside the pair and an
+	// unavailable attempt, including when its inviter supplies its id.
 	ErrorCodeCallNotFound = "call_not_found"
-	// ErrorCodeCallStateChanged: an action named a revision that is no longer
-	// current and the attempt is not already in the state the action leads to
-	// (HTTP 409). Its body is PrivateCallConflictV1, which carries the current
-	// attempt; the client follows it and never retries blindly. Also the answer
-	// to a media join for an attempt that is not accepted or active.
+	// ErrorCodeCallStateChanged: an action named a stale revision and is
+	// not an exact replay of a successful action (HTTP 409). Its body is
+	// PrivateCallConflictV1, which carries the current attempt; the client
+	// follows it and never retries blindly. Also the answer to a media join
+	// for a visible attempt that is not accepted or active.
 	ErrorCodeCallStateChanged = "call_state_changed"
 	// ErrorCodeCallInProgress: the caller already has a non-terminal attempt
 	// of their own (HTTP 409), and this invite is not the glare case. It says
 	// nothing about the callee.
 	ErrorCodeCallInProgress = "call_in_progress"
-	// ErrorCodeCallActionConflict: an action id was used before, inside
-	// PrivateCallActionWindowSeconds, for a different action or attempt
-	// (HTTP 409). An identical repeat is not an error: it replays.
+	// ErrorCodeCallActionConflict: the same credential used this action id
+	// inside PrivateCallActionWindowSeconds for a different route, target or
+	// request revision (HTTP 409).
 	ErrorCodeCallActionConflict = "call_action_conflict"
 	// ErrorCodeCallWrongDevice: the caller's credential is not the endpoint
 	// selected for the caller's side of this attempt (HTTP 403), on a media
@@ -298,7 +305,8 @@ type PrivateCallTransition struct {
 // reason is shown to neither side), and the glare case is not a row because
 // it creates no attempt: an invite while the callee is ringing the caller
 // returns that attempt as the caller's incoming call
-// (PrivateCallResponseV1.Glare).
+// (PrivateCallResponseV1.Glare). The invite_unavailable row records the
+// HTTP result only and does not trigger fan-out or DM publication.
 var PrivateCallTransitions = []PrivateCallTransition{
 	{PrivateCallFromNone, PrivateCallEventInvite, PrivateCallStateRinging, "", PrivateCallActorCaller},
 	{PrivateCallFromNone, PrivateCallEventInviteUnavailable, PrivateCallStateUnavailable, "", PrivateCallActorCaller},
@@ -506,10 +514,10 @@ func (c PrivateCallV1) validateDeadlines() error {
 }
 
 // ValidatePrivateCallStep reports whether next is a legal successor of prev:
-// the same attempt, revision exactly one higher, and a transition the table
-// has, with the reason it gives. It is the server's check before a write and
-// a client's before it believes a frame out of order. A terminal prev has no
-// successor, so no sequence ever takes a terminal attempt back to a live one.
+// the same attempt as seen by the same credential, revision exactly one
+// higher, and a transition the table has, with the reason it gives. The
+// caller's selection is fixed for the life of the attempt. A callee can
+// become selected only on acceptance. Terminal documents clear selection.
 func ValidatePrivateCallStep(prev, next PrivateCallV1) error {
 	if err := prev.Validate(); err != nil {
 		return fmt.Errorf("previous: %w", err)
@@ -528,6 +536,11 @@ func ValidatePrivateCallStep(prev, next PrivateCallV1) error {
 	if next.Revision != prev.Revision+1 {
 		return errors.New("schema: private call revision must rise by exactly 1")
 	}
+	selectsCallee := prev.Role == PrivateCallRoleCallee &&
+		prev.State == PrivateCallStateRinging && next.State == PrivateCallStateAccepted
+	if prev.SelectedHere != next.SelectedHere && !next.State.Terminal() && !selectsCallee {
+		return errors.New("schema: private call selected_here cannot change for this transition")
+	}
 	for _, t := range PrivateCallTransitions {
 		if t.From == string(prev.State) && t.To == next.State && t.Reason == next.Reason {
 			return nil
@@ -539,9 +552,10 @@ func ValidatePrivateCallStep(prev, next PrivateCallV1) error {
 // InvitePrivateCallRequestV1 is the body of POST
 // /v1/dms/{conversation}/calls. The caller is the credential's person and
 // the callee the conversation's other person. ActionID makes the invite
-// idempotent: chosen by the client once per invite and reused on every
-// retry, a repeat inside PrivateCallActionWindowSeconds answers the attempt
-// the first created, with Replayed set and nothing sent again.
+// idempotent: the client chooses it once per invite and reuses it on every
+// retry. Within PrivateCallActionWindowSeconds, an authorized retry with the
+// same credential, action id and conversation returns the attempt associated
+// with the original invite, with Replayed set and no new fan-out.
 type InvitePrivateCallRequestV1 struct {
 	ActionID string `json:"action_id"`
 }
@@ -551,12 +565,20 @@ func (r InvitePrivateCallRequestV1) Validate() error { return validateCallAction
 
 // PrivateCallActionRequestV1 is the body of the four action routes. Revision
 // is the attempt's revision the client last saw: the change is a
-// compare-and-swap on it. If the attempt has moved on, the answer is 409
-// ErrorCodeCallStateChanged with the current attempt, except that a request
-// for the transition that already happened (the attempt is now in the state
-// the action leads to, by the same act) answers 200 with it: actions are
-// idempotent. ActionID makes a retry exactly the same action; reusing one
-// for another action or attempt is ErrorCodeCallActionConflict.
+// compare-and-swap on it. Within PrivateCallActionWindowSeconds, an
+// authorized request matching the credential, action id, route, call id and
+// submitted revision of a successful action replays with HTTP 200 and the
+// current attempt, with Replayed set. It performs no transition or fan-out.
+// Reusing the same credential's action id with a different route, target or
+// revision is ErrorCodeCallActionConflict. After the replay and action id
+// checks, a stale request gets HTTP 409 ErrorCodeCallStateChanged with the
+// current attempt, even if the requested state has already been reached.
+//
+// For competing accepts at revision 1, the winning credential's exact
+// retry gets 200 with selected_here true while the call is still accepted.
+// An accept at revision 1 from another credential gets 409 with the accepted
+// attempt at revision 2 and selected_here false, even with the same action
+// id. That device stops ringing and does not request a join grant.
 type PrivateCallActionRequestV1 struct {
 	ActionID string `json:"action_id"`
 	Revision int64  `json:"revision"`
@@ -581,8 +603,8 @@ func validateCallActionID(id string) error {
 }
 
 // PrivateCallResponseV1 is the answer to an invite or an action: the attempt
-// as it now is. An invite that made an attempt (ringing, or unavailable)
-// answers 201; every other answer is 200.
+// as it now is. A fresh invite that starts ringing answers HTTP 201. An
+// unavailable invite, glare, an action success and a replay answer HTTP 200.
 //
 // Glare: when the caller invites a person whose own invite to the caller is
 // ringing, no attempt is made. The answer is that other attempt, as the
@@ -590,8 +612,8 @@ func validateCallActionID(id string) error {
 // the caller may accept it. Neither side is shown "busy".
 type PrivateCallResponseV1 struct {
 	Call PrivateCallV1 `json:"call"`
-	// Replayed is true when the request repeated an earlier action id or an
-	// action that had already happened, and nothing changed.
+	// Replayed is true for an exact retry of a successful request by the
+	// same credential within the action window.
 	Replayed bool `json:"replayed,omitempty"`
 	// Glare is true when Call is the other person's ringing invite to the
 	// caller, returned in place of a new attempt.
@@ -625,6 +647,9 @@ func (r PrivateCallConflictV1) Validate() error {
 	}
 	if r.Message == "" {
 		return errors.New("schema: private call conflict message is required")
+	}
+	if r.Call.State == PrivateCallStateUnavailable {
+		return errors.New("schema: an unavailable call has no action or session conflict response")
 	}
 	return r.Call.Validate()
 }
@@ -741,10 +766,12 @@ func (f PrivateCallStopRingingV1) Validate() error {
 	}
 }
 
-// PrivateCallStateV1 is the stream frame for every transition, to both
-// people's sockets, the acting device's included: the attempt as the reader
-// sees it. A client replaces what it holds for that id when Revision is
-// higher, drops a frame at or below the revision it holds, and notifies
+// PrivateCallStateV1 is the stream frame for a transition of an attempt that
+// rang. The server checks current access for each recipient at fan-out and
+// builds the frame from the receiving credential's view. The acting device
+// can receive it too. An unavailable attempt never produces a frame, even
+// for the inviter. A client replaces what it holds for that id when Revision
+// is higher, drops a frame at or below the revision it holds, and notifies
 // no one on a terminal state beyond what the product says. A frame for an
 // attempt the client has never held is a new one (a second device that was
 // signed out when it started): it is shown by its state.
@@ -758,6 +785,9 @@ type PrivateCallStateV1 struct {
 func (f PrivateCallStateV1) Validate() error {
 	if f.Schema != PrivateCallStateSchemaV1 {
 		return fmt.Errorf("schema: private call state schema must be %q, got %q", PrivateCallStateSchemaV1, f.Schema)
+	}
+	if f.Call.State == PrivateCallStateUnavailable {
+		return errors.New("schema: an unavailable call cannot appear in a state frame")
 	}
 	return f.Call.Validate()
 }
@@ -773,9 +803,12 @@ func (f PrivateCallStateV1) Validate() error {
 // most one); omitted when there is none. A client replaces whatever call
 // state it holds with the snapshot, then applies frames after it by
 // revision: a frame for the snapshot's id at or below its revision is a
-// duplicate. A client that held a call the snapshot does not list treats it
-// as over, and reads its final state from the conversation's history. It
-// never infers state locally.
+// duplicate. If a previously held call is absent, the client clears its live
+// UI and stops ringing or joining. It can show the final state from a visible
+// history entry for that id. With no such entry, it uses the generic
+// "Call ended" status if a status is shown. For example, when an outgoing
+// ring expires during a disconnect, only the callee has a missed history
+// entry. The caller must not infer a reason or create a missed entry.
 type PrivateCallSnapshotV1 struct {
 	Schema string         `json:"schema"`
 	Call   *PrivateCallV1 `json:"call,omitempty"`
@@ -806,7 +839,7 @@ func (s PrivateCallSnapshotV1) Validate() error {
 // ListPrivateCallsResponseV1 is the body of GET
 // /v1/dms/{conversation}/calls?cursor=: one page of the conversation's
 // finished calls as the reader sees them, newest first. It is the missed
-// and call history, and where a client reads a call's final state. Calls is
+// and call history, and shows the final state of listed attempts. Calls is
 // never null and holds at most MaxPrivateCallHistoryPage.
 //
 // What is listed: attempts that rang and are terminal: declined, cancelled,
