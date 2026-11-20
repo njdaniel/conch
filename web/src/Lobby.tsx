@@ -8,6 +8,9 @@ import type { SettingsChange } from './ChannelSettingsAsk';
 import type { InVoice } from './voice/useOccupancy';
 import { headingId } from './Conversation';
 import { Avatar, Glyph } from './Icons';
+import { DmInbox } from './dm/DmInbox';
+import { useDm } from './dm/DmContext';
+import { DmRoute } from './dm/DmRoute';
 import { ServerVersion, TemporaryBanner } from './ServerVersion';
 import { AddPerson, JoiningSettings, SettingsOpen, type JoiningRequest } from './joiningSettings';
 import { MicTestShown, phoneViews, ShowChat, useAppHeight, usePhone, VoiceLive, VoiceStrip, type PhoneView } from './phone';
@@ -212,6 +215,11 @@ export function Lobby({
   // the draft, the log's place and the call are untouched.
   const phone = usePhone();
   // The person's own favorites, groups and order (issue #1493).
+  // Direct messages (ADR-017): a separate inbox beside Channels, and an open
+  // conversation that takes the middle of the page. Neither touches the voice
+  // strip, which is mounted below and does not read this.
+  const dm = useDm();
+  const directOpen = dm?.inbox.state.selected ?? null;
   const arranged = useArrangement(origin, me, channels.channels, channels.loaded);
   const inVisualOrder = useMemo(() => visualOrder(arranged.arrangement, channels.channels), [arranged.arrangement, channels.channels]);
   useAppHeight(phone);
@@ -220,9 +228,12 @@ export function Lobby({
   const [chosen, setView] = useState<PhoneView | null>(null);
   // Chat with nothing open (the channel was lost or closed on this tab) is
   // Channels.
-  const chatOpen = channels.loaded && channels.selected !== null;
+  const chatOpen = (channels.loaded && channels.selected !== null) || directOpen !== null;
   const wanted: PhoneView = chosen ?? 'chat';
   const view: PhoneView = wanted === 'chat' && !chatOpen ? 'channels' : wanted;
+  useEffect(() => {
+    if (phone && directOpen !== null) setView('chat');
+  }, [phone, directOpen]);
   const [live, setLive] = useState(false);
   // Leaving voice under Chat or Channels takes the strip off the screen
   // (Join voice was focused in it): focus goes to the Voice button, where Join
@@ -435,6 +446,7 @@ export function Lobby({
               me={me}
               refresh={directoryTick}
               onOpen={(name) => {
+                dm?.inbox.select(null);
                 onOpen(name);
                 if (phone) {
                   toHeading.current = true;
@@ -474,6 +486,7 @@ export function Lobby({
                   {...(onLeft === undefined ? {} : { onLeft })}
                   {...(onUnauthorized === undefined ? {} : { onUnauthorized })}
                   onOpen={(name) => {
+                    dm?.inbox.select(null);
                     onOpen(name);
                     if (phone) {
                       toHeading.current = true;
@@ -504,6 +517,7 @@ export function Lobby({
               <p className="empty">Loading channels…</p>
             )}
           </nav>
+            <DmInbox />
             {channels.loaded && visit === undefined && channels.channels.length > 0 ? <GroupsPanel controls={arranged} /> : null}
           </div>
           <main className="centre">
@@ -516,8 +530,19 @@ export function Lobby({
                   You no longer have access to #{channels.lost}
                 </p>
               )}
-              {conversation}
-              {phone ? null : firstRun}
+              {directOpen === null ? null : (
+                <DmRoute
+                  conversationId={directOpen}
+                  onClose={() => {
+                    dm?.inbox.select(null);
+                  }}
+                />
+              )}
+              {/* Kept mounted while a DM is open: the channel's feed and drafts carry on. */}
+              <div className="keep-mounted" hidden={directOpen !== null}>
+                {conversation}
+                {phone ? null : firstRun}
+              </div>
             </section>
           </main>
           <aside aria-label="Members panel" className="panel">

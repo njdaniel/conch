@@ -22,6 +22,9 @@ import { archivedLine, channelArchived, isArchived } from './archived';
 import { ChannelSettingsAsk } from './ChannelSettingsAsk';
 import { RenameChannel } from './RenameChannel';
 import { SetTopic } from './SetTopic';
+import { DmProvider } from './dm/DmContext';
+import { dmApi, inertApi } from './dm/api';
+import { scopeKey } from './dm/keys';
 import { channelFromHash, messageFromHash, forgetChannel, hashForChannel, rememberChannel, rememberedChannel, showChannelInAddress, takeLinkFromAddress } from './route';
 import type { ChannelDocV1 } from './schema/channel';
 import type { WhoAmIResponseV1 } from './schema/principal';
@@ -1762,6 +1765,8 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
         <ManifestReads.Provider value={manifestReads}>
         <PreviewEntry.Provider value={previewEntry}>
         <ComposerAttachmentProvider value={composerAttachments}>
+        {/* Direct messages (ADR-017): people only, with their own sign-in. */}
+        <DmProvider api={auth.principal.kind === 'human' && visit === null ? dmApi : inertApi} scope={scopeKey(origin, auth.principal.id)} me={auth.principal.id}>
         <Lobby
           origin={origin}
           name={shownName}
@@ -2161,6 +2166,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           onSignOutEverywhere={signOutEverywhere}
           signOutProblem={everywhereFailed}
         />
+        </DmProvider>
         </ComposerAttachmentProvider>
         </PreviewEntry.Provider>
         </ManifestReads.Provider>

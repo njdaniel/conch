@@ -41,6 +41,22 @@ export function hashForMessage(channel: string, id: number): string {
   return `${hashForChannel(channel)}/m/${String(id)}`;
 }
 
+// Direct messages: #/dm/<id> names a conversation, in an id space of its own
+// (never a channel's). Parsed here so a link or a restored tab can name one;
+// the page does not write it yet (the address belongs to the open channel), and
+// a DM id is never read as a channel name: channelFromHash does not match it.
+export function dmFromHash(hash: string): number | null {
+  const match = /^#\/dm\/([0-9]+)$/.exec(hash);
+  if (match?.[1] === undefined) return null;
+  const id = Number(match[1]);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+
+export function hashForDm(id: number): string {
+  if (!Number.isSafeInteger(id) || id <= 0) throw new RangeError('Invalid conversation id');
+  return `#/dm/${String(id)}`;
+}
+
 // Invite links (issue #440): <origin>/app/#/invite/<code>. The code is in the
 // fragment, which no server, proxy log or Referer sees. It is handled like a
 // credential: read into memory, never stored, logged or put in the DOM.

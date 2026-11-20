@@ -3447,3 +3447,45 @@ function publishRemoval(data: unknown) {
     if (message?.removed === true) for (const receive of removalWatchers) receive(message);
   } catch { /* Unknown frames are ignored. */ }
 }
+
+// The transport the direct-message adapter (dm/api.ts, issue #2027) is built
+// on: the same credential handling as every call above (the stored credential,
+// a 401 dropping it, one more send after a proof the server asked for), so the
+// DM routes are not a second way to hold or send a credential. read validates
+// the answer; write hands back the response itself, because a write must tell
+// "no answer" from "answered no". upload and download are one send each, with
+// the credential this page holds now: a 401 is the person's to sign in again.
+export const dmTransport = {
+  read: authed,
+  write: authedSend,
+  async upload(request: Call, mediaType: string, bytes: Blob, signal: AbortSignal): Promise<PostReply> {
+    const held = current();
+    if (held === null) return { kind: 'unauthorized' };
+    try {
+      const res = await platform.http.upload(request, held.token, mediaType, bytes, signal);
+      if (!res.ok) await noteRefusal(res);
+      return res.status === 401 ? { kind: 'unauthorized' } : { kind: 'reply', res };
+    } catch {
+      noteNoAnswer();
+      return { kind: 'none' };
+    }
+  },
+  async download(request: Call): Promise<PostReply> {
+    const held = current();
+    if (held === null) return { kind: 'unauthorized' };
+    try {
+      const res = await platform.http.download(request, held.token);
+      if (!res.ok) await noteRefusal(res);
+      return res.status === 401 ? { kind: 'unauthorized' } : { kind: 'reply', res };
+    } catch {
+      noteNoAnswer();
+      return { kind: 'none' };
+    }
+  },
+} as const;
+
+// The request builders the direct-message adapter uses. The operation table is
+// read by this module and the platform alone (hygiene.test.ts), so dm/api.ts
+// takes its builders from here and never names the table itself.
+export const dmRequest = { call, queryOf } as const;
+export type DmCall = Call;

@@ -6426,3 +6426,20 @@ button.link {
   width: 100%;
   max-width: 100%;
 }
+
+/* Direct messages (#2026, #2027). The wrapper keeps the channel conversation
+   mounted, without a box of its own, while a DM is open. */
+.keep-mounted { display: contents; }
+.keep-mounted[hidden] { display: none; }
+.dm-inbox ul { list-style: none; margin: 0; padding: 0; }
+.dm-row { display: flex; align-items: center; gap: 0.5rem; }
+.dm-row .dm-open { flex: 1; display: flex; align-items: center; gap: 0.5rem; text-align: start; }
+.dm-row.selected .dm-open { font-weight: 700; }
+.dm-route, .dm-transcript { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+.dm-header { display: flex; align-items: center; gap: 0.5rem; }
+.dm-log { flex: 1; overflow-y: auto; }
+.dm-log ol { list-style: none; margin: 0; padding: 0; }
+.dm-body { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0.15rem 0; }
+.dm-message.pending { opacity: 0.8; }
+.dm-composer textarea { width: 100%; box-sizing: border-box; }
+.message-action { display: inline-flex; gap: 0.5rem; align-items: center; }
