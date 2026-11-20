@@ -360,18 +360,18 @@ export function NativeVoicePanel({
             {needsTalkSetup ? 'Set up the talk key' : 'Talk key'}
           </button>
         )}
+        {joined !== null && !unavailable ? (
+          <VoiceDiagnostics
+            key={joined}
+            desktop
+            client={companionClient}
+            sharing={companion?.state.share.kind === 'sharing'}
+            watched={sharers(presence)
+              .filter(({ principal }) => principal !== viewer && companion?.state.watched.has(principal))
+              .map(({ principal }) => ({ principal, name: nameOf(named, principal, viewer) }))}
+          />
+        ) : null}
       </div>
-      {joined !== null && !unavailable ? (
-        <VoiceDiagnostics
-          key={joined}
-          desktop
-          client={companionClient}
-          sharing={companion?.state.share.kind === 'sharing'}
-          watched={sharers(presence)
-            .filter(({ principal }) => principal !== viewer && companion?.state.watched.has(principal))
-            .map(({ principal }) => ({ principal, name: nameOf(named, principal, viewer) }))}
-        />
-      ) : null}
       {companion === null || unavailable ? null : <NativeStreams companion={companion} presence={presence} viewer={viewer} people={named} joined={joined} live={live} />}
       {setup !== null ? (
         <TalkKeySetup

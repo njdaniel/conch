@@ -1,4 +1,6 @@
-// The same disclosure in the browser dock and the desktop dock. Closing it
+// The same disclosure in the browser dock and the desktop dock. It sits in the
+// dock's notes row (.voice-notes), so it adds no line of its own to a short
+// window (#1813); open, its section takes the row's full width. Closing it
 // unmounts the reader, so it keeps neither a timer nor any previous samples.
 import { useEffect, useId, useState, type ReactNode } from 'react';
 import type { VoiceClient } from './connection';
@@ -83,12 +85,10 @@ export function VoiceDiagnostics(props: Props): ReactNode {
   const id = useId();
   return (
     <>
-      <div className="voice-notes">
-        <button type="button" className="more" aria-expanded={open} aria-controls={id} onClick={() => { setOpen(!open); }}>
-          Voice diagnostics
-        </button>
-      </div>
-      <section id={id} className="voice-options" aria-label="Voice diagnostics" hidden={!open}>
+      <button type="button" className="more" aria-expanded={open} aria-controls={id} onClick={() => { setOpen(!open); }}>
+        Voice diagnostics
+      </button>
+      <section id={id} className="voice-diagnostics" aria-label="Voice diagnostics" hidden={!open}>
         {open ? <VoiceDiagnosticsReadout {...props} /> : null}
       </section>
     </>

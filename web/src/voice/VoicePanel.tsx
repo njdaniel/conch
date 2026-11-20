@@ -714,20 +714,20 @@ export function VoicePanel({
             {canJoin && micTestShown ? <MicTest /> : null}
           </>
         )}
+        {joined !== null && !strip ? (
+          <VoiceDiagnostics
+            key={joined}
+            client={client}
+            participants={others}
+            sharing={state.share.kind === 'sharing'}
+            watched={theirStreams
+              .filter(({ principal }) => state.watched.has(principal))
+              .map(({ principal }) => ({ principal, name: nameOf(people, principal, viewer) }))}
+          />
+        ) : null}
       </div>
 
       {inVoice ? <Options voice={voice} open={options && !strip} sharable={sharable} about={about} others={others} cameraAllowed={cameraAllowed} /> : null}
-      {joined !== null && !strip ? (
-        <VoiceDiagnostics
-          key={joined}
-          client={client}
-          participants={others}
-          sharing={state.share.kind === 'sharing'}
-          watched={theirStreams
-            .filter(({ principal }) => state.watched.has(principal))
-            .map(({ principal }) => ({ principal, name: nameOf(people, principal, viewer) }))}
-        />
-      ) : null}
       {staged === null ? null : stage === null ? staged : createPortal(staged, stage)}
     </section>
   );
