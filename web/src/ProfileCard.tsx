@@ -18,7 +18,7 @@ function present(person: ProfilePerson): person is Entry & IdentityInput {
 // Every value comes from the opening surface; an Entry alone adds its
 // already-held presence. Controlled open state lets a member row move between
 // presence groups without closing the card.
-export function ProfileCard({ id, person, viewer, name: surfaceName, className = '', open, onOpenChange, onDisappear }: {
+export function ProfileCard({ id, person, viewer, name: surfaceName, className = '', open, onOpenChange, onDisappear, describedBy }: {
   readonly id: number;
   readonly person: ProfilePerson | undefined;
   readonly viewer?: number;
@@ -28,6 +28,10 @@ export function ProfileCard({ id, person, viewer, name: surfaceName, className =
   readonly onOpenChange?: (open: boolean) => void;
   // The owning surface names a focus target that outlives a disappearing row.
   readonly onDisappear?: () => void;
+  // An element outside the card that describes it, such as the row's You
+  // badge when the card is the viewer's own (#2071), so a screen reader still
+  // hears it on the dialog without a second visible badge.
+  readonly describedBy?: string;
 }) {
   const [ownOpen, setOwnOpen] = useState(false);
   const shown = open ?? ownOpen;
@@ -146,7 +150,7 @@ export function ProfileCard({ id, person, viewer, name: surfaceName, className =
         {name}
       </button>
       {shown ? (
-        <div ref={card} id={cardId} role="dialog" aria-modal="false" aria-labelledby={titleId} className="profile-card" onKeyDown={keyDown}>
+        <div ref={card} id={cardId} role="dialog" aria-modal="false" aria-labelledby={titleId} aria-describedby={describedBy} className="profile-card" onKeyDown={keyDown}>
           <div className="profile-card-person">
             <Avatar id={id} name={name} />
             <div>

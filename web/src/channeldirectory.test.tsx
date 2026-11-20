@@ -435,6 +435,11 @@ describe('the community member panel', () => {
     const card = await row.findByRole('dialog', { name: 'robert' });
     expect(within(list).getAllByText('You')).toEqual([row.getByText('You')]);
     expect(within(card).queryByText('You')).toBeNull();
+    // A screen reader still hears that the open card is the viewer's own: the
+    // dialog is described by the row's one You badge (#2071 review).
+    const describedBy = card.getAttribute('aria-describedby');
+    expect(describedBy).not.toBeNull();
+    expect(document.getElementById(describedBy ?? '')?.textContent).toContain('You');
   });
 
   it('is read again when the person’s own channels change, and on a directory tick; a 401 signs out', async () => {
