@@ -64,6 +64,12 @@ var principalReads = []principalRead{
 	// operator holding manage_channels, or a manager of the channel), and a
 	// manager's ban target, a member of the channel it manages.
 	{"store/bans.go", "Store.ListChannelBans", 1, readOperatorOrMaker},
+	// #2017: a DM's peer, read before any may-know check. No route calls
+	// OpenDM yet (ADR-017's release gate). #2018, pair eligibility and
+	// mutual visibility, gates it, and must make a peer the caller may not
+	// know, or a hidden one, the same ErrPrincipalNotFound as an id never
+	// issued, before any route reaches it.
+	{"store/dm.go", "openDMTx", 1, readGated},
 	// #1832: a block's target, only when the owner may know it by
 	// knownPrincipalsSQL (the directory's rule) and it is not hidden.
 	{"store/blocks.go", "Store.PutBlock", 1, readPredicate},
