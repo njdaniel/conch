@@ -2606,6 +2606,19 @@ export const voiceDevicesV1 = object<VoiceDevicesV1>({
   configured_output: optional(str),
 });
 
+// schema.MuteKeyEventV1
+export const muteKeyEventV1Schema = 'conch.mute_key_event.v1';
+
+export interface MuteKeyEventV1 {
+  schema: typeof muteKeyEventV1Schema;
+  press: boolean;
+}
+
+export const muteKeyEventV1 = object<MuteKeyEventV1>({
+  schema: vocab<typeof muteKeyEventV1Schema>({ [muteKeyEventV1Schema]: true }),
+  press: bool,
+});
+
 // schema.PrincipalV0
 export interface PrincipalV0 {
   id: number;
@@ -5630,6 +5643,43 @@ export const listPendingNotificationsResponseV2 = object<ListPendingNotification
   summaries: array(notificationSummaryV2),
   cursor: optional(str),
   more: bool,
+});
+
+// schema.BlockV1
+export interface BlockV1 {
+  principal_id: number;
+  name: string;
+  kind: PrincipalKind;
+  created_at: string;
+}
+
+export const blockV1 = object<BlockV1>({
+  principal_id: int,
+  name: str,
+  kind: principalKind,
+  created_at: timestamp,
+});
+
+// schema.ListBlocksResponseV1
+export interface ListBlocksResponseV1 {
+  blocks: BlockV1[];
+  limit: number;
+}
+
+export const listBlocksResponseV1 = object<ListBlocksResponseV1>({
+  blocks: array(blockV1),
+  limit: int,
+});
+
+// schema.BlocksChangedV1
+export const blocksChangedV1Schema = 'conch.blocks_changed.v1';
+
+export interface BlocksChangedV1 {
+  schema: typeof blocksChangedV1Schema;
+}
+
+export const blocksChangedV1 = object<BlocksChangedV1>({
+  schema: vocab<typeof blocksChangedV1Schema>({ [blocksChangedV1Schema]: true }),
 });
 
 // schema.PrivateCallRole

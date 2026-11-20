@@ -2,7 +2,7 @@
 // published and straight after, after any republish and after a remote unmute, the capture
 // asks for the browser's echo cancellation and noise suppression, a Leave at
 // any point leaves no microphone open, and the SDK's logs are redacted and
-// kept off the console. The screen share (issue #444): what the picker is
+// kept off the browser console. The screen share (issue #444): what the picker is
 // asked for, the simulcast layers and the sound published, how a share's end
 // is told apart, and the watch view's subscription choices. The share's
 // encodings follow what was captured (issue #565). The microphone chosen
@@ -21,6 +21,7 @@
 // No network, no microphone, no screen.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { VoiceSessionResult } from '../api';
+import { platform } from '../platform';
 import { VoiceClient, companionQualities } from './connection';
 import { FakeClock, settle } from './fakes';
 
@@ -1210,6 +1211,32 @@ describe('the SDK adapter', () => {
     expect(lines).not.toMatch(/room-abcdef|tok-abcdef/);
   });
 
+  it('reports only fixed diagnostic codes to the platform', () => {
+    const report = vi.fn();
+    platform.services.reportVoiceDiagnostic = report;
+    try {
+      const context = { fields: { sdp: 'private room and SDP', error: 'wss://host/room?token=secret' } };
+      state.logger.methodFactory('warn')('not able to set offer, falling back to unmodified sdp', context);
+      state.logger.methodFactory('error')('unable to set answer', context);
+      state.logger.methodFactory('error')('unable to set offer', {
+        fields: { ...context.fields, error: 'A BUNDLE group contains a codec collision between private fields' },
+      });
+      state.logger.methodFactory('error')('unable to set answer', {
+        fields: { error: 'Bundled payload type collision: private fields' },
+      });
+      state.logger.methodFactory('error')('room-name with token', context);
+      expect(report.mock.calls).toEqual([
+        ['sdp-retry'],
+        ['sdp-rejected'],
+        ['sdp-bundle-collision'],
+        ['sdp-bundle-collision'],
+        ['sdk-error'],
+      ]);
+    } finally {
+      delete platform.services.reportVoiceDiagnostic;
+    }
+  });
+
   it("holds the room's own name once connected, though the caller gave none (the companion's grant names no room)", async () => {
     const room = newLiveKitRoom();
     room.setCompanion?.(true);
@@ -1810,7 +1837,14 @@ describe('the watch view', () => {
     const sink = { video: document.createElement('video'), audio: document.createElement('audio') };
     room.attachStream(8, sink);
     state.handlers.get('ts')?.(audio, remotePub('screen_share_audio'), sharer);
-    expect(attached).toEqual(['screen_share VIDEO', 'screen_share_audio AUDIO']);
+    const microphone = remote('microphone', 'audio');
+    state.handlers.get('ts')?.(microphone, remotePub('microphone'), { identity: 'p9' });
+    expect(room.diagnosticsSources?.()).toEqual([
+      { kind: 'audio', principal: 9, track: microphone },
+      { kind: 'received', principal: 8, track: video, video: sink.video },
+    ]);
+    state.handlers.get('tu')?.(microphone);
+    expect(attached).toEqual(['screen_share VIDEO', 'screen_share_audio AUDIO', 'microphone new', 'detach microphone all']);
     expect(document.body.querySelectorAll('audio')).toHaveLength(0);
     expect(told).toEqual([[8, { video: true, audio: false }], [8, { video: true, audio: true }]]);
     state.handlers.get('tu')?.(video);
@@ -1977,6 +2011,14 @@ describe('sharing a screen', () => {
     await room.close();
   });
 
+  it('publishes a Detail share with balanced degradation', async () => {
+    const room = await connected();
+    await room.pickScreen({ resolution: '1080p', frameRate: 15 });
+    await room.publishScreen();
+    expect(state.published[0]?.options).toMatchObject({ degradationPreference: 'balanced' });
+    await room.close();
+  });
+
   it('applies caps on pick and skips them on publish or repeated quality with identical max constraints', async () => {
     const room = await connected();
     await room.pickScreen();
@@ -1985,7 +2027,7 @@ describe('sharing a screen', () => {
     expect(state.screenTracks[0]?.mediaStreamTrack.constraints).toEqual([{ width: { max: 1920 }, height: { max: 1080 }, frameRate: { max: 30 } }]);
     expect(state.screenTracks[0]?.sender?.parameters.degradationPreference).toBe('maintain-framerate');
     await room.setShareQuality({ resolution: '720p', frameRate: 15 });
-    expect(state.screenTracks[0]?.sender?.parameters.degradationPreference).toBe('maintain-resolution');
+    expect(state.screenTracks[0]?.sender?.parameters.degradationPreference).toBe('balanced');
     await room.close();
   });
 

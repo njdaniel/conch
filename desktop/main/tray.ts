@@ -28,6 +28,7 @@
 //     the activation in force at each refresh, and blanked when media ends
 //     for a switch or a sign-out, staying blank until activated() says the
 //     new activation is open.
+import type { MainLog } from './diagnostics.ts';
 import { join } from 'node:path';
 
 import type { NativeVoiceView, VoiceCommandResult } from '../../web/src/platform/desktop/bridge.ts';
@@ -152,7 +153,7 @@ export interface TrayDeps {
   readonly confirmed: () => boolean;
   // A repeating timer; returns its stop. A test supplies its own.
   readonly every?: (fn: () => void, ms: number) => () => void;
-  readonly log: (line: string) => void;
+  readonly log: MainLog;
 }
 
 export const CHECK_INTERVAL_MS = 10_000;

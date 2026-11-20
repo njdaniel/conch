@@ -64,6 +64,9 @@ var principalReads = []principalRead{
 	// operator holding manage_channels, or a manager of the channel), and a
 	// manager's ban target, a member of the channel it manages.
 	{"store/bans.go", "Store.ListChannelBans", 1, readOperatorOrMaker},
+	// #1832: a block's target, only when the owner may know it by
+	// knownPrincipalsSQL (the directory's rule) and it is not hidden.
+	{"store/blocks.go", "Store.PutBlock", 1, readPredicate},
 	{"store/bans.go", "managerBanTargetTx", 1, readOperatorOrMaker},
 	{"store/audience.go", "Store.ListChannelAuthors", 1, readGated},
 	// #1828: recheck only the removing caller’s kind under the write lock.
@@ -179,7 +182,7 @@ var principalReads = []principalRead{
 	{"store/sign_in_links.go", "Store.CreateSignInLink", 1, readOwnOrInternal},
 	{"store/sign_in_links.go", "liveSignInLinkTx", 1, readOwnOrInternal},
 	{"store/sign_in_links.go", "signInLinkCredentialLifetimeTx", 1, readOwnOrInternal},
-	{"store/voice.go", "Store.InvalidVoiceRooms", 1, readOperatorOrMaker},
+	{"store/voice.go", "Store.invalidVoiceRooms", 1, readOperatorOrMaker},
 	{"store/voice_permission.go", "Store.SetVoiceAllowed", 2, readOperatorOrMaker},
 }
 
@@ -189,6 +192,7 @@ var predicateNames = map[string]string{
 	"mayKnowTx":                         "knownPrincipalsSQL",
 	"directoryKnowersTx":                "knowsCond",
 	"Store.DirectoryMembershipAudience": "knowsCondExcept",
+	"Store.PutBlock":                    "knownPrincipalsSQL",
 }
 
 var selectsPrincipals = regexp.MustCompile(`(?i)\b(from|join)\s+principals\b`)

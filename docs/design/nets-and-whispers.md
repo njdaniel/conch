@@ -1,7 +1,7 @@
 # Design: nets and whispers — audience-scoped speaking
 
 - **Status:** V2 schema landed (#114): `conch.message.v2`, the audience, net, and manifest-grant shapes are in `pkg/schema`. Store, visibility predicate, REST, CLI/TUI and MCP are the rest of V2 (governing decision: [ADR-005](../adr/ADR-005-nets-and-whispers.md), Accepted).
-- **Touches:** D11 (no team abstraction), D12 (no DMs before P6/P7), D8 (typed messages), D10 (capabilities) in [ADR-000](../adr/ADR-000-charter.md); the nets-and-voice track in [ROADMAP.md](../../ROADMAP.md).
+- **Touches:** D11 (no team abstraction), D12 (no DMs before P6/P7; *note, 2026-11-19:* local 1:1 human DMs are permitted by [ADR-017](../adr/ADR-017-local-direct-messages-and-calls.md)), D8 (typed messages), D10 (capabilities) in [ADR-000](../adr/ADR-000-charter.md); the nets-and-voice track in [ROADMAP.md](../../ROADMAP.md).
 - **Owner:** protocol-designer (schemas), server-engineer (visibility enforcement)
 - **Issue:** #82
 
@@ -187,7 +187,7 @@ API parity (D6): nets and audiences exist in REST/WS first.
 |---|---|
 | Separate channels per team plus a command channel | Works today at zero schema cost. Splits the log, floor, and spend accounting; no single view; does not carry to voice. |
 | Threads as nets (#25) | Threads scope a *topic*, not an audience — everyone in the channel can read them. |
-| DMs and group DMs (P6/P7) | Detached from the channel's context and floor; no layering. |
+| DMs and group DMs (P6/P7) | Detached from the channel's context and floor; no layering. *Note, 2026-11-19:* local 1:1 DMs now exist beside nets and whispers ([ADR-017](../adr/ADR-017-local-direct-messages-and-calls.md)); they replace neither. |
 | Unit tree with derived nets | More expressive, more to get wrong. Flat sets cover the motivating case; a tree can be layered on as presentation later. |
 
 ## 11. Phasing

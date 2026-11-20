@@ -27,6 +27,7 @@ import { Client } from './api/client.ts';
 import { Session } from './api/session.ts';
 import { deliverVoice } from './voice/events.ts';
 import { Companion, stillHeldBy } from './voice/companion.ts';
+import { watchMuteKey } from './voice/mute-key.ts';
 import { OneShot } from './voice/oneshot.ts';
 import { OWNER_VERSIONS_SHARE_AUDIO } from './voice/protocol.ts';
 import { linuxShareAudioEnabled, registeredApplicationName, ShareSound } from './voice/share-audio.ts';
@@ -58,6 +59,7 @@ import { Autostart } from './autostart.ts';
 import { Notifications } from './notifications.ts';
 import { createSettingsFiles, memorySettingsFiles, SettingsService } from './settings.ts';
 import { WindowMaximized } from './window.ts';
+import { Diagnostics, diagnosticsLogger, LogRing } from './diagnostics.ts';
 import { saveChosenFile } from './save-file.ts';
 import { parseManifest, SCHEME, SCHEME_PRIVILEGES } from './scheme.ts';
 import { electronStorage } from './vault/electron-storage.ts';
@@ -73,9 +75,10 @@ export function registerScheme(): void {
   protocol.registerSchemesAsPrivileged([{ scheme: SCHEME, privileges: { ...SCHEME_PRIVILEGES } }]);
 }
 
-function log(line: string): void {
-  console.error(line);
-}
+// The diagnostics ring (issue #2084) keeps only main's fixed diagnostic
+// context. Call sites opt in explicitly with fixed diagnostic text.
+const ring = new LogRing();
+const log = diagnosticsLogger(ring, (line) => { console.error(line); });
 
 // A vault that stores nothing, for a data root that is not private to this user.
 function refusingVault(): Vault {
@@ -211,7 +214,7 @@ export async function start(): Promise<void> {
 
   // Only the owning process registers the Windows invite handler. Failure
   // leaves pasted invites available; never include argv or a link in the log.
-  if (!registerInviteProtocol(app)) log('conch-desktop: could not register the conch: protocol');
+  if (!registerInviteProtocol(app)) log('conch-desktop: could not register the conch: protocol', { ring: true });
 
   // The app's settings, once the data root is known (below). Until then, and
   // with none, closing the last window quits.
@@ -261,7 +264,9 @@ export async function start(): Promise<void> {
   void portal.probe();
 
   // The first receipt: what this build really is.
-  console.log(`conch-desktop: versions ${JSON.stringify({ electron: process.versions.electron, chrome: process.versions.chrome, node: process.versions.node })}`);
+  const versions = { app: app.getVersion(), electron: process.versions.electron, chrome: process.versions.chrome, node: process.versions.node, platform: process.platform };
+  const versionsLine = `conch-desktop: versions ${JSON.stringify({ electron: versions.electron, chrome: versions.chrome, node: versions.node })}`;
+  console.log(versionsLine);
 
   const appPath = app.getAppPath();
   const ui = join(appPath, 'out', 'ui');
@@ -271,7 +276,7 @@ export async function start(): Promise<void> {
   // One that cannot be read supports nothing. The development flag is honoured
   // only by an unpackaged build, and says so on the log.
   const allowlist = parseCompat(await readFile(join(appPath, 'out', 'compat.json'), 'utf8').catch(() => ''));
-  if (allowlist === null) log('conch-desktop: compat.json is missing or malformed; no server release is supported');
+  if (allowlist === null) log('conch-desktop: compat.json is missing or malformed; no server release is supported', { ring: true });
   const override = allowUnlisted(app.isPackaged, process.argv);
   if (override) log(`conch-desktop: ${OVERRIDE_FLAG}: servers that are not on the tested list are allowed (development build)`);
 
@@ -279,7 +284,7 @@ export async function start(): Promise<void> {
   // which the vault itself creates and nothing else.
   const root = app.getPath('userData');
   const checked = await prepareRoot(root);
-  if (!checked.ok) log('conch-desktop: the data directory is not private to you; nothing will be saved');
+  if (!checked.ok) log('conch-desktop: the data directory is not private to you; nothing will be saved', { ring: true });
   const files = createProfileFiles(root);
   const maximized = process.platform === 'win32'
     ? new WindowMaximized(checked.ok ? createSettingsFiles(root, 'window-state.json') : memorySettingsFiles(), log)
@@ -472,12 +477,20 @@ export async function start(): Promise<void> {
   // profile can turn it on; the default becomes on only in a later change that
   // cites a passed L-S6 receipt.
   const shareAudio = linuxShareAudioEnabled(process.env, process.platform);
-  if (shareAudio) log('conch-desktop: CONCH_LINUX_SHARE_AUDIO is on: the Linux screen share offers its sound (experimental)');
+  if (shareAudio) log('conch-desktop: CONCH_LINUX_SHARE_AUDIO is on: the Linux screen share offers its sound (experimental)', { ring: true });
   // Set once Lifecycle exists (below); voice and the companion read it.
   let screenLocked: () => boolean = () => false;
+  let unmuteBlocked: () => boolean = () => true;
+  const hasMuteKey = process.platform === 'linux' || process.platform === 'win32';
   const voice = new VoiceService({
-    locked: () => screenLocked(),
+    locked: () => screenLocked() || (hasMuteKey && unmuteBlocked()),
     supervisor: new Supervisor({ resources: process.resourcesPath, env: process.env, log, ...(shareAudio ? { versions: OWNER_VERSIONS_SHARE_AUDIO } : {}) }),
+    ...(hasMuteKey ? {
+      muteKey: {
+        blocked: () => unmuteBlocked(),
+        watch: (configDir: string, onPress: () => void) => watchMuteKey(process.resourcesPath, process.env, log, configDir, onPress),
+      },
+    } : {}),
     // The device list and the saves run the same trusted helper, with no token.
     oneShot: new OneShot({ resources: process.resourcesPath, env: process.env, log }),
     identity: async () => {
@@ -601,7 +614,7 @@ export async function start(): Promise<void> {
   // Lock and suspend fail closed (issue #1588, D5-02): mute on lock, leave on
   // suspend, end the share, hide notification text. Linux observes the lock
   // through logind; Windows through powerMonitor (#1935). Where it cannot be, the
-  // rules keep notification text hidden and say so on the log.
+  // rules keep notification text hidden and mute voice on observation loss.
   //
   // The companion is the real one (issue #1579, above): lock ends a live share
   // with reason 'lock' and suspend with 'suspend'.
@@ -612,6 +625,7 @@ export async function start(): Promise<void> {
     log,
   });
   screenLocked = () => lifecycle.locked;
+  unmuteBlocked = () => lifecycle.sleeping || lifecycle.lockObservation === 'unavailable';
   let watcher: LinuxLifecycle | WindowsLifecycle | null = null;
   if (process.platform === 'linux') {
     watcher = new LinuxLifecycle({ rules: lifecycle, powerMonitor, pid: process.pid, log });
@@ -685,6 +699,22 @@ export async function start(): Promise<void> {
           voice: () => voice.state(),
         }),
     },
+    diagnostics: new Diagnostics({
+      ring,
+      versions,
+      now: () => new Date(),
+      chooseSavePath: async (suggested) => {
+        const options = { title: 'Save diagnostics', defaultPath: suggested, properties: ['showOverwriteConfirmation' as const, 'createDirectory' as const] };
+        const window = parent();
+        const chosen = await (window === null ? dialog.showSaveDialog(options) : dialog.showSaveDialog(window, options));
+        return chosen.canceled || chosen.filePath === '' ? null : chosen.filePath;
+      },
+      writeFile: saveChosenFile,
+      downloadsDir: () => app.getPath('downloads'),
+      join,
+      isAbsolute,
+      log,
+    }),
     companion,
     ...(sound === null ? {} : { shareSound: sound }),
     now: Date.now,
