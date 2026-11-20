@@ -253,6 +253,13 @@ var validators = map[string]func(string) bool{
 	"AdminGate":         validOf[AdminGate](),
 	"AdminTargetKind":   validOf[AdminTargetKind](),
 	"AdminActionStatus": validOf[AdminActionStatus](),
+
+	// Local direct messages (issue #2016).
+	"DMState":            validOf[DMState](),
+	"DMAcceptPolicy":     validOf[DMAcceptPolicy](),
+	"DMChangeKind":       validOf[DMChangeKind](),
+	"DMOrder":            validOf[DMOrder](),
+	"MessageContextKind": validOf[MessageContextKind](),
 }
 
 // namers is every …Names() func, by the type it names. TestVocabularies fails

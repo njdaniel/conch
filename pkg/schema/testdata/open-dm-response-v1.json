@@ -1,0 +1,17 @@
+{
+  "conversation": {
+    "schema": "conch.dm_conversation.v1",
+    "id": 6841052319853917,
+    "participant_ids": [
+      3,
+      9
+    ],
+    "peer_id": 9,
+    "peer_name": "Linus",
+    "state": "open",
+    "revision": 0,
+    "last_message_id": 0,
+    "last_read_id": 0,
+    "unread": 0
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "order": "desc",
+  "messages": [
+    {
+      "schema": "conch.dm_message.v1",
+      "id": 4310,
+      "conversation_id": 12,
+      "author_id": 5,
+      "created_at": "2026-11-19T09:14:30.000Z",
+      "revision": 6,
+      "body": "Thanks, reading it now."
+    },
+    {
+      "schema": "conch.dm_message.v1",
+      "id": 4305,
+      "conversation_id": 12,
+      "author_id": 3,
+      "created_at": "2026-11-19T09:05:12.000Z",
+      "revision": 5,
+      "body": "Sure. Here is the draft.",
+      "file_ids": [
+        41
+      ],
+      "client_nonce": "q7Zr0dXv3mJ8wq1P5kLc2A"
+    }
+  ],
+  "next_before": 4305
+}

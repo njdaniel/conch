@@ -1,0 +1,4 @@
+{
+  "code": "dm_require_auth",
+  "message": "direct messages need authentication to be on"
+}

@@ -126,6 +126,16 @@ var TSConstants = []TSConstant{
 	{Name: "DEFAULT_ADMIN_MAX_PENDING", Value: DefaultAdminMaxPending},
 	{Name: "MAX_ADMIN_MAX_PENDING", Value: MaxAdminMaxPending},
 	{Name: "MAX_ADMIN_REASON_CHARS", Value: MaxAdminReasonChars},
+
+	// Local direct messages (issue #2016, ADR-017): the page
+	// and nonce bounds a client must not exceed.
+	{Name: "DEFAULT_DM_PAGE_SIZE", Value: DefaultDMPageSize},
+	{Name: "MAX_DM_PAGE_SIZE", Value: MaxDMPageSize},
+	{Name: "MAX_DM_CONVERSATIONS_PAGE", Value: MaxDMConversationsPage},
+	{Name: "MAX_DM_SNAPSHOT_CONVERSATIONS", Value: MaxDMSnapshotConversations},
+	{Name: "MAX_DM_CLIENT_NONCE_BYTES", Value: MaxDMClientNonceBytes},
+	{Name: "DM_CLIENT_NONCE_WINDOW_SECONDS", Value: DMClientNonceWindowSeconds},
+	{Name: "MAX_DM_CURSOR_BYTES", Value: MaxDMCursorBytes},
 }
 
 // TSTypes is every struct the web client reads or sends, and the refusal
@@ -533,6 +543,36 @@ var TSTypes = []TSType{
 	{Value: NotificationSummaryV1{}, Family: "notification-summary-v1", Schema: NotificationSummarySchemaV1},
 	{Value: ListPendingNotificationsResponseV1{}, Family: "list-pending-notifications-response-v1"},
 
+	// Local direct messages (issue #2016, ADR-017): the
+	// conversation, its messages, read mark, files and preferences, the
+	// per-person stream's frames and snapshot, and version 2 of the pending
+	// feed, whose summaries say whether a message was said in a channel or
+	// a conversation (MessageContext, in TSUnions).
+	{Value: DMConversationV1{}, Family: "dm-conversation-v1", Schema: DMConversationSchemaV1},
+	{Value: OpenDMRequestV1{}, Family: "open-dm-request-v1"},
+	{Value: OpenDMResponseV1{}, Family: "open-dm-response-v1"},
+	{Value: ListDMConversationsResponseV1{}, Family: "list-dm-conversations-response-v1"},
+	{Value: DMMessageV1{}, Family: "dm-message-v1", Schema: DMMessageSchemaV1},
+	{Value: PostDMMessageRequestV1{}, Family: "post-dm-message-request-v1"},
+	{Value: PostDMMessageResponseV1{}, Family: "post-dm-message-response-v1"},
+	{Value: ListDMMessagesResponseV1{}, Family: "list-dm-messages-response-v1"},
+	{Value: ListDMChangesResponseV1{}, Family: "list-dm-changes-response-v1"},
+	{Value: SearchDMMessagesResponseV1{}, Family: "search-dm-messages-response-v1"},
+	{Value: DMReadStateV1{}, Family: "dm-read-state-v1", Schema: DMReadStateSchemaV1},
+	{Value: SetDMStateRequestV1{}, Family: "set-dm-state-request-v1"},
+	{Value: DMPreferencesV1{}, Family: "dm-preferences-v1"},
+	{Value: EditDMMessageRequestV1{}, Family: "edit-dm-message-request-v1"},
+	{Value: EditDMMessageResponseV1{}, Family: "edit-dm-message-response-v1"},
+	{Value: DMMessageEditedV1{}, Family: "dm-message-edited-v1", Schema: DMMessageEditedSchemaV1},
+	{Value: DMMessageRemovedV1{}, Family: "dm-message-removed-v1", Schema: DMMessageRemovedSchemaV1},
+	{Value: DMServerSettingsV1{}, Family: "dm-server-settings-v1"},
+	{Value: DMPermissionRequestV1{}, Family: "dm-permission-request-v1"},
+	{Value: DMPermissionResponseV1{}, Family: "dm-permission-response-v1"},
+	{Value: DMFileV1{}, Family: "dm-file-v1", Schema: DMFileSchemaV1},
+	{Value: DMChangedV1{}, Family: "dm-changed-v1", Schema: DMChangedSchemaV1},
+	{Value: DMSnapshotV1{}, Family: "dm-snapshot-v1", Schema: DMSnapshotSchemaV1},
+	{Value: NotificationSummaryV2{}, Family: "notification-summary-v2", Schema: NotificationSummarySchemaV2},
+	{Value: ListPendingNotificationsResponseV2{}, Family: "list-pending-notifications-response-v2"},
 	// Personal blocks (issue #1832, docs/design/blocks.md): one entry, the
 	// caller's list, and the events signal that their list changed.
 	{Value: BlockV1{}, Family: "block-v1"},
@@ -545,6 +585,16 @@ var TSTypes = []TSType{
 
 // TSUnions is every struct in TSTypes' fields that is a union.
 var TSUnions = []TSUnion{
+	// Where a message was said: a channel, or a direct conversation (issue
+	// #2016), so the two ids are never read as each other.
+	{
+		Value: MessageContext{},
+		Tag:   "kind",
+		Variants: map[string][]string{
+			string(MessageContextChannel): {"channel_id", "channel_name"},
+			string(MessageContextDirect):  {"conversation_id"},
+		},
+	},
 	// A message's audience: a net, or a list of principals (ADR-005).
 	{
 		Value: Audience{},
@@ -638,6 +688,9 @@ var TSVocabularyModes = map[string]TSVocabularyMode{
 	// The pending feed (notification.go, issue #1712): a later reason for a
 	// message to be in it. A phone still renders the summary.
 	"NotificationKind": TSTolerant,
+	// Local direct messages (issue #2016): a later hint at what changed in
+	// a conversation; the client re-reads it whatever the kind.
+	"DMChangeKind": TSTolerant,
 
 	// Strict: a union's tag. tagged() picks the variant by it and has no
 	// shape for a value it does not know.
@@ -645,6 +698,7 @@ var TSVocabularyModes = map[string]TSVocabularyMode{
 	"EscalationTargetKind": TSStrict,
 	"LoginNext":            TSStrict,
 	"AdminActionStatus":    TSStrict,
+	"MessageContextKind":   TSStrict,
 	// Strict: the page switches on an action's gate class to say whether a
 	// person will be asked.
 	"AdminGate": TSStrict,
@@ -661,6 +715,9 @@ var TSVocabularyModes = map[string]TSVocabularyMode{
 	"ActivityKind":          TSStrict,
 	"ApprovalState":         TSStrict,
 	"ChannelVisibility":     TSStrict,
+	"DMAcceptPolicy":        TSStrict,
+	"DMState":               TSStrict,
+	"DMOrder":               TSStrict,
 	"CredentialScope":       TSStrict,
 	"GuestEndReason":        TSStrict,
 	"GuestOrigin":           TSStrict,

@@ -271,6 +271,14 @@ func TestReactionConstants(t *testing.T) {
 		"DEFAULT_ADMIN_MAX_PENDING":          DefaultAdminMaxPending,
 		"MAX_ADMIN_MAX_PENDING":              MaxAdminMaxPending,
 		"MAX_ADMIN_REASON_CHARS":             MaxAdminReasonChars,
+		// Local direct messages (issue #2016).
+		"DEFAULT_DM_PAGE_SIZE":           DefaultDMPageSize,
+		"MAX_DM_PAGE_SIZE":               MaxDMPageSize,
+		"MAX_DM_CONVERSATIONS_PAGE":      MaxDMConversationsPage,
+		"MAX_DM_SNAPSHOT_CONVERSATIONS":  MaxDMSnapshotConversations,
+		"MAX_DM_CLIENT_NONCE_BYTES":      MaxDMClientNonceBytes,
+		"DM_CLIENT_NONCE_WINDOW_SECONDS": DMClientNonceWindowSeconds,
+		"MAX_DM_CURSOR_BYTES":            MaxDMCursorBytes,
 	}
 	if len(TSConstants) != len(want) {
 		t.Errorf("TSConstants has %d entries, want %d", len(TSConstants), len(want))
