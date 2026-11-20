@@ -129,7 +129,6 @@ export function Voice(props: { channel: string; onBack: () => void }) {
       <Text accessibilityLiveRegion="polite" style={{ fontSize: 17, color: colours.ink }}>
         {status}
       </Text>
-      <Note text={developmentNotice(client.server, 'voice')} kind="warn" />
       {mine && v.phase === 'confirm' ? (
         <View>
           <Note text={v.warning} kind="warn" />
@@ -185,6 +184,8 @@ export function Voice(props: { channel: string; onBack: () => void }) {
         );
       }) : null}
       {v.route !== '' ? <Text style={styles.small}>{'Audio devices: ' + v.route}</Text> : null}
+      {/* Last, so on a small screen it can't push Leave voice out of reach. */}
+      <Note text={developmentNotice(client.server, 'voice')} kind="warn" />
     </Screen>
   );
 }

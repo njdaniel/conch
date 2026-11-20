@@ -286,6 +286,9 @@ test('development marking: http:// sign-in marks each screen, https:// marks non
   const cases: { origin: string; development: boolean }[] = [
     { origin: 'http://192.168.1.20:8080/', development: true },
     { origin: ' HTTP://nas.local:8080', development: true },
+    { origin: 'http:/192.168.1.20:8080', development: true },
+    { origin: 'http:192.168.1.20', development: true },
+    { origin: '192.168.1.20:8080', development: false },
     { origin: 'https://chat.example.test', development: false },
     { origin: 'HTTPS://chat.example.test/', development: false },
     { origin: '', development: false },

@@ -9,10 +9,12 @@ export const developmentLine = 'Development server: this connection is not encry
 // The state line on Diagnostics.
 export const developmentState = 'server development';
 
-// isDevelopmentServer: the address uses plain http://. The scheme is not case
-// sensitive. An https:// or empty address is not a development server.
+// isDevelopmentServer: the address's scheme is plain http, however many
+// slashes follow it: Android's URL parser (OkHttp) reads http:/host and
+// http:host as http too, so the marking keys on the scheme alone. The scheme
+// is not case sensitive. An https:, scheme-less or empty address is not one.
 export function isDevelopmentServer(origin: string): boolean {
-  return /^http:\/\//i.test(origin.trim());
+  return /^http:/i.test(origin.trim());
 }
 
 // developmentNotice is what a screen shows for the address in use: the visible
