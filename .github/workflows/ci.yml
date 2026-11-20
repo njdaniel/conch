@@ -1029,6 +1029,14 @@ jobs:
           ./scripts/invisible-chars.sh
           ./scripts/ci-docs-only-test.sh
 
+      # The Android device run sheet and its receipt name only rows of the
+      # mobile capability matrix, and every row (#2008). Runs on docs-only
+      # pull requests too, since they are the ones that edit these files.
+      - name: mobile capability rows
+        run: |
+          ./scripts/mobile-rows-check-test.sh
+          ./scripts/mobile-rows-check.sh
+
       # The issue-claim helper's lifecycle (#831): real local Git remotes,
       # mocked GitHub and model calls, no network.
       - name: agent claims
