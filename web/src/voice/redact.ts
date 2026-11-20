@@ -49,8 +49,8 @@ export class Redactor {
   }
 }
 
-// A bounded, redacted record of what the SDK warned about. Nothing goes to the
-// console: the page makes no console call.
+// A bounded, redacted record of what the SDK warned about. The ring stays
+// in memory.
 export class LogRing {
   private readonly lines: string[] = [];
   private readonly redactor: Redactor;

@@ -133,6 +133,21 @@ export const integrationsText = {
   copyTitle: 'Conch desktop: what works here',
 } as const;
 
+// Save diagnostics (issue #2084): the bundle is shown first, then saved to a
+// file the person picks. Nothing is sent.
+export const diagnosticsText = {
+  heading: 'Diagnostics',
+  intro: 'Save a file containing build versions and recent diagnostic events. Read it before sharing. Nothing is sent automatically.',
+  open: 'Save diagnostics…',
+  shown: 'What the file will contain',
+  save: 'Save to a file…',
+  close: 'Close',
+  saved: 'Saved.',
+  cancelled: '',
+  failed: 'Could not save the diagnostics. Open a new preview and try again.',
+  unavailable: 'Could not read the diagnostics.',
+} as const;
+
 export const integrationNames: Readonly<Record<IntegrationId, string>> = {
   tray: 'Tray icon',
   notifications: 'Notifications',

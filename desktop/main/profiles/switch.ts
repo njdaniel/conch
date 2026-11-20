@@ -13,6 +13,7 @@
 //
 // Every switch is one at a time; a generation counts them, so that an async
 // completion of an older one can tell it has been superseded.
+import type { MainLog } from '../diagnostics.ts';
 import type { TeardownHooks, TeardownReason } from './hooks.ts';
 import type { Profile } from './store.ts';
 
@@ -79,7 +80,7 @@ export interface SwitcherDeps {
   readonly hooks: TeardownHooks;
   readonly open: (spec: OpenSpec) => Promise<Activation>;
   readonly now: () => number;
-  readonly log: (line: string) => void;
+  readonly log: MainLog;
   readonly boundMs?: number;
 }
 

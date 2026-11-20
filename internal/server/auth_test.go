@@ -349,6 +349,10 @@ var routeExpectations = map[string]routeExpectation{
 	"GET /v1/notifications/preferences": {classAuth, "/v1/notifications/preferences", "", 200},
 	"PUT /v1/notifications/preferences": {classAuth, "/v1/notifications/preferences", `{"policy":"off","muted":[]}`, 200},
 	"GET /v1/notifications/pending":     {classAuth, "/v1/notifications/pending", "", 200},
+	// Personal blocks (issue #1832): principal 3 is the fixture's bot.
+	"GET /v1/blocks":                   {classAuth, "/v1/blocks", "", 200},
+	"PUT /v1/blocks/{principal_id}":    {classAuth, "/v1/blocks/3", "", 200},
+	"DELETE /v1/blocks/{principal_id}": {classAuth, "/v1/blocks/3", "", 204},
 	// Push registrations (issue #1714): the config is for any signed-in
 	// caller; the rest are for people, so an agent gets 403 and AuthOff 400
 	// (special-cased below). With no push flag the server answers a POST or a
@@ -742,7 +746,7 @@ func TestRoleMatrix(t *testing.T) {
 			}
 			// Read state is for people (issue #351): an agent is refused before
 			// any channel is looked at.
-			if strings.HasSuffix(rt.pattern, "/read-state") || strings.Contains(rt.pattern, "/v1/notifications/") || isPushPeopleRoute(rt.pattern) {
+			if strings.HasSuffix(rt.pattern, "/read-state") || strings.Contains(rt.pattern, "/v1/notifications/") || strings.Contains(rt.pattern, "/v1/blocks") || isPushPeopleRoute(rt.pattern) {
 				agentWant = http.StatusForbidden
 			}
 			// The moderation routes of reactions (issue #765) administer a
@@ -839,7 +843,7 @@ func TestAuthOffUnchanged(t *testing.T) {
 				if strings.Contains(rt.pattern, "/v1/sessions") || strings.Contains(rt.pattern, "/v1/runs") || strings.Contains(rt.pattern, "/v1/interventions") {
 					want = http.StatusBadRequest // sessions_require_auth: a session, and so a run, is bound to a credential
 				}
-				if strings.HasSuffix(rt.pattern, "/read-state") || strings.Contains(rt.pattern, "/v1/notifications/") || isPushPeopleRoute(rt.pattern) {
+				if strings.HasSuffix(rt.pattern, "/read-state") || strings.Contains(rt.pattern, "/v1/notifications/") || strings.Contains(rt.pattern, "/v1/blocks") || isPushPeopleRoute(rt.pattern) {
 					want = http.StatusBadRequest // read_state_require_auth: a mark, and notification preferences, belong to a principal
 				}
 				if isReactionRoute(rt.pattern) {

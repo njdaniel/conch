@@ -101,6 +101,8 @@ func RunWithStdin(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		return runNotices(ctx, args[1:], stdout)
 	case "rename":
 		return runRename(ctx, args[1:], stdout, stderr)
+	case "block":
+		return runBlock(ctx, args[1:], stdout, stderr)
 	case "report":
 		return runReport(ctx, args[1:], stdin, stdout, stderr, version)
 	case "version":
@@ -217,6 +219,7 @@ Usage:
   conch notices [--server <url>] [--json]
   conch notices dismiss [--server <url>] <id>
   conch rename [--server <url>] [--json] <name>
+  conch block list|add <principal id>|remove <principal id> [--server <url>] [--json]
   conch report [--server <url>] [--did <text>] [--expected <text>] [--happened <text>] [--often every_time|sometimes|once] [--yes] [--json]
   conch version
 

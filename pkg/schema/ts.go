@@ -303,6 +303,7 @@ var TSTypes = []TSType{
 	// every case of cases.json against this validator.
 	{Value: VoiceDevice{}},
 	{Value: VoiceDevicesV1{}, Schema: VoiceDevicesSchemaV1},
+	{Value: MuteKeyEventV1{}, Schema: MuteKeyEventSchemaV1, Family: "mute-key-event-v1"},
 	// Invites: the way in (ADR-008 §4). The code is in the create response
 	// alone; the new principal is in the redeem response.
 	{Value: PrincipalV0{}, Family: "principal-v0"},
@@ -534,6 +535,12 @@ var TSTypes = []TSType{
 	{Value: PutNotificationPreferencesRequestV1{}, Family: "put-notification-preferences-request-v1"},
 	{Value: NotificationSummaryV1{}, Family: "notification-summary-v1", Schema: NotificationSummarySchemaV1},
 	{Value: ListPendingNotificationsResponseV1{}, Family: "list-pending-notifications-response-v1"},
+
+	// Personal blocks (issue #1832, docs/design/blocks.md): one entry, the
+	// caller's list, and the events signal that their list changed.
+	{Value: BlockV1{}, Family: "block-v1"},
+	{Value: ListBlocksResponseV1{}, Family: "list-blocks-response-v1"},
+	{Value: BlocksChangedV1{}, Family: "blocks-changed-v1", Schema: BlocksChangedSchemaV1},
 
 	// The body of every refusal.
 	{Value: Error{}, Name: "ErrorV0", Family: "error"},

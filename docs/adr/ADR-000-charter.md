@@ -4,6 +4,7 @@
 - **Date:** 2026-07-12
 - **Deciders:** Nick (Tier-H, project owner)
 - **Source:** Founding handoff document, 2026-07-12
+- **Amended 2026-11-19 by [ADR-017](ADR-017-local-direct-messages-and-calls.md)** (Proposed; effective when Nick merges it): D12's "No DMs before P6 (agent DMs) / P7 (human DMs)" no longer holds for humans. Local 1:1 DMs and private voice calls between two human principals are permitted; agent DMs stay at P6. The D12 row below is unchanged; ADR-017 gives the old and new text.
 
 ## Context
 

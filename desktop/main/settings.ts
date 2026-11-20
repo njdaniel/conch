@@ -9,6 +9,7 @@
 // recovery screen; unknown keys are dropped. Nothing here starts a helper,
 // joins voice or resumes capture: a start at login opens the app as any launch
 // does.
+import type { MainLog } from './diagnostics.ts';
 import { randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, mkdir, open, rename, rm } from 'node:fs/promises';
@@ -149,7 +150,7 @@ export interface SettingsDeps {
   // Called after a change is stored or the confirmation changes, so the tray
   // can follow closeToTray.
   readonly changed?: (settings: AppSettings) => void;
-  readonly log: (line: string) => void;
+  readonly log: MainLog;
   // The clock for the detector's short cache; a test supplies its own.
   readonly now?: () => number;
 }
@@ -209,14 +210,14 @@ export class SettingsService {
       if (!this.#current.launchAtLogin) {
         // Nothing to store; only an entry of ours that outlived the setting.
         const stale = await this.#deps.autostart.disable();
-        if (!stale.ok && stale.reason !== 'foreign-file') this.#deps.log('conch-desktop: a stale autostart entry could not be removed');
+        if (!stale.ok && stale.reason !== 'foreign-file') this.#deps.log('conch-desktop: a stale autostart entry could not be removed', { ring: true });
         return;
       }
-      this.#deps.log('conch-desktop: launch at login is on but the app no longer sits where only you or the system can change it; the autostart entry is removed and the setting turned off');
+      this.#deps.log('conch-desktop: launch at login is on but the app no longer sits where only you or the system can change it; the autostart entry is removed and the setting turned off', { ring: true });
       const done = await this.#deps.autostart.disable();
       // A foreign file is left alone and there is nothing of ours to remove.
       if (!done.ok && done.reason !== 'foreign-file') {
-        this.#deps.log('conch-desktop: the autostart entry could not be removed; the setting stays on');
+        this.#deps.log('conch-desktop: the autostart entry could not be removed; the setting stays on', { ring: true });
         return;
       }
     } else if (reason !== 'launch-unsupported' || !this.#current.launchAtLogin) {

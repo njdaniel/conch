@@ -156,7 +156,7 @@ describe('suspend', () => {
     const first = life.suspend();
     expect(life.suspended).toBe(true);
     await Promise.all([first, life.suspend(), life.suspend()]);
-    expect(calls).toEqual(['leave', 'end suspend']);
+    expect(calls).toEqual(['mute true', 'leave', 'end suspend']);
   });
 
   it('clears the latch when the leave and the end settle, with no resume event (S3)', async () => {
@@ -166,7 +166,7 @@ describe('suspend', () => {
     calls.length = 0;
     // A suspend signal after a missed resume acts again; both actions are idempotent.
     await life.suspend();
-    expect(calls).toEqual(['leave', 'end suspend']);
+    expect(calls).toEqual(['mute true', 'leave', 'end suspend']);
   });
 
   it('clears the latch when the actions fail too (S3)', async () => {
@@ -180,6 +180,15 @@ describe('suspend', () => {
     expect(life.suspended).toBe(false);
   });
 
+  it('keeps the hotkey sleep gate up after teardown until resume', async () => {
+    const { life } = observed('running');
+    await life.suspend();
+    expect(life.suspended).toBe(false);
+    expect(life.sleeping).toBe(true);
+    life.resume();
+    expect(life.sleeping).toBe(false);
+  });
+
   it('resume does nothing to voice or the share, and a later suspend acts again', async () => {
     const { life, calls } = observed('running');
     await life.suspend();
@@ -187,7 +196,7 @@ describe('suspend', () => {
     life.resume();
     expect(calls).toEqual([]);
     await life.suspend();
-    expect(calls).toEqual(['leave', 'end suspend']);
+    expect(calls).toEqual(['mute true', 'leave', 'end suspend']);
   });
 
   it('still ends the share when leaving voice fails', async () => {
@@ -204,6 +213,14 @@ describe('suspend', () => {
 });
 
 describe('the lock cannot be observed (fail closed)', () => {
+  it('queues a mute immediately when observation is lost during a call', async () => {
+    const { life, calls } = observed('running');
+    life.observe('unavailable');
+    expect(calls).toContain('mute true');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls).toContain('lockMuted true');
+  });
+
   it('hides notification text from the start, before anything observes the lock', () => {
     const calls: string[] = [];
     const life = new Lifecycle({

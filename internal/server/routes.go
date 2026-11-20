@@ -203,6 +203,11 @@ func (s *Server) routeTable() []route {
 		rt("GET /v1/notifications/preferences", accessAuthenticated, s.membersOnly(hf(s.handleGetNotificationPreferences))),
 		rt("PUT /v1/notifications/preferences", accessAuthenticated, s.membersOnly(hf(s.handlePutNotificationPreferences))),
 		rt("GET /v1/notifications/pending", accessAuthenticated, s.membersOnly(hf(s.handleListPendingNotifications))),
+		// Personal blocks (issue #1832, docs/design/blocks.md): the caller's
+		// own list, for people with a full credential; see blocks.go.
+		rt("GET /v1/blocks", accessAuthenticated, s.membersOnly(hf(s.handleListBlocks))),
+		rt("PUT /v1/blocks/{principal_id}", accessAuthenticated, s.membersOnly(hf(s.handlePutBlock))),
+		rt("DELETE /v1/blocks/{principal_id}", accessAuthenticated, s.membersOnly(hf(s.handleDeleteBlock))),
 		// Push registrations (issue #1714): the same people-only rule, and the
 		// same limiter. The config is the one route any signed-in caller may
 		// read: nothing in it is secret. "mine" is a literal, so the mux never

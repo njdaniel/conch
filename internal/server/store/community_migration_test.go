@@ -32,6 +32,7 @@ func rewindToBeforeCommunity(t *testing.T, path string) {
 		"DROP TABLE account_notices",                      // migration 52 (issue #2042)
 		"ALTER TABLE credentials DROP COLUMN self_made",   // migration 52 (issue #2042)
 		"ALTER TABLE sign_in_links DROP COLUMN self_made", // migration 52
+		"DROP TABLE blocks",                               // migration 51 (issue #1832)
 		"DROP TABLE push_registrations",                   // migration 49 (issue #1714)
 		"DROP TABLE notification_preferences",             // migration 48 (issue #1713)
 		"ALTER TABLE channels DROP COLUMN topic",          // migration 47 (issue #1503)
