@@ -10,6 +10,10 @@ trap 'rm -rf "$WORK"' EXIT
 
 fail() { echo "mobile-rows-check-test: FAIL: $*" >&2; exit 1; }
 
+# edit <sed expression> <file>: sed -i without GNU's -i, so the test runs on
+# macOS and the BSDs too.
+edit() { sed "$1" "$2" >"$2.new" && mv "$2.new" "$2"; }
+
 # A matrix of three rows, a sheet naming each, a receipt listing each.
 fixtures() {
     rm -rf "$WORK/t"
@@ -20,12 +24,14 @@ fixtures() {
 | **Foreground** | | | | | |
 | M-F1 | Join | heard | P | P | ME1 |
 | M-C7 | Camera prompt | asked | P | P | ME10 |
+| M-C10 | Battery | recorded | P | P | ME11 |
 | M-H3 | iOS only | recorded | — | U / P | ME3 |
 EOF
     cat >"$WORK/t/spike/sheet.md" <<'EOF'
 See the [receipt](../review/receipt.md#rows).
 1. **M-F1.** Join.
 2. **M-C7.** Camera.
+3. **M-C10.** Battery.
 **M-H3** is iOS only.
 EOF
     cat >"$WORK/t/review/receipt.md" <<'EOF'
@@ -35,6 +41,7 @@ Steps are in the [sheet](../spike/sheet.md).
 | M-F1 | Join | not run | | | Pass |
 | M-C7 | Camera prompt | pass | run 2 | Nick | not run |
 | M-C7b | Sub-row of M-C7 | fail | run 2 | Nick | not run |
+| M-C10 | Battery | not run | | | not run |
 | M-H3 | iOS only | not run (iOS only) | | | not run |
 EOF
 }
@@ -60,11 +67,11 @@ echo '3. **M-Z9.** Nothing.' >>"$WORK/t/spike/sheet.md"
 expect_refused "unknown ID in the sheet" "names M-Z9, which is not a row"
 
 fixtures
-sed -i '/M-C7/d' "$WORK/t/spike/sheet.md"
+edit '/M-C7/d' "$WORK/t/spike/sheet.md"
 expect_refused "row missing from the sheet" "does not name matrix row M-C7"
 
 fixtures
-sed -i '/^| M-F1 /d' "$WORK/t/review/receipt.md"
+edit '/^| M-F1 /d' "$WORK/t/review/receipt.md"
 expect_refused "row missing from the receipt" "lists matrix row M-F1 0 times"
 
 fixtures
@@ -76,8 +83,26 @@ echo '| M-Q1 | Unknown | not run | | | |' >>"$WORK/t/review/receipt.md"
 expect_refused "unknown ID in the receipt" "lists M-Q1, which is not a row"
 
 fixtures
-sed -i 's/| M-F1 | Join | not run |/| M-F1 | Join | maybe |/' "$WORK/t/review/receipt.md"
+edit 's/| M-F1 | Join | not run |/| M-F1 | Join | maybe |/' "$WORK/t/review/receipt.md"
 expect_refused "bad Result" "Result \"maybe\""
+
+# IDs with no space between them are each checked.
+for line in '**M-F1,M-Z9.**' '**M-F1/M-Z9.**' '(M-F1)M-Z9 and M-C7' 'M-F1-M-Z9'; do
+    fixtures
+    printf '4. %s\n' "$line" >>"$WORK/t/spike/sheet.md"
+    expect_refused "adjacent IDs: $line" "names M-Z9, which is not a row"
+done
+
+# M-C10 is not M-C1: naming M-C10 doesn't name M-C1, in either direction.
+fixtures
+echo '4. **M-C1.** Not a row.' >>"$WORK/t/spike/sheet.md"
+expect_refused "M-C1 named, only M-C10 a row" "names M-C1, which is not a row"
+fixtures
+edit '/^| M-C7 /a\
+| M-C1 | Camera | on | P | P | ME10 |
+' "$WORK/t/review/matrix.md"
+expect_refused "M-C1 a row, only M-C10 named" "does not name matrix row M-C1"
+expect_refused "M-C1 a row, only M-C10 listed" "lists matrix row M-C1 0 times"
 
 fixtures
 echo 'And a [missing link](gone.md).' >>"$WORK/t/spike/sheet.md"

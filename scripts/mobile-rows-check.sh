@@ -6,7 +6,8 @@
 #
 # The matrix is docs/reviews/mobile-capabilities.md: its rows are the table
 # lines that start "| M-<letter><number> |". The check fails when:
-#   - the run sheet names a row ID (M-F1, M-C10, ...) the matrix does not have;
+#   - the run sheet names a row ID (M-F1, M-C10, ...) the matrix does not have,
+#     even with no space after the one before it (M-F1,M-Z9);
 #   - a matrix row is named nowhere in the run sheet;
 #   - the receipt's table lacks a matrix row, or lists one twice, or lists an
 #     ID that is neither a matrix row nor a matrix row with a lower-case
@@ -35,9 +36,22 @@ rows=$(grep -oE "^\| $id_re \|" "$matrix" | grep -oE "$id_re" | sort -u || true)
 [ -n "$rows" ] || { echo "mobile-rows-check: FAIL: no rows in $matrix" >&2; exit 1; }
 is_row() { grep -qxF "$1" <<<"$rows"; }
 
-# The sheet: every ID it names is a matrix row, and every row is named.
-named=$(grep -oE "(^|[^A-Za-z0-9-])${id_re}[a-z]?([^A-Za-z0-9]|$)" "$sheet" |
-    grep -oE "${id_re}[a-z]?" | sort -u || true)
+# The sheet: every ID it names is a matrix row, and every row is named. An ID
+# is M-<letter><digits> with an optional lower-case suffix, with no letter or
+# digit just before or after it; awk walks each line match by match, so IDs
+# with only a comma or slash between them (M-F1,M-Z9) are all found, and
+# M-C10 is never read as M-C1.
+named=$(awk '{
+    s = $0; prev = ""
+    while (match(s, /M-[A-Z][0-9]+[a-z]?/)) {
+        id = substr(s, RSTART, RLENGTH)
+        before = RSTART > 1 ? substr(s, RSTART - 1, 1) : prev
+        after = substr(s, RSTART + RLENGTH, 1)
+        if (before !~ /[A-Za-z0-9]/ && after !~ /[A-Za-z0-9]/) print id
+        prev = substr(id, length(id), 1)
+        s = substr(s, RSTART + RLENGTH)
+    }
+}' "$sheet" | sort -u)
 while IFS= read -r id; do
     [ -z "$id" ] && continue
     is_row "$id" || fail "$sheet names $id, which is not a row of $matrix"

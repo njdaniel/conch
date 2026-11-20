@@ -29,7 +29,7 @@ to ask the operator.
   somewhere else: a browser, the desktop app or the terminal app. The hand-off
   steps move voice between it and the phone. If it shares a computer with the
   listener, use a separate browser profile for it.
-- **The operator** runs the test server (usually Nick). They can read the
+- **The operator** runs the server (usually Nick). They can read the
   server's history: who joined and left voice, start and stop reports, camera
   records and their timestamps. When a step says "ask the operator", write down
   the clock time and send it to them afterwards.
@@ -43,15 +43,26 @@ to ask the operator.
    Use this standalone APK so the phone can be unplugged. For the bug check at
    the end of Run 1, know whether the APK includes
    [PR #1985](https://github.com/njdaniel/conch/pull/1985) (ask the operator).
-2. **Sign-in details.** The test server's address (it must start with
-   `https://`), a test channel, and your name and password or a fresh one-use
-   sign-in link. Use a test server and test accounts, never a real one.
+2. **Sign-in details.** The server's address (it must start with `https://`),
+   a test channel, and your name and password or a fresh one-use sign-in link.
+   Nick's Run 1 uses his own alpha server, `https://alpha.gankbears.com`, where
+   he is the operator, with a test channel and a second account for the
+   listener. Other testers use the server and the test accounts Nick gives
+   them. Never use your everyday account for the listener or the second
+   session.
 3. **A clock.** A stopwatch on another device, or the listener's clock, to time
    things.
 4. **A way to call the phone** (another phone or a friend), for the call steps.
-5. **A steady sound source** for the open-microphone steps: another device
-   playing a loop of speech at normal talking volume, near the phone. You will
-   pause it for about a second when a step says "pause and restart".
+5. **A steady sound source** for the open-microphone steps: another device,
+   near the phone, playing a sound with no gaps in it, such as pink or white
+   noise or music with no breaks. Not speech: after the microphone has been
+   held shut, the app sends again once it has heard half a second of quiet and
+   then a new sound, and the pauses between sentences are longer than that.
+   It must be loud enough that step 14 shows **Open microphone: sending**.
+   When a step says "pause and restart", pause it for about a second, then
+   play it again. Any gap in the sound longer than half a second counts as a
+   pause and restart: if the sound comes back after one, check the source for
+   a gap before writing **fail**.
 6. **A note of the setup** for the receipt's "Device runs" table: date, APK and
    its commit, phone model, Android version (Settings, About phone), whether
    Google Play services is on the phone, Wi-Fi or cellular, and whether battery
@@ -84,7 +95,7 @@ voice state right now:
 | `mode` | `ptt` for Hold to talk, `open` for the open microphone |
 | `muted`, `deafened` | `true` when **Mute** or **Deafen** is on |
 | `gate` | `open` when sound can leave the phone, `shut` when it cannot |
-| `blocked` | `no`, or what is holding the microphone shut: `lock`, `background`, `inactive`, `interruption` |
+| `blocked` | `no`, or what is holding the microphone shut: `lock`, `background`, `inactive`, `interruption`, or `stopped` (Android sets `stopped` every time you leave the app). Several show together, joined by `+`, such as `background+stopped`. |
 
 Below them is a log of recent events: the app going to the background or
 coming back, voice and connection messages, and each request to the server
@@ -132,7 +143,7 @@ do fewer repeats rather than skipping a section, and write the count you did.
 
 ### Sign in, join and leave (about 4 minutes)
 
-1. **M-F1.** On **Sign in**, type the test server's address under **Server**.
+1. **M-F1.** On **Sign in**, type the server's address under **Server**.
    Enter your name and password and tap **Sign in**, or paste a fresh one-use
    link and tap **Use the link**. Expect **Channels** with your test channel
    and no voice running.
@@ -191,11 +202,15 @@ Keep voice joined and don't touch **Hold to talk** in this section.
     to lock. Expect the listener to hear you cut off at once, with no tail of
     sound. Unlock while still holding: expect nothing to be sent until you let
     go and press again. Do it once more, this time switching to another app
-    (Home or Recents) instead of locking.
+    (Home or Recents) instead of locking. Note the time of the lock and of the
+    switch, and ask the operator to check that each made one stop report
+    (`stopped`) in the server's history, and how soon after the lock or switch
+    it came.
 14. **M-L8.** Tap **Use open microphone**. In quiet, expect **Open microphone:
     waiting for you to speak**. Start the steady sound. Expect **Open
-    microphone: sending** and the listener to hear it. Keep it playing for
-    steps 15 to 22 unless a step says otherwise.
+    microphone: sending** and the listener to hear it. If it stays on
+    **waiting for you to speak**, turn the sound up or move it closer. Keep it
+    playing for steps 15 to 22 unless a step says otherwise.
 15. **M-L8.** Switch to another app while the sound plays. Expect the listener
     to hear it stop at once and not come back.
 16. **M-L9.** Switch back to Conch with the sound still playing. Expect the
@@ -210,9 +225,12 @@ Keep voice joined and don't touch **Hold to talk** in this section.
     ask the operator to check that steps 15, 17 and 19 each made one stop
     report and no `voice_transmit_unreported` record.
 20. **M-L9.** End the call with the sound still playing and go back to Conch.
-    If the screen says another app has the audio, wait until the call is fully
-    over and come back to the voice screen. Expect silence until you pause and
-    restart the sound.
+    If the screen says "The microphone is held shut: interruption.", wait until
+    the call is fully over, press Home, then reopen Conch: the app asks Android
+    for the audio again only when it comes back to the screen (going **Back**
+    and into the channel again doesn't). If it still says held shut after
+    that, write it down, because then nothing is sent even after a restart.
+    Expect silence until you pause and restart the sound.
 21. **M-L9.** Turn on Airplane mode for about 20 seconds, then turn it off,
     with the sound still playing. Expect **Reconnecting** and then **In voice**
     again, and silence until you pause and restart the sound. If it never says
@@ -342,8 +360,14 @@ otherwise.
   checks: the microphone was muted from the first moment on every join, no
   start reports, no camera records, and once more after forcing a reconnect
   and after rotating the room. Export Diagnostics and look for "exception" in
-  it. Then press Home during a join and check that coming back doesn't start
-  voice by itself. Run 1's joins count only if the operator checked the same
+  it. Then tap **Join voice**, press Home while it says **Joining**, and come
+  back. Either of two outcomes passes, because the join came from your tap:
+  you are **In voice** and nothing is sent until you press **Hold to talk**;
+  or the join failed with "Android would not start the voice service
+  (ForegroundServiceStartNotAllowedException)." (this one doesn't count
+  against the 20 joins). Write down which. It fails if the app crashes, if
+  anything is sent before you press, or if voice ever starts without a tap on
+  **Join voice**. Run 1's joins count only if the operator checked the same
   things for them.
 - **M-L6.** Lock and unlock 10 times, then switch away and back 10 times,
   never pressing talk. Expect no joining and no sending caused by coming back.
@@ -365,7 +389,7 @@ otherwise.
 
 ### The phone's web browser (listener)
 
-- **M-L1.** This tests the browser, not the app. Open the test server's address
+- **M-L1.** This tests the browser, not the app. Open the server's address
   in Chrome on the phone, sign in, open the channel and join voice. Lock the
   phone for 5 minutes, then switch to another app for 5 minutes. Each time,
   record whether the listener still sees you in voice, whether you still hear
@@ -392,9 +416,12 @@ otherwise.
   still on in the foreground, and that a "stale" answer stopped the camera.
 - **M-R1.** This needs a development build and a test server on your home
   network over plain `http://`. Sign in over Wi-Fi. Expect it to work, and the
-  app to mark it as a development setup. (The standalone APK only allows
-  `https://`; with it, write **not run**.)
-- **M-R2.** On mobile data, sign in and join voice through the test server's
+  app to mark it as a development setup. This build has no such marking yet
+  (only the hint in the **Server** box mentions development), so the marking
+  half of M-R1 is expected to fail: write **fail** and say whether sign-in
+  over `http://` worked. (The standalone APK only allows `https://`; with it,
+  write **not run**.)
+- **M-R2.** On mobile data, sign in and join voice through the server's
   public `https://` address. Expect chat and voice to work. The operator
   confirms the connection tickets and the voice server were reached.
 - **M-R3.** Ask the operator for a test server whose certificate comes from
@@ -402,8 +429,9 @@ otherwise.
   refused with no "continue anyway" option. Install the certificate in
   Android's settings (Security, Encryption and credentials, Install a
   certificate) and expect sign-in and voice to work. Remove it afterwards.
-- **M-R4.** Ask the operator to turn voice off on the test server. Open the
-  channel and tap **Join voice**. Expect a message that voice is unavailable
+- **M-R4.** Ask the operator to stop LiveKit (the voice server) and leave
+  conchd running, at a time nobody else needs voice there; removing the
+  server's voice setup instead tests something else. Open the channel and tap **Join voice**. Expect a message that voice is unavailable
   and no crash. Write down whether anything else in the app still works.
 
 ### Bluetooth headset, wired headset and buttons (listener)
@@ -430,14 +458,23 @@ otherwise.
 
 - **M-I1.** Get a call while in voice and not talking, and again while holding
   **Hold to talk**. Expect sending to stop at once, voice not rejoining by
-  itself if it ended, and nothing sent after the call until a fresh press.
+  itself if it ended, and nothing sent after the call until a fresh press. If
+  the screen says the microphone is held shut by "interruption" after the
+  call, do as in Run 1 step 20 (Home, then reopen Conch) before pressing.
 - **M-I2.** Repeat with the voice assistant, an alarm going off, and another
   app playing audio (a video or music app). Expect the same, even if Android
   offers to resume.
 - **M-I3.** In voice, open Android Settings, Apps, Conch, Permissions, and turn
-  off the microphone. Go back to Conch. Expect sending to stop, a message
-  telling you to check the microphone permission, and no crash or repeated
-  retrying. Turn the permission back on.
+  off the microphone. Note the time. Android may close Conch when a
+  permission is taken away; that is Android's doing, not a crash. Record
+  whether the listener sees you leave voice (and how soon), whether Android's
+  microphone indicator goes, and ask the operator whether voice left the room
+  and any open start report was closed. Go back to Conch. If it is still
+  running, expect sending to stop, the message "The microphone stopped. Check
+  the app's microphone permission, then leave and join again.", and no
+  repeated retrying. If Android closed it, expect **Sign in** (the sign-in is
+  kept in memory only) and nothing rejoining voice by itself. Turn the
+  permission back on.
 - **M-P1, M-P2.** In Settings, Apps, Conch, Permissions, reset the
   microphone and notification permissions. Tap **Join voice** and deny the
   microphone: expect "Voice needs the microphone. Allow it for this app in
@@ -461,8 +498,12 @@ otherwise.
   on**. Expect Android's camera question only now, not earlier. Deny it:
   expect a message saying what to do next, no camera, and voice still
   working. Then allow it "only this time", and while the camera is on, turn
-  the camera permission off in Settings: expect the camera to stop with no
-  crash or retrying. Also try Home or Recents while Android's camera question
+  the camera permission off in Settings. Android may close Conch here, as in
+  M-I3. Record whether the camera indicator goes, whether the listener's tile
+  for you goes and whether they see you leave voice, and ask the operator
+  whether the camera claim was released. Back in Conch, expect no camera and
+  no retrying; if Android closed it, expect **Sign in** and nothing rejoining
+  voice or turning the camera on by itself. Also try Home or Recents while Android's camera question
   is showing, and write down what happened on return. Ask the operator to turn
   off camera use for your account and tap the button: expect "Camera is off for
   you on this server." and no camera. Then have them turn it off while your
