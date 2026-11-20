@@ -97,6 +97,7 @@ const named: Record<
   voiceSaveDevice: true,
   voiceKeyDevices: true,
   voiceSaveTalkBinding: true,
+  reportVoiceDiagnostic: true,
   inviteCheck: true,
   inviteAccept: true,
   inviteCancel: true,
@@ -153,8 +154,7 @@ describe('the preload', () => {
     expect(invoke).toHaveBeenLastCalledWith('conch:notifyClose', { tag: 't' });
     await bridge.settingsSet({ launchAtLogin: true });
     expect(invoke).toHaveBeenLastCalledWith('conch:settingsSet', { launchAtLogin: true });
-    // 62 before the Linux share sound's four (issue #1854).
-    expect(INVOKED_FUNCTIONS).toHaveLength(67);
+    expect(INVOKED_FUNCTIONS).toHaveLength(68);
   });
 
   it('rejects with a bare "refused" when main refuses, or answers anything but an envelope', async () => {
@@ -354,6 +354,7 @@ describe('the preload’s voice family', () => {
     await bridge.voiceSaveDevice({ key: 'audio.input', value: 'Mic' });
     await bridge.voiceKeyDevices();
     await bridge.voiceSaveTalkBinding({ deviceId: 'abc', code: 275 });
+    await bridge.reportVoiceDiagnostic('encoder-cpu');
     expect(calls).toEqual([
       ['conch:voiceState', []],
       ['conch:voiceJoin', [{ channel: 'general', muted: true, deafened: false }]],
@@ -367,6 +368,7 @@ describe('the preload’s voice family', () => {
       ['conch:voiceSaveDevice', [{ key: 'audio.input', value: 'Mic' }]],
       ['conch:voiceKeyDevices', []],
       ['conch:voiceSaveTalkBinding', [{ deviceId: 'abc', code: 275 }]],
+      ['conch:reportVoiceDiagnostic', ['encoder-cpu']],
     ]);
   });
 

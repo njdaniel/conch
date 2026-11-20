@@ -380,7 +380,7 @@ describe('the shortfall reason', () => {
 });
 
 it.each([
-  [15, 'maintain-resolution'],
+  [15, 'balanced'],
   [30, 'maintain-framerate'],
   [60, 'maintain-framerate'],
 ] as const)('publishes %i fps with %s', (frameRate, preference) => {

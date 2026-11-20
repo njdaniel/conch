@@ -12,6 +12,7 @@ import { ModerationScope } from '../Moderation';
 import type { WhoAmIResponseV1 } from '../schema/principal';
 import { windowOf } from '../fakewindow';
 import { Lobby } from '../Lobby';
+import { platform } from '../platform';
 import type { VoicePresenceV2 } from '../schema/voice';
 import { initialChannels } from '../state/channels';
 import type { Person } from '../useLiveChannel';
@@ -732,6 +733,8 @@ describe('sharing', () => {
     }
     const capture = new Capture();
     const log = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const report = vi.fn();
+    platform.services.reportVoiceDiagnostic = report;
     vi.useFakeTimers();
     const off = watchScreenCapture(capture as unknown as MediaStreamTrack, (stalled) => room.events?.onScreenStalled?.(stalled));
     try {
@@ -742,6 +745,7 @@ describe('sharing', () => {
       expect(within(voice()).getByRole('button', { name: 'Restart share' })).toBeTruthy();
       expect(room.calls).toEqual(['pick', 'publish']);
       expect(log).toHaveBeenCalledTimes(1);
+      expect(report).toHaveBeenCalledExactlyOnceWith('capture-stalled');
       act(() => { capture.unmute(); });
       expect(screen.queryByRole('button', { name: 'Restart share' })).toBeNull();
       act(() => { capture.mute(); vi.advanceTimersByTime(3000); });
@@ -752,6 +756,8 @@ describe('sharing', () => {
     } finally {
       act(off);
       vi.useRealTimers();
+      log.mockRestore();
+      delete platform.services.reportVoiceDiagnostic;
     }
   });
 
@@ -1051,7 +1057,8 @@ describe('ShareReadout over time', () => {
 
   it('warns only after 3 seconds of CPU reports for a single publication and clears on recovery', async () => {
     vi.useFakeTimers();
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const report = vi.fn();
+    platform.services.reportVoiceDiagnostic = report;
     try {
       let clock = 0;
       const cpu = { width: 1920, height: 1080, fps: 1, limitation: 'cpu' } as const;
@@ -1073,8 +1080,14 @@ describe('ShareReadout over time', () => {
       expect(warning()).toBeNull();
       await tick();
       expect(warning()?.getAttribute('role')).toBe('status');
+      samples.current = null;
       await tick();
-      expect(warn).toHaveBeenCalledExactlyOnceWith('Screen share encoder is CPU-limited.');
+      expect(warning()).not.toBeNull();
+      expect(view.queryByRole('status', { name: 'Share quality' })).toBeNull();
+      samples.current = { ...cpu, publication: 'replacement' };
+      await tick();
+      expect(warning()).not.toBeNull();
+      expect(report).toHaveBeenCalledExactlyOnceWith('encoder-cpu');
       samples.current = { ...cpu, publication: 'replacement', limitation: 'bandwidth' };
       await tick();
       expect(warning()).toBeNull();
@@ -1082,7 +1095,7 @@ describe('ShareReadout over time', () => {
       await tick();
       expect(warning()).toBeNull();
     } finally {
-      warn.mockRestore();
+      delete platform.services.reportVoiceDiagnostic;
     }
   });
 

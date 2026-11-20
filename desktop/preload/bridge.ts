@@ -427,6 +427,7 @@ export function createBridge(
     voiceSaveDevice: call('voiceSaveDevice'),
     voiceKeyDevices: call('voiceKeyDevices'),
     voiceSaveTalkBinding: call('voiceSaveTalkBinding'),
+    reportVoiceDiagnostic: call('reportVoiceDiagnostic'),
     // Opening an invite link (issue #1591). The code comes back from
     // inviteTake only, once.
     inviteCheck: call('inviteCheck'),

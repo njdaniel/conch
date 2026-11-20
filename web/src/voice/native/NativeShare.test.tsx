@@ -334,14 +334,12 @@ describe('the sharer’s readout', () => {
 
   it('shows the CPU warning in the sharing strip from the companion’s outbound stats', async () => {
     vi.useFakeTimers();
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     try {
       const t = fake({ phase: 'connected', companion: true, share: { kind: 'sharing', audio: false } }, { ...sample, fps: 1, limitation: 'cpu' });
       strip(t.companion);
       await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
       expect(screen.getByText(/Your computer is too busy to send smoothly/)).toBeTruthy();
     } finally {
-      warn.mockRestore();
       vi.useRealTimers();
     }
   });

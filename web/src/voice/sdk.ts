@@ -122,6 +122,7 @@ import {
   type TrackPublishOptions,
   type VideoCaptureOptions,
 } from 'livekit-client';
+import { platform } from '../platform';
 import type { DisconnectCause } from './disconnect';
 import type { Camera, CameraProfile, KeptCamera } from './camera';
 import type { CameraTrack, Microphone, Output, Processing, Room, RoomEvents, ShareSink } from './connection';
@@ -153,23 +154,22 @@ export function quietSdk(): void {
     logger.methodFactory = (method) => (message: unknown, context?: unknown) => {
       const text = typeof message === 'string' ? message : '';
       sdkLog.add(method, text, context);
-      if (typeof location === 'undefined' || location.protocol !== 'conch-app:') return;
+      const report = platform.services.reportVoiceDiagnostic;
+      if (report === undefined) return;
       if (method === 'warn') {
-        console.warn(/^not able to set (offer|answer), falling back to unmodified sdp$/.test(text)
-          ? 'LiveKit retried negotiation with unmodified SDP.'
-          : 'LiveKit SDK warning.');
+        report(/^not able to set (offer|answer), falling back to unmodified sdp$/.test(text) ? 'sdp-retry' : 'sdk-warning');
       } else if (method === 'error') {
         if (!/^unable to set (offer|answer)$/.test(text)) {
-          console.error('LiveKit SDK error.');
+          report('sdk-error');
           return;
         }
         // PCTransport reports the final setDescription rejection here.
         // Match a known reason and leave SDP, credentials and error text out.
         const fields = typeof context === 'object' && context !== null && 'fields' in context ? context.fields : undefined;
         const error = typeof fields === 'object' && fields !== null && 'error' in fields ? fields.error : undefined;
-        console.error(typeof error === 'string' && error.includes('A BUNDLE group contains a codec collision between')
-          ? 'LiveKit SDP description rejected due to a BUNDLE codec collision.'
-          : 'LiveKit could not apply an SDP description.');
+        report(typeof error === 'string' && /A BUNDLE group contains a codec collision between|Bundled payload type collision/.test(error)
+          ? 'sdp-bundle-collision'
+          : 'sdp-rejected');
       }
     };
     logger.setLevel(LogLevel.warn, false);
@@ -549,6 +549,7 @@ export function watchScreenCapture(capture: MediaStreamTrack, changed: (stalled:
       if (!capture.muted || capture.readyState === 'ended') return;
       stalled = true;
       console.warn('Screen capture stopped delivering frames (muted for 3 seconds).');
+      platform.services.reportVoiceDiagnostic?.('capture-stalled');
       changed(true);
     }, 3000);
   };
@@ -583,11 +584,10 @@ export function captureOptions(quality: ShareQuality = defaultShareQuality, soun
   };
 }
 
-// WebRTC's DegradationPreferenceManager maps balanced screen sharing to
-// maintain-resolution. Keep Detail's policy explicit, including on engines
-// that do not apply the same mapping.
+// Detail lets the encoder trade frame rate or resolution under load.
+// The motion presets ask it to preserve frame rate.
 function shareDegradationPreference(quality: ShareQuality): RTCDegradationPreference {
-  return quality.frameRate === 15 ? 'maintain-resolution' : 'maintain-framerate';
+  return quality.frameRate === 15 ? 'balanced' : 'maintain-framerate';
 }
 
 // How the picture is published, from what was captured and the chosen caps.

@@ -9,7 +9,6 @@ import { BrowserWindow, type WebPreferences } from 'electron';
 import { trackDocument, type DocumentGate } from './document.ts';
 import { INITIAL_URL } from './scheme.ts';
 import type { SettingsFiles } from './settings.ts';
-import { forwardVoiceConsole } from './voice/renderer-console.ts';
 
 // An in-memory session: no "persist:" prefix, so nothing the page stores
 // outlives the process. The scheme handler and the guards are installed on it.
@@ -105,7 +104,6 @@ export interface WindowOptions {
   readonly partition?: string;
   readonly bounds?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
   readonly maximized?: WindowMaximized;
-  readonly log?: (line: string) => void;
   // Called with the window after it is made and before its first load: the
   // session's handlers are installed here.
   readonly prepare?: (window: BrowserWindow) => void;
@@ -124,7 +122,6 @@ export function createWindow(packaged: boolean, appPath: string, gate: DocumentG
   });
   // The document generation begins at each navigation, before the first load.
   trackDocument(window.webContents, gate);
-  if (options.log !== undefined) forwardVoiceConsole(window.webContents, options.log);
   options.prepare?.(window);
   const maximized = options.maximized;
   if (maximized !== undefined) {

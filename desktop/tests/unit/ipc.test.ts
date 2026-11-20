@@ -32,6 +32,7 @@ interface Fixture {
   readonly share: ShareAllowance;
   readonly activation: object;
   event(over?: Partial<InvokeEvent>): InvokeEvent;
+  replaceWindow(): InvokeEvent;
 }
 
 function fixture(realGestures?: Gestures): Fixture {
@@ -70,9 +71,52 @@ function fixture(realGestures?: Gestures): Fixture {
   const gestures = realGestures ?? { take: () => (input.recent ? ('pointer' as const) : null) };
   const installed = new Proxy({} as InstalledApi, { get: (_t, name: string) => record(`installed.${name}`) });
   const share = new ShareAllowance({ now: () => clock.now, generation: () => gate.generation });
-  const ipc = new Ipc({ owned: () => contents, gate, service, feeds, files, gestures, profiles, voice, invites, notifications, settings, integrations, companion, share, installed, now: () => clock.now, log: (line) => logs.push(line) });
-  return { ipc, gate, contents, main, calls, logs, clock, permit, input, share, activation, event: (over = {}) => ({ sender: contents, senderFrame: main, ...over }) };
+  let owned: ContentsLike = contents;
+  const ipc = new Ipc({ owned: () => owned, gate, service, feeds, files, gestures, profiles, voice, invites, notifications, settings, integrations, companion, share, installed, now: () => clock.now, log: (line) => logs.push(line) });
+  return {
+    ipc, gate, contents, main, calls, logs, clock, permit, input, share, activation,
+    event: (over = {}) => ({ sender: owned, senderFrame: owned.mainFrame, ...over }),
+    replaceWindow: () => {
+      const replacement = frame('replacement');
+      gate.begin();
+      gate.commit(replacement);
+      owned = { isDestroyed: () => false, mainFrame: replacement };
+      return { sender: owned, senderFrame: replacement };
+    },
+  };
 }
+
+describe('voice renderer diagnostics', () => {
+  it('accepts only fixed codes and leaves raw console text, URLs and tokens out of the log', async () => {
+    const f = fixture();
+    const report = (value: unknown) => f.ipc.invoke(f.event(), 'reportVoiceDiagnostic', [value]);
+    expect((await report('WebRTC wss://h/?token=private')).ok).toBe(false);
+    expect((await report('constructor')).ok).toBe(false);
+    expect((await report('sdp-bundle-collision')).ok).toBe(true);
+    expect(f.logs).toEqual([
+      'conch-desktop: refused an IPC call (shape); 1 so far',
+      'conch-desktop: refused an IPC call (shape); 2 so far',
+      'conch-desktop: voice renderer error: LiveKit SDP description rejected due to a BUNDLE codec collision.',
+    ]);
+  });
+
+  it('rate-limits each diagnostic across window replacement and keeps distinct reports', async () => {
+    const f = fixture();
+    const report = (event: InvokeEvent, code: string) => f.ipc.invoke(event, 'reportVoiceDiagnostic', [code]);
+    expect((await report(f.event(), 'sdk-warning')).ok).toBe(true);
+    const next = f.replaceWindow();
+    f.clock.now += 9_999;
+    expect((await report(next, 'sdk-warning')).ok).toBe(true);
+    expect((await report(next, 'encoder-cpu')).ok).toBe(true);
+    expect(f.logs).toEqual([
+      'conch-desktop: voice renderer warning: LiveKit SDK warning.',
+      'conch-desktop: voice renderer warning: Screen share encoder is CPU-limited.',
+    ]);
+    f.clock.now += 1;
+    expect((await report(next, 'sdk-warning')).ok).toBe(true);
+    expect(f.logs).toHaveLength(3);
+  });
+});
 
 describe('every invocation is checked before anything else', () => {
   it('runs a call from the owned contents’ live main frame at the app’s own origin', async () => {
@@ -900,6 +944,7 @@ describe('the voice family (issue #1374)', () => {
       ['voiceSetDeafen', [true]], ['voiceSetDevices', [{ input: 'Mic' }]], ['voiceSetTalkMode', ['open']],
       ['voiceDevices', []], ['voiceSaveDevice', [{ key: 'audio.input', value: 'Mic' }]],
       ['voiceKeyDevices', []], ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: 275 }]],
+      ['reportVoiceDiagnostic', ['encoder-cpu']],
     ];
     expect(calls.map(([name]) => name).sort()).toEqual([...VOICE_FUNCTIONS].sort());
     for (const [name, args] of calls) expect(await f.ipc.invoke(event, name, args), name).toEqual({ ok: false, kind: 'refused' });

@@ -14,7 +14,7 @@
 // operator's re-authentication, a password change, an invite code, a device
 // link, which main will carry in later children).
 import type { NativeNotification, NotificationPermissionState, Platform } from '../types';
-import { bridge } from './access';
+import { bridge, voiceDiagnosticBridge } from './access';
 import { copyText } from './clipboard';
 import { credentials } from './credentials';
 import { http } from './http';
@@ -97,6 +97,9 @@ export const platform: Platform = {
     // A new window is never made; main turns the click into the OS browser.
     externalLink: { target: '_blank', rel: 'noopener noreferrer' },
     browserVoice: false,
+    reportVoiceDiagnostic: (diagnostic) => {
+      void voiceDiagnosticBridge()?.reportVoiceDiagnostic?.(diagnostic).catch(() => undefined);
+    },
     appVersion: () =>
       (bridge()?.profiles() ?? Promise.resolve(null)).then(
         (view) => view?.compat.desktop ?? null,

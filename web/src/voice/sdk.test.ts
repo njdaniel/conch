@@ -21,6 +21,7 @@
 // No network, no microphone, no screen.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { VoiceSessionResult } from '../api';
+import { platform } from '../platform';
 import { VoiceClient, companionQualities } from './connection';
 import { FakeClock, settle } from './fakes';
 
@@ -1210,10 +1211,9 @@ describe('the SDK adapter', () => {
     expect(lines).not.toMatch(/room-abcdef|tok-abcdef/);
   });
 
-  it('sends only fixed diagnostic messages to the desktop console', () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    vi.stubGlobal('location', { protocol: 'conch-app:' });
+  it('reports only fixed diagnostic codes to the platform', () => {
+    const report = vi.fn();
+    platform.services.reportVoiceDiagnostic = report;
     try {
       const context = { fields: { sdp: 'private room and SDP', error: 'wss://host/room?token=secret' } };
       state.logger.methodFactory('warn')('not able to set offer, falling back to unmodified sdp', context);
@@ -1221,17 +1221,19 @@ describe('the SDK adapter', () => {
       state.logger.methodFactory('error')('unable to set offer', {
         fields: { ...context.fields, error: 'A BUNDLE group contains a codec collision between private fields' },
       });
+      state.logger.methodFactory('error')('unable to set answer', {
+        fields: { error: 'Bundled payload type collision: private fields' },
+      });
       state.logger.methodFactory('error')('room-name with token', context);
-      expect(warn).toHaveBeenCalledExactlyOnceWith('LiveKit retried negotiation with unmodified SDP.');
-      expect(error.mock.calls).toEqual([
-        ['LiveKit could not apply an SDP description.'],
-        ['LiveKit SDP description rejected due to a BUNDLE codec collision.'],
-        ['LiveKit SDK error.'],
+      expect(report.mock.calls).toEqual([
+        ['sdp-retry'],
+        ['sdp-rejected'],
+        ['sdp-bundle-collision'],
+        ['sdp-bundle-collision'],
+        ['sdk-error'],
       ]);
     } finally {
-      vi.unstubAllGlobals();
-      warn.mockRestore();
-      error.mockRestore();
+      delete platform.services.reportVoiceDiagnostic;
     }
   });
 
@@ -2002,6 +2004,14 @@ describe('sharing a screen', () => {
     await room.close();
   });
 
+  it('publishes a Detail share with balanced degradation', async () => {
+    const room = await connected();
+    await room.pickScreen({ resolution: '1080p', frameRate: 15 });
+    await room.publishScreen();
+    expect(state.published[0]?.options).toMatchObject({ degradationPreference: 'balanced' });
+    await room.close();
+  });
+
   it('applies caps on pick and skips them on publish or repeated quality with identical max constraints', async () => {
     const room = await connected();
     await room.pickScreen();
@@ -2010,7 +2020,7 @@ describe('sharing a screen', () => {
     expect(state.screenTracks[0]?.mediaStreamTrack.constraints).toEqual([{ width: { max: 1920 }, height: { max: 1080 }, frameRate: { max: 30 } }]);
     expect(state.screenTracks[0]?.sender?.parameters.degradationPreference).toBe('maintain-framerate');
     await room.setShareQuality({ resolution: '720p', frameRate: 15 });
-    expect(state.screenTracks[0]?.sender?.parameters.degradationPreference).toBe('maintain-resolution');
+    expect(state.screenTracks[0]?.sender?.parameters.degradationPreference).toBe('balanced');
     await room.close();
   });
 
