@@ -4,7 +4,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-import { BUNDLE_MAX_BYTES, buildBundle, Diagnostics, diagnosticsLogger, LINE_MAX_CHARS, LogRing, RING_LINES, scrubLine } from '../../main/diagnostics.ts';
+import { RECORD_MAX_CHARS, BUNDLE_MAX_BYTES, buildBundle, Diagnostics, diagnosticsLogger, LINE_MAX_CHARS, LogRing, RING_LINES, scrubLine } from '../../main/diagnostics.ts';
 
 const NOW = new Date('2026-11-20T10:00:00Z');
 
@@ -72,7 +72,10 @@ const ringValues: Readonly<Record<string, readonly string[]>> = {
 // or template. Aliases and computed log messages should fail closed here too.
 function unsafeRingCalls(file: string, source: string): string[] {
   const errors: string[] = [];
-  for (const match of source.matchAll(/(?<=[{,]\s*)(?:ring\b|['"]ring['"]|\[\s*['"]ring['"]\s*\])\s*:/gu)) {
+  // Every 'ring:' key, wherever it stands (a comment before it must not hide
+  // it: #2089's review). diagnostics.ts declares the option and is exempt.
+  if (file === 'diagnostics.ts') return errors;
+  for (const match of source.matchAll(/(?:\bring\b|['"]ring['"]|\[\s*['"]ring['"]\s*\])\s*:/gu)) {
     const before = source.slice(0, match.index);
     const where = `${file}:${String(before.split('\n').length)}`;
     const after = source.slice(match.index + match[0].length);
@@ -101,6 +104,26 @@ describe('diagnostic export call sites', () => {
         return unsafeRingCalls(relative(main, path).split(sep).join('/'), readFileSync(path, 'utf8'));
       });
     expect(errors).toEqual([]);
+  });
+
+  // The ways past the key check (#2089's review): a shorthand { ring } option,
+  // and writing to the ring directly. The tree has exactly one of each, pinned.
+  it('has no shorthand ring option and no direct ring write but the pinned ones', () => {
+    const main = join(import.meta.dirname, '../../main');
+    const found = readdirSync(main, { recursive: true, withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.endsWith('.ts'))
+      .flatMap((entry) => {
+        const file = relative(main, join(entry.parentPath, entry.name)).split(sep).join('/');
+        const source = readFileSync(join(entry.parentPath, entry.name), 'utf8');
+        return [...source.matchAll(/[{,]\s*ring\s*[,}]|\.record\s*\(/gu)].map((m) => `${file}: ${m[0].replace(/\s+/gu, ' ').trim()}`);
+      });
+    // app.ts hands the ring to Diagnostics ({ ring, ... }); diagnosticsLogger records.
+    expect(found.sort()).toEqual(['app.ts: { ring,', 'diagnostics.ts: .record('].sort());
+  });
+
+  it('refuses a ring option hidden behind a comment', () => {
+    expect(unsafeRingCalls('ipc.ts', 'deps.log(`refused ${reason}`, { /* export */ ring: true });')).toHaveLength(1);
+    expect(unsafeRingCalls('ipc.ts', 'deps.log(`refused`, {\n  // export\n  ring: true,\n});')).toHaveLength(1);
   });
 
   it('allows numeric literals and the reviewed values for their own file', () => {
@@ -295,12 +318,13 @@ describe('scrubLine', () => {
   });
 
   it('scrubs a line at the record bound and replaces a line just above it', () => {
-    expect(scrubLine('word '.repeat(400))).toHaveLength(LINE_MAX_CHARS);
-    expect(scrubLine('word '.repeat(400) + 'x')).toBe('[a 2001-character line, not kept]');
+    const atBound = 'word '.repeat(RECORD_MAX_CHARS / 4).slice(0, RECORD_MAX_CHARS);
+    expect(scrubLine(atBound)).toHaveLength(LINE_MAX_CHARS);
+    expect(scrubLine(`${atBound}x`)).toBe(`[a ${String(RECORD_MAX_CHARS + 1)}-character line, not kept]`);
   });
 
   it('counts the ellipsis within the line bound', () => {
-    const line = scrubLine(`conch-desktop: ${'word '.repeat(200)}`);
+    const line = scrubLine(`conch-desktop: ${'word '.repeat(80)}`);
     expect(line).toHaveLength(LINE_MAX_CHARS);
     expect(line.endsWith('…')).toBe(true);
   });

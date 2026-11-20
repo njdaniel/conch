@@ -81,6 +81,9 @@ import { currentName, isNotFound, isMoved, type CurrentName } from './channel-fo
 import { LINUX_SHARE_AUDIO_SCOPE, validApplicationName } from './protocol.ts';
 import type { CommandResult } from './supervisor.ts';
 import type { Companion, RemoveReason, ShareRef } from './companion.ts';
+
+// Why a share's sound record ends: the companion's RemoveReason, or main's own.
+type EndReason = RemoveReason | 'unused' | 'page' | 'page share end' | 'presence share end' | 'leave';
 import { COMPANION_PASS_MS } from './companion.ts';
 
 // The one switch, read by main alone: the exact value "1", on Linux. Never the
@@ -727,7 +730,8 @@ export class ShareSound {
   // is replacing this one (keepCapture). This covers a share that had a sound
   // record; one that never did (the choice none, a start refused before it
   // made one) is cleared by shareEnded.
-  #end(o: Owned, reason: string, keepCapture = false): Promise<void> {
+  // reason is a closed vocabulary: it reaches the diagnostics export (#2088).
+  #end(o: Owned, reason: EndReason, keepCapture = false): Promise<void> {
     if (this.#owned === o) this.#owned = null;
     if (!keepCapture && this.#capture?.companion === o.share.id) this.#capture = null;
     o.cancelled = true;
