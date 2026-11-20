@@ -4,6 +4,7 @@
 // releases (blur, hidden, pagehide).
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import * as api from '../api';
+import { usePrivateCalls } from '../calls/PrivateCallControls';
 import { soundAudience, sounds, voiceSounds } from '../sounds';
 import { pageHiddenOnPhone } from '../phone';
 import { platform } from '../platform';
@@ -180,6 +181,7 @@ function writeCamera(choice: Camera | null): void {
 
 // Every voice client this page made, for leaveVoice.
 const clients = new Set<VoiceClient>();
+const leaving = new Map<VoiceClient, Promise<void>>();
 
 // Whether this page is in voice now, on any client (Preview as member refuses
 // to start, and ends, while it is: issue #1517).
@@ -203,13 +205,26 @@ export function useInVoice(): boolean {
   return useSyncExternalStore(subscribeVoice, anyJoined);
 }
 
+// A client can publish its idle state while the room is still disconnecting.
+export function channelVoiceBusy(): boolean {
+  return leaving.size > 0 || anyJoined();
+}
+
+function leaveChannelVoice(client: VoiceClient): Promise<void> {
+  const pending = leaving.get(client);
+  if (pending !== undefined) return pending;
+  const left = client.leave().finally(() => { leaving.delete(client); });
+  leaving.set(client, left);
+  return left;
+}
+
 // leaveVoice leaves voice on every client of the page, and resolves once each
 // has: the camera stopped and its claim released, naming it, the share
 // stopped, the last report sent. Signing out calls it first, while the
 // credential still works, so nothing of this person's voice or camera is
 // carried into the next identity (ADR-015, design §6.2).
 export async function leaveVoice(): Promise<void> {
-  await Promise.all([...clients].map((c) => c.leave()));
+  await Promise.all([...new Set([...clients, ...leaving.keys()])].map(leaveChannelVoice));
 }
 
 // The voice processing chosen for each microphone (issue #659), for as long
@@ -296,6 +311,7 @@ export interface VoiceControl {
   readonly secure: boolean;
   // What this browser can share, and with what sound.
   readonly features: ShareFeatures;
+  readonly privateAudioBusy?: boolean;
   readonly client: VoiceClient;
   readonly setTalkKey: (code: string) => void;
   // Sets the release delay, and keeps it for the tab.
@@ -332,6 +348,7 @@ export function useVoice({
   reachable: boolean;
   onUnauthorized: () => void;
 }): VoiceControl {
+  const privateCalls = usePrivateCalls();
   const clientRef = useRef<VoiceClient | null>(null);
   if (clientRef.current === null) {
     clientRef.current = new VoiceClient({
@@ -457,7 +474,7 @@ export function useVoice({
 
   // Signing out ends voice.
   useEffect(() => {
-    if (!signedIn) void client.leave();
+    if (!signedIn) void leaveChannelVoice(client);
   }, [signedIn, client]);
   useEffect(
     () => () => {
@@ -689,20 +706,20 @@ export function useVoice({
     joinedAt.current = channelsNow.current.find((c) => c.name === name)?.id ?? null;
   }, [client]);
   const join = useCallback(() => {
-    if (channel === null) return;
+    if (channel === null || leaving.has(client) || privateCalls?.audioBusy()) return;
     // The meter's audio context is made first, in the click, with nothing
     // before or between (issue #1794): iOS only runs one made in a gesture.
     const audio = openAudio();
     note(channel);
     client.join(channel, { audio });
-  }, [channel, client, note]);
+  }, [channel, client, note, privateCalls]);
   const watchOnly = useCallback((beside = false) => {
-    if (channel === null) return;
+    if (channel === null || leaving.has(client) || privateCalls?.audioBusy()) return;
     note(channel);
     client.join(channel, { watchOnly: true, beside });
-  }, [channel, client, note]);
+  }, [channel, client, note, privateCalls]);
   const leave = useCallback(() => {
-    void client.leave();
+    void leaveChannelVoice(client);
   }, [client]);
 
   return {
@@ -713,6 +730,7 @@ export function useVoice({
     capturing,
     secure: window.isSecureContext,
     features,
+    privateAudioBusy: privateCalls?.audioBusy(),
     client,
     setTalkKey,
     setReleaseDelay,

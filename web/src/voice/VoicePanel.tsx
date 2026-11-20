@@ -626,12 +626,12 @@ export function VoicePanel({
               </>
             ) : (
               <>
-                <button ref={joinButton} type="button" className="primary" onClick={voice.join} disabled={!canJoin}>
+                <button ref={joinButton} type="button" className="primary" onClick={voice.join} disabled={!canJoin || voice.privateAudioBusy}>
                   <Glyph name="headphones" />
                   {/* One flex item, so the words and the channel read as one line of text (F17). */}
                   <span className="btn-text">Join voice {dest}</span>
                 </button>
-                <button type="button" onClick={() => { voice.watchOnly(elsewhere); }} disabled={!canJoin} aria-describedby={canJoin ? 'voice-watch-hint' : undefined}>
+                <button type="button" onClick={() => { voice.watchOnly(elsewhere); }} disabled={!canJoin || voice.privateAudioBusy} aria-describedby={canJoin ? 'voice-watch-hint' : undefined}>
                   <span className="btn-text">Watch only {dest}</span>
                 </button>
               </>

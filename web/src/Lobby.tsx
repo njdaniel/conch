@@ -1,10 +1,12 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { DMCallControls, PrivateCallBanner, PrivateCallProvider, type PrivateCallOptions } from './calls/PrivateCallControls';
 import { ChannelList } from './ChannelList';
 import { ChannelNav } from './ChannelNav';
 import { GroupsPanel } from './ChannelGroups';
 import { visualOrder } from './arrangement';
 import { useArrangement } from './useArrangement';
 import type { SettingsChange } from './ChannelSettingsAsk';
+import { channelVoiceBusy, leaveVoice } from './voice/useVoice';
 import type { InVoice } from './voice/useOccupancy';
 import { headingId } from './Conversation';
 import { Avatar, Glyph } from './Icons';
@@ -102,11 +104,15 @@ export function Lobby({
   passwordSet = false,
   banner,
   band,
+  privateCalls,
   visit,
   admin,
   onSettingsOpen,
   overlay,
 }: {
+  // The DM route supplies its conversation id when it is mounted. The
+  // signed-in person stream supplies the transport for the whole lobby.
+  readonly privateCalls?: PrivateCallOptions & { readonly conversationId?: number };
   readonly origin: string;
   readonly name: string;
   // The signed-in principal's id, for the colour of their initial.
@@ -372,14 +378,16 @@ export function Lobby({
     close();
   };
 
-  return (
+  const showCalls = privateCalls !== undefined && me > 0 && visit === undefined;
+  const hasBand = band !== undefined || showCalls;
+  const lobby = (
     <JoiningSettings.Provider value={joining}>
     <SettingsOpen.Provider value={settingsOpen}>
     <AddPerson.Provider value={onAddPerson === undefined ? null : addPerson}>
-      <div ref={lobbyEl} className={`${phone ? `lobby phone view-${view}${live ? ' in-voice' : ''}` : 'lobby'}${band === undefined ? '' : ' has-band'}`}>
+      <div ref={lobbyEl} className={`${phone ? `lobby phone view-${view}${live ? ' in-voice' : ''}` : 'lobby'}${hasBand ? ' has-band' : ''}`}>
         {/* While Settings is open the rest of the page is inert: the panel is
             modal, and focus cannot wander behind its backdrop. */}
-        <div className="top-group" inert={band !== undefined && (settingsOpen || asking)}>
+        <div className="top-group" inert={hasBand && (settingsOpen || asking)}>
         <header className="topbar" inert={settingsOpen || asking}>
           <h1 className="brand">Conch</h1>
           <div role="status" aria-label="Status" className="status">
@@ -423,6 +431,7 @@ export function Lobby({
           </div>
         </header>
         {band}
+        {showCalls ? <PrivateCallBanner conversationId={privateCalls.conversationId} nameOf={(id) => voiceNames?.get(id)} /> : null}
         </div>
         <div className={panelOpen ? 'areas' : 'areas side-closed'} inert={settingsOpen || asking}>
           {/* The switcher's entry is above the Channels navigation, not in it: that holds channel controls only. */}
@@ -516,6 +525,7 @@ export function Lobby({
                   You no longer have access to #{channels.lost}
                 </p>
               )}
+              {showCalls && privateCalls.conversationId !== undefined ? <DMCallControls conversationId={privateCalls.conversationId} /> : null}
               {conversation}
               {phone ? null : firstRun}
             </section>
@@ -689,4 +699,9 @@ export function Lobby({
     </SettingsOpen.Provider>
     </JoiningSettings.Provider>
   );
+  return showCalls ? (
+    <PrivateCallProvider scope={{ origin, account: me }} options={privateCalls} channelVoice={{ isBusy: channelVoiceBusy, leave: leaveVoice }}>
+      {lobby}
+    </PrivateCallProvider>
+  ) : lobby;
 }
