@@ -144,8 +144,11 @@ type eventsSub struct {
 	// directoryChanged owes a human socket one conch.directory_changed.v1
 	// (notifyDirectoryChanged, design §13.6): a flag, as the two above are.
 	directoryChanged bool
-	refs             []eventRef
-	gone             bool
+	// blocksChanged owes a human socket one conch.blocks_changed.v1
+	// (notifyBlocksChanged, issue #1832): a flag, as the three above are.
+	blocksChanged bool
+	refs          []eventRef
+	gone          bool
 }
 
 // subscribe registers a subscriber, owed its first roster: that roster goes
@@ -195,6 +198,15 @@ func (sub *eventsSub) takePermissions() bool {
 	defer sub.hub.mu.Unlock()
 	owed := sub.permissionsChanged
 	sub.permissionsChanged = false
+	return owed && !sub.gone
+}
+
+// takeBlocks reports and clears an owed conch.blocks_changed.v1.
+func (sub *eventsSub) takeBlocks() bool {
+	sub.hub.mu.Lock()
+	defer sub.hub.mu.Unlock()
+	owed := sub.blocksChanged
+	sub.blocksChanged = false
 	return owed && !sub.gone
 }
 
@@ -428,6 +440,24 @@ func (h *eventsHub) notifyDirectoryChanged(everyone bool, principalIDs ...int64)
 		}
 		if _, ok := want[sub.principalID]; everyone || ok {
 			sub.directoryChanged = true
+			sub.signal()
+		}
+	}
+}
+
+// notifyBlocksChanged owes every human events socket of ownerID one
+// conch.blocks_changed.v1 (issue #1832): their answer to GET /v1/blocks
+// changed. It is the owner's alone: no other principal's socket, the blocked
+// principal's least of all, is ever owed it. A zero id matches nothing.
+func (h *eventsHub) notifyBlocksChanged(ownerID int64) {
+	if ownerID == 0 {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for sub := range h.subs {
+		if sub.human && sub.principalID == ownerID {
+			sub.blocksChanged = true
 			sub.signal()
 		}
 	}
@@ -752,7 +782,10 @@ type eventsStream struct {
 	permissionsLater <-chan time.Time
 	// directoryLater is channelsLater for conch.directory_changed.v1 (design
 	// §13.6): coalesced under the same roster floor.
-	directoryLater   <-chan time.Time
+	directoryLater <-chan time.Time
+	// blocksLater is channelsLater for conch.blocks_changed.v1 (issue
+	// #1832): coalesced under the same roster floor.
+	blocksLater      <-chan time.Time
 	readStateBuilt   time.Time
 	readStateLater   <-chan time.Time
 	lastReadStates   map[int64][]byte
@@ -860,6 +893,17 @@ func (e *eventsStream) run(ctx context.Context, recheck <-chan time.Time) {
 			default:
 			}
 			if !e.stillMember(ctx) || !e.sendDoc(ctx, schema.DirectoryChangedV1{Schema: schema.DirectoryChangedSchemaV1}) {
+				return
+			}
+		case <-e.blocksLater:
+			e.blocksLater = nil
+			select {
+			case <-e.sub.dropped:
+				e.s.closeEventsDropped(ctx, e.conn, e.channel.ID, e.principalID, e.credID)
+				return
+			default:
+			}
+			if !e.stillMember(ctx) || !e.sendDoc(ctx, schema.BlocksChangedV1{Schema: schema.BlocksChangedSchemaV1}) {
 				return
 			}
 		case <-e.sub.dropped:
@@ -981,6 +1025,9 @@ func (e *eventsStream) flush(ctx context.Context) bool {
 	}
 	if e.sub.takeDirectory() && e.directoryLater == nil {
 		e.directoryLater = time.After(e.s.eventsRosterFloor)
+	}
+	if e.sub.takeBlocks() && e.blocksLater == nil {
+		e.blocksLater = time.After(e.s.eventsRosterFloor)
 	}
 	for _, ref := range refs {
 		if !e.sendRef(ctx, ref) {

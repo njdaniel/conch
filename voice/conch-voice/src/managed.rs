@@ -2391,10 +2391,10 @@ fn whoami_reason(error: &ApiError) -> VoiceControlReason {
 /// With `no_mute_key` (`--no-mute-key`, #1631) `keys.mute` is not one of them: the owner
 /// alone mutes. The desktop app locks a session by muting it through `set_mute`, and a mute
 /// key read here would toggle the machine without that path, so it could unmute a locked
-/// session. The desktop's own settings cannot bind it (`saveDevice` and `saveTalkBinding`
-/// exclude it); this covers a hand-edited `voice.toml`. A file that binds only mute then
-/// opens no key device. Without the flag, as for `conch`'s TUI and for `join`, `keys.mute`
-/// is read as it always was.
+/// session. The desktop can watch the configured key in an input-only process and send
+/// `set_mute` after checking its lifecycle state. A file that binds only mute opens no key
+/// device in this managed process. Without the flag, as for `conch`'s TUI and `join`,
+/// `keys.mute` is read as it always was.
 fn key_source(
     config: &Config,
     keys: &KeySource,

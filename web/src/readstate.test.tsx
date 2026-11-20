@@ -847,12 +847,18 @@ describe('the opening unread position', () => {
     server.history = Array.from({ length: 320 }, (_, i) => message(i + 1));
     server.read = () => [state(7, 320 - mark, mark)];
     await openChat();
+    const jump = await screen.findByRole('button', { name: 'Jump to first unread' });
     expect(divider()).toBeNull();
     const scroll = vi.fn();
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: scroll });
-    fireEvent.click(screen.getByRole('button', { name: 'Jump to first unread' }));
-    await waitFor(() => { expect(nextRow()).toBe(String(mark + 1)); });
-    await waitFor(() => { expect(document.activeElement?.getAttribute('data-message-id')).toBe(String(mark + 1)); });
+    // Flush the mocked page responses and the effects that request each
+    // next page and focus the target once React has rendered it.
+    await act(async () => {
+      fireEvent.click(jump);
+      await Promise.resolve();
+    });
+    expect(nextRow()).toBe(String(mark + 1));
+    expect(document.activeElement?.getAttribute('data-message-id')).toBe(String(mark + 1));
     expect(scroll).toHaveBeenCalledWith({ block: 'center' });
   });
 

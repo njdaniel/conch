@@ -101,6 +101,7 @@ const (
 	maxReadStateBody      = listRowCeiling*listRowBound + listSlack
 	maxCredentialsBody    = listRowCeiling*listRowBound + listSlack
 	maxDeviceLinksBody    = listRowCeiling*listRowBound + listSlack
+	maxAccountNoticesBody = listRowCeiling*listRowBound + listSlack
 	maxVoiceOccupancyBody = listRowCeiling*listRowBound + listSlack
 	maxNetsBody           = netCeiling*netRowBound + listSlack
 )
@@ -151,6 +152,9 @@ type (
 	}
 	deviceLinksDoc struct {
 		schema.ListOwnSignInLinksResponseV1
+	}
+	accountNoticesDoc struct {
+		schema.ListAccountNoticesResponseV1
 	}
 	voiceOccupancyDoc struct{ schema.VoiceOccupancyV1 }
 
@@ -210,6 +214,7 @@ func (previewDoc) maxBody() int64        { return listSlack }
 func (readStateDoc) maxBody() int64      { return maxReadStateBody }
 func (credentialsDoc) maxBody() int64    { return maxCredentialsBody }
 func (deviceLinksDoc) maxBody() int64    { return maxDeviceLinksBody }
+func (accountNoticesDoc) maxBody() int64 { return maxAccountNoticesBody }
 func (voiceOccupancyDoc) maxBody() int64 { return maxVoiceOccupancyBody }
 func (netsDoc) maxBody() int64           { return maxNetsBody }
 

@@ -308,6 +308,8 @@ func walkCases(t *testing.T) []walkCase {
 		{key: "setup", stdin: walkSetupToken + "\n" + walkPassword + "\n123456\n", args: func(u, _ string) []string { return []string{"setup", "--server", u} }},
 		{key: "device-link create", quietWhenOK: true, args: func(u, _ string) []string { return []string{"device-link", "create", "--server", u} }},
 		{key: "device-link list", args: func(u, _ string) []string { return []string{"device-link", "list", "--server", u} }},
+		{key: "notices", args: func(u, _ string) []string { return []string{"notices", "--server", u} }},
+		{key: "notices dismiss", quietWhenOK: true, args: func(u, _ string) []string { return []string{"notices", "dismiss", "--server", u, "3"} }},
 		{key: "device-link close", quietWhenOK: true, args: func(u, _ string) []string { return []string{"device-link", "close", "--server", u, "9"} }},
 		{key: "admin join status", ownWords: true, args: func(u, _ string) []string { return []string{"admin", "join", "status", "--server", u} }},
 		{key: "admin join set", ownWords: true, args: func(u, _ string) []string {
@@ -328,6 +330,8 @@ func walkCases(t *testing.T) []walkCase {
 		}},
 		{key: "whoami", args: func(u, _ string) []string { return []string{"whoami", "--server", u} }},
 		{key: "rename", whoamiOK: true, args: func(u, _ string) []string { return []string{"rename", "--server", u, "bob"} }},
+		{key: "block", args: func(u, _ string) []string { return []string{"block", "list", "--server", u} }},
+		{key: "block", args: func(u, _ string) []string { return []string{"block", "add", "--server", u, "9"} }},
 		{key: "report", quietWhenOK: true, args: func(u, _ string) []string {
 			return []string{"report", "--server", u, "--did", "a", "--expected", "b", "--happened", "c", "--often", "once", "--yes"}
 		}},
@@ -459,6 +463,10 @@ func hostileServer(t *testing.T, ok, whoamiOK bool) *httptest.Server {
 			write(w, http.StatusCreated, schema.CreateChannelResponse{Channel: schema.ChannelV0{ID: 1, Name: hostile, CreatedAt: ts.Time()}})
 		case "POST /v0/principals":
 			write(w, http.StatusCreated, schema.CreatePrincipalResponse{Principal: schema.PrincipalV0{ID: 9, Kind: schema.PrincipalKind(hostile), Name: hostile, CreatedAt: ts.Time()}})
+		case "GET /v1/blocks":
+			write(w, http.StatusOK, schema.ListBlocksResponseV1{Blocks: []schema.BlockV1{{PrincipalID: 9, Name: hostile, Kind: schema.PrincipalHuman, CreatedAt: ts}}, Limit: schema.MaxBlocks})
+		case "PUT /v1/blocks/9":
+			write(w, http.StatusOK, schema.BlockV1{PrincipalID: 9, Name: hostile, Kind: schema.PrincipalHuman, CreatedAt: ts})
 		case "PUT /v1/principals/9/name", "PUT /v1/principals/42/name":
 			write(w, http.StatusOK, schema.RenamePrincipalResponseV1{Principal: schema.PrincipalV0{ID: 9, Kind: schema.PrincipalKind(hostile), Name: hostile, CreatedAt: ts.Time()}})
 		case "GET /v1/principals":
@@ -597,7 +605,11 @@ func hostileServer(t *testing.T, ok, whoamiOK bool) *httptest.Server {
 				Token: walkToken, Auth: schema.AuthStateV1{Scope: schema.CredentialScopeSetup}})
 		case "POST /v1/totp/enroll":
 			write(w, http.StatusOK, schema.TOTPEnrollmentV1{Secret: hostile, Issuer: hostile, Account: hostile, Algorithm: hostile, Digits: 6, PeriodSeconds: 30, URI: hostile})
-		case "POST /v1/totp/confirm", "DELETE /v1/sign-in-links/mine/9":
+		case "GET /v1/notices/mine":
+			write(w, http.StatusOK, schema.ListAccountNoticesResponseV1{Notices: []schema.AccountNoticeV1{
+				{ID: 3, Kind: schema.AccountNoticeKindPasswordSetByLink, ByName: hostile, At: ts},
+				{ID: 4, Kind: schema.AccountNoticeKind(hostile), ByName: hostile, At: ts}}})
+		case "POST /v1/totp/confirm", "DELETE /v1/sign-in-links/mine/9", "DELETE /v1/notices/mine/3":
 			w.WriteHeader(http.StatusNoContent)
 		case "POST /v1/sign-in-links/mine":
 			write(w, http.StatusCreated, schema.CreateSignInLinkResponseV1{SignInLink: schema.SignInLinkV1{ID: 3, PrincipalID: 42, CreatedBy: 42, CreatedAt: ts, ExpiresAt: ts, Label: hostile}, Code: walkSignInCode})

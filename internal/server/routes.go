@@ -203,6 +203,11 @@ func (s *Server) routeTable() []route {
 		rt("GET /v1/notifications/preferences", accessAuthenticated, s.membersOnly(hf(s.handleGetNotificationPreferences))),
 		rt("PUT /v1/notifications/preferences", accessAuthenticated, s.membersOnly(hf(s.handlePutNotificationPreferences))),
 		rt("GET /v1/notifications/pending", accessAuthenticated, s.membersOnly(hf(s.handleListPendingNotifications))),
+		// Personal blocks (issue #1832, docs/design/blocks.md): the caller's
+		// own list, for people with a full credential; see blocks.go.
+		rt("GET /v1/blocks", accessAuthenticated, s.membersOnly(hf(s.handleListBlocks))),
+		rt("PUT /v1/blocks/{principal_id}", accessAuthenticated, s.membersOnly(hf(s.handlePutBlock))),
+		rt("DELETE /v1/blocks/{principal_id}", accessAuthenticated, s.membersOnly(hf(s.handleDeleteBlock))),
 		// Push registrations (issue #1714): the same people-only rule, and the
 		// same limiter. The config is the one route any signed-in caller may
 		// read: nothing in it is secret. "mine" is a literal, so the mux never
@@ -397,6 +402,11 @@ func (s *Server) routeTable() []route {
 		rt("POST /v1/sign-in-links/mine", accessAuthenticated, hf(s.handleCreateDeviceLink)),
 		rt("GET /v1/sign-in-links/mine", accessAuthenticated, hf(s.handleListOwnDeviceLinks)),
 		rt("DELETE /v1/sign-in-links/mine/{id}", accessAuthenticated, hf(s.handleCloseOwnDeviceLink)),
+		// Account notices (issue #2042): what the member is told about their
+		// own account, such as a password set through a link someone else
+		// made. Their own, on a sign-in of their own. See account_notices.go.
+		rt("GET /v1/notices/mine", accessAuthenticated, hf(s.handleListAccountNotices)),
+		rt("DELETE /v1/notices/mine/{id}", accessAuthenticated, hf(s.handleDismissAccountNotice)),
 		// Operator sign-in and setup (issue #709). The second step of an
 		// operator's sign-in and the setup token's redemption are exempt, as
 		// the sign-in is, limited before any work and over HTTPS or loopback

@@ -1,3 +1,4 @@
+import { isCollapsedFor } from './blocks';
 import { sounds, setSoundAudience } from './sounds';
 import { messagePreview } from './spoilerFiles';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -48,6 +49,8 @@ function permission(): BrowserPermission {
   return platform.services.notifications.permission();
 }
 
+const noBlocks: ReadonlySet<number> = new Set();
+
 export function useNotifications({
   signedIn,
   origin,
@@ -60,6 +63,7 @@ export function useNotifications({
   openChannel = null,
   readStateEvent,
   onOpen,
+  blocked = noBlocks,
 }: {
   readonly openChannel?: number | null;
   readonly signedIn: boolean;
@@ -75,6 +79,9 @@ export function useNotifications({
   readonly editEvent?: MessageV2 | null;
   readonly readStateEvent: ReadStateV1 | null;
   readonly onOpen: (channel: string) => void;
+  // The people this person blocks (issue #1832): their messages and mentions
+  // raise no alert, unless they carry a decision (isBlockExempt).
+  readonly blocked?: ReadonlySet<number>;
 }) {
   const account = principal?.id ?? 0;
   useEffect(() => {
@@ -193,6 +200,7 @@ export function useNotifications({
   const eligible = useCallback((message: MessageV2) => {
     if (message.removed === true || removed.current.has(message.id)) return null;
     if (!signedIn || !eventsLive || principal === null || preferences.policy === 'off' || preferences.muted.includes(message.channel_id) || message.author_id === principal.id) return null;
+    if (isCollapsedFor(blocked, message)) return null;
     const channel = channels.find((candidate) => candidate.id === message.channel_id);
     if (channel === undefined) return null;
     const mention = mentions(message.body, principal.name);
@@ -200,7 +208,7 @@ export function useNotifications({
     const id = `${origin}:${String(account)}:${String(message.id)}`;
     if (delivered.current.has(id)) return null;
     return { channel, mention, id };
-  }, [signedIn, eventsLive, principal, preferences, channels, origin, account]);
+  }, [signedIn, eventsLive, principal, preferences, channels, origin, account, blocked]);
 
   const deliver = useCallback((message: MessageV2, live: boolean) => {
     const found = eligible(message);

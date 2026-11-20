@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { Autostart, autostartPath, carriesMarker, entryText, execValue, trustedTarget } from '../../main/autostart.ts';
 
+import { diagnosticsLogger, LogRing } from '../../main/diagnostics.ts';
+
 const dirs: string[] = [];
 function tmp(): string {
   const dir = mkdtempSync(join(tmpdir(), 'conch-autostart-'));
@@ -32,6 +34,7 @@ const EXEC = '/opt/Conch/conch-desktop';
 
 function make(config: string, over: { packaged?: boolean; platform?: NodeJS.Platform; execPath?: string; above?: string } = {}) {
   const logs: string[] = [];
+  const ring = new LogRing();
   const target = over.execPath === undefined ? tree() : null;
   const auto = new Autostart({
     packaged: over.packaged ?? true,
@@ -40,9 +43,9 @@ function make(config: string, over: { packaged?: boolean; platform?: NodeJS.Plat
     ...(over.execPath === undefined ? { trustedAbove: target?.top } : over.above === undefined ? {} : { trustedAbove: over.above }),
     env: { XDG_CONFIG_HOME: config },
     home: '/nonexistent-home',
-    log: (l) => logs.push(l),
+    log: diagnosticsLogger(ring, (line) => logs.push(line)),
   });
-  return { auto, logs, file: join(config, 'autostart', 'chat.conch.desktop.desktop'), exec: target?.exec ?? EXEC };
+  return { auto, logs, ring, file: join(config, 'autostart', 'chat.conch.desktop.desktop'), exec: target?.exec ?? EXEC };
 }
 
 describe('where the entry goes', () => {
@@ -121,15 +124,20 @@ describe('turning it on and off', () => {
   });
 
   it('never overwrites or removes a file Conch did not write', async () => {
-    const config = tmp();
-    const { auto, file } = make(config);
-    mkdirSync(join(config, 'autostart'));
+    const config = join(tmp(), 'Jane Doe', '.config');
+    const { auto, file, logs, ring } = make(config);
+    mkdirSync(join(config, 'autostart'), { recursive: true });
     writeFileSync(file, '[Desktop Entry]\nName=Mine\nExec=/usr/bin/other\n');
     expect(await auto.enable()).toEqual({ ok: false, reason: 'foreign-file' });
     expect(readFileSync(file, 'utf8')).toContain('Name=Mine');
     expect(await auto.disable()).toEqual({ ok: false, reason: 'foreign-file' });
     expect(readFileSync(file, 'utf8')).toContain('Name=Mine');
     expect(readdirSync(join(config, 'autostart'))).toEqual(['chat.conch.desktop.desktop']);
+    expect(logs.filter((line) => line.includes(file))).toHaveLength(2);
+    expect(ring.lines()).toEqual([
+      'conch-desktop: an existing autostart entry was not written by Conch; it is left alone',
+      'conch-desktop: the autostart entry was not written by Conch; it is left alone',
+    ]);
   });
 
   it('refuses a path it cannot write safely', async () => {

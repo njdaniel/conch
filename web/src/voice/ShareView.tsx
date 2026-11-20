@@ -8,6 +8,7 @@
 // no device.
 import { useEffect, useRef, useState } from 'react';
 import { Glyph } from '../Icons';
+import { platform } from '../platform';
 import { fullscreenVideo } from './fullscreen';
 import { usePictureInPicture } from './pictureInPicture';
 import type { VoiceClient, VoiceState } from './connection';
@@ -18,24 +19,27 @@ import type { SettledQuality, ShareDirection, ShareSample } from './share';
 // gives it the companion's, which is a narrower thing than the call view's.
 export type ShareViewClient = Pick<VoiceClient, 'attachStream' | 'readShareStats' | 'watchStream'>;
 
+const cpuWarning = 'Your computer is too busy to send smoothly. Close heavy programs or choose a lower share resolution.';
+
 // ShareReadout samples only the selected watched picture or the local screen's
 // top layer. The first sample has no bitrate; the next, about a second later,
 // does. Given asked (the sharer's own line), it says what was asked first, the
 // measurement after, and, once the picture has been short of it for 5 s, one
 // reason, until it has been back on target for 5 s. Loss shows when the engine
-// reports it. Every number is the browser's measurement; a stat the engine
-// does not give is left out. It is one polite-off status line: read in order
-// by a screen reader, never announced each second.
+// reports it. The sending strip also warns after 3 s of CPU limitation.
+// Every number is the browser's measurement; a stat the engine does not give
+// is left out. The readout is a status line with live announcements off.
 export function ShareReadout({ client, direction, principal, prefix = '', asked, now = () => performance.now() }: {
   readonly client: Pick<VoiceClient, 'readShareStats'>;
   readonly direction: ShareDirection;
   readonly principal?: number;
   readonly prefix?: string;
   readonly asked?: SettledQuality;
-  // The clock the 5 s holds count on, in ms.
+  // The clock for the quality and CPU holds, in ms.
   readonly now?: () => number;
 }) {
   const [text, setText] = useState<string | null>(null);
+  const [cpuLimited, setCpuLimited] = useState(false);
   const [reason, setReason] = useState<string | null>(null);
   const previous = useRef<ShareSample | null>(null);
   const shortfall = useRef<ShortfallState>(noShortfall);
@@ -52,18 +56,38 @@ export function ShareReadout({ client, direction, principal, prefix = '', asked,
   useEffect(() => {
     let live = true;
     let timer: number | null = null;
+    let cpu: { publication: ShareSample['publication']; since: number } | null = null;
+    let warned = false;
     previous.current = null;
     shortfall.current = noShortfall;
     setText(null);
+    setCpuLimited(false);
     setReason(null);
     const read = async () => {
       const sample = await client.readShareStats(direction, principal);
       if (!live) return;
+      const at = clock.current();
       setText(shareReadout(sample, previous.current));
+      // The encoder's own reason can report CPU pressure even when the
+      // requested quality is unknown or the measured picture meets it.
+      if (direction === 'sent') {
+        // Missed polls interrupt the initial hold, but an active warning
+        // needs a new sample to confirm recovery or a replaced publication.
+        if (sample === null) {
+          if (!warned) cpu = null;
+        } else {
+          if (sample.limitation !== 'cpu') cpu = null;
+          else if (cpu === null || sample.publication !== cpu.publication) cpu = { publication: sample.publication, since: at };
+          const limited = cpu !== null && at - cpu.since >= 3000;
+          if (limited && !warned) platform.services.reportVoiceDiagnostic?.('encoder-cpu');
+          warned = limited;
+          setCpuLimited(limited);
+        }
+      }
       if (quality.current === undefined) {
         setReason(null);
       } else {
-        shortfall.current = nextShortfall(shortfall.current, sample, quality.current, clock.current());
+        shortfall.current = nextShortfall(shortfall.current, sample, quality.current, at);
         setReason(shortfall.current.reason);
       }
       // A missing sample resets the baseline.
@@ -76,13 +100,19 @@ export function ShareReadout({ client, direction, principal, prefix = '', asked,
       if (timer !== null) window.clearTimeout(timer);
     };
   }, [client, direction, principal]);
-  if (text === null) return null;
-  return (
+  const readout = text === null ? null : (
     <span className="share-readout" role="status" aria-live="off" aria-label="Share quality">
       {asked === undefined ? null : <span>{askedText(asked)}. </span>}
       <span>{prefix}{text}</span>
       {reason === null ? null : <span>. {reason}.</span>}
     </span>
+  );
+  if (direction === 'received') return readout;
+  return (
+    <>
+      {readout === null ? null : <p className="hint voice-supplemental">{readout}</p>}
+      {cpuLimited ? <p role="status" className="hint">{cpuWarning}</p> : null}
+    </>
   );
 }
 

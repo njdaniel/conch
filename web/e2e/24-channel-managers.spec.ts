@@ -88,11 +88,11 @@ test('C793 an operator delegates a channel; its manager adds, removes and rename
   await expect(memberRow(mgr, target.name)).toBeVisible();
 
   await memberRow(mgr, operatorName).getByRole('button', { name: `Actions for ${operatorName}` }).click();
-  await expect(memberRow(mgr, operatorName).getByRole('menuitem')).toHaveText(['Remove from voice']);
+  await expect(memberRow(mgr, operatorName).getByRole('menuitem')).toHaveText(['Remove from voice', 'Block…']);
   await mgr.keyboard.press('Escape');
   await expect(panel(mgr).getByText('Only operators choose who manages a channel or decides approvals.', { exact: true })).toBeVisible();
   await memberRow(mgr, target.name).getByRole('button', { name: `Actions for ${target.name}` }).click();
-  await expect(memberRow(mgr, target.name).getByRole('menuitem')).toHaveText(['Remove from voice', 'Ban from channel', 'Remove from channel']);
+  await expect(memberRow(mgr, target.name).getByRole('menuitem')).toHaveText(['Remove from voice', 'Ban from channel', 'Remove from channel', 'Block…']);
   await mgr.keyboard.press('Escape');
 
   const member = (await meet()).page;
@@ -100,7 +100,11 @@ test('C793 an operator delegates a channel; its manager adds, removes and rename
   await channelButton(member, current).click();
   await expect(memberRow(member, plain.name)).toBeVisible();
   await expect(panel(member).getByRole('form', { name: 'Add person by name' })).toHaveCount(0);
-  await expect(panel(member).getByRole('button', { name: /^Actions for / })).toHaveCount(0);
+  // A plain member holds no moderation, only the personal Block on anyone else's row.
+  await expect(memberRow(member, plain.name).getByRole('button', { name: /^Actions for / })).toHaveCount(0);
+  await memberRow(member, operatorName).getByRole('button', { name: `Actions for ${operatorName}` }).click();
+  await expect(memberRow(member, operatorName).getByRole('menuitem')).toHaveText(['Block…']);
+  await member.keyboard.press('Escape');
 
   await chooseFor(memberRow(mgr, target.name), target.name, 'Remove from channel');
   await expect(memberRow(mgr, target.name)).toHaveCount(0);

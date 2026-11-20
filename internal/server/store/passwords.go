@@ -208,7 +208,8 @@ func (s *Store) IssueLoginCredential(ctx context.Context, in LoginIssue, now tim
 			return err
 		}
 		exp := now.Add(lifetime)
-		cred, err := insertCredentialTx(ctx, tx, p.ID, "password sign-in", token, now, &exp, lifetime, p.ID)
+		// A password sign-in is the person's own (issue #2042).
+		cred, err := insertCredentialTx(ctx, tx, p.ID, "password sign-in", token, now, &exp, lifetime, p.ID, madeBySelf)
 		if err != nil {
 			return err
 		}
@@ -663,10 +664,11 @@ func rotateSessionTx(ctx context.Context, tx execer, actor string, credentialID 
 		principalID             int64
 		label                   string
 		expiresAt, renews, idle sql.NullInt64
+		selfMade                bool
 	)
 	if err := tx.QueryRowContext(ctx,
-		"SELECT principal_id, label, expires_at, renew_ms, idle_ms FROM credentials WHERE id = ?", credentialID,
-	).Scan(&principalID, &label, &expiresAt, &renews, &idle); err != nil {
+		"SELECT principal_id, label, expires_at, renew_ms, idle_ms, self_made FROM credentials WHERE id = ?", credentialID,
+	).Scan(&principalID, &label, &expiresAt, &renews, &idle, &selfMade); err != nil {
 		return schema.CredentialV1{}, fmt.Errorf("store: rotate session: read: %w", err)
 	}
 	res, err := tx.ExecContext(ctx,
@@ -679,7 +681,10 @@ func rotateSessionTx(ctx context.Context, tx execer, actor string, credentialID 
 	} else if n != 1 {
 		return schema.CredentialV1{}, ErrLoginStale
 	}
-	c, err := insertCredentialTx(ctx, tx, principalID, label, token, now, millisPtr(expiresAt), time.Duration(renews.Int64)*time.Millisecond, issuerOf(actor))
+	// The caller's own session, rotated: it keeps the provenance of the one
+	// it replaces (issue #2042), so a password change made on a credential
+	// someone else made does not make it self-made.
+	c, err := insertCredentialTx(ctx, tx, principalID, label, token, now, millisPtr(expiresAt), time.Duration(renews.Int64)*time.Millisecond, issuerOf(actor), credentialMaker(selfMade))
 	if err != nil {
 		return schema.CredentialV1{}, err
 	}
@@ -855,7 +860,7 @@ func (s *Store) EnrollPassword(ctx context.Context, actor string, in PasswordEnr
 				return ErrEnrollmentProofRequired
 			}
 		}
-		var linkID int64
+		var linkID, linkMaker int64
 		if in.ProofHash != "" {
 			l, err := usableLinkOfTx(ctx, tx, in.ProofHash, now, schema.SignInLinkPurposeEnrollment)
 			if err != nil {
@@ -868,9 +873,13 @@ func (s *Store) EnrollPassword(ctx context.Context, actor string, in PasswordEnr
 				return err
 			}
 			linkID = l.id
+			linkMaker = l.createdBy
 		}
 		replaced, err := setPasswordTx(ctx, tx, in.PrincipalID, in.Record, now)
 		if err != nil {
+			return err
+		}
+		if err := noticePasswordSetByLinkTx(ctx, tx, in.PrincipalID, linkMaker, now); err != nil {
 			return err
 		}
 		via := "enrollment"
@@ -1111,6 +1120,9 @@ func (s *Store) ResetPassword(ctx context.Context, codeHash, record string, now 
 		id := l.principal.ID
 		replaced, err := setPasswordTx(ctx, tx, id, record, now)
 		if err != nil {
+			return err
+		}
+		if err := noticePasswordSetByLinkTx(ctx, tx, id, l.createdBy, now); err != nil {
 			return err
 		}
 		actor := signInLinkSubject(l.id)

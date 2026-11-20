@@ -348,7 +348,8 @@ func TestAuthConstants(t *testing.T) {
 	}
 	if ErrorCodeAuthFailed != "auth_failed" || ErrorCodeReauthRequired != "reauth_required" ||
 		ErrorCodeEnrollmentProofRequired != "enrollment_proof_required" || ErrorCodeSetupOnHost != "setup_on_host" ||
-		ErrorCodePasswordRequired != "password_required" || ErrorCodeAccountsRequireAuth != "accounts_require_auth" {
+		ErrorCodePasswordRequired != "password_required" || ErrorCodeAccountsRequireAuth != "accounts_require_auth" ||
+		ErrorCodeOwnSignInRequired != "own_sign_in_required" {
 		t.Error("an authentication error code changed")
 	}
 }

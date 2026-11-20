@@ -415,6 +415,33 @@ describe('the community member panel', () => {
     expect(screen.queryByText('builder')).toBeNull();
   });
 
+  it('renders one You badge in the self row across a directory refresh with its profile open', async () => {
+    people.mockResolvedValueOnce({ ok: true, value: { members: [ada, bob] } });
+    const out = panel();
+    const list = await screen.findByRole('list', { name: 'People' });
+    const self = within(list).getAllByRole('listitem').find((item) => within(item).queryByRole('button', { name: bob.name }) !== null);
+    if (self === undefined) throw new Error('Missing self row');
+    const row = within(self);
+    const opener = row.getByRole('button', { name: bob.name });
+    expect(row.getAllByText('You')).toHaveLength(1);
+    fireEvent.click(opener);
+
+    people.mockResolvedValueOnce({ ok: true, value: { members: [{ ...bob, name: 'robert' }, bot] } });
+    out.rerender(<CommunityMembers viewer={2} channelIds="1" directoryTick={1} onUnauthorized={() => seen.unauthorized++} />);
+    // The existing row and its open profile stay in place while the read is pending.
+    expect(row.getByRole('dialog', { name: bob.name })).toBeDefined();
+    expect(row.getAllByText('You')).toHaveLength(1);
+
+    const card = await row.findByRole('dialog', { name: 'robert' });
+    expect(within(list).getAllByText('You')).toEqual([row.getByText('You')]);
+    expect(within(card).queryByText('You')).toBeNull();
+    // A screen reader still hears that the open card is the viewer's own: the
+    // dialog is described by the row's one You badge (#2071 review).
+    const describedBy = card.getAttribute('aria-describedby');
+    expect(describedBy).not.toBeNull();
+    expect(document.getElementById(describedBy ?? '')?.textContent).toContain('You');
+  });
+
   it('is read again when the person’s own channels change, and on a directory tick; a 401 signs out', async () => {
     people.mockResolvedValue({ ok: true, value: { members: [bob] } });
     const out = panel('1');
