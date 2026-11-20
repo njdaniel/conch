@@ -163,18 +163,97 @@ func TestBlocksLimit(t *testing.T) {
 	}
 }
 
-// A hidden principal is not found, as in the directory; a disabled one can
-// still be blocked.
+// A hidden principal is not found, as in the directory; so is every principal
+// the directory does not list for the owner: a disabled person or agent, and
+// a guest the owner shares no channel with. Each is the same error as an id
+// never issued, so a PUT is no probe. A guest the owner shares a channel with
+// stays blockable.
 func TestBlocksHiddenTarget(t *testing.T) {
 	f := newFeedFixture(t)
 	ctx := context.Background()
+	now := time.Now()
+	apart, err := f.s.CreateChannel(ctx, "apart")
+	if err != nil {
+		t.Fatal(err)
+	}
+	newGuest := func(label string, ch int64) int64 {
+		g, err := f.s.CreateGuest(ctx, "system", NewGuest{Label: label, Origin: schema.GuestOriginAddress,
+			Channels: []int64{ch}, Idle: time.Hour, Absolute: 2 * time.Hour})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return g.Principal.ID
+	}
+	mkAgent := func(name string) int64 {
+		p, err := f.s.CreatePrincipal(ctx, PrincipalAgent, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p.ID
+	}
+	sharedGuest := newGuest("Shared", f.ch.ID)
+	strangerGuest := newGuest("Stranger", apart.ID)
+	endedGuest := newGuest("Ended", apart.ID)
+	if _, err := f.s.EndGuestVisit(ctx, "system", endedGuest, schema.GuestEndOperator); err != nil {
+		t.Fatal(err)
+	}
+	disabledAgent := mkAgent("gone-bot")
+	if _, err := f.s.DisablePrincipal(ctx, "system", disabledAgent); err != nil {
+		t.Fatal(err)
+	}
+	liveAgent := mkAgent("live-bot")
+	disabledHuman, err := f.s.CreatePrincipal(ctx, PrincipalHuman, "gone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.s.DisablePrincipal(ctx, "system", disabledHuman.ID); err != nil {
+		t.Fatal(err)
+	}
+	// frank shares dave's channel and is disabled: not listed, so not found.
 	if _, err := f.s.DisablePrincipal(ctx, "system", f.frank.ID); err != nil {
 		t.Fatal(err)
 	}
-	// frank shares dave's channel: known without the directory.
-	if _, _, err := f.s.PutBlock(ctx, f.dave.ID, f.frank.ID, false, time.Now()); err != nil {
-		t.Errorf("block a disabled channel-mate = %v, want nil", err)
+
+	_, _, never := f.s.PutBlock(ctx, f.dave.ID, 987654, false, now)
+	if !errors.Is(never, ErrNotFound) {
+		t.Fatalf("never-issued id = %v, want ErrNotFound", never)
 	}
+	for _, tc := range []struct {
+		name    string
+		id      int64
+		seeAll  bool
+		blocked bool
+	}{
+		{"disabled channel-mate", f.frank.ID, false, false},
+		{"disabled human with the directory", disabledHuman.ID, true, false},
+		{"disabled agent", disabledAgent, true, false},
+		{"active guest, no shared channel", strangerGuest, false, false},
+		{"active guest, no shared channel, with the directory", strangerGuest, true, false},
+		{"ended guest, no shared channel", endedGuest, true, false},
+		{"active guest, shared channel", sharedGuest, false, true},
+		{"enabled agent with the directory", liveAgent, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := f.s.PutBlock(ctx, f.dave.ID, tc.id, tc.seeAll, now)
+			if tc.blocked {
+				if err != nil {
+					t.Fatalf("PutBlock = %v, want nil", err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrNotFound) {
+				t.Fatalf("PutBlock = %v, want ErrNotFound", err)
+			}
+			// Byte for byte what a never-issued id gets.
+			if err.Error() != never.Error() {
+				t.Errorf("error %q differs from a never-issued id's %q", err, never)
+			}
+		})
+	}
+	if l, err := f.s.ListBlocks(ctx, f.dave.ID); err != nil || len(l) != 2 {
+		t.Errorf("list = %v, %v; want only the two blockable entries", l, err)
+	}
+
 	if _, err := f.s.db.Exec(`UPDATE principals SET hidden_at = 1 WHERE id = ?`, f.erin.ID); err == nil {
 		t.Fatal("hid an enabled principal; the CHECK should refuse it")
 	}

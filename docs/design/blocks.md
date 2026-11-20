@@ -29,9 +29,22 @@ The confirmation says so in plain words before a block is made
   device and so push, which the server sends, can honour it.
 - **Visible only to its owner.** No route names an owner: `GET /v1/blocks`
   is always the caller's own list. Another member, an operator, the owner of
-  the server and the blocked person all read their own list. No audit row is
-  written, because operators read the audit log and a block is not theirs to
-  see.
+  the server and the blocked person each read only their own list; an
+  operator has no route to anyone else's. No audit row is written, because
+  operators read the audit log and a block is not theirs to see.
+- **Act-as credentials.** Until the provenance guard of #2047
+  (`selfMadeCredentialRoutes`) lands, a credential made on someone's behalf
+  (act-as) can read and change that person's list. When it does, the three
+  block routes join `selfMadeCredentialRoutes`, so only a credential the
+  person made themself reaches them.
+- **Who can be named.** `PUT` admits the principals the member directory
+  lists for the caller (same rule as `ListDirectory`) and, for a guest or
+  agent, anyone the caller shares a channel with. A disabled person or
+  agent, a hidden one, and a guest the caller shares no channel with are the
+  same `404 principal_not_found` as an id never issued.
+- **Write limit.** The block routes' writes (PUT and DELETE) have their own
+  bucket per principal, 30 per 10 minutes, apart from notification
+  preferences and push registration. A 404 or a repeat counts.
 - **Reaches all devices.** A change that took effect sends
   `conch.blocks_changed.v1` (no content) to the owner's own human events
   sockets, and every client re-reads the list on that signal and on each

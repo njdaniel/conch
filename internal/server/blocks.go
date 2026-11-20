@@ -26,9 +26,11 @@ import (
 // 403 human_required, a guest with 403 guest_not_allowed (membersOnly, in
 // routes.go; a guest is short-lived and keeps no list), and a request with no
 // credential is 401. They are not previewable, not in the admin catalog, and
-// write no audit row. Reads and writes share the notification preferences'
-// limits (notification_limits.go): reads per credential, writes per
-// principal, spent before the store is touched. Nothing here logs whom
+// write no audit row. Reads share the notification preferences' read
+// limit (notification_limits.go), per credential; writes have a bucket of
+// their own, per principal (30 per 10 minutes, so blocking a raid does not
+// spend the preferences' or push registration's writes). Both are spent
+// before the store is touched, and a 404 or a repeat counts. Nothing here logs whom
 // anyone blocks.
 //
 // A change that took effect sends conch.blocks_changed.v1 to the caller's own
@@ -93,7 +95,7 @@ func (s *Server) handlePutBlock(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !s.takeNotificationWriteToken(w, caller.ID) {
+	if !s.takeBlockWriteToken(w, caller.ID) {
 		return
 	}
 	entry, created, err := s.store.PutBlock(ctx, caller.ID, targetID, seeAll, s.now())
@@ -130,7 +132,7 @@ func (s *Server) handleDeleteBlock(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !s.takeNotificationWriteToken(w, caller.ID) {
+	if !s.takeBlockWriteToken(w, caller.ID) {
 		return
 	}
 	removed, err := s.store.DeleteBlock(ctx, caller.ID, targetID)

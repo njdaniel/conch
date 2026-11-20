@@ -62,13 +62,16 @@ func TestBlockRoutes(t *testing.T) {
 	if rec := f.do(t, "PUT", blockPath(f.op2.ID), f.aliceTok, ""); rec.Code != http.StatusOK {
 		t.Fatalf("block an operator = %d %s", rec.Code, rec.Body)
 	}
-	if rec := f.do(t, "PUT", blockPath(f.disabled.ID), f.aliceTok, ""); rec.Code != http.StatusOK {
-		t.Fatalf("block a disabled person = %d %s", rec.Code, rec.Body)
+	// A disabled person is not listed in the directory: the same 404 as an
+	// id never issued, byte for byte.
+	ghost := f.do(t, "PUT", blockPath(987654), f.aliceTok, "")
+	if rec := f.do(t, "PUT", blockPath(f.disabled.ID), f.aliceTok, ""); rec.Code != http.StatusNotFound || rec.Body.String() != ghost.Body.String() {
+		t.Fatalf("block a disabled person = %d %s, want the ghost's %d %s", rec.Code, rec.Body, ghost.Code, ghost.Body)
 	}
 	list := decodeBlocks(t, f.do(t, "GET", "/v1/blocks", f.aliceTok, ""))
-	// Oldest first; these four share a millisecond, so only the count and
+	// Oldest first; these three share a millisecond, so only the count and
 	// the limit are asserted here (the store's test holds the order).
-	if len(list.Blocks) != 4 || list.Limit != schema.MaxBlocks {
+	if len(list.Blocks) != 3 || list.Limit != schema.MaxBlocks {
 		t.Errorf("list = %+v", list)
 	}
 
@@ -103,8 +106,8 @@ func TestBlockRoutes(t *testing.T) {
 			t.Errorf("DELETE %s = %d %q, want 204 and no body", path, rec.Code, rec.Body)
 		}
 	}
-	if got := decodeBlocks(t, f.do(t, "GET", "/v1/blocks", f.aliceTok, "")); len(got.Blocks) != 3 {
-		t.Errorf("after delete the list holds %d, want 3", len(got.Blocks))
+	if got := decodeBlocks(t, f.do(t, "GET", "/v1/blocks", f.aliceTok, "")); len(got.Blocks) != 2 {
+		t.Errorf("after delete the list holds %d, want 2", len(got.Blocks))
 	}
 }
 
@@ -216,6 +219,47 @@ func TestBlockLimit(t *testing.T) {
 	assertErrorBody(t, f.do(t, "PUT", blockPath(f.outsider.ID), f.aliceTok, ""), http.StatusConflict, schema.ErrorCodeBlockLimitReached)
 	if rec := f.do(t, "PUT", blockPath(last.ID), f.aliceTok, ""); rec.Code != http.StatusOK {
 		t.Errorf("repeat on a full list = %d %s, want 200", rec.Code, rec.Body)
+	}
+}
+
+// The block routes have a write bucket of their own: blocking, 404s and
+// repeats included, spends it and not the preferences', and spending the
+// preferences' does not stop a block.
+func TestBlockWriteBucket(t *testing.T) {
+	f := newDirectoryFixture(t)
+	relaxed := inviteLimit{name: "relaxed", burst: testRelaxedBurst, window: time.Hour}
+	f.srv.setNotificationLimits(inviteLimit{name: "prefs", burst: 2, window: time.Hour}, relaxed)
+	f.srv.setBlockWriteLimit(inviteLimit{name: "blocks", burst: 3, window: time.Hour})
+	const prefs = `{"policy":"all","muted":[]}`
+
+	// Two blocks' worth of writes (one a repeat, one a 404) and a delete.
+	if rec := f.do(t, "PUT", blockPath(f.outsider.ID), f.aliceTok, ""); rec.Code != 200 {
+		t.Fatalf("PUT = %d %s", rec.Code, rec.Body)
+	}
+	if rec := f.do(t, "PUT", blockPath(f.outsider.ID), f.aliceTok, ""); rec.Code != 200 {
+		t.Fatalf("repeat PUT = %d %s", rec.Code, rec.Body)
+	}
+	if rec := f.do(t, "PUT", blockPath(987654), f.aliceTok, ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("PUT of nobody = %d %s", rec.Code, rec.Body)
+	}
+	// The block bucket is empty; a 404 and a repeat counted.
+	if rec := f.do(t, "DELETE", blockPath(f.outsider.ID), f.aliceTok, ""); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("fourth block write = %d %s, want 429", rec.Code, rec.Body)
+	}
+	// The preferences' bucket is untouched: its two writes still go through.
+	for i := range 2 {
+		if rec := f.do(t, "PUT", "/v1/notifications/preferences", f.aliceTok, prefs); rec.Code != 200 {
+			t.Fatalf("preferences write %d = %d %s, want 200", i+1, rec.Code, rec.Body)
+		}
+	}
+	// And draining the preferences' bucket did not touch the blocks': a fresh
+	// owner with a drained preferences bucket can still block.
+	if rec := f.do(t, "PUT", "/v1/notifications/preferences", f.aliceTok, prefs); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("third preferences write = %d, want 429", rec.Code)
+	}
+	f.srv.setBlockWriteLimit(inviteLimit{name: "blocks", burst: 3, window: time.Hour})
+	if rec := f.do(t, "PUT", blockPath(f.outsider.ID), f.aliceTok, ""); rec.Code != 200 {
+		t.Errorf("block with a drained preferences bucket = %d %s, want 200", rec.Code, rec.Body)
 	}
 }
 

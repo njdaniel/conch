@@ -76,10 +76,12 @@ func (s *Store) ListBlocks(ctx context.Context, ownerID int64) ([]schema.BlockV1
 // created=true when the row is new. It is idempotent: a principal already on
 // the list is answered as it is, with its original time, whether or not the
 // list is full. It fails with ErrBlockSelf when the two are the same,
-// ErrNotFound when blockedID is no principal, a hidden one, or one the owner
+// ErrNotFound when blockedID is no principal, a hidden one, one the owner
 // may not know (knownPrincipalsSQL, with seeAll the owner's
-// see_member_directory: the directory's own rule, so a PUT cannot be used to
-// probe for principals or read their names), and
+// see_member_directory), or one the directory does not list for them: a
+// disabled person or agent, or a guest the owner shares no channel with. It
+// is ListDirectory's rule, so a PUT cannot be used to probe for principals or
+// read their names, and
 // ErrBlockLimit when the list already holds schema.MaxBlocks others. The
 // count and the insert are in one immediate transaction, so two concurrent
 // PUTs cannot pass the limit together.
@@ -91,8 +93,9 @@ func (s *Store) PutBlock(ctx context.Context, ownerID, blockedID int64, seeAll b
 		cond, args, _ := knownPrincipalsSQL(ownerID, seeAll)
 		var one int
 		switch err := tx.QueryRowContext(ctx,
-			"SELECT 1 FROM principals p WHERE p.id = ? AND p.hidden_at IS NULL AND ("+cond+")", // #nosec G202 -- cond is a constant of knownPrincipalsSQL
-			append([]any{blockedID}, args...)...).Scan(&one); {
+			"SELECT 1 FROM principals p WHERE p.id = ? AND p.hidden_at IS NULL AND ("+cond+")"+
+				" AND (("+memberPredicateSQL+") OR (p.kind = 'agent' AND p.disabled_at IS NULL) OR (p.disabled_at IS NULL AND "+knowsCond("?")+"))", // #nosec G202 -- every fragment is a constant
+			append(append([]any{blockedID}, args...), ownerID, ownerID, ownerID)...).Scan(&one); {
 		case errors.Is(err, sql.ErrNoRows):
 			return ErrNotFound
 		case err != nil:
