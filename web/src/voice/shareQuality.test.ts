@@ -3,7 +3,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readShareQuality, writeShareQuality } from '../api';
 import { defaultShareQuality, provisionalQuality, resolveAuto, settleQuality, type SettledQuality, type ShareQuality, type ShareSample } from './share';
-import { askedText, captureOptions, nextShortfall, noShortfall, shareEncodings, shareEstimateMbps, shareReadout, shareSample, shortfallHold, shortfallReason, type ShareStats, type ShortfallState } from './sdk';
+import { askedText, captureOptions, nextShortfall, noShortfall, videoPublishOptions, shareEncodings, shareEstimateMbps, shareReadout, shareSample, shortfallHold, shortfallReason, type ShareStats, type ShortfallState } from './sdk';
 
 afterEach(() => {
   window.localStorage.clear();
@@ -220,6 +220,10 @@ describe('the sent readout: reasons, loss and the capture', () => {
     expect(shareSample([sent({ qualityLimitationReason: reason })], 'sent')?.limitation).toBe(want);
   });
 
+  it('ignores the last CPU reason when the encoder layer is inactive', () => {
+    expect(shareSample([sent({ active: false, qualityLimitationReason: 'cpu' })], 'sent')).not.toHaveProperty('limitation');
+  });
+
   it('leaves an absent or unknown reason out rather than guessing', () => {
     expect(shareSample([sent()], 'sent')).not.toHaveProperty('limitation');
     expect(shareSample([sent({ qualityLimitationReason: 'sunspots' })], 'sent')).not.toHaveProperty('limitation');
@@ -373,4 +377,12 @@ describe('the shortfall reason', () => {
     expect(step(state, { ...slow, publication: 'B' }, 7000).reason).toBeNull();
     expect(step(state, null, 7000)).toEqual(noShortfall);
   });
+});
+
+it.each([
+  [15, 'maintain-resolution'],
+  [30, 'maintain-framerate'],
+  [60, 'maintain-framerate'],
+] as const)('publishes %i fps with %s', (frameRate, preference) => {
+  expect(videoPublishOptions({ width: 1920, height: 1080 }, { resolution: '1080p', frameRate }).degradationPreference).toBe(preference);
 });

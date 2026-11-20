@@ -2,7 +2,7 @@
 // published and straight after, after any republish and after a remote unmute, the capture
 // asks for the browser's echo cancellation and noise suppression, a Leave at
 // any point leaves no microphone open, and the SDK's logs are redacted and
-// kept off the console. The screen share (issue #444): what the picker is
+// kept off the browser console. The screen share (issue #444): what the picker is
 // asked for, the simulcast layers and the sound published, how a share's end
 // is told apart, and the watch view's subscription choices. The share's
 // encodings follow what was captured (issue #565). The microphone chosen
@@ -1208,6 +1208,31 @@ describe('the SDK adapter', () => {
     const lines = sdkLog.recent().join('\n');
     expect(lines).toContain('joined');
     expect(lines).not.toMatch(/room-abcdef|tok-abcdef/);
+  });
+
+  it('sends only fixed diagnostic messages to the desktop console', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.stubGlobal('location', { protocol: 'conch-app:' });
+    try {
+      const context = { fields: { sdp: 'private room and SDP', error: 'wss://host/room?token=secret' } };
+      state.logger.methodFactory('warn')('not able to set offer, falling back to unmodified sdp', context);
+      state.logger.methodFactory('error')('unable to set answer', context);
+      state.logger.methodFactory('error')('unable to set offer', {
+        fields: { ...context.fields, error: 'A BUNDLE group contains a codec collision between private fields' },
+      });
+      state.logger.methodFactory('error')('room-name with token', context);
+      expect(warn).toHaveBeenCalledExactlyOnceWith('LiveKit retried negotiation with unmodified SDP.');
+      expect(error.mock.calls).toEqual([
+        ['LiveKit could not apply an SDP description.'],
+        ['LiveKit SDP description rejected due to a BUNDLE codec collision.'],
+        ['LiveKit SDK error.'],
+      ]);
+    } finally {
+      vi.unstubAllGlobals();
+      warn.mockRestore();
+      error.mockRestore();
+    }
   });
 
   it("holds the room's own name once connected, though the caller gave none (the companion's grant names no room)", async () => {

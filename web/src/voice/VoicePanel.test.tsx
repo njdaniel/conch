@@ -2034,6 +2034,8 @@ describe('the share quality menu', () => {
       for (let i = 0; i < 9; i++) await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
       expect(within(voice).getByRole('status', { name: 'Share quality' }).textContent).toContain(asked);
       expect(within(voice).getByRole('status', { name: 'Share quality' }).textContent).toContain(reason);
+      const cpuWarning = within(voice).queryByText(/Your computer is too busy to send smoothly/);
+      expect(cpuWarning !== null).toBe(sample.limitation === 'cpu');
     } finally {
       vi.useRealTimers();
     }

@@ -18,12 +18,15 @@ import type { SettledQuality, ShareDirection, ShareSample } from './share';
 // gives it the companion's, which is a narrower thing than the call view's.
 export type ShareViewClient = Pick<VoiceClient, 'attachStream' | 'readShareStats' | 'watchStream'>;
 
+const cpuWarning = 'Your computer is too busy to send smoothly. Close heavy programs or choose a lower share resolution.';
+
 // ShareReadout samples only the selected watched picture or the local screen's
 // top layer. The first sample has no bitrate; the next, about a second later,
 // does. Given asked (the sharer's own line), it says what was asked first, the
 // measurement after, and, once the picture has been short of it for 5 s, one
 // reason, until it has been back on target for 5 s. Loss shows when the engine
-// reports it. Every number is the browser's measurement; a stat the engine
+// reports it. The sending strip also warns after 3 s of CPU limitation.
+// Every number is the browser's measurement; a stat the engine
 // does not give is left out. It is one polite-off status line: read in order
 // by a screen reader, never announced each second.
 export function ShareReadout({ client, direction, principal, prefix = '', asked, now = () => performance.now() }: {
@@ -36,6 +39,7 @@ export function ShareReadout({ client, direction, principal, prefix = '', asked,
   readonly now?: () => number;
 }) {
   const [text, setText] = useState<string | null>(null);
+  const [cpuLimited, setCpuLimited] = useState(false);
   const [reason, setReason] = useState<string | null>(null);
   const previous = useRef<ShareSample | null>(null);
   const shortfall = useRef<ShortfallState>(noShortfall);
@@ -52,18 +56,33 @@ export function ShareReadout({ client, direction, principal, prefix = '', asked,
   useEffect(() => {
     let live = true;
     let timer: number | null = null;
+    let cpuSince: number | null = null;
+    let warned = false;
     previous.current = null;
     shortfall.current = noShortfall;
     setText(null);
+    setCpuLimited(false);
     setReason(null);
     const read = async () => {
       const sample = await client.readShareStats(direction, principal);
       if (!live) return;
+      const at = clock.current();
       setText(shareReadout(sample, previous.current));
+      // The encoder's own reason can report CPU pressure even when the
+      // requested quality is unknown or the measured picture meets it.
+      if (direction !== 'sent' || sample?.limitation !== 'cpu') {
+        cpuSince = null;
+      } else if (cpuSince === null || sample.publication !== previous.current?.publication) {
+        cpuSince = at;
+      }
+      const limited = cpuSince !== null && at - cpuSince >= 3000;
+      if (limited && !warned) console.warn('Screen share encoder is CPU-limited.');
+      warned = limited;
+      setCpuLimited(limited);
       if (quality.current === undefined) {
         setReason(null);
       } else {
-        shortfall.current = nextShortfall(shortfall.current, sample, quality.current, clock.current());
+        shortfall.current = nextShortfall(shortfall.current, sample, quality.current, at);
         setReason(shortfall.current.reason);
       }
       // A missing sample resets the baseline.
@@ -77,12 +96,19 @@ export function ShareReadout({ client, direction, principal, prefix = '', asked,
     };
   }, [client, direction, principal]);
   if (text === null) return null;
-  return (
+  const readout = (
     <span className="share-readout" role="status" aria-live="off" aria-label="Share quality">
       {asked === undefined ? null : <span>{askedText(asked)}. </span>}
       <span>{prefix}{text}</span>
       {reason === null ? null : <span>. {reason}.</span>}
     </span>
+  );
+  if (direction === 'received') return readout;
+  return (
+    <>
+      <p className="hint voice-supplemental">{readout}</p>
+      {cpuLimited ? <p role="status" className="hint">{cpuWarning}</p> : null}
+    </>
   );
 }
 

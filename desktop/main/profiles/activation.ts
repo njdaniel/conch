@@ -94,6 +94,7 @@ export function activationFactory(env: ActivationEnv, live: Live): (spec: Activa
       partition: partitionFor(spec.generation),
       ...(bounds === undefined ? {} : { bounds }),
       ...(env.maximized === undefined ? {} : { maximized: env.maximized }),
+      log: env.log,
       prepare: (made) => {
         const ses = made.webContents.session;
         guardSession(ses, env.guard);

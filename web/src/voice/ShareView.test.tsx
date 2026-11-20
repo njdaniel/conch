@@ -1049,6 +1049,43 @@ describe('ShareReadout over time', () => {
     expect(line()).toBe('Asked 1080p · 60 fps. Sending: 1920×1080 · 60 fps');
   });
 
+  it('warns only after 3 seconds of CPU reports for a single publication and clears on recovery', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      let clock = 0;
+      const cpu = { width: 1920, height: 1080, fps: 1, limitation: 'cpu' } as const;
+      const samples: { current: ShareSample | null } = { current: { ...cpu, publication: 'first' } };
+      const view = render(<ShareReadout client={client(samples)} direction="sent" now={() => clock} />);
+      const warning = () => view.queryByText(/Your computer is too busy to send smoothly/);
+      const tick = async () => {
+        clock += 1000;
+        await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      };
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      await tick();
+      await tick();
+      expect(warning()).toBeNull();
+      samples.current = { ...cpu, publication: 'replacement' };
+      await tick();
+      await tick();
+      await tick();
+      expect(warning()).toBeNull();
+      await tick();
+      expect(warning()?.getAttribute('role')).toBe('status');
+      await tick();
+      expect(warn).toHaveBeenCalledExactlyOnceWith('Screen share encoder is CPU-limited.');
+      samples.current = { ...cpu, publication: 'replacement', limitation: 'bandwidth' };
+      await tick();
+      expect(warning()).toBeNull();
+      samples.current = { ...cpu, publication: 'replacement' };
+      await tick();
+      expect(warning()).toBeNull();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('a changed ask starts the explanation over', async () => {
     vi.useFakeTimers();
     let clock = 0;
@@ -1081,5 +1118,6 @@ describe('ShareReadout over time', () => {
       await vi.advanceTimersByTimeAsync(10_000);
     });
     expect(view.getByRole('status', { name: 'Share quality' }).textContent).toBe('1280×720 · 3 fps · 0.5% lost');
+    expect(view.queryByText(/Your computer is too busy/)).toBeNull();
   });
 });
