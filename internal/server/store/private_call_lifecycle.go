@@ -141,6 +141,17 @@ func restartPrivateCallsTx(ctx context.Context, tx execer, now time.Time) error 
 	})
 }
 
+func restorePrivateCallsTx(ctx context.Context, tx execer, now time.Time) error {
+	return eachLivePrivateCall(ctx, tx, func(c *privateCall) error {
+		row, ok := schema.NextPrivateCall(string(c.State), schema.PrivateCallEventRestart)
+		if !ok {
+			return fmt.Errorf("store: invalid restore in private call state %q", c.State)
+		}
+		row.Reason = privateCallReasonRestore
+		return transitionPrivateCall(ctx, tx, c, row, 0, now)
+	})
+}
+
 // ObservePrivateCallEndpoints is the #2032 media poller seam. Submit
 // observations in poll order for the attempt revision observed. Each
 // credential is the selected credential seen in the room, or zero when

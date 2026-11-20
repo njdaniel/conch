@@ -92,6 +92,10 @@ type privateCall struct {
 	callerAbsent, calleeAbsent         sql.NullInt64
 }
 
+// The store records restore separately. The wire schema uses server_restart
+// for both restart and restore.
+const privateCallReasonRestore schema.PrivateCallReason = "restore"
+
 const privateCallColumns = `c.id, c.conversation_id, c.caller, c.callee, c.caller_credential,
 	COALESCE(c.callee_credential, 0), c.state, c.reason, c.last_event, c.revision,
 	c.created_at, c.deadline, c.ended_at, c.caller_absent_since, c.callee_absent_since`
@@ -135,6 +139,9 @@ func (c privateCall) view(actor PrivateCallActor) schema.PrivateCallV1 {
 	doc := c.PrivateCallV1
 	doc.Role = c.role(actor.PrincipalID)
 	if doc.State.Terminal() {
+		if doc.Reason == privateCallReasonRestore {
+			doc.Reason = schema.PrivateCallReasonServerRestart
+		}
 		doc.EndedAt = privateCallTimestamp(c.endedAt.Int64)
 		return doc
 	}

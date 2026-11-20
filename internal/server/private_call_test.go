@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -206,14 +208,85 @@ func TestPrivateCallHTTPPermissionLoss(t *testing.T) {
 	assertErrorBody(t, f.do(t, "POST", privateCallTestPair, bobTok, `{"action_id":"invite-back"}`), 403, schema.ErrorCodeVoiceNotAllowed)
 }
 
-func TestPrivateCallSweeperExpiresUnansweredInvite(t *testing.T) {
+// privateCallTestListener lets Serve reach Accept without binding a socket.
+type privateCallTestListener struct {
+	accepting chan struct{}
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+func (l *privateCallTestListener) Accept() (net.Conn, error) {
+	close(l.accepting)
+	<-l.closed
+	return nil, net.ErrClosed
+}
+
+func (l *privateCallTestListener) Close() error {
+	l.closeOnce.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (l *privateCallTestListener) Addr() net.Addr { return &net.TCPAddr{} }
+
+func TestServeReconcilesAndSweepsPrivateCalls(t *testing.T) {
 	f, _, bobTok, _ := privateCallHTTPFixture(t)
-	now := time.Now()
-	f.srv.now = func() time.Time { return now }
-	call := decodePrivateCallResponse(t, f.do(t, "POST", privateCallTestPair,
-		f.aliceTok, `{"action_id":"invite"}`), http.StatusCreated).Call
-	now = call.RingDeadline.Time()
-	defer f.srv.startPrivateCallSweeper(context.Background())()
+	var now atomic.Int64
+	now.Store(time.Now().UnixMilli())
+	f.srv.now = func() time.Time { return time.UnixMilli(now.Load()) }
+	previous := decodePrivateCallResponse(t, f.do(t, "POST", privateCallTestPair,
+		f.aliceTok, `{"action_id":"before-restart"}`), http.StatusCreated).Call
+	now.Store(previous.RingDeadline.Time().UnixMilli())
+
+	ln := &privateCallTestListener{accepting: make(chan struct{}), closed: make(chan struct{})}
+	f.srv.ln = ln
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan struct{})
+	var serveErr error
+	go func() {
+		defer close(served)
+		serveErr = f.srv.Serve(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-served:
+			if serveErr != nil {
+				t.Errorf("Serve: %v", serveErr)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("Serve did not stop")
+		}
+	})
+	select {
+	case <-ln.accepting:
+	case <-served:
+		t.Fatal("Serve exited before accepting connections")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve did not start")
+	}
+
+	history := func() []schema.PrivateCallV1 {
+		t.Helper()
+		rec := f.do(t, "GET", privateCallTestPair, bobTok, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("history = %d: %s", rec.Code, rec.Body)
+		}
+		var history schema.ListPrivateCallsResponseV1
+		if err := json.Unmarshal(rec.Body.Bytes(), &history); err != nil {
+			t.Fatal(err)
+		}
+		return history.Calls
+	}
+	calls := history()
+	if len(calls) != 1 || calls[0].ID != previous.ID ||
+		calls[0].State != schema.PrivateCallStateFailed || calls[0].Reason != schema.PrivateCallReasonServerRestart ||
+		calls[0].Revision != previous.Revision+1 {
+		t.Fatalf("history when Serve begins accepting: %+v", calls)
+	}
+
+	next := decodePrivateCallResponse(t, f.do(t, "POST", privateCallTestPair,
+		f.aliceTok, `{"action_id":"after-restart"}`), http.StatusCreated).Call
+	now.Store(next.RingDeadline.Time().UnixMilli())
 	deadline := time.After(5 * time.Second)
 	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
@@ -222,17 +295,10 @@ func TestPrivateCallSweeperExpiresUnansweredInvite(t *testing.T) {
 		case <-deadline:
 			t.Fatal("sweeper did not expire the unanswered invite")
 		case <-ticker.C:
-			rec := f.do(t, "GET", privateCallTestPair, bobTok, "")
-			if rec.Code != http.StatusOK {
-				t.Fatalf("history = %d: %s", rec.Code, rec.Body)
-			}
-			var history schema.ListPrivateCallsResponseV1
-			if err := json.Unmarshal(rec.Body.Bytes(), &history); err != nil {
-				t.Fatal(err)
-			}
-			if len(history.Calls) != 0 {
-				if history.Calls[0].ID != call.ID || history.Calls[0].State != schema.PrivateCallStateMissed {
-					t.Fatalf("swept history: %+v", history)
+			calls := history()
+			if len(calls) == 2 {
+				if calls[0].ID != next.ID || calls[0].State != schema.PrivateCallStateMissed {
+					t.Fatalf("swept history: %+v", calls)
 				}
 				return
 			}

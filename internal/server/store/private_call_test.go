@@ -316,6 +316,68 @@ func TestPrivateCallReconcileAfterReopen(t *testing.T) {
 	}
 }
 
+func TestInvalidateRestoredPrivateCalls(t *testing.T) {
+	for _, state := range []schema.PrivateCallState{
+		schema.PrivateCallStateRinging, schema.PrivateCallStateAccepted, schema.PrivateCallStateActive,
+	} {
+		t.Run(string(state), func(t *testing.T) {
+			ctx := context.Background()
+			f := newPrivateCallFixture(t, openTestStore(t))
+			earlier := f.invite(1, f.a, "earlier").Call
+			declined := f.act(earlier, f.b, schema.PrivateCallEventDecline, "decline").Call
+			call := f.invite(1, f.a, "invite").Call
+			if state != schema.PrivateCallStateRinging {
+				call = f.act(call, f.b, schema.PrivateCallEventAccept, "accept").Call
+			}
+			if state == schema.PrivateCallStateActive {
+				f.observe(call, f.a.CredentialID, f.b.CredentialID)
+				call = f.stored(call.ID).view(f.a)
+			}
+			if call.State != state {
+				t.Fatalf("setup state = %s, want %s", call.State, state)
+			}
+
+			// A failure at the final audit write must roll back the call and
+			// its holders along with the rest of the restore.
+			if _, err := f.s.db.ExecContext(ctx, `CREATE TRIGGER fail_restore BEFORE INSERT ON audit_events
+				WHEN NEW.action = 'restore_invalidated' BEGIN SELECT RAISE(ABORT, 'restore test'); END`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.s.InvalidateRestored(ctx, f.now); err == nil {
+				t.Fatal("restore succeeded with an injected audit failure")
+			}
+			if got := f.stored(call.ID); got.State != state || got.Revision != call.Revision || got.endedAt.Valid {
+				t.Fatalf("restore failure changed the call: %+v", got)
+			}
+			if held, err := privateCallHeldBy(ctx, f.s.db, f.a.PrincipalID); err != nil || held.ID != call.ID {
+				t.Fatalf("restore failure removed the caller's holder: %q, %v", held.ID, err)
+			}
+			if _, err := f.s.db.ExecContext(ctx, "DROP TRIGGER fail_restore"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.s.InvalidateRestored(ctx, f.now); err != nil {
+				t.Fatal(err)
+			}
+			got := f.stored(call.ID)
+			if got.State != schema.PrivateCallStateFailed || got.Reason != privateCallReasonRestore ||
+				got.Revision != call.Revision+1 || got.deadline.Valid ||
+				!got.endedAt.Valid || got.endedAt.Int64 != f.now.UnixMilli() {
+				t.Fatalf("restored call: %+v", got)
+			}
+			var holders int
+			if err := f.s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM private_call_holders WHERE call_id = ?", call.ID).Scan(&holders); err != nil || holders != 0 {
+				t.Fatalf("holders after restore = %d, err = %v", holders, err)
+			}
+			if view := got.view(f.a); view.Reason != schema.PrivateCallReasonServerRestart || view.Validate() != nil {
+				t.Fatalf("restore projection: %+v", view)
+			}
+			if got := f.stored(declined.ID); got.State != declined.State || got.Revision != declined.Revision {
+				t.Fatalf("restore changed a terminal call: %+v", got)
+			}
+		})
+	}
+}
+
 func TestPrivateCallHistoryPageWithTiedTimestamps(t *testing.T) {
 	f := newPrivateCallFixture(t, openTestStore(t))
 	ctx := context.Background()
