@@ -2,6 +2,7 @@
 // nothing about what is shown in it. Input: whether the app is packaged,
 // where its files are, and the gate that tracks its documents. Output: a
 // BrowserWindow loading conch-app://ui/.
+import type { MainLog } from './diagnostics.ts';
 import { join } from 'node:path';
 
 import { BrowserWindow, type WebPreferences } from 'electron';
@@ -60,7 +61,7 @@ export class WindowMaximized {
   #inFlight: Promise<void> | undefined;
   #pending: Promise<void> | undefined;
 
-  constructor(private readonly files: SettingsFiles, private readonly log: (line: string) => void) {}
+  constructor(private readonly files: SettingsFiles, private readonly log: MainLog) {}
 
   async load(): Promise<void> {
     const saved = await this.files.read();

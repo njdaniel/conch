@@ -92,6 +92,33 @@ afterEach(() => {
   cleanup();
 });
 
+it('reads browser call quality from the dock only while diagnostics is open', async () => {
+  const id = 3;
+  const people = new Map<number, Person>([[id, { name: 'Ada', kind: null }]]);
+  const state = inVoice('connected', 'general');
+  const { client, redraw } = panel(state, 'general', {
+    kind: 'presence',
+    presence: {
+      ...presence,
+      rooms: [{ participants: [{ principal_id: id, can_publish: true, transmitting: false, joined_at: '2026-10-18T00:00:00Z' }] }],
+    },
+  }, people);
+  const getRTCStatsReport = vi.fn(() => Promise.resolve(new Map([
+    ['private-track-id', { type: 'inbound-rtp', kind: 'audio', jitter: 0.017 }],
+  ])));
+  const sources = vi.spyOn(client, 'diagnosticsSources').mockReturnValue([{ kind: 'audio', principal: id, track: { getRTCStatsReport } }]);
+  const button = screen.getByRole('button', { name: 'Voice diagnostics' });
+  expect(sources).not.toHaveBeenCalled();
+  fireEvent.click(button);
+  expect(await screen.findByText(/Ada · Packet loss — · Jitter 17 ms/)).toBeTruthy();
+  expect(screen.queryByText(/private-track-id/)).toBeNull();
+  fireEvent.click(button);
+  expect(screen.queryByRole('region', { name: 'Voice diagnostics' })).toBeNull();
+  expect(getRTCStatsReport).toHaveBeenCalledTimes(1);
+  redraw(initialVoice);
+  expect(screen.queryByRole('button', { name: 'Voice diagnostics' })).toBeNull();
+});
+
 describe('an archived channel (issue #844)', () => {
   it('has no voice to join: the strip says so, and Join voice, Watch only and the test are gone', () => {
     const calls: string[] = [];
@@ -2034,6 +2061,8 @@ describe('the share quality menu', () => {
       for (let i = 0; i < 9; i++) await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
       expect(within(voice).getByRole('status', { name: 'Share quality' }).textContent).toContain(asked);
       expect(within(voice).getByRole('status', { name: 'Share quality' }).textContent).toContain(reason);
+      const cpuWarning = within(voice).queryByText(/Your computer is too busy to send smoothly/);
+      expect(cpuWarning !== null).toBe(sample.limitation === 'cpu');
     } finally {
       vi.useRealTimers();
     }

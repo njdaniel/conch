@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// dmTables are the tables of migration 51 that hold what a conversation's
+// dmTables are the tables of migration 53 that hold what a conversation's
 // participants may read, or who they are.
 const dmTables = `dm_conversations|dm_viewer_state|direct_messages|direct_message_revisions|direct_message_removals|direct_messages_fts|dm_files|dm_read_marks`
 

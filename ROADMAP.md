@@ -344,6 +344,11 @@ happens here — terminal-first (dashboard GUI optional per the P3 track).*
 > presence preferences, human DMs and OIDC login stay here. Proposed ADR-009 brings
 > password login and temporary-guest/account onboarding into the usable alpha.
 
+> **Amended by [ADR-017](docs/adr/ADR-017-local-direct-messages-and-calls.md)
+> (2026-11-19; Proposed until Nick merges it):** local 1:1 human DMs and private voice
+> calls leave P7 for epic #2013. Agent DMs stay in P6; group conversations stay research
+> (#1501). "Human DMs" in the note above is superseded by this one.
+
 ADR-007 brings the shared React foundation and a limited browser lobby/chat/agent
 view into P3, and with it a basic online / stale / offline roster for people as well
 as agents. P7 still owns the full small-team GUI, presence preferences and social /
@@ -352,7 +357,7 @@ is the chosen desktop shell, sharing browser UI; platform release scope and
 native media/input support need their own measured implementation work.
 
 Multi-human *access* arrives earlier, in the nets-and-voice track (ADR-003). P7 adds what
-is left: presence, human DMs, per-principal permissions polish — plus the full graphical
+is left: presence, per-principal permissions polish — plus the full graphical
 client (web SPA over the existing API, TUI still first-class beside it). This is the GUI
 that's genuinely justified by having humans to use it, as distinct from the P3 dashboard.
 Optional OIDC remains here (#24). Password login moved here from P2 on 2026-10-13,

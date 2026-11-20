@@ -191,7 +191,7 @@ func insertDMPairTx(ctx context.Context, tx execer, a, b int64, now time.Time) (
 }
 
 // setDMStateTx stores viewer's own state of convID. Only a participant may
-// have one (a trigger of migration 51 says so as well).
+// have one (a trigger of migration 53 says so as well).
 func setDMStateTx(ctx context.Context, tx execer, viewer, convID int64, state schema.DMState, now time.Time) error {
 	if _, err := tx.ExecContext(ctx, `INSERT INTO dm_viewer_state (principal_id, conversation_id, state, updated_at)
 		VALUES (?, ?, ?, ?)

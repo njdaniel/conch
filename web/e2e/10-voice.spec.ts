@@ -502,8 +502,11 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
       const voice = voiceRegion(page);
       const focused = (l: Locator) => l.evaluate((el) => el === document.activeElement);
       // Presses Tab until the control has focus, as a person would.
+      // Hold to talk comes before Open mic, so reaching it from there goes
+      // once round the page: the bound is above its tab stops (each other
+      // person's row in the Members list has a ⋯ since issue #1832).
       const tabTo = async (l: Locator) => {
-        for (let i = 0; i < 40 && !(await focused(l)); i++) await page.keyboard.press('Tab');
+        for (let i = 0; i < 80 && !(await focused(l)); i++) await page.keyboard.press('Tab');
         await expect(l).toBeFocused();
       };
 

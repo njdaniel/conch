@@ -2968,8 +2968,9 @@ func (s *Store) pendingCandidates(ctx context.Context, reader Reader, after int6
 // reader must be a scoped reader with a verified principal; the request's
 // readerFor reader is.
 //
-// A candidate qualifies when its channel is not muted and the policy admits
-// it: off admits nothing (and reads nothing), mentions a whisper the reader
+// A candidate qualifies when its channel is not muted, its author is not one
+// the reader blocks (unless it carries a decision: schema.BlockExemptPayload),
+// and the policy admits it: off admits nothing (and reads nothing), mentions a whisper the reader
 // received or a body that mentions the reader's current name, all every
 // candidate. The kind is whisper, then mention, then message, whatever the
 // policy. A page that fills stops at its last summary, so the cursor never
@@ -3009,6 +3010,12 @@ func (s *Store) ListPendingNotifications(ctx context.Context, reader Reader, cre
 	for _, id := range prefs.Muted {
 		muted[id] = struct{}{}
 	}
+	// The reader's blocks (issue #1832): a blocked author's message is not
+	// in the feed, unless it carries a decision (blockExemptMessage).
+	blocked, err := blockedSetOf(ctx, s.db, reader.PrincipalID)
+	if err != nil {
+		return schema.ListPendingNotificationsResponseV1{}, fmt.Errorf("store: list pending notifications: %w", err)
+	}
 	examine := cands
 	truncated := false
 	if len(examine) > PendingNotificationScanBound {
@@ -3028,6 +3035,15 @@ func (s *Store) ListPendingNotifications(ctx context.Context, reader Reader, cre
 		}
 		if _, isMuted := muted[c.summary.ChannelID]; isMuted {
 			continue
+		}
+		if _, isBlocked := blocked[c.summary.AuthorID]; isBlocked {
+			exempt, err := blockExemptMessage(ctx, s.db, c.summary.MessageID)
+			if err != nil {
+				return schema.ListPendingNotificationsResponseV1{}, fmt.Errorf("store: list pending notifications: %w", err)
+			}
+			if !exempt {
+				continue
+			}
 		}
 		if prefs.Policy == schema.NotificationPolicyMentions && kind == schema.NotificationKindMessage {
 			continue
@@ -3119,9 +3135,13 @@ var pushTargetScanBound = PushTargetScanBound
 //     killed is never woken, and neither expired nor idle past its bound); a
 //     guest's visit is checked in Go (credentialIdle.live);
 //   - its principal is a human, enabled, not hidden, and a live member of the
-//     channel (liveMembers: not banned), and did not write the message.
+//     channel (liveMembers: not banned), and did not write the message;
+//   - its principal does not block the author (issue #1832), unless the
+//     message carries a decision (?4: schema.BlockExemptPayload, read from
+//     the message's row in Go).
 //
-// Arguments, in order: the channel, the author, the bound.
+// Arguments, in order: the channel, the author, the bound, and whether the
+// message is exempt from blocks (0 or 1).
 func pushCandidatesSQL(now time.Time) string {
 	// liveCredentialWhere is a constant of this package plus an integer.
 	return `SELECT r.id, r.credential_id, r.principal_id, r.endpoint, r.p256dh, r.auth,
@@ -3134,6 +3154,7 @@ func pushCandidatesSQL(now time.Time) string {
 	  AND ` + liveCredentialWhere(now) + `
 	  AND p.kind = 'human' AND p.disabled_at IS NULL AND p.hidden_at IS NULL
 	  AND p.id <> ?2
+	  AND (?4 = 1 OR NOT EXISTS (SELECT 1 FROM blocks b WHERE b.owner_id = p.id AND b.blocked_id = ?2))
 	ORDER BY r.id LIMIT ?3`
 }
 
@@ -3141,7 +3162,7 @@ func pushCandidatesSQL(now time.Time) string {
 // only when it is in the channel and not removed. It is the only place the
 // push path reads a body, and the body leaves this file only as the answer of
 // pushPolicyAdmits.
-const pushMessageSQL = `SELECT m.body, m.audience_kind, m.author_id FROM messages m
+const pushMessageSQL = `SELECT m.body, m.audience_kind, m.author_id, m.payload_schema FROM messages m
 	WHERE m.id = ? AND m.channel_id = ? AND ` + notRemovedCond
 
 // pushVisibleSQL asks whether the message is visible to a scoped reader:
@@ -3159,7 +3180,8 @@ var pushVisibleSQL = `SELECT 1 FROM messages m WHERE m.id = ? AND ` + notRemoved
 //   - it is a candidate (pushCandidatesSQL): an active webpush registration of
 //     a live, full-scope credential at its principal's present generation,
 //     whose principal is a human, enabled, not hidden, a live member of the
-//     channel and not the author;
+//     channel, not the author, and not blocking the author unless the
+//     message carries a decision (issue #1832);
 //   - the credential is within its idle bound at now (credentialIdle.live);
 //   - the message exists in the channel, is not removed, and is visible to
 //     that principal (messageVisible with their scoped reader, so a net
@@ -3179,7 +3201,8 @@ func (s *Store) PushTargets(ctx context.Context, channelID, messageID int64, now
 	var body string
 	var kind sql.NullString
 	var authorID int64 // the message's own author: never a caller's word for it
-	switch err := s.db.QueryRowContext(ctx, pushMessageSQL, messageID, channelID).Scan(&body, &kind, &authorID); {
+	var payloadSchema sql.NullString
+	switch err := s.db.QueryRowContext(ctx, pushMessageSQL, messageID, channelID).Scan(&body, &kind, &authorID, &payloadSchema); {
 	case errors.Is(err, sql.ErrNoRows):
 		return nil, nil
 	case err != nil:
@@ -3187,7 +3210,11 @@ func (s *Store) PushTargets(ctx context.Context, channelID, messageID int64, now
 	}
 	whisper := kind.Valid && schema.AudienceKind(kind.String) == schema.AudienceKindPrincipals
 
-	rows, err := s.db.QueryContext(ctx, pushCandidatesSQL(now), channelID, authorID, pushTargetScanBound) // #nosec G202 -- constants plus an integer
+	exempt := 0
+	if payloadSchema.Valid && schema.BlockExemptPayload(payloadSchema.String) {
+		exempt = 1
+	}
+	rows, err := s.db.QueryContext(ctx, pushCandidatesSQL(now), channelID, authorID, pushTargetScanBound, exempt) // #nosec G202 -- constants plus an integer
 	if err != nil {
 		return nil, fmt.Errorf("store: push targets: candidates: %w", err)
 	}
@@ -3277,4 +3304,18 @@ func pushPolicyAdmits(prefs schema.NotificationPreferencesV1, channelID int64, w
 	default:
 		return false
 	}
+}
+
+// blockExemptMessage reports whether messageID carries a payload a block
+// never hides (schema.BlockExemptPayload: an approval request or an admin
+// action). It is asked only for a message whose author the reader blocks.
+func blockExemptMessage(ctx context.Context, q execer, messageID int64) (bool, error) {
+	var payload sql.NullString
+	switch err := q.QueryRowContext(ctx, `SELECT payload_schema FROM messages WHERE id = ?`, messageID).Scan(&payload); {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("store: block exemption: %w", err)
+	}
+	return payload.Valid && schema.BlockExemptPayload(payload.String), nil
 }

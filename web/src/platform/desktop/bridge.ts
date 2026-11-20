@@ -351,7 +351,8 @@ declare global {
       Partial<DesktopSettingsBridge> &
       Partial<DesktopCompanionBridge> &
       Partial<DesktopInviteBridge> &
-      Partial<DesktopShareSoundBridge>;
+      Partial<DesktopShareSoundBridge> &
+      Partial<DesktopDiagnosticsBridge>;
   }
 }
 
@@ -493,7 +494,7 @@ export type VoiceTalkModeResult =
 // The keys main also saves, but only from the talk-key setup below: the page
 // never names them (issue #1381, D3-10). keys.mute and keys.deafen are not
 // set from here.
-export type VoiceBindingKey = 'keys.device' | 'keys.talk';
+export type VoiceBindingKey = 'keys.device' | 'keys.talk' | 'keys.mute';
 
 // A device the person could bind a talk key on, listed by name from
 // /dev/input/by-id without opening anything. id is opaque and valid only for
@@ -529,14 +530,18 @@ export type VoiceKeyDevicesResult =
 // Windows capture carries only an allowlisted physical code and the voice
 // generation shown during configuration. Main translates it; no event or text.
 export type VoiceTalkBindingRequest =
-  | { readonly deviceId: string; readonly code: number }
-  | { readonly windowsCode: string; readonly generation: number };
+  | { readonly deviceId: string; readonly code: number; readonly binding?: 'mute' }
+  | { readonly windowsCode: string; readonly generation: number; readonly binding?: 'mute' };
 
-// Linux saves keys.device then keys.talk; Windows saves only keys.talk.
-// failed says which write did not save.
+// Linux mute setup saves the shared device and binding in one operation.
+// Linux talk setup saves the device first. Windows saves only the binding.
+// An omitted binding selects keys.talk. failed identifies a separate write.
 export type VoiceTalkBindingResult =
   | { readonly ok: true }
-  | { readonly ok: false; readonly error: VoiceOneShotError; readonly failed?: 'device' | 'talk' };
+  | { readonly ok: false; readonly error: VoiceOneShotError; readonly failed?: 'device' | 'talk' | 'mute' };
+
+// The desktop log accepts only these fixed renderer diagnostics.
+export type VoiceDiagnostic = 'capture-stalled' | 'encoder-cpu' | 'sdp-retry' | 'sdp-rejected' | 'sdp-bundle-collision' | 'sdk-warning' | 'sdk-error';
 
 export interface DesktopVoiceBridge {
   voiceState(): Promise<NativeVoiceView>;
@@ -548,6 +553,8 @@ export interface DesktopVoiceBridge {
   voiceSetDevices(devices: { readonly input?: string; readonly output?: string }): Promise<VoiceCommandResult>;
   voiceSetTalkMode(mode: VoiceControlTalkMode, save?: true): Promise<VoiceTalkModeResult>;
   voiceDevices(): Promise<NativeVoiceDevicesResult>;
+  // A fixed diagnostic from the renderer's voice or share code.
+  reportVoiceDiagnostic(diagnostic: VoiceDiagnostic): Promise<void>;
   voiceSaveDevice(request: { readonly key: VoiceDeviceKey; readonly value: string }): Promise<VoiceSaveResult>;
   voiceKeyDevices(): Promise<VoiceKeyDevicesResult>;
   voiceSaveTalkBinding(request: VoiceTalkBindingRequest): Promise<VoiceTalkBindingResult>;
@@ -776,9 +783,9 @@ export interface CompanionEvent {
 // cannot-share: a Share whose grant said this desktop cannot share.
 export type CompanionPageEndKind = 'left' | 'connect-failed' | 'disconnected' | 'dropped' | 'insecure-address' | 'cannot-share';
 
-// detail is short words only, checked again by main: an error's name and
-// LiveKit's reason name (ConnectionError:WebSocket), a disconnect's cause, a
-// URL's scheme. Never an error's message, an address, a room or a token.
+// detail can carry an error name and a reason (ConnectionError:WebSocket),
+// a disconnect cause, or the scheme refused by CSP. Main logs recognized
+// details from a fixed vocabulary and records other short words as 'other'.
 export interface CompanionPageEnd {
   readonly kind: CompanionPageEndKind;
   readonly detail?: string;
@@ -884,6 +891,19 @@ export interface DesktopUpdateBridge {
   onUpdateState(listener: (view: InstalledView) => void): Unsubscribe;
 }
 
+// The diagnostics bundle (issue #2084): the build versions and recent
+// diagnostic events. Main holds the preview text by ID. Save takes that ID
+// after the person's own input and the native dialog supplies the path.
+export interface DiagnosticsPreview {
+  readonly id: string;
+  readonly text: string;
+}
+
+export interface DesktopDiagnosticsBridge {
+  diagnosticsPreview(): Promise<DiagnosticsPreview | null>;
+  diagnosticsSave(id: string): Promise<SaveOutcome>;
+}
+
 // The object the preload exposes: the bridge, the voice family, the settings,
 // the companion, the invite family and the update family. Still no press, release, gate or transmit function in any.
 export type ExposedDesktopBridge = ConchDesktopBridge &
@@ -892,4 +912,5 @@ export type ExposedDesktopBridge = ConchDesktopBridge &
   DesktopCompanionBridge &
   DesktopInviteBridge &
   DesktopUpdateBridge &
-  DesktopShareSoundBridge;
+  DesktopShareSoundBridge &
+  DesktopDiagnosticsBridge;

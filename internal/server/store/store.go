@@ -1131,7 +1131,48 @@ BEGIN SELECT RAISE(ABORT, 'message removals are permanent'); END`,
 	// 50: distinguish author removals from moderation, including a moderator
 	// removing their own message. Existing rows keep their original meaning.
 	{`ALTER TABLE message_removals ADD COLUMN by_author INTEGER NOT NULL DEFAULT 0 CHECK (by_author IN (0, 1))`},
-	// 51 (dmMigration): local direct messages (issue #2017, ADR-017). The
+	// 51: personal blocks (issue #1832, docs/design/blocks.md). One row per
+	// (owner, blocked) pair: owner_id would rather not see or be alerted
+	// about blocked_id. It is a preference of the owner's, read only for the
+	// owner (their list, their feed, their wakes) and never for anyone
+	// else, so no audit row is written: the audit log is read by operators,
+	// and a block is not theirs to see. At most schema.MaxBlocks rows per
+	// owner, enforced in PutBlock. The primary key serves "does owner block
+	// author?", the only question the alert paths ask. Nothing is backfilled.
+	{
+		`CREATE TABLE blocks (
+	owner_id   INTEGER NOT NULL REFERENCES principals (id),
+	blocked_id INTEGER NOT NULL REFERENCES principals (id),
+	created_at INTEGER NOT NULL,
+	PRIMARY KEY (owner_id, blocked_id),
+	CHECK (owner_id <> blocked_id)
+) WITHOUT ROWID`,
+	},
+	// 52 (credentialProvenanceMigration): who made each credential (issue
+	// #2042, provenance.go). credentials.self_made is 1 when the principal
+	// made it for themselves, 0 when another principal made it or nobody
+	// knows; sign_in_links.self_made is 1 for a device link made on a
+	// self-made credential, which is what its redemption passes on. Every
+	// existing row is 0, made by another: the conservative answer, since
+	// which path made an old row is not on record. The DM and call routes
+	// refuse a credential that is not self-made; nothing else reads it.
+	// account_notices holds what a member is told about their own account
+	// (account_notices.go): a password set through a link another principal
+	// made. It starts empty; nothing is backfilled.
+	{
+		`ALTER TABLE credentials ADD COLUMN self_made INTEGER NOT NULL DEFAULT 0 CHECK (self_made IN (0, 1))`,
+		`ALTER TABLE sign_in_links ADD COLUMN self_made INTEGER NOT NULL DEFAULT 0 CHECK (self_made IN (0, 1))`,
+		`CREATE TABLE account_notices (
+	id           INTEGER PRIMARY KEY AUTOINCREMENT,
+	principal_id INTEGER NOT NULL REFERENCES principals (id),
+	kind         TEXT    NOT NULL,
+	by_name      TEXT    NOT NULL,
+	at           INTEGER NOT NULL,
+	dismissed_at INTEGER
+)`,
+		`CREATE INDEX account_notices_open ON account_notices (principal_id, id) WHERE dismissed_at IS NULL`,
+	},
+	// 53 (dmMigration): local direct messages (issue #2017, ADR-017). The
 	// statements are in dm_migration.go, beside the store code they serve.
 	dmMigration,
 }

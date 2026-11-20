@@ -392,6 +392,12 @@ func (s *Server) guard(rt route) http.Handler {
 	if rule := recentAuthRoutes[rt.pattern]; rule != reauthNone {
 		handler = s.recentAuthGate(rule, handler)
 	}
+	// A person's own DMs, calls and stream refuse a credential made by
+	// another (issue #2042), before any proof is asked for: such a
+	// credential cannot give one that would help.
+	if selfMadeCredentialRoutes[rt.pattern] {
+		handler = s.requireSelfMadeCredential(handler)
+	}
 	switch rt.access {
 	case accessOperator:
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

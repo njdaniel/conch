@@ -13,7 +13,7 @@ import (
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
-// dmObjectNames lists the tables migration 51 makes.
+// dmObjectNames lists the tables migration 53 makes.
 func dmObjectNames(t *testing.T, s *Store) []string {
 	t.Helper()
 	rows, err := s.db.Query(`SELECT name FROM sqlite_master
@@ -45,7 +45,7 @@ var wantDMTables = []string{
 // later migration's author has added theirs: the rewind must leave no object
 // of a migration the old version has not made.
 var dmDropStatements = []string{
-	"DROP TABLE direct_messages_fts", // migration 51 (issue #2017)
+	"DROP TABLE direct_messages_fts", // migration 53 (issue #2017)
 	"DROP TABLE dm_read_marks",
 	"DROP TABLE dm_files",
 	"DROP TABLE direct_message_removals",
@@ -55,7 +55,7 @@ var dmDropStatements = []string{
 	"DROP TABLE dm_conversations",
 }
 
-// dropDMObjects returns a migrated database to its state before migration 51:
+// dropDMObjects returns a migrated database to its state before migration 53:
 // the migration only adds tables, so removing them (and the triggers that go
 // with them) and the version is that state.
 func dropDMObjects(t *testing.T, s *Store, version int) {
@@ -166,7 +166,7 @@ func TestDMMigrationUpgradeReopenAndRestore(t *testing.T) {
 		t.Fatalf("seed reads: bob %v carol %v", beforeBob, beforeCarol)
 	}
 
-	// Make it a database from before migration 51.
+	// Make it a database from before migration 53.
 	preDM := len(migrations) - 1
 	dropDMObjects(t, s, preDM)
 	if got := dmObjectNames(t, s); len(got) != 0 {

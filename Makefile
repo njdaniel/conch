@@ -45,10 +45,14 @@ agent-claim-test:
 # No tracked text file may hold a bidi control, a line or paragraph separator
 # or a control character other than tab, LF and CR (issue #244). The script's
 # own test runs first, so a check that has stopped checking fails here too.
+# The Android device run sheet's row IDs are checked against the mobile
+# capability matrix here too (issue #2008), the same way.
 invisible-check:
 	./scripts/invisible-chars-test.sh
 	./scripts/invisible-chars.sh
 	./scripts/ci-docs-only-test.sh
+	./scripts/mobile-rows-check-test.sh
+	./scripts/mobile-rows-check.sh
 
 # The Rust voice client under voice/ (ADR-006): fmt, clippy, tests, the
 # dependency gate and cargo-deny, with the pinned toolchain. Fetch that once

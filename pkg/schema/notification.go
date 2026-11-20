@@ -167,7 +167,7 @@ const (
 	// as a mention under the policy "mentions" (Q3 on #1116).
 	NotificationKindWhisper NotificationKind = "whisper"
 	// NotificationKindDirect: a direct message to the reader (issue #2016,
-	// DRAFT pending ADR-017). It is carried only by NotificationSummaryV2,
+	// ADR-017). It is carried only by NotificationSummaryV2,
 	// whose context is then direct; a v1 summary never holds one, so a
 	// client of v1 never sees it. It counts as a mention under the policy
 	// "mentions", as a whisper does.

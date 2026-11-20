@@ -1,6 +1,6 @@
 package store
 
-// dmMigration is migration 51: local direct messages (issue #2017, ADR-017 Decisions 1, 5 and 12,
+// dmMigration is migration 53: local direct messages (issue #2017, ADR-017 Decisions 1, 5 and 12,
 // the design note that comes with it, §2.1). Purely additive: no existing table, row,
 // trigger or index is touched, so channels, two-member private channels and
 // whispers read as before and a pre-DM database gains only empty tables.
