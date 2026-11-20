@@ -26,8 +26,8 @@ import (
 // audited, ADR-004) who holds voice (issue #437), and only for the channels
 // they are a member of, as GET /v1/channels lists them (operators get no
 // exemption). A channel the caller may not read is absent from the document,
-// never a zero. Only the channel-wide room is counted: the poller tracks no
-// other (voicePoller.roomLocked), so a net's room is never in anyone's count.
+// never a zero. Only the channel-wide room is counted. The presence cache
+// (voicePoller.roomLocked) holds only channel-wide rooms.
 //
 // The socket is one per viewer, not per channel, so a tab holds one whatever
 // the number of channels (design note §4). The poller wakes its subscribers
@@ -137,8 +137,8 @@ func (p *voicePoller) occupancy(channelIDs []int64) schema.VoiceOccupancyV1 {
 // count, and the principal ids behind it (issue #1103), are what that
 // channel's presence would list (snapshotLocked): nobody in a stale room,
 // nothing at all while LiveKit is unavailable, and each principal once.
-// Every room the poller holds is a channel-wide one, so no net's people are
-// ever in a row. Ids are always stated, as [] for nobody.
+// Every room in the presence cache is channel-wide. Ids are always stated,
+// as [] for nobody.
 func (p *voicePoller) occupancyLocked(channelIDs []int64) schema.VoiceOccupancyV1 {
 	doc := schema.VoiceOccupancyV1{Schema: schema.VoiceOccupancySchemaV1, Channels: []schema.VoiceChannelOccupancy{}}
 	if p.s.lk == nil {

@@ -152,35 +152,6 @@ func restorePrivateCallsTx(ctx context.Context, tx execer, now time.Time) error 
 	})
 }
 
-// ObservePrivateCallEndpoints is the #2032 media poller seam. Submit
-// observations in poll order for the attempt revision observed. Each
-// credential is the selected credential seen in the room, or zero when
-// absent. A late observation cannot resurrect an expired attempt.
-func (s *Store) ObservePrivateCallEndpoints(ctx context.Context, id string, revision, callerCredential, calleeCredential int64, clock func() time.Time) error {
-	return s.withImmediateTx(ctx, func(tx execer) error {
-		c, err := privateCallByID(ctx, tx, id)
-		if err != nil {
-			return err
-		}
-		if c.Revision != revision || (c.State != schema.PrivateCallStateAccepted && c.State != schema.PrivateCallStateActive) {
-			return nil
-		}
-		now := clock().Truncate(time.Millisecond)
-		if changed, err := refreshPrivateCall(ctx, tx, &c, now); changed || err != nil {
-			return err
-		}
-		callerPresent := callerCredential == c.callerCredential
-		calleePresent := calleeCredential == c.calleeCredential
-		if c.State == schema.PrivateCallStateAccepted {
-			if callerPresent && calleePresent {
-				return applyPrivateCallServerEvent(ctx, tx, &c, schema.PrivateCallEventJoined, now)
-			}
-			return nil
-		}
-		return recordPrivateCallAbsence(ctx, tx, c, callerPresent, calleePresent, now)
-	})
-}
-
 func recordPrivateCallAbsence(ctx context.Context, tx execer, c privateCall, callerPresent, calleePresent bool, now time.Time) error {
 	caller := privateCallAbsence(c.callerAbsent, callerPresent, now)
 	callee := privateCallAbsence(c.calleeAbsent, calleePresent, now)

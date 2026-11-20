@@ -26,10 +26,11 @@ import (
 // §5, §6, §7).
 //
 // A LiveKit token cannot be revoked and an open connection outlives it, so
-// conchd watches the rooms. The voicePoller asks LiveKit who is in each room
-// in use, removes anyone who is not a current, enabled, human member of the
-// room's channel, derives who is connected and who is transmitting, writes the
-// audit events, and tells presence subscribers when the picture changes.
+// conchd watches the rooms. For channel-wide rooms in use, the voicePoller
+// asks LiveKit who is in the room, removes anyone who is not a current, enabled,
+// human member of the channel, derives who is connected and transmitting, writes
+// audit events, and tells presence subscribers when the picture changes. Its
+// private media loop handles call rooms separately.
 //
 // From issue #135 the poller no longer writes a row for every transmission it
 // sees. Clients report their presses (voice_transmit.go); each pass hands what
@@ -61,7 +62,8 @@ const (
 	voicePassGapMean = 400 * time.Millisecond
 	voicePassGapMax  = 1500 * time.Millisecond
 	// voiceSweepInterval is how often the room list is re-read to rebuild "in
-	// use" (design note §6). With no room in use it is the only call made.
+	// use" (design note §6). With no channel room in use, the channel pass
+	// makes no other requests to LiveKit.
 	voiceSweepInterval = 30 * time.Second
 	// voiceRetiredKeep is how long a retired room's row is kept after LiveKit
 	// last listed the room (or after the rotation, if it never did again):
@@ -341,9 +343,11 @@ func transmitEvents(channelID int64, rows []transmitRow) []voiceEvent {
 // voicePoller owns presence state, the poller that fills it, and the
 // subscribers who watch it. It is built for every server so that presence
 // (and the sockets that stream it) answers "not configured" without a
-// special case; its goroutine is started only when voice is configured.
+// special case. Its loops run only when voice is configured.
 type voicePoller struct {
 	s *Server
+	// A bounded set of locks for private room creation and deletion, keyed by name.
+	callRoomLocks [64]sync.Mutex
 	// now is the clock. Tests replace it; nothing else may.
 	now func() time.Time
 	// entitle and storedRooms are the poller's two reads of the store:
@@ -646,17 +650,17 @@ func (s *Server) voiceEntitlement(ctx context.Context, identity string, channelI
 // Lifecycle
 
 // start runs the poller until ctx ends or the returned stop is called. stop
-// waits for the goroutine, so nothing is left running after it returns.
+// waits for both loops, so nothing is left running after it returns.
 func (p *voicePoller) start(ctx context.Context) (stop func()) {
 	ctx, cancel := context.WithCancel(ctx)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		p.loop(ctx)
-	}()
+	var wg sync.WaitGroup
+	wg.Go(func() { p.loop(ctx) })
+	if p.privateCallMedia() != nil {
+		wg.Go(func() { p.loopPrivateCallMedia(ctx) })
+	}
 	return func() {
 		cancel()
-		<-done
+		wg.Wait()
 	}
 }
 
@@ -889,9 +893,13 @@ func (p *voicePoller) runSweep(ctx context.Context) bool {
 	if retiredErr != nil {
 		slog.ErrorContext(ctx, "voice: sweep could not read retired rooms", "error", retiredErr)
 	}
+	callRooms, callRoomsErr := p.privateCallRoomStates(ctx, listed)
+	if callRoomsErr != nil {
+		slog.ErrorContext(ctx, "voice: sweep could not read private call rooms", "error", callRoomsErr)
+	}
 	p.mu.Lock()
 	next := now.Add(voiceSweepInterval)
-	if invErr != nil || retiredErr != nil {
+	if invErr != nil || retiredErr != nil || callRoomsErr != nil {
 		// The invariant or the cleanup could not be done: look again soon,
 		// not in thirty seconds.
 		next = now.Add(voiceSweepRetry)
@@ -919,11 +927,13 @@ func (p *voicePoller) runSweep(ctx context.Context) bool {
 	}
 	p.deleteRooms(ctx, stale)
 	// A room of this instance's that the store holds neither live nor
-	// retired is deleted too (issue #782). Only when both were read: with
-	// the retired rooms unknown every retired room would count as one, and
-	// a failed read already brings the next sweep a second closer.
-	if retiredErr == nil {
-		p.sweepOrphans(ctx, p.orphanRooms(listed, stored, retired))
+	// retired is deleted too (issue #782). Only classify orphans when all
+	// room reads succeeded, so a failed read cannot cause a false orphan.
+	if callRoomsErr == nil {
+		p.sweepRetiredPrivateCallRooms(ctx, callRooms)
+		if retiredErr == nil {
+			p.sweepOrphans(ctx, p.orphanRooms(listed, stored, retired, callRooms))
+		}
 	}
 	// A retired room LiveKit has not listed for a day has nothing left to be
 	// found for: its row goes. The day is counted from the last sweep that
@@ -2594,8 +2604,11 @@ func (p *voicePoller) deleteRooms(ctx context.Context, rooms []store.VoiceRoom) 
 // prefix begins with this one's. A room under a prefix this instance used
 // before is not matched either: it is known by its row, if at all, and
 // deleted as a retired room.
-func (p *voicePoller) orphanRooms(listed []livekit.Room, stored, retired []store.VoiceRoom) []string {
-	known := make(map[string]struct{}, len(stored)+len(retired))
+func (p *voicePoller) orphanRooms(listed []livekit.Room, stored, retired []store.VoiceRoom, callRooms map[string]bool) []string {
+	known := make(map[string]struct{}, len(stored)+len(retired)+len(callRooms))
+	for name := range callRooms {
+		known[name] = struct{}{}
+	}
 	for _, r := range stored {
 		known[r.RoomName] = struct{}{}
 	}
