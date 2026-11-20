@@ -1,7 +1,7 @@
 // The desktop's diagnostics bundle (issue #2084). Input: fixed diagnostic
-// lines chosen by main, build versions, and the person's acts of previewing
-// and saving. Output: the preview and those same bytes in the file the person
-// chose in the native save dialog.
+// lines chosen by main, build versions, the IPC refusal total, and the
+// person's acts of previewing and saving. Output: the preview and those same
+// bytes in the file the person chose in the native save dialog.
 //
 // Only explicitly opted-in, fixed-vocabulary log lines enter the export ring.
 // Opt-in is the privacy boundary; the scrub is best-effort defense in depth.
@@ -47,8 +47,7 @@ const RULES: readonly (readonly [RegExp, string | ((match: string) => string)])[
   [/\b(?:bearer|basic)\s+\S.*/giu, '[redacted]'],
   [/\b[\w-]*(?:token|secret|password|passwd|passphrase|credential|authorization|cookie|ticket|api[ _-]?key|access[ _-]?key|private[ _-]?key|session[ _-]?id|invite[ _-]?code)[\w-]*\s*(?:[=:]|\bis\b)\s*\S.*/giu, '[redacted]'],
   [/\b(?:invite|pass|pwd|session|otp|pin|auth|sid|sig|nonce|room|channel|profile|user|name)\s*[=:]\s*\S.*/giu, '[redacted]'],
-  // Keep the code fields in fixed exit and share diagnostic lines.
-  [/(?<!\b(?:exit |diagnostic ))\bcode\s*[=:]\s*\S.*/giu, '[redacted]'],
+  [/\bcode\s*[=:]\s*\S.*/giu, '[redacted]'],
   [/\bkey\s*=\s*\S.*/giu, '[redacted]'],
   [/\b(?:the invite|joined room|identity)\s+\S.*/giu, '[redacted]'],
   // Credentials and e-mail must be removed before @names and hosts.
@@ -71,11 +70,26 @@ const RULES: readonly (readonly [RegExp, string | ((match: string) => string)])[
   [/[\w-]{8,}\.[\w-]{8,}\.[\w-]+|[A-Za-z0-9_+/=-]{22,}/gu, '[redacted]'],
 ];
 
+// Whole fixed lines whose reviewed values resemble hosts, keys or addresses.
+// Anchoring the complete shape keeps an adjoining payload subject to the scrub.
+const FIXED_LINES = [
+  /^conch-desktop: compat\.json is missing or malformed; no server release is supported$/u,
+  /^conch-desktop: CONCH_LINUX_SHARE_AUDIO is on: the Linux screen share offers its sound \(experimental\)$/u,
+  /^voice: helper \d+ speaks conch\.voice_control\.v[123]$/u,
+  /^voice: unavailable: runtime-dir-(?:unset|not-absolute|missing|symlink|not-directory|not-owned|not-private)$/u,
+  /^voice: helper \d+ exited \((?:code |exit code: )-?\d+\)$/u,
+  /^voice: (?:config (?:set|set-mute-binding)|devices): (?:failed|unsupported) \(exit status -?\d+\)$/u,
+  /^vault: temporarilyUnavailable$/u,
+  /^share: diagnostic code=capture_stalled$/u,
+  /^conch-desktop: refused an IPC call \((?:sender|destroyed|frame|subframe|origin|generation|name|rate|size|shape|gesture|disabled|error)\); \d+ so far$/u,
+];
+
 // Bound work before scrubbing and bound the result after redaction.
 export function scrubLine(line: string): string {
   // Cutting first could shorten a key below the long-run rule's length.
   if (line.length > RECORD_MAX_CHARS) return `[a ${String(line.length)}-character line, not kept]`;
   let out = line.replace(FORMAT, '').replace(CONTROLS, ' ');
+  if (out.length <= LINE_MAX_CHARS && FIXED_LINES.some((pattern) => pattern.test(out))) return out;
   for (const [pattern, replacement] of RULES) {
     out = out.replace(pattern, typeof replacement === 'string' ? () => replacement : replacement);
   }
@@ -104,6 +118,24 @@ export class LogRing {
   }
 }
 
+// Each key must come from a closed vocabulary. Log the first event and then
+// events 2, 4, 8, etc. so repeated events take logarithmic space in the ring.
+export class GeometricSampler<Key extends string> {
+  readonly #counts = new Map<Key, { count: number; next: number }>();
+
+  sample(key: Key): boolean {
+    const state = this.#counts.get(key);
+    if (state === undefined) {
+      this.#counts.set(key, { count: 1, next: 2 });
+      return true;
+    }
+    state.count++;
+    if (state.count !== state.next) return false;
+    state.next *= 2;
+    return true;
+  }
+}
+
 // Call sites opt in only with fixed text, numbers or closed vocabularies.
 export type MainLog = (line: string, options?: { readonly ring: true }) => void;
 
@@ -118,16 +150,18 @@ export interface BundleInput {
   // This build's versions: names and version strings main itself read.
   readonly versions: Readonly<Record<string, string>>;
   readonly lines: readonly string[];
+  readonly refusals: number;
   readonly now: Date;
 }
 
 // buildBundle is the text the person sees and may save. If the lines make it
 // larger than BUNDLE_MAX_BYTES the oldest are left out, and it says how many.
-export function buildBundle({ versions, lines, now }: BundleInput): string {
+export function buildBundle({ versions, lines, refusals, now }: BundleInput): string {
   const head = [
     'Conch desktop diagnostics',
     `made: ${now.toISOString()}`,
     ...Object.entries(versions).map(([name, value]) => `${scrubLine(name)}: ${scrubLine(value)}`),
+    `IPC refusals since start: ${String(refusals)}`,
     '',
     'This file contains build versions and recent diagnostic events. Read it before sharing. It was made on this computer and has not been sent anywhere.',
     '',
@@ -172,9 +206,10 @@ export class Diagnostics {
     this.#deps = deps;
   }
 
-  // Hold the exact text returned with each main-generated ID.
-  preview(): DiagnosticsPreview {
-    const text = buildBundle({ versions: this.#deps.versions, lines: this.#deps.ring.lines(), now: this.#deps.now() });
+  // Hold the exact text returned with each main-generated ID, including the
+  // live refusal total IPC supplied for this preview.
+  preview(refusals: number): DiagnosticsPreview {
+    const text = buildBundle({ versions: this.#deps.versions, lines: this.#deps.ring.lines(), refusals, now: this.#deps.now() });
     const id = randomBytes(16).toString('hex');
     this.#shown.set(id, text);
     if (this.#shown.size > SNAPSHOT_LIMIT) {

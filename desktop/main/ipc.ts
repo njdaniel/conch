@@ -15,7 +15,7 @@
 // (registerNotificationSupport), which Electron's ipcMain.on answers through
 // event.returnValue. notificationSupported() runs the same caller, rate and
 // shape checks and returns an Envelope too.
-import type { MainLog } from './diagnostics.ts';
+import { GeometricSampler, type MainLog } from './diagnostics.ts';
 import { windowsKey } from '../../web/src/platform/desktop/windows-keys.ts';
 import type { IpcMain } from 'electron';
 
@@ -124,7 +124,7 @@ export interface IntegrationsApi {
 export type CompanionApi = Pick<Companion, 'grant' | 'stop' | 'end'>;
 export type ShareSoundApi = Pick<ShareSound, 'start' | 'choose' | 'mute' | 'end' | 'shareEnded'>;
 
-export type DiagnosticsApi = Pick<Diagnostics, 'save'> & { preview(): ReturnType<Diagnostics['preview']> | null };
+export type DiagnosticsApi = Pick<Diagnostics, 'save'> & { preview(refusals: number): ReturnType<Diagnostics['preview']> | null };
 const NO_DIAGNOSTICS: DiagnosticsApi = { preview: () => null, save: () => Promise.resolve('failed') };
 const NO_INTEGRATIONS: IntegrationsApi = { view: () => Promise.resolve({ rows: [] }) };
 
@@ -237,6 +237,7 @@ interface Handlers {
   readonly settings: SettingsApi;
   readonly integrations: IntegrationsApi;
   readonly diagnostics: DiagnosticsApi;
+  readonly refusals: number;
   readonly companion: CompanionApi;
   readonly reportVoiceDiagnostic: (diagnostic: VoiceDiagnostic) => void;
   // Absent (the switch off): a share-sound function never reaches its run.
@@ -772,7 +773,7 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
   // The save writes it to the path the person chooses after their own input.
   // Also gesture-gated: the preview is main's log, so a page script can't
   // read it unasked; the click that opens it is the person's input.
-  diagnosticsPreview: { limit: 30, maxBytes: 0, parse: none, run: ({ diagnostics }) => diagnostics.preview(), gesture: true },
+  diagnosticsPreview: { limit: 30, maxBytes: 0, parse: none, run: ({ diagnostics, refusals }) => diagnostics.preview(refusals), gesture: true },
   diagnosticsSave: {
     limit: 10,
     maxBytes: 64,
@@ -926,6 +927,7 @@ export class Ipc {
   readonly #reportVoiceDiagnostic: (diagnostic: VoiceDiagnostic) => void;
   readonly #limits = new Map<InvokedFunction, RateLimit>(INVOKED_FUNCTIONS.map((name) => [name, new RateLimit(SPECS[name].limit)]));
   readonly #supportLimit = new RateLimit(120);
+  readonly #refusalSamples = new GeometricSampler<Refusal>();
   #refusals = 0;
 
   constructor(deps: IpcDeps) {
@@ -941,8 +943,9 @@ export class Ipc {
   #refuse(reason: Refusal, log = true): Envelope {
     this.#refusals++;
     if (log) {
-      // Sample exported refusals so a burst cannot crowd out recent history.
-      if (this.#refusals === 1 || this.#refusals % 100 === 0) {
+      // Give each logged reason its own sample sequence. Silent refusals
+      // still count toward the total shown in the preview.
+      if (this.#refusalSamples.sample(reason)) {
         this.#deps.log(`conch-desktop: refused an IPC call (${reason}); ${String(this.#refusals)} so far`, { ring: true });
       } else {
         this.#deps.log(`conch-desktop: refused an IPC call (${reason}); ${String(this.#refusals)} so far`);
@@ -993,6 +996,7 @@ export class Ipc {
         settings: this.#deps.settings,
         integrations: this.#deps.integrations ?? NO_INTEGRATIONS,
         diagnostics: this.#deps.diagnostics ?? NO_DIAGNOSTICS,
+        refusals: this.#refusals,
         companion: this.#deps.companion ?? NO_COMPANION,
         reportVoiceDiagnostic: this.#reportVoiceDiagnostic,
         shareSound: this.#deps.shareSound ?? null,
