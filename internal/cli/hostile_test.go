@@ -441,7 +441,10 @@ func hostileServer(t *testing.T, ok, whoamiOK bool) *httptest.Server {
 		case "GET /v1/dms/7/messages":
 			write(w, http.StatusOK, schema.ListDMMessagesResponseV1{Order: schema.DMOrderDesc, Messages: []schema.DMMessageV1{dmMessage}})
 		case "POST /v1/dms/7/messages":
-			write(w, http.StatusCreated, schema.PostDMMessageResponseV1{Message: dmMessage})
+			// A send's answer carries the author's client nonce (#2046's contract).
+			sent := dmMessage
+			sent.ClientNonce = "hostile-test-nonce"
+			write(w, http.StatusCreated, schema.PostDMMessageResponseV1{Message: sent})
 		case "PUT /v1/dms/7/read-state":
 			write(w, http.StatusOK, schema.DMReadStateV1{Schema: schema.DMReadStateSchemaV1, ConversationID: 7, LastReadID: 9})
 		case "PATCH /v1/dms/7/messages/9":
