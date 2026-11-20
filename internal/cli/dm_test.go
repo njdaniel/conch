@@ -13,6 +13,23 @@ import (
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
+type dmHandlerTransport struct{ handler http.Handler }
+
+func (transport dmHandlerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	recorder := httptest.NewRecorder()
+	transport.handler.ServeHTTP(recorder, r)
+	return recorder.Result(), nil
+}
+
+func useDMHandler(t *testing.T, handler http.Handler) {
+	t.Helper()
+	original := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = original })
+	http.DefaultTransport = dmHandlerTransport{handler}
+	t.Setenv("CONCH_SERVER", "https://dm.example")
+	t.Setenv("CONCH_TOKEN", "dm-token")
+}
+
 func TestDMCommands(t *testing.T) {
 	at := schema.NewTimestamp(time.Unix(1, 0))
 	conversation := schema.DMConversationV1{
@@ -93,10 +110,7 @@ func TestDMCommands(t *testing.T) {
 		return schema.EditDMMessageResponseV1{Message: edited}
 	})
 	handle("DELETE /v1/dms/7/messages/9", func(*http.Request) any { return nil })
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-	t.Setenv("CONCH_SERVER", srv.URL)
-	t.Setenv("CONCH_TOKEN", "dm-token")
+	useDMHandler(t, mux)
 
 	listing := "7  Bo\\x1bb\\u202e (#2)  1 unread\n"
 	for _, tt := range []struct {
@@ -117,6 +131,54 @@ func TestDMCommands(t *testing.T) {
 				t.Fatalf("stdout = %q, stderr = %q, err = %v; want %q", out, stderr, err, tt.want)
 			}
 		})
+	}
+}
+
+func TestDMSendRetryAcrossInvocations(t *testing.T) {
+	var stored schema.PostDMMessageRequestV1
+	sends := 0
+	useDMHandler(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/dms/7/messages" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		var req schema.PostDMMessageRequestV1
+		checkDMRequest(t, r, &req, "body", "client_nonce")
+		if err := req.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		sends++
+		if sends == 1 {
+			stored = req
+			// The message was stored, but the client got no confirmation.
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		if req.ClientNonce != stored.ClientNonce || req.Body != stored.Body {
+			t.Fatalf("retry changed the request: got %+v, first was %+v", req, stored)
+		}
+		response := schema.PostDMMessageResponseV1{Replayed: true, Message: schema.DMMessageV1{
+			Schema: schema.DMMessageSchemaV1, ID: 9, ConversationID: 7, AuthorID: 1,
+			Body: stored.Body, ClientNonce: stored.ClientNonce, Revision: 1,
+			CreatedAt: schema.NewTimestamp(time.Unix(1, 0)),
+		}}
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			t.Fatal(err)
+		}
+	}))
+
+	out, stderr, err := runCLI(t, "", "dm", "send", "7", "hello")
+	if err == nil || out != "" || stored.ClientNonce == "" || !strings.Contains(stderr, "--nonce "+stored.ClientNonce+" ") {
+		t.Fatalf("failed send gave stdout %q, stderr %q, error %v", out, stderr, err)
+	}
+	out, stderr, err = runCLI(t, "", "dm", "send", "--nonce", stored.ClientNonce, "7", "hello")
+	if err != nil || out != "9\n" || stderr != "" || sends != 2 {
+		t.Fatalf("retry gave stdout %q, stderr %q, error %v, sends %d", out, stderr, err, sends)
+	}
+	for _, nonce := range []string{"", "bad nonce"} {
+		_, _, err := runCLI(t, "", "dm", "send", "--nonce", nonce, "7", "hello")
+		if err == nil || sends != 2 {
+			t.Fatalf("invalid nonce %q reached the handler or passed validation: %v", nonce, err)
+		}
 	}
 }
 
@@ -154,15 +216,12 @@ func TestDMCommandRefusals(t *testing.T) {
 		{"history", schema.ErrorCodeDMNotFound, schema.DMNotFoundMessage, http.StatusNotFound, []string{"7"}},
 	} {
 		t.Run(tt.verb+"/"+tt.code, func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			useDMHandler(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.WriteHeader(tt.status)
 				if err := json.NewEncoder(w).Encode(schema.Error{Code: tt.code, Message: "private detail\x1b"}); err != nil {
 					t.Error(err)
 				}
 			}))
-			t.Cleanup(srv.Close)
-			t.Setenv("CONCH_SERVER", srv.URL)
-			t.Setenv("CONCH_TOKEN", "dm-token")
 			out, stderr, err := runCLI(t, "", append([]string{"dm", tt.verb}, tt.args...)...)
 			if out != "" || stderr != "" || !IsServerCode(err, tt.code) || err.Error() != tt.want || strings.Contains(err.Error(), "private detail") {
 				t.Fatalf("stdout = %q, stderr = %q, err = %v; want %q", out, stderr, err, tt.want)

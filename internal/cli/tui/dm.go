@@ -225,14 +225,13 @@ func (m Model) dmWriteDone(msg dmWritten) (Model, tea.Cmd) {
 	}
 	m.dm.busy = false
 	if msg.err != nil {
+		if msg.request.ClientNonce != "" {
+			m.dm.retry = msg.request
+		}
 		m.dm.status = sanitize(msg.err.Error())
 		return m, nil
 	}
 	if msg.request.ClientNonce != "" {
-		if strings.TrimSpace(m.dm.draft) == msg.request.Body {
-			m.dm.draft = ""
-		}
-		m.dm.retry = schema.PostDMMessageRequestV1{}
 		m.dm.before, m.dm.scroll = 0, 0
 	} else {
 		m.dm.conversation.Unread = msg.read.Unread
@@ -321,6 +320,11 @@ func (m Model) dmHistoryKey(key tea.KeyMsg) (Model, tea.Cmd) {
 	switch key.String() {
 	case "enter":
 		return m.dmSend()
+	case "ctrl+u":
+		if !m.dm.busy && m.dm.retry.ClientNonce != "" {
+			m.dm.retry = schema.PostDMMessageRequestV1{}
+			m.dm.status = ""
+		}
 	case "ctrl+r":
 		return m.dmMarkRead()
 	case "up":
@@ -347,7 +351,9 @@ func (m Model) dmHistoryKey(key tea.KeyMsg) (Model, tea.Cmd) {
 		}
 		m.dm.scroll = 0
 	default:
-		m.dm.draft = editDMDraft(m.dm.draft, key)
+		if m.dm.retry.ClientNonce == "" {
+			m.dm.draft = editDMDraft(m.dm.draft, key)
+		}
 	}
 	return m, nil
 }
@@ -364,15 +370,21 @@ func editDMDraft(draft string, key tea.KeyMsg) string {
 }
 
 func (m Model) dmSend() (Model, tea.Cmd) {
-	body := strings.TrimSpace(m.dm.draft)
-	if body == "" || m.dm.busy || m.dm.conversation.ID == 0 {
+	if m.dm.busy || m.dmRecipientPrompt() == "" {
 		return m, nil
 	}
-	if body != m.dm.retry.Body {
-		m.dm.retry = cli.NewDMText(body)
+	request := m.dm.retry
+	if request.ClientNonce == "" {
+		body := strings.TrimSpace(m.dm.draft)
+		if body == "" {
+			return m, nil
+		}
+		request = cli.NewDMText(body)
+		m.dm.draft = ""
 	}
+	m.dm.retry = schema.PostDMMessageRequestV1{}
 	m.dm.busy, m.dm.status = true, "sending…"
-	ctx, api, id, request := m.dm.ctx, m.api.(dmAPI), m.dm.id, m.dm.retry
+	ctx, api, id := m.dm.ctx, m.api.(dmAPI), m.dm.id
 	return m, func() tea.Msg {
 		requestCtx, cancel := context.WithTimeout(ctx, dmRefreshInterval)
 		defer cancel()
@@ -395,30 +407,43 @@ func (m Model) dmMarkRead() (Model, tea.Cmd) {
 	}
 }
 
-func dmPeerLabel(conversation schema.DMConversationV1) string {
+func dmPeerLabel(conversation schema.DMConversationV1, width int) string {
+	id := fmt.Sprintf("#%d", conversation.PeerID)
+	room := width - cellWidth(id) - 3 // space and parentheses
+	if room < 2 {
+		return id
+	}
 	name := strings.TrimSpace(sanitize(conversation.PeerName))
 	if name == "" {
 		name = "person"
 	}
-	return fmt.Sprintf("%s (#%d)", name, conversation.PeerID)
+	return fitCells(name, room) + " (" + id + ")"
 }
 
 func (m Model) dmHistoryLines(cols int) []string {
+	const continuation = "  " + contMark
+	continuationWidth := max(1, cols-cellWidth(continuation))
 	var lines []string
 	for i := len(m.dm.page.Messages) - 1; i >= 0; i-- {
 		msg := m.dm.page.Messages[i]
 		author := fmt.Sprintf("#%d", msg.AuthorID)
 		if msg.AuthorID == m.dm.conversation.PeerID {
-			author = dmPeerLabel(m.dm.conversation)
+			author = dmPeerLabel(m.dm.conversation, cols-2)
 		}
 		if msg.AuthorID == m.authorID {
 			author = "you"
 		}
-		for j, line := range strings.Split(sanitizeMultiline(msg.Body), "\n") {
-			if j == 0 {
-				line = author + ": " + line
+		head := fitCells(author, cols-2) + ": "
+		body := strings.Split(sanitizeMultiline(msg.Body), "\n")
+		if cellWidth(body[0]) <= cols-cellWidth(head) {
+			head += body[0]
+			body = body[1:]
+		}
+		lines = append(lines, head)
+		for _, line := range body {
+			for _, chunk := range wrapCells(line, continuationWidth) {
+				lines = append(lines, continuation+fitCells(chunk, continuationWidth))
 			}
-			lines = append(lines, wrapCells(line, cols)...)
 		}
 	}
 	return lines
@@ -431,6 +456,7 @@ func (m Model) dmMaxScroll() int {
 
 func (m Model) dmPanes(l layout) string {
 	view := m.dm
+	split := l.leftW != l.width
 	listTitle := "DIRECT MESSAGES"
 	if view.archive {
 		listTitle = "ARCHIVED DMS"
@@ -447,16 +473,20 @@ func (m Model) dmPanes(l layout) string {
 			prefix = "› "
 		}
 		suffix := fmt.Sprintf(" · %d unread", conversation.Unread)
-		list = append(list, prefix+fitCells(dmPeerLabel(conversation), l.leftW-4-cellWidth(suffix))+suffix)
+		list = append(list, prefix+dmPeerLabel(conversation, l.leftW-4-cellWidth(suffix))+suffix)
 	}
 	if len(list) == 0 && view.id == 0 && !view.busy && view.status == "" {
 		list = []string{"No conversations"}
 	}
 	left := paneBox(listTitle, view.id == 0, list, l.leftW, l.contentH, "")
+	if !split && view.id == 0 {
+		return left
+	}
 	title, foot := "CONVERSATION", ""
 	var history []string
 	if view.conversation.ID > 0 {
-		title = fmt.Sprintf("%d unread · %s", view.conversation.Unread, dmPeerLabel(view.conversation))
+		title = dmPeerLabel(view.conversation, l.rightW-6-cellWidth(focusMark))
+		foot = fmt.Sprintf("%d unread", view.conversation.Unread)
 		history = m.dmHistoryLines(l.rightW - 2)
 		if len(history) > 0 {
 			end := len(history) - min(view.scroll, max(0, len(history)-l.contentH))
@@ -465,23 +495,50 @@ func (m Model) dmPanes(l layout) string {
 			history = []string{"No messages"}
 		}
 		if view.page.NextBefore > 0 {
-			foot = "pgup older"
+			foot += " · pgup older"
 		}
 		if view.before > 0 {
-			foot = "end latest"
+			foot += " · end latest"
+		}
+		if view.retry.ClientNonce != "" {
+			foot = "enter retry · ctrl+u discard"
 		}
 	}
 	right := paneBox(title, view.id != 0, history, l.rightW, l.contentH, foot)
+	if !split {
+		return right
+	}
 	return lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 }
 
+// dmRecipientPrompt is also the send guard: the full principal ID must fit
+// on the composer row, and that row must be visible.
+func (m Model) dmRecipientPrompt() string {
+	width, height := m.size()
+	if width < minWidth || height < minHeight || m.help ||
+		m.dm.id == 0 || m.dm.conversation.ID != m.dm.id || m.dm.conversation.PeerID <= 0 {
+		return ""
+	}
+	action := "DM"
+	if m.dm.retry.ClientNonce != "" {
+		action = "Retry"
+	}
+	prompt := fmt.Sprintf("%s to #%d >", action, m.dm.conversation.PeerID)
+	if cellWidth(prompt)+3 > width {
+		return ""
+	}
+	return prompt
+}
+
 func (m Model) dmPrompt(width int, cursor string) string {
-	prompt := "DM >"
+	prompt, body := m.dmRecipientPrompt(), m.dm.draft
 	switch {
 	case m.dm.opening:
 		prompt = "Principal ID >"
-	case m.dm.conversation.ID == 0:
+	case prompt == "":
 		return ""
+	case m.dm.retry.ClientNonce != "":
+		body, cursor = m.dm.retry.Body, ""
 	}
-	return prompt + " " + clipTail(sanitize(m.dm.draft), width-cellWidth(prompt)-3) + cursor
+	return prompt + " " + clipTail(sanitize(body), width-cellWidth(prompt)-3) + cursor
 }

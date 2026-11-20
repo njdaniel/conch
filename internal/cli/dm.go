@@ -3,8 +3,10 @@ package cli
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 
 	"github.com/njdaniel/conch/pkg/schema"
@@ -12,11 +14,13 @@ import (
 
 const dmUsage = `  conch dm list [--server <url>] [--archived] [--cursor <cursor>]
   conch dm open [--server <url>] <principal-id>
-  conch dm send [--server <url>] <conversation-id> <text>
+  conch dm send [--server <url>] [--nonce <nonce>] <conversation-id> <text>
   conch dm history [--server <url>] [--before <message-id>] [--limit <n>] <conversation-id>
   conch dm mark-read [--server <url>] <conversation-id> <message-id>
   conch dm edit [--server <url>] <conversation-id> <message-id> <text>
   conch dm remove [--server <url>] <conversation-id> <message-id>
+
+  For send retries within 24 hours, reuse the same --nonce, conversation and text.
 `
 
 // NewDMText creates a text send with a nonce to keep for any retry.
@@ -43,7 +47,7 @@ func runDM(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	var before int64
 	var limit int
 	var archived bool
-	var cursor string
+	var cursor, nonce string
 	switch verb {
 	case "list":
 		fs.BoolVar(&archived, "archived", false, "list archived conversations")
@@ -51,6 +55,8 @@ func runDM(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	case "history":
 		fs.Int64Var(&before, "before", 0, "list messages older than this message ID")
 		fs.IntVar(&limit, "limit", schema.DefaultDMPageSize, "maximum messages")
+	case "send":
+		fs.StringVar(&nonce, "nonce", rand.Text(), "reuse the original nonce when retrying a send")
 	}
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
@@ -79,7 +85,17 @@ func runDM(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		}
 		return writeDMConversation(stdout, conversation)
 	case "send":
-		message, err := client.SendDM(ctx, id, NewDMText(pos[1]))
+		request := schema.PostDMMessageRequestV1{Body: pos[1], ClientNonce: nonce}
+		if err := request.Validate(); err != nil {
+			return err
+		}
+		message, err := client.SendDM(ctx, id, request)
+		if err != nil {
+			var refusal *ServerError
+			if !errors.As(err, &refusal) || refusal.Status >= http.StatusInternalServerError {
+				_, _ = fmt.Fprintf(stderr, "DM delivery could not be confirmed. To retry within 24 hours, use --nonce %s with the same conversation and text.\n", nonce)
+			}
+		}
 		return writeDMResult(stdout, message, err)
 	case "history":
 		if before < 0 || limit < 1 || limit > schema.MaxDMPageSize {

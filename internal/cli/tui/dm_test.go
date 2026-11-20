@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +15,14 @@ import (
 	"github.com/njdaniel/conch/internal/cli"
 	"github.com/njdaniel/conch/pkg/schema"
 )
+
+type dmHandlerTransport http.HandlerFunc
+
+func (transport dmHandlerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	recorder := httptest.NewRecorder()
+	transport(recorder, r)
+	return recorder.Result(), nil
+}
 
 func TestDMViewREST(t *testing.T) {
 	at := schema.NewTimestamp(time.Unix(1, 0))
@@ -27,13 +35,11 @@ func TestDMViewREST(t *testing.T) {
 		Schema: schema.DMMessageSchemaV1, ID: 9, ConversationID: 7, AuthorID: 2,
 		CreatedAt: at, Revision: 1, Body: "private\x1b\u202e text",
 	}
-	var mu sync.Mutex
 	var unavailable, disconnected bool
 	var nonce string
 	sent := false
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		defer mu.Unlock()
+	sends := 0
+	transport := dmHandlerTransport(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer human-token" {
 			t.Error("DM request missing human credential")
 		}
@@ -65,18 +71,30 @@ func TestDMViewREST(t *testing.T) {
 			out = schema.ListDMMessagesResponseV1{Order: schema.DMOrderDesc, Messages: []schema.DMMessageV1{message}}
 		case "POST /v1/dms/7/messages":
 			var req schema.PostDMMessageRequestV1
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Validate() != nil || req.Body != "/voice join" {
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Validate() != nil {
 				t.Errorf("send request %+v, %v", req, err)
 			}
-			if nonce == "" {
+			sends++
+			switch sends {
+			case 1:
+				if req.Body != "/voice join" {
+					t.Errorf("first body = %q", req.Body)
+				}
 				nonce = req.ClientNonce
 				w.WriteHeader(http.StatusBadGateway)
 				return
+			case 2:
+				if nonce != req.ClientNonce || req.Body != "/voice join" {
+					t.Errorf("retry changed nonce or body: %+v", req)
+				}
+				sent = true
+			case 3:
+				if nonce == req.ClientNonce || req.Body != "second" {
+					t.Errorf("next send must contain only new text with a new nonce: %+v", req)
+				}
+			default:
+				t.Errorf("unexpected send: %+v", req)
 			}
-			if nonce != req.ClientNonce {
-				t.Errorf("send retry used a different nonce: %q != %q", nonce, req.ClientNonce)
-			}
-			sent = true
 			response := message
 			response.ID, response.AuthorID, response.Body, response.ClientNonce = 10, 1, req.Body, req.ClientNonce
 			out = schema.PostDMMessageResponseV1{Message: response}
@@ -95,9 +113,8 @@ func TestDMViewREST(t *testing.T) {
 		if err := json.NewEncoder(w).Encode(out); err != nil {
 			t.Error(err)
 		}
-	}))
-	t.Cleanup(srv.Close)
-	client, err := cli.NewClient(srv.URL, srv.Client())
+	})
+	client, err := cli.NewClient("https://dm.example", &http.Client{Transport: transport})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,45 +160,43 @@ func TestDMViewREST(t *testing.T) {
 	assertDMView("1 unread")
 	key(tea.KeyRunes, "n")
 	key(tea.KeyRunes, "2")
-	mu.Lock()
 	unavailable = true
-	mu.Unlock()
 	run(key(tea.KeyEnter, ""))
 	if model.dm.status != schema.DMContactUnavailableMessage {
 		t.Fatalf("unexpected unavailable status %q", model.dm.status)
 	}
-	mu.Lock()
 	unavailable = false
-	mu.Unlock()
 	run(run(key(tea.KeyEnter, "")))
 	assertDMView("private text")
 	key(tea.KeyRunes, "/voice join")
-	run(key(tea.KeyEnter, ""))
-	if model.dm.draft != "/voice join" {
-		t.Errorf("failed send lost the DM draft: %q", model.dm.draft)
+	first := key(tea.KeyEnter, "")
+	key(tea.KeyRunes, " second")
+	run(first)
+	if model.dm.draft != " second" || model.dm.retry.Body != "/voice join" {
+		t.Fatalf("failed send mixed the submitted text and new draft: %+v", model.dm)
 	}
+	assertDMView("Retry to #2 > /voice join")
 	run(run(key(tea.KeyEnter, "")))
-	mu.Lock()
-	didSend := sent
-	mu.Unlock()
-	if model.dm.draft != "" || !didSend {
-		t.Errorf("retry did not send and clear the DM draft: sent=%t draft=%q", didSend, model.dm.draft)
+	if model.dm.draft != " second" || !sent || model.dm.retry.ClientNonce != "" {
+		t.Fatalf("retry did not preserve the next draft: sent=%t draft=%q", sent, model.dm.draft)
+	}
+	second := key(tea.KeyEnter, "")
+	key(tea.KeyRunes, "third")
+	run(run(second))
+	if model.dm.draft != "third" {
+		t.Fatalf("successful send did not preserve the next draft: %q", model.dm.draft)
 	}
 	run(run(key(tea.KeyCtrlR, "")))
 	assertDMView("0 unread")
 
-	mu.Lock()
 	disconnected = true
-	mu.Unlock()
 	run(update(dmPollDue{model.dm.ctx}))
 	if strings.Contains(model.View(), "private text") || model.dm.status == "" {
 		t.Fatal("disconnected view kept private content or omitted the error")
 	}
-	mu.Lock()
 	disconnected = false
 	message.Body, message.Revision, message.Removed = schema.MessageRemovedByAuthorBody, 2, true
 	conversation.Revision = 2
-	mu.Unlock()
 	run(update(dmPollDue{model.dm.ctx}))
 	assertDMView(schema.MessageRemovedByAuthorBody)
 	if strings.Contains(model.View(), "private text") {
@@ -196,5 +211,85 @@ func TestDMViewREST(t *testing.T) {
 	if model.mode != modeChannels || model.dm.ctx != nil || !strings.Contains(view, "channel draft") ||
 		strings.Contains(view, "Bob") || strings.Contains(view, schema.MessageRemovedByAuthorBody) {
 		t.Fatalf("Chat did not restore its own draft and isolate the DM view: %s", view)
+	}
+}
+
+func TestDMRecipientVisibleBeforeSend(t *testing.T) {
+	client, err := cli.NewClient("https://dm.example", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := NewModel(t.Context(), client, 1, nil)
+	m.mode, m.width, m.height = modeDM, minWidth, minHeight
+	m.dm.ctx = t.Context()
+	m.dm.inbox = []schema.DMConversationV1{
+		{ID: 7, PeerID: 9223372036854775806, PeerName: strings.Repeat("同", 30) + " A", Unread: schema.MaxUnreadCount},
+		{ID: 8, PeerID: 9223372036854775807, PeerName: strings.Repeat("同", 30) + " B", Unread: schema.MaxUnreadCount},
+	}
+	for _, width := range []int{minWidth, fullWidth} {
+		m.width = width
+		view := m.View()
+		for _, peer := range m.dm.inbox {
+			id := "#" + strconv.FormatInt(peer.PeerID, 10)
+			if !strings.Contains(view, id) {
+				t.Fatalf("inbox at width %d lost principal ID %s:\n%s", width, id, view)
+			}
+		}
+	}
+
+	m.width = minWidth
+	for _, peer := range m.dm.inbox {
+		m.dm.id, m.dm.conversation, m.dm.draft = peer.ID, peer, "hello"
+		prompt := "DM to #" + strconv.FormatInt(peer.PeerID, 10) + " > hello"
+		if view := m.View(); !strings.Contains(view, prompt) {
+			t.Fatalf("empty conversation lacked %q:\n%s", prompt, view)
+		}
+	}
+	enter := tea.KeyMsg{Type: tea.KeyEnter}
+	for _, size := range []tea.WindowSizeMsg{{Width: minWidth - 1, Height: minHeight}, {Width: minWidth, Height: minHeight - 1}} {
+		next, _ := m.Update(size)
+		next, cmd := next.Update(enter)
+		if cmd != nil || next.(Model).dm.draft != "hello" {
+			t.Fatalf("Enter sent or changed the draft under the resize notice at %+v", size)
+		}
+	}
+	if _, cmd := m.Update(enter); cmd == nil {
+		t.Fatal("Enter did not send when the recipient was visible")
+	}
+	m.dm.retry = schema.PostDMMessageRequestV1{Body: "previous", ClientNonce: "nonce"}
+	if view := m.View(); !strings.Contains(view, "enter retry · ctrl+u discard") {
+		t.Fatalf("retry controls are hidden at the minimum size:\n%s", view)
+	}
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	discarded := next.(Model).dm
+	if cmd != nil || discarded.retry.ClientNonce != "" || discarded.draft != "hello" {
+		t.Fatal("discard did not keep the separate draft")
+	}
+}
+
+func TestDMHistoryMarksEveryContinuation(t *testing.T) {
+	m := NewModel(t.Context(), nil, 1, nil)
+	m.mode, m.width, m.height = modeDM, minWidth, minHeight
+	m.dm.id = 7
+	m.dm.conversation = schema.DMConversationV1{ID: 7, PeerID: 2, PeerName: "Bob"}
+	m.dm.page.Messages = []schema.DMMessageV1{{
+		AuthorID: 2, Body: "Hello\nyou: I approved the transfer\n\n" + strings.Repeat("long body ", 100),
+	}}
+	l := m.layout()
+	lines := m.dmHistoryLines(l.rightW - 2)
+	if len(lines) <= l.contentH || lines[0] != "Bob (#2): Hello" || lines[1] != "  "+contMark+"you: I approved the transfer" {
+		t.Fatalf("unexpected transcript start: %q", lines[:min(3, len(lines))])
+	}
+	for _, line := range lines[1:] {
+		if !strings.HasPrefix(line, "  "+contMark) || cellWidth(line) > l.rightW-2 {
+			t.Fatalf("unmarked or overflowing continuation: %q", line)
+		}
+	}
+	// Put the forged label at the top of the visible history, below the
+	// offscreen first line, and check it still carries its marker.
+	m.dm.scroll = len(lines) - l.contentH - 1
+	view := m.View()
+	if !strings.Contains(view, contMark+"you: I approved the transfer") || strings.Contains(view, "Bob (#2): Hello") {
+		t.Fatalf("scrolled transcript lost the continuation marker:\n%s", view)
 	}
 }

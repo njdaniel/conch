@@ -363,6 +363,8 @@ func (m Model) statusHints() []hint {
 		switch {
 		case m.dm.opening:
 			hints = []hint{{"enter", "open by ID", 1}, {"esc", "back", 0}}
+		case m.dm.retry.ClientNonce != "":
+			hints = []hint{{"esc", "back", 0}}
 		case m.dm.id != 0:
 			hints = []hint{{"enter", "send", 1}, {"ctrl+r", "mark read", 2}, {"pgup", "history", 3}, {"esc", "back", 0}}
 		default:
