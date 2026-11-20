@@ -36,6 +36,7 @@ import { LINK_GESTURE_MS, type Gestures } from './gestures.ts';
 import type { DocumentGate } from './document.ts';
 import type { Notifications } from './notifications.ts';
 import { HOST, SCHEME } from './scheme.ts';
+import type { Diagnostics } from './diagnostics.ts';
 import type { Installed } from './installed.ts';
 import type { VoiceService } from './voice/service.ts';
 import type { SettingsService } from './settings.ts';
@@ -87,6 +88,9 @@ export interface IpcDeps {
   // What works on this desktop (issue #1593): read-only. Absent: main answers
   // no rows at all (NO_INTEGRATIONS), and the page shows no list.
   readonly integrations?: IntegrationsApi;
+  // The diagnostics bundle (issue #2084). Absent: the preview is empty and a
+  // save fails (NO_DIAGNOSTICS).
+  readonly diagnostics?: DiagnosticsApi;
   // The screen companion (issue #1579). Absent: every grant is refused as
   // failed, and nothing is held to end.
   readonly companion?: CompanionApi;
@@ -119,6 +123,8 @@ export interface IntegrationsApi {
 export type CompanionApi = Pick<Companion, 'grant' | 'stop' | 'end'>;
 export type ShareSoundApi = Pick<ShareSound, 'start' | 'choose' | 'mute' | 'end' | 'shareEnded'>;
 
+export type DiagnosticsApi = Pick<Diagnostics, 'preview' | 'save'>;
+const NO_DIAGNOSTICS: DiagnosticsApi = { preview: () => '', save: () => Promise.resolve('failed') };
 const NO_INTEGRATIONS: IntegrationsApi = { view: () => Promise.resolve({ rows: [] }) };
 
 const NO_COMPANION: CompanionApi = {
@@ -229,6 +235,7 @@ interface Handlers {
   readonly notifications: NotificationsApi;
   readonly settings: SettingsApi;
   readonly integrations: IntegrationsApi;
+  readonly diagnostics: DiagnosticsApi;
   readonly companion: CompanionApi;
   readonly reportVoiceDiagnostic: (diagnostic: VoiceDiagnostic) => void;
   // Absent (the switch off): a share-sound function never reaches its run.
@@ -745,6 +752,11 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
     run: ({ voice }, [request]) => voice.saveTalkBinding(request as import('../../web/src/platform/desktop/bridge.ts').VoiceTalkBindingRequest),
     gesture: true,
   },
+  // The diagnostics bundle (issue #2084). The preview is read-only text main
+  // built from its own redacted ring; the save writes that same text where the
+  // person chooses, so it is the person's act alone.
+  diagnosticsPreview: { limit: 30, maxBytes: 0, parse: none, run: ({ diagnostics }) => diagnostics.preview() },
+  diagnosticsSave: { limit: 10, maxBytes: 0, parse: none, run: ({ diagnostics }) => diagnostics.save(), gesture: true },
   // The update family (issue #1600). Restart is the person's act alone: it
   // runs only right after a click or key in the window, and nothing else
   // restarts the app.
@@ -950,6 +962,7 @@ export class Ipc {
         notifications: this.#deps.notifications,
         settings: this.#deps.settings,
         integrations: this.#deps.integrations ?? NO_INTEGRATIONS,
+        diagnostics: this.#deps.diagnostics ?? NO_DIAGNOSTICS,
         companion: this.#deps.companion ?? NO_COMPANION,
         reportVoiceDiagnostic: this.#reportVoiceDiagnostic,
         shareSound: this.#deps.shareSound ?? null,

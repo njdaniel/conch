@@ -453,6 +453,9 @@ export function createBridge(
     updateState: call('updateState'),
     updateRestart: call('updateRestart'),
     onUpdateState,
+    // The diagnostics bundle (issue #2084): look, then save.
+    diagnosticsPreview: call('diagnosticsPreview'),
+    diagnosticsSave: call('diagnosticsSave'),
     // The Linux screen share's sound (issue #1854): requests only. Main builds
     // the scope and the application name, and answers only with its switch on.
     shareSoundStart: call('shareSoundStart'),

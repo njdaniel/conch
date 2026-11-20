@@ -96,6 +96,8 @@ test.describe('the packaged shell', () => {
         'updateState', 'updateRestart', 'onUpdateState',
         // A fixed, redacted voice or share diagnostic for the main log (#2055).
         'reportVoiceDiagnostic',
+        // The diagnostics bundle (#2084): look, then save.
+        'diagnosticsPreview', 'diagnosticsSave',
       ].sort(),
       true,
     ]);

@@ -7,11 +7,11 @@
 // the person's own choice.
 import { useCallback, useContext, useEffect, useId, useRef, useState } from 'react';
 
-import { settingsBridge } from '../access';
+import { diagnosticsBridge, settingsBridge } from '../access';
 import { DesktopOS } from '../../os';
 import { copyText } from '../clipboard';
 import type { DesktopSettingsView, IntegrationsView, SettingsChange } from '../bridge';
-import { integrationNames, integrationSentence, integrationsPlainText, integrationsText, integrationStateWords, settingsRefusalLine, settingsText } from './text';
+import { diagnosticsText, integrationNames, integrationSentence, integrationsPlainText, integrationsText, integrationStateWords, settingsRefusalLine, settingsText } from './text';
 
 // What works on this desktop (issue #1593): main's held states as a list, and
 // a "Copy this list" button for a problem report. Shown only when main
@@ -82,6 +82,79 @@ function Integrations({ settings }: { readonly settings: DesktopSettingsView }) 
         {integrationsText.copy}
       </button>
       <p role="status">{copied === 'yes' ? integrationsText.copied : copied === 'no' ? integrationsText.copyFailed : ''}</p>
+    </section>
+  );
+}
+
+// Save diagnostics (issue #2084): asks main for the bundle and shows exactly
+// that text before anything is written; Save writes the text main held for
+// this preview, to a file the person picks in the system dialog. The text is
+// main's, shown as text. Shown only when main answers.
+export function DiagnosticsExport() {
+  const id = useId();
+  const [shown, setShown] = useState<string | null>(null);
+  const [line, setLine] = useState('');
+  const available = diagnosticsBridge()?.diagnosticsPreview !== undefined;
+
+  async function open(): Promise<void> {
+    setLine('');
+    try {
+      const text = await diagnosticsBridge()?.diagnosticsPreview?.();
+      if (typeof text === 'string') setShown(text);
+      else setLine(diagnosticsText.unavailable);
+    } catch {
+      setLine(diagnosticsText.unavailable);
+    }
+  }
+
+  async function save(): Promise<void> {
+    try {
+      const outcome = await diagnosticsBridge()?.diagnosticsSave?.();
+      setLine(outcome === 'saved' ? diagnosticsText.saved : outcome === 'cancelled' ? diagnosticsText.cancelled : diagnosticsText.failed);
+    } catch {
+      setLine(diagnosticsText.failed);
+    }
+  }
+
+  if (!available) return null;
+  return (
+    <section className="desktop-diagnostics" aria-labelledby={`${id}-h`}>
+      <h3 id={`${id}-h`}>{diagnosticsText.heading}</h3>
+      <p className="desktop-settings-note">{diagnosticsText.intro}</p>
+      {shown === null ? (
+        <button
+          type="button"
+          onClick={() => {
+            void open();
+          }}
+        >
+          {diagnosticsText.open}
+        </button>
+      ) : (
+        <div role="group" aria-label={diagnosticsText.shown}>
+          <textarea readOnly rows={12} cols={72} aria-label={diagnosticsText.shown} value={shown} />
+          <p>
+            <button
+              type="button"
+              onClick={() => {
+                void save();
+              }}
+            >
+              {diagnosticsText.save}
+            </button>{' '}
+            <button
+              type="button"
+              onClick={() => {
+                setShown(null);
+                setLine('');
+              }}
+            >
+              {diagnosticsText.close}
+            </button>
+          </p>
+        </div>
+      )}
+      <p role="status">{line}</p>
     </section>
   );
 }
@@ -202,6 +275,7 @@ export function DesktopSettings() {
       )}
       {line === '' ? null : <p role="alert">{line}</p>}
       <Integrations settings={view} />
+      <DiagnosticsExport />
     </section>
   );
 }

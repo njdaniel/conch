@@ -394,6 +394,46 @@ describe('the desktop app settings (issue #1587)', () => {
     expect(screen.getByText('Notifications when Conch is closed are not available in the desktop app.')).toBeDefined();
   });
 
+  describe('Save diagnostics (issue #2084)', () => {
+    const bundle = 'Conch desktop diagnostics\nconch-desktop: one';
+
+    it('shows the exact text first, and writes nothing until Save is clicked', async () => {
+      installSettings(settings(), () => Promise.reject(new Error('unexpected')));
+      const diagnosticsPreview = vi.fn(() => Promise.resolve(bundle));
+      const diagnosticsSave = vi.fn(() => Promise.resolve('saved' as const));
+      Object.defineProperty(window, 'conchDesktop', { value: { ...window.conchDesktop, diagnosticsPreview, diagnosticsSave }, configurable: true, writable: true });
+      await open();
+      expect(diagnosticsPreview).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole('button', { name: 'Save diagnostics…' }));
+      const shown = await screen.findByRole('textbox', { name: 'What the file will contain' });
+      expect(shown).toHaveProperty('value', bundle);
+      expect(shown).toHaveProperty('readOnly', true);
+      expect(diagnosticsSave).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole('button', { name: 'Save to a file…' }));
+      await waitFor(() => {
+        expect(diagnosticsSave).toHaveBeenCalledOnce();
+      });
+      expect(await screen.findByText('Saved.')).toBeDefined();
+    });
+
+    it('says so when the save fails, and shows nothing when the bridge has no diagnostics', async () => {
+      installSettings(settings(), () => Promise.reject(new Error('unexpected')));
+      const diagnosticsSave = vi.fn(() => Promise.resolve('failed' as const));
+      Object.defineProperty(window, 'conchDesktop', { value: { ...window.conchDesktop, diagnosticsPreview: () => Promise.resolve(bundle), diagnosticsSave }, configurable: true, writable: true });
+      await open();
+      fireEvent.click(screen.getByRole('button', { name: 'Save diagnostics…' }));
+      await screen.findByRole('textbox', { name: 'What the file will contain' });
+      fireEvent.click(screen.getByRole('button', { name: 'Save to a file…' }));
+      expect(await screen.findByText('Could not save the file. Try another place.')).toBeDefined();
+    });
+
+    it('is absent where main has no diagnostics', async () => {
+      installSettings(settings(), () => Promise.reject(new Error('unexpected')));
+      await open();
+      expect(screen.queryByRole('button', { name: 'Save diagnostics…' })).toBeNull();
+    });
+  });
+
   describe('what works on this desktop (issue #1593)', () => {
     const states: readonly IntegrationRow[] = [
       { id: 'tray', state: 'unavailable', why: 'no-tray-host' },

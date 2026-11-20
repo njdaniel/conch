@@ -351,7 +351,8 @@ declare global {
       Partial<DesktopSettingsBridge> &
       Partial<DesktopCompanionBridge> &
       Partial<DesktopInviteBridge> &
-      Partial<DesktopShareSoundBridge>;
+      Partial<DesktopShareSoundBridge> &
+      Partial<DesktopDiagnosticsBridge>;
   }
 }
 
@@ -890,6 +891,16 @@ export interface DesktopUpdateBridge {
   onUpdateState(listener: (view: InstalledView) => void): Unsubscribe;
 }
 
+// The diagnostics bundle (issue #2084): main's last log lines and this build's
+// versions, as text. diagnosticsPreview returns exactly the text a save will
+// write (main holds it for the save); diagnosticsSave is the person's click
+// alone and opens the native save dialog. Nothing is sent anywhere, and the
+// page names no path.
+export interface DesktopDiagnosticsBridge {
+  diagnosticsPreview(): Promise<string>;
+  diagnosticsSave(): Promise<SaveOutcome>;
+}
+
 // The object the preload exposes: the bridge, the voice family, the settings,
 // the companion, the invite family and the update family. Still no press, release, gate or transmit function in any.
 export type ExposedDesktopBridge = ConchDesktopBridge &
@@ -898,4 +909,5 @@ export type ExposedDesktopBridge = ConchDesktopBridge &
   DesktopCompanionBridge &
   DesktopInviteBridge &
   DesktopUpdateBridge &
-  DesktopShareSoundBridge;
+  DesktopShareSoundBridge &
+  DesktopDiagnosticsBridge;

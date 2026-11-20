@@ -1394,3 +1394,17 @@ describe('the settings family (issue #1587)', () => {
     expect(f.calls).toEqual([]);
   });
 });
+
+describe('the diagnostics bundle (issue #2084)', () => {
+  it('previews without an act, takes no argument, and saves only right after the person’s own input', async () => {
+    const f = fixture();
+    // No diagnostics service wired: the preview is empty and a save fails, but
+    // the gate in front of them is the real one.
+    expect(await f.ipc.invoke(f.event(), 'diagnosticsPreview', [])).toEqual({ ok: true, value: '' });
+    expect(await f.ipc.invoke(f.event(), 'diagnosticsPreview', ['x'])).toEqual({ ok: false, kind: 'refused' });
+    expect(await f.ipc.invoke(f.event(), 'diagnosticsSave', [])).toEqual({ ok: false, kind: 'refused' });
+    f.input.recent = true;
+    expect(await f.ipc.invoke(f.event(), 'diagnosticsSave', ['/tmp/evil'])).toEqual({ ok: false, kind: 'refused' });
+    expect(await f.ipc.invoke(f.event(), 'diagnosticsSave', [])).toEqual({ ok: true, value: 'failed' });
+  });
+});
