@@ -170,6 +170,13 @@ export class OneShot {
     return ran.ok ? { ok: true } : ran;
   }
 
+  // The helper validates both edits before replacing voice.toml once.
+  async saveMuteBinding(configDir: string, device: string, code: string): Promise<VoiceSaveResult> {
+    if (!saveValueFits('keys.device', device) || keyCodeText(Number(code)) !== code) return { ok: false, error: 'invalid' };
+    const ran = await this.#run(configDir, ['config', 'set-mute-binding', '--', device, code], 'config set-mute-binding', true);
+    return ran.ok ? { ok: true } : ran;
+  }
+
   // cancel kills the run in progress, if any, and resolves once it is reaped.
   async cancel(): Promise<void> {
     const run = this.#active;

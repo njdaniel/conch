@@ -289,6 +289,13 @@ pub enum Invocation {
         /// decimal code. Checked, and not to be logged or echoed.
         value: String,
     },
+    /// Atomically save a Linux mute device and binding for desktop.
+    ConfigSetMuteBinding {
+        /// The already checked event device.
+        device: String,
+        /// The already checked mute key.
+        value: String,
+    },
     /// `conch-voice config unset keys.<key>`.
     ConfigUnset {
         /// The `[keys]` key to remove.
@@ -554,11 +561,16 @@ pub fn command() -> Command {
                 .value_parser(CONFIG_UNSET_KEYS)
                 .help("keys.device, keys.talk, keys.mute or keys.deafen"),
         );
+    let set_mute_binding = Command::new("set-mute-binding")
+        .hide(true)
+        .arg(Arg::new("device").required(true))
+        .arg(Arg::new("value").required(true));
     let config = Command::new("config")
         .about("Change voice.toml: the microphone, the speakers, the talk mode, the key device and the key bindings")
         .subcommand_required(true)
         .subcommand(set)
-        .subcommand(unset);
+        .subcommand(unset)
+        .subcommand(set_mute_binding);
     Command::new("conch-voice")
         .about("The Conch voice client: push-to-talk voice for a channel")
         .after_help(format!(
@@ -598,6 +610,24 @@ fn keys_key(name: Option<&str>) -> Option<KeysKey> {
 /// written into the file as it is, or the talk mode is one there is. A value that cannot is
 /// refused without being shown, as `devices` does not show a name.
 fn config_set(matches: &clap::ArgMatches) -> Result<Invocation, clap::Error> {
+    if let Some(("set-mute-binding", binding)) = matches.subcommand() {
+        if let (Some(device), Some(value)) = (
+            binding.get_one::<String>("device"),
+            binding.get_one::<String>("value"),
+        ) && KeysKey::Device.check(device).is_ok()
+            && value.parse::<u16>().is_ok()
+            && KeysKey::Mute.check(value).is_ok()
+        {
+            return Ok(Invocation::ConfigSetMuteBinding {
+                device: device.clone(),
+                value: value.clone(),
+            });
+        }
+        return Err(command().error(
+            clap::error::ErrorKind::ValueValidation,
+            "a Linux mute binding needs an input device and a key code",
+        ));
+    }
     if let Some(("unset", unset)) = matches.subcommand() {
         let key = keys_key(unset.get_one::<String>("key").map(String::as_str));
         return match key {

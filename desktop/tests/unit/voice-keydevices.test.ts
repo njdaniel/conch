@@ -284,6 +284,9 @@ class FakeOneShot {
     if (this.gate !== null) await this.gate;
     return this.answers.shift() ?? { ok: true };
   }
+  saveMuteBinding(configDir: string, device: string, code: string): Promise<VoiceSaveResult> {
+    return this.save(configDir, device, code);
+  }
   cancel(): Promise<void> {
     return Promise.resolve();
   }
@@ -350,12 +353,11 @@ describe('saving the binding', () => {
     ]);
   });
 
-  it('saves a Linux mute binding to the same profile and device settings as talk', async () => {
+  it('saves a Linux mute device and binding together for the current profile', async () => {
     const deviceId = await listed();
     expect(await svc.saveTalkBinding({ deviceId, code: 30, binding: 'mute' })).toEqual({ ok: true });
     expect(one.calls).toEqual([
-      ['/nonexistent/config/p1', 'keys.device', '/dev/input/by-id/usb-Example_Keyboard-event-kbd'],
-      ['/nonexistent/config/p1', 'keys.mute', '30'],
+      ['/nonexistent/config/p1', '/dev/input/by-id/usb-Example_Keyboard-event-kbd', '30'],
     ]);
   });
 

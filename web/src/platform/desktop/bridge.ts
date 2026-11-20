@@ -532,9 +532,9 @@ export type VoiceTalkBindingRequest =
   | { readonly deviceId: string; readonly code: number; readonly binding?: 'mute' }
   | { readonly windowsCode: string; readonly generation: number; readonly binding?: 'mute' };
 
-// Linux saves the shared keys.device before the binding. Windows saves only
-// the binding. An omitted binding selects keys.talk.
-// failed says which write did not save.
+// Linux mute setup saves the shared device and binding in one operation.
+// Linux talk setup saves the device first. Windows saves only the binding.
+// An omitted binding selects keys.talk. failed identifies a separate write.
 export type VoiceTalkBindingResult =
   | { readonly ok: true }
   | { readonly ok: false; readonly error: VoiceOneShotError; readonly failed?: 'device' | 'talk' | 'mute' };

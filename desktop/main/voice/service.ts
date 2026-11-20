@@ -119,7 +119,7 @@ export interface VoiceIdentity {
 export interface VoiceServiceDeps {
   readonly supervisor: VoiceSupervisor;
   // The helper's one-shot runs: the device list and a save (issue #1378).
-  readonly oneShot: Pick<OneShot, 'devices' | 'save' | 'cancel'>;
+  readonly oneShot: Pick<OneShot, 'devices' | 'save' | 'saveMuteBinding' | 'cancel'>;
   // The identity in force, or null (no profile, signed out, no private data
   // directory).
   readonly identity: () => Promise<VoiceIdentity | null>;
@@ -239,6 +239,9 @@ export class VoiceService {
   private listing = new Map<string, string>();
   private bindingSave = false;
   private talkModeSave = false;
+  // Presses can arrive before the helper reports the effect of the previous
+  // command. Only toggle decisions use this pending intent; the view stays confirmed.
+  private pendingMute: { readonly muted: boolean } | undefined;
   private stopMuteKey: (() => void) | undefined;
   // Set when main muted the person at a screen lock (issue #1588): the view
   // says so until they unmute or leave.
@@ -341,16 +344,14 @@ export class VoiceService {
       if (epoch !== this.epoch || this.stopMuteKey === undefined) return;
       const view = this.plain();
       if (view.status !== 'running' || view.channel === null || view.helper === undefined || view.generation !== generation) return;
-      // Use the same confirmed state and command as the dock and tray. A
-      // blocked press may mute, but must never request an unmute.
-      const muted = view.helper.muted;
-      if (muted && (this.deps.locked() || muteKey.blocked())) return;
-      void this.setMute(!muted).catch(() => { this.deps.log('voice: the mute key command failed'); });
+      const muted = this.pendingMute?.muted ?? view.helper.muted;
+      void this.applyMute(!muted, true).catch(() => { this.deps.log('voice: the mute key command failed'); });
     });
   }
 
   private onSupervisor(s: VoiceState): void {
     if (s.status !== 'running') this.endMuteKeyWatch();
+    if (s.status !== 'running' && s.status !== 'starting') this.pendingMute = undefined;
     // A join that sign-out, a switch or a 401 has overtaken reports nothing.
     if (this.active !== null && !this.active.current()) return;
     this.override = null;
@@ -517,6 +518,7 @@ export class VoiceService {
   async leave(): Promise<NativeVoiceView> {
     this.epoch++;
     this.endMuteKeyWatch();
+    this.pendingMute = undefined;
     this.lockMuted = false;
     // The share's sound ends first: its stop is written before the helper's
     // leave (a helper that is leaving takes no command), and the withdrawal
@@ -599,8 +601,8 @@ export class VoiceService {
   }
 
   // saveTalkBinding saves keys.device (the by-id path of a device of the
-  // current listing) and then the binding (a key code 1..767) for the profile
-  // in force, and says which of the two did not save. The id and the code are
+  // current listing) and the binding (a key code 1..767) for the profile in
+  // force. Linux mute setup saves both in a single replacement. The id and the code are
   // checked again here. Windows saves only the binding, translated from an
   // allowlisted physical code and fenced to the session.
   async saveTalkBinding(request: VoiceTalkBindingRequest): Promise<VoiceTalkBindingResult> {
@@ -619,11 +621,16 @@ export class VoiceService {
       if (await this.oneShotRefused()) return { ok: false, error: UPDATE_PENDING };
       const identity = await this.deps.identity();
       if (identity === null || begun !== this.teardowns) return { ok: false, error: NOT_SIGNED_IN };
+      if (!identity.current()) return { ok: false, error: 'cancelled' };
+      if (binding === 'mute') {
+        const saved = await this.deps.oneShot.saveMuteBinding(identity.configDir, path, code);
+        return begun === this.teardowns && identity.current() ? saved : { ok: false, error: 'cancelled' };
+      }
       const device = await this.deps.oneShot.save(identity.configDir, 'keys.device', path);
       if (!device.ok) return { ok: false, error: device.error, failed: 'device' };
       if (begun !== this.teardowns || !identity.current()) return { ok: false, error: 'cancelled' };
-      const saved = await this.deps.oneShot.save(identity.configDir, `keys.${binding}`, code);
-      return saved.ok ? { ok: true } : { ok: false, error: saved.error, failed: binding };
+      const saved = await this.deps.oneShot.save(identity.configDir, 'keys.talk', code);
+      return saved.ok ? { ok: true } : { ok: false, error: saved.error, failed: 'talk' };
     } finally {
       this.bindingSave = false;
     }
@@ -676,15 +683,26 @@ export class VoiceService {
 
   // The commands resolve with the helper's own ack, never optimistically; the
   // view changes when the helper's state says so.
-  async setMute(muted: boolean): Promise<VoiceCommandResult> {
-    // Unmuting is the person's act after unlock, never during a lock.
-    if (!muted && this.deps.locked()) {
-      this.deps.log('voice: unmute refused: the screen is locked');
+  setMute(muted: boolean): Promise<VoiceCommandResult> {
+    return this.applyMute(muted, false);
+  }
+
+  private async applyMute(muted: boolean, byKey: boolean): Promise<VoiceCommandResult> {
+    // Make the decision and submit it to the supervisor without yielding.
+    if (!muted && (this.deps.locked() || (byKey && this.deps.muteKey?.blocked()))) {
+      if (!byKey) this.deps.log('voice: unmute refused: the screen is locked');
       return { ok: false, error: 'locked' };
     }
-    const r = await this.deps.supervisor.setMute(muted);
-    if (r.ok && this.last !== null) this.last = { ...this.last, muted };
-    return r;
+    const intent = { muted };
+    const epoch = this.epoch;
+    this.pendingMute = intent;
+    try {
+      const r = await this.deps.supervisor.setMute(muted);
+      if (r.ok && epoch === this.epoch && this.last !== null) this.last = { ...this.last, muted };
+      return r;
+    } finally {
+      if (this.pendingMute === intent) this.pendingMute = undefined;
+    }
   }
 
   async setDeafen(deafened: boolean): Promise<VoiceCommandResult> {

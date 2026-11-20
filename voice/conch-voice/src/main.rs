@@ -79,6 +79,9 @@ fn main() {
         Invocation::ConfigSetKeys { key, value } => {
             conch_voice::config_set_keys(&Environment::from_process(), *key, value)
         }
+        Invocation::ConfigSetMuteBinding { device, value } => {
+            conch_voice::config_set_mute_binding(&Environment::from_process(), device, value)
+        }
         Invocation::ConfigUnset { key } => {
             conch_voice::config_unset(&Environment::from_process(), *key)
         }

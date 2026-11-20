@@ -2591,6 +2591,19 @@ export const voiceDevicesV1 = object<VoiceDevicesV1>({
   configured_output: optional(str),
 });
 
+// schema.MuteKeyEventV1
+export const muteKeyEventV1Schema = 'conch.mute_key_event.v1';
+
+export interface MuteKeyEventV1 {
+  schema: typeof muteKeyEventV1Schema;
+  press: boolean;
+}
+
+export const muteKeyEventV1 = object<MuteKeyEventV1>({
+  schema: vocab<typeof muteKeyEventV1Schema>({ [muteKeyEventV1Schema]: true }),
+  press: bool,
+});
+
 // schema.PrincipalV0
 export interface PrincipalV0 {
   id: number;

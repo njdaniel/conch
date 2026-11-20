@@ -316,14 +316,7 @@ pub fn join(
             Some((device, bindings)) => {
                 // With a key device, a client started with no standard input runs on.
                 input::stdin_lines(inputs.clone(), AtEnd::Release);
-                keydev::spawn(
-                    device,
-                    bindings,
-                    DeviceRule::EventDevice,
-                    KeyTimings::default(),
-                    inputs,
-                )
-                .map_err(Error::Runtime)?;
+                watch_configured_keys(device, bindings, inputs)?;
             }
             None => input::stdin_lines(inputs, AtEnd::Quit),
         }
@@ -560,8 +553,37 @@ pub fn config_unset(
     config_cmd::unset_keys(environment, key)
 }
 
-/// Watches the configured mute key for desktop main. A press writes one byte
-/// (`0x01`) to the private stdout pipe. No key code or audio leaves this process;
+/// Atomically saves the Linux mute device and binding for desktop.
+///
+/// # Errors
+///
+/// If the save is refused, the settings are unchanged.
+pub fn config_set_mute_binding(
+    environment: &Environment,
+    device: &str,
+    value: &str,
+) -> Result<(), Error> {
+    config_cmd::set_mute_binding(environment, device, value)
+}
+
+// Both commands use the production device rule at the same entry point.
+fn watch_configured_keys(
+    device: std::path::PathBuf,
+    bindings: conch_voice_control::KeyBindings,
+    inputs: mpsc::UnboundedSender<session::Input>,
+) -> Result<(), Error> {
+    keydev::spawn(
+        device,
+        bindings,
+        DeviceRule::EventDevice,
+        KeyTimings::default(),
+        inputs,
+    )
+    .map_err(Error::Runtime)
+}
+
+/// Watches the configured mute key for desktop main. A press writes one
+/// schema event as a JSON line. No key code or audio leaves this process;
 /// the desktop owner decides whether a press mutes or unmutes.
 ///
 /// Exit on owner pipe closure even if the device is idle or unavailable.
@@ -572,6 +594,15 @@ pub fn config_unset(
 pub fn watch_mute_key(environment: &Environment) -> Result<(), Error> {
     use conch_voice_control::{Key, KeyAction, KeyEvent};
     use session::Input;
+
+    // Start before reading the configuration or touching the device.
+    std::thread::Builder::new()
+        .name("conch-voice-mute-owner".to_owned())
+        .spawn(|| {
+            let _ = std::io::stdin().lock().read_exact(&mut [0]);
+            lines::exit(0);
+        })
+        .map_err(Error::Runtime)?;
 
     let Some(dir) = conch_voice_api::default_config_dir(
         environment.conch_config_dir.as_deref(),
@@ -591,35 +622,25 @@ pub fn watch_mute_key(environment: &Environment) -> Result<(), Error> {
     let Some((device, bindings)) = cli::key_device(&config, false)? else {
         return Ok(());
     };
-    std::thread::Builder::new()
-        .name("conch-voice-mute-owner".to_owned())
-        .spawn(|| {
-            let _ = std::io::stdin().lock().read_exact(&mut [0]);
-            lines::exit(0);
-        })
-        .map_err(Error::Runtime)?;
     let (tx, mut rx) = mpsc::unbounded_channel();
-    keydev::spawn(
-        device,
-        bindings,
-        DeviceRule::EventDevice,
-        KeyTimings::default(),
-        tx,
-    )
-    .map_err(Error::Runtime)?;
-    let mut out = std::io::stdout();
+    watch_configured_keys(device, bindings, tx)?;
+    let mut out = std::io::stdout().lock();
     while let Some(input) = rx.blocking_recv() {
         if let Input::Key(KeyEvent {
             key: Key::Mute,
             action: KeyAction::Press,
         }) = input
         {
-            out.write_all(&[1])
-                .and_then(|()| out.flush())
-                .map_err(Error::Output)?;
+            write_mute_key_press(&mut out).map_err(Error::Output)?;
         }
     }
     Ok(())
+}
+
+fn write_mute_key_press(out: &mut impl Write) -> std::io::Result<()> {
+    serde_json::to_writer(&mut *out, &conch_voice_api::MuteKeyEventV1::PRESS)?;
+    out.write_all(b"\n")?;
+    out.flush()
 }
 
 /// `conch-voice keys <device>`: says that it will show every key pressed on the device,
@@ -655,6 +676,16 @@ mod tests {
         scrubber.always(&Secret::new(FAKE_LOGIN));
         scrubber.connection(&Secret::new(FAKE_JOIN), &Secret::new(FAKE_ROOM));
         scrubber
+    }
+
+    #[test]
+    fn mute_key_press_matches_the_schema_fixture() {
+        let mut out = Vec::new();
+        write_mute_key_press(&mut out).unwrap();
+        assert_eq!(
+            out,
+            include_bytes!("../../../pkg/schema/testdata/mute-key-event-v1.json")
+        );
     }
 
     #[cfg(windows)]

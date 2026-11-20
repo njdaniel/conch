@@ -17,10 +17,9 @@
 //     the companion refuses grants (they read Lifecycle.locked).
 //   - unlock: notification text may show again. Nothing else: still muted, no
 //     share, no rejoin. Unmuting is the person's act.
-//   - suspend: leave voice and end the companion ('suspend'), once however
-//     many signals say so. Resume does nothing to either.
-//   - when the lock cannot be observed, notification text is treated as
-//     locked, and #1593 says so. Every action is idempotent.
+//   - suspend: mute and leave voice and end the companion ('suspend'), once
+//     however many signals say so. Resume does nothing to either.
+//   - when lock observation is lost, mute voice and hide notification text.
 //
 // Owns: the locked and suspended flags, and nothing that persists. A signal
 // source (lifecycle-linux.ts or lifecycle-windows.ts) reports under its own
@@ -30,8 +29,8 @@
 // idle-state poll (a second signal), or Windows powerMonitor.
 export type LockSource = 'logind' | 'idle' | 'powerMonitor';
 
-// Whether main can tell when the screen locks. 'unavailable' is exposed for
-// #1593 (D5-07), which tells the person that lock won't mute them.
+// Whether main can tell when the screen locks. While unavailable, main
+// cannot tell when it is safe to unmute.
 export type LockObservation = 'available' | 'unavailable';
 
 // The ways the companion can end because of this module.
@@ -67,6 +66,7 @@ export class Lifecycle {
   #observation: LockObservation = 'unavailable';
   #locked = false;
   #suspended = false;
+  #sleeping = false;
   // What notifications were last told, so a repeat is not sent again.
   #redacted: boolean | null = null;
 
@@ -89,13 +89,25 @@ export class Lifecycle {
     return this.#suspended;
   }
 
+  // Unmute remains blocked until wake even after suspend teardown settles.
+  get sleeping(): boolean {
+    return this.#sleeping;
+  }
+
   // observe says whether the lock can be observed now. While it cannot,
   // notification text stays hidden, as if locked.
   observe(state: LockObservation): void {
     if (state === this.#observation) return;
     this.#observation = state;
-    if (state === 'unavailable') this.#deps.log('lifecycle: the screen lock cannot be observed; notification text is hidden and lock will not mute voice');
+    if (state === 'unavailable') {
+      this.#deps.log('lifecycle: the screen lock cannot be observed; notification text is hidden and unmute is blocked');
+    }
     this.#syncNotifications();
+    // A known lock already queued its mute. Otherwise, queue one now behind
+    // any unmute on the helper's control channel.
+    if (state === 'unavailable' && !this.#locked && this.#canMute()) {
+      void this.#mute().catch(() => this.#deps.log('lifecycle: an action at loss of lock observation failed'));
+    }
   }
 
   // lockSignal is one source's report of whether the screen is locked. The
@@ -113,10 +125,8 @@ export class Lifecycle {
   // dropSource forgets what one source last said, because the source is gone
   // (its watcher gave up), not because the screen changed. A stale "locked"
   // from a source that can no longer say "unlocked" would hold the app locked
-  // for good. Nothing acts: no lock action runs, and an unlock only means the
-  // flag is clear (unmute and join work again; still muted, no share, no
-  // rejoin). Notification text stays hidden while observation is
-  // 'unavailable', which is the state a gone source leaves behind.
+  // for good. Dropping a source only updates the lock flag. Notification
+  // text stays hidden and unmute stays blocked while observation is unavailable.
   dropSource(source: LockSource): void {
     if (!this.#sources.delete(source)) return;
     const now = [...this.#sources.values()].some((v) => v);
@@ -131,8 +141,11 @@ export class Lifecycle {
   // are idempotent) and not only on resume, so a missed resume event cannot
   // leave the next suspend ignored.
   suspend(): Promise<void> {
+    this.#sleeping = true;
     if (this.#suspended) return Promise.resolve();
     this.#suspended = true;
+    // Queue the mute behind any in-flight unmute before starting teardown.
+    if (this.#canMute()) void this.#deps.voice.setMute(true).catch(() => undefined);
     return Promise.all([this.#deps.voice.leave(), this.#deps.companion.end('suspend')]).then(
       () => {
         this.#suspended = false;
@@ -146,6 +159,7 @@ export class Lifecycle {
 
   // resume: nothing rejoins, unmutes or reshares by itself.
   resume(): void {
+    this.#sleeping = false;
     this.#suspended = false;
   }
 
@@ -161,6 +175,11 @@ export class Lifecycle {
     if (results.some((r) => r.status === 'rejected')) this.#deps.log('lifecycle: an action at lock failed');
   }
 
+  #canMute(): boolean {
+    const { status } = this.#deps.voice.state();
+    return status === 'running' || status === 'starting' || status === 'stopping';
+  }
+
   // #mute mutes a running session, and leaves when the helper does not
   // acknowledge the mute, or the view does not show it, within the bound
   // (fail closed). With no helper to mute (idle, ended, failed, lost: a join
@@ -168,8 +187,7 @@ export class Lifecycle {
   // safe with nothing running, and it overtakes a join that has not started.
   async #mute(): Promise<void> {
     const voice = this.#deps.voice;
-    const status = voice.state().status;
-    if (status !== 'running' && status !== 'starting' && status !== 'stopping') {
+    if (!this.#canMute()) {
       await voice.leave();
       return;
     }

@@ -476,13 +476,14 @@ export async function start(): Promise<void> {
   if (shareAudio) log('conch-desktop: CONCH_LINUX_SHARE_AUDIO is on: the Linux screen share offers its sound (experimental)');
   // Set once Lifecycle exists (below); voice and the companion read it.
   let screenLocked: () => boolean = () => false;
-  let muteKeyBlocked: () => boolean = () => true;
+  let unmuteBlocked: () => boolean = () => true;
+  const hasMuteKey = process.platform === 'linux' || process.platform === 'win32';
   const voice = new VoiceService({
-    locked: () => screenLocked(),
+    locked: () => screenLocked() || (hasMuteKey && unmuteBlocked()),
     supervisor: new Supervisor({ resources: process.resourcesPath, env: process.env, log, ...(shareAudio ? { versions: OWNER_VERSIONS_SHARE_AUDIO } : {}) }),
-    ...((process.platform === 'linux' || process.platform === 'win32') ? {
+    ...(hasMuteKey ? {
       muteKey: {
-        blocked: () => muteKeyBlocked(),
+        blocked: () => unmuteBlocked(),
         watch: (configDir: string, onPress: () => void) => watchMuteKey(process.resourcesPath, process.env, log, configDir, onPress),
       },
     } : {}),
@@ -609,7 +610,7 @@ export async function start(): Promise<void> {
   // Lock and suspend fail closed (issue #1588, D5-02): mute on lock, leave on
   // suspend, end the share, hide notification text. Linux observes the lock
   // through logind; Windows through powerMonitor (#1935). Where it cannot be, the
-  // rules keep notification text hidden and say so on the log.
+  // rules keep notification text hidden and mute voice on observation loss.
   //
   // The companion is the real one (issue #1579, above): lock ends a live share
   // with reason 'lock' and suspend with 'suspend'.
@@ -620,7 +621,7 @@ export async function start(): Promise<void> {
     log,
   });
   screenLocked = () => lifecycle.locked;
-  muteKeyBlocked = () => lifecycle.suspended || lifecycle.lockObservation === 'unavailable';
+  unmuteBlocked = () => lifecycle.sleeping || lifecycle.lockObservation === 'unavailable';
   let watcher: LinuxLifecycle | WindowsLifecycle | null = null;
   if (process.platform === 'linux') {
     watcher = new LinuxLifecycle({ rules: lifecycle, powerMonitor, pid: process.pid, log });
