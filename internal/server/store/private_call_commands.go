@@ -88,12 +88,31 @@ func (s *Store) InvitePrivateCall(ctx context.Context, conversationID int64, act
 			return err
 		}
 		out, err = cmd.invite(ctx, tx, conversationID, peer)
-		if err != nil {
+		if err != nil || out.RetryAfter > 0 {
 			return err
 		}
 		return cmd.remember(ctx, tx, out)
 	})
 	return out, err
+}
+
+// Count prior outcomes for this caller and conversation under the same write
+// lock as creation. Retries of a recorded action bypass this check.
+func (cmd privateCallCommand) inviteRetryAfter(ctx context.Context, tx execer, conversationID int64) (time.Duration, error) {
+	const window = 10 * time.Minute
+	var ended int64
+	err := tx.QueryRowContext(ctx, `SELECT ended_at FROM private_calls
+		WHERE conversation_id = ? AND caller = ? AND ended_at > ?
+		AND state IN ('unavailable', 'declined', 'missed')
+		ORDER BY ended_at DESC LIMIT 1 OFFSET 2`,
+		conversationID, cmd.actor.PrincipalID, cmd.now.Add(-window).UnixMilli()).Scan(&ended)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return time.UnixMilli(ended).Add(window).Sub(cmd.now), nil
 }
 
 func (cmd privateCallCommand) invite(ctx context.Context, tx execer, conversationID, peer int64) (PrivateCallResult, error) {
@@ -114,6 +133,13 @@ func (cmd privateCallCommand) invite(ctx context.Context, tx execer, conversatio
 			}}, nil
 		}
 		return PrivateCallResult{Code: schema.ErrorCodeCallInProgress}, nil
+	}
+	retry, err := cmd.inviteRetryAfter(ctx, tx, conversationID)
+	if err != nil {
+		return PrivateCallResult{}, err
+	}
+	if retry > 0 {
+		return PrivateCallResult{Code: schema.ErrorCodeRateLimited, RetryAfter: retry}, nil
 	}
 	event := schema.PrivateCallEventInviteUnavailable
 	available, err := cmd.calleeAvailable(ctx, tx, peer)

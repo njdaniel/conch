@@ -15,7 +15,7 @@ import (
 
 var privateCallToken = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
-func privateCallActor(w http.ResponseWriter, r *http.Request) (store.PrivateCallActor, bool) {
+func (s *Server) privateCallActor(w http.ResponseWriter, r *http.Request) (store.PrivateCallActor, bool) {
 	w.Header().Set("Cache-Control", "no-store")
 	p, ok := callerFrom(r.Context())
 	credentialID, authenticated := credentialIDFrom(r.Context())
@@ -27,15 +27,18 @@ func privateCallActor(w http.ResponseWriter, r *http.Request) (store.PrivateCall
 		writeError(w, http.StatusForbidden, errForbidden.Code, "private calls require a human member")
 		return store.PrivateCallActor{}, false
 	}
-	if !privateCallOwnSignIn(r.Context()) {
+	actor := store.PrivateCallActor{PrincipalID: p.ID, CredentialID: credentialID}
+	own, err := s.store.PrivateCallOwnSignIn(r.Context(), actor)
+	if err != nil {
+		writePrivateCallResult(w, r, store.PrivateCallResult{}, err)
+		return store.PrivateCallActor{}, false
+	}
+	if !own {
 		writeError(w, http.StatusForbidden, schema.ErrorCodeOwnSignInRequired, "sign in with your own account")
 		return store.PrivateCallActor{}, false
 	}
-	return store.PrivateCallActor{PrincipalID: p.ID, CredentialID: credentialID}, true
+	return actor, true
 }
-
-// privateCallOwnSignIn is the #2047 seam for refusing act-as credentials.
-func privateCallOwnSignIn(_ context.Context) bool { return true }
 
 func privateCallConversationID(w http.ResponseWriter, r *http.Request) (int64, bool) {
 	id, err := strconv.ParseInt(r.PathValue("conversation"), 10, 64)
@@ -46,9 +49,20 @@ func privateCallConversationID(w http.ResponseWriter, r *http.Request) (int64, b
 	return id, true
 }
 
-func (s *Server) handleInvitePrivateCall(w http.ResponseWriter, r *http.Request) {
-	actor, ok := privateCallActor(w, r)
+func (s *Server) privateCallInviteHandler() http.Handler {
+	limit := newChannelWriteLimiter(inviteLimit{"private_call_invites", 3, time.Minute})
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.handleInvitePrivateCall(w, r, limit)
+	})
+}
+
+func (s *Server) handleInvitePrivateCall(w http.ResponseWriter, r *http.Request, limit *channelWriteLimiter) {
+	actor, ok := s.privateCallActor(w, r)
 	if !ok {
+		return
+	}
+	if allowed, retry := limit.take(actor.PrincipalID, 0, s.now()); !allowed {
+		writeRateLimited(w, &rateLimitedError{retryAfter: retry})
 		return
 	}
 	conversationID, ok := privateCallConversationID(w, r)
@@ -66,7 +80,7 @@ func (s *Server) handleInvitePrivateCall(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) privateCallAction(event string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		actor, ok := privateCallActor(w, r)
+		actor, ok := s.privateCallActor(w, r)
 		if !ok {
 			return
 		}
@@ -86,7 +100,7 @@ func (s *Server) privateCallAction(event string) http.Handler {
 }
 
 func (s *Server) handleCurrentPrivateCall(w http.ResponseWriter, r *http.Request) {
-	actor, ok := privateCallActor(w, r)
+	actor, ok := s.privateCallActor(w, r)
 	if !ok {
 		return
 	}
@@ -99,7 +113,7 @@ func (s *Server) handleCurrentPrivateCall(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleListPrivateCalls(w http.ResponseWriter, r *http.Request) {
-	actor, ok := privateCallActor(w, r)
+	actor, ok := s.privateCallActor(w, r)
 	if !ok {
 		return
 	}
@@ -140,6 +154,8 @@ func writePrivateCallResult(w http.ResponseWriter, r *http.Request, out store.Pr
 
 func writePrivateCallCommand(w http.ResponseWriter, out store.PrivateCallResult) {
 	switch out.Code {
+	case schema.ErrorCodeRateLimited:
+		writeRateLimited(w, &rateLimitedError{retryAfter: out.RetryAfter})
 	case schema.ErrorCodeCallStateChanged:
 		writeJSON(w, http.StatusConflict, schema.PrivateCallConflictV1{
 			Code: out.Code, Message: "call state changed", Call: out.Call,
@@ -152,7 +168,7 @@ func writePrivateCallCommand(w http.ResponseWriter, out store.PrivateCallResult)
 		writeError(w, http.StatusForbidden, out.Code, "voice is not part of your access to this server")
 	default:
 		status := http.StatusOK
-		if out.Created {
+		if out.Created && out.Call.State == schema.PrivateCallStateRinging {
 			status = http.StatusCreated
 		}
 		// #2031 can publish committed transitions, using attempt IDs and

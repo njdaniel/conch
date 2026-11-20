@@ -61,8 +61,15 @@ var privateCallMigration = []string{
 	`CREATE INDEX IF NOT EXISTS private_call_actions_expiry ON private_call_actions (expires_at)`,
 }
 
-// Register migration 51 after the ordered migrations declared by the store.
-func init() { migrations = append(migrations, privateCallMigration) }
+// A database opened by the draft records this DDL as version 51. A combined
+// build must reconcile that slot with the base before reusing it.
+func init() {
+	const draftPrivateCallMigration = 51
+	if len(migrations) != draftPrivateCallMigration-1 {
+		panic("store: reconcile draft private call migration 51 with the base migration list")
+	}
+	migrations = append(migrations, privateCallMigration)
+}
 
 var (
 	ErrPrivateCallNotFound = errors.New("store: private call not found")
@@ -80,8 +87,9 @@ type PrivateCallActor struct {
 // outcome. Code is empty for a successful command.
 type PrivateCallResult struct {
 	schema.PrivateCallResponseV1
-	Created bool
-	Code    string
+	Created    bool
+	Code       string
+	RetryAfter time.Duration
 }
 
 type privateCall struct {
@@ -164,17 +172,8 @@ func privateCallTimestamp(ms int64) *schema.Timestamp {
 	return &t
 }
 
-// BindPrivateCallConversation supplies the immutable pair from the DM store.
-// #2018 should replace this bridge and privateCallPeer with its conversation
-// lookup in the same transaction. No call route accepts a pair from a client.
-func (s *Store) BindPrivateCallConversation(ctx context.Context, conversationID, a, b int64) error {
-	err := s.db.QueryRowContext(ctx, `INSERT INTO private_call_pairs (conversation_id, lo, hi)
-		VALUES (?, ?, ?) ON CONFLICT (conversation_id) DO UPDATE SET lo = excluded.lo
-		WHERE lo = excluded.lo AND hi = excluded.hi RETURNING conversation_id`,
-		conversationID, min(a, b), max(a, b)).Scan(&conversationID)
-	return err
-}
-
+// This draft pair lookup only supports isolated call fixtures. Production
+// invites must use the DM store's viewer-scoped lookup in the same transaction.
 func privateCallPeer(ctx context.Context, tx execer, conversationID, participant int64) (int64, error) {
 	var peer int64
 	err := tx.QueryRowContext(ctx, `SELECT CASE WHEN lo = ? THEN hi ELSE lo END
@@ -186,10 +185,20 @@ func privateCallPeer(ctx context.Context, tx execer, conversationID, participant
 	return peer, err
 }
 
-// privateCallContactAllowed is the #2018 eligibility seam. Its policy must
-// cover both directions and run in this transaction for invites and live calls.
-func privateCallContactAllowed(_ context.Context, _ execer, _, _ int64) (bool, error) {
-	return true, nil
+// The block check and the call transition share a write transaction. Until
+// #1832's schema is present, an invite cannot verify either direction.
+// #2018 must replace this with the shared DM policy before wiring real pairs.
+func privateCallContactAllowed(ctx context.Context, tx execer, from, to int64) (bool, error) {
+	var hasBlocks bool
+	err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'blocks')`).Scan(&hasBlocks)
+	if err != nil || !hasBlocks {
+		return false, err
+	}
+	var allowed bool
+	err = tx.QueryRowContext(ctx, `SELECT NOT EXISTS (SELECT 1 FROM blocks
+		WHERE (owner_id = ? AND blocked_id = ?) OR (owner_id = ? AND blocked_id = ?))`,
+		from, to, to, from).Scan(&allowed)
+	return allowed, err
 }
 
 func privateCallVoiceAllowed(ctx context.Context, tx execer, principalID int64) (bool, error) {
@@ -201,14 +210,28 @@ func privateCallVoiceAllowed(ctx context.Context, tx execer, principalID int64) 
 	return principalPermittedTx(ctx, tx, p, schema.PermUseVoice)
 }
 
-// A zero credential asks whether the callee has any signed-in device.
-// #2031 can additionally require a recipient reachable by the ring stream.
+const privateCallOwnCredential = `(c.issued_by IS NULL OR c.issued_by = c.principal_id)
+	AND NOT EXISTS (SELECT 1 FROM sign_in_links l
+		WHERE l.principal_id = c.principal_id AND l.credential_id = c.id AND l.created_by <> c.principal_id)`
+
+// PrivateCallOwnSignIn checks credential provenance before a route reads
+// call or conversation data. A NULL issuer without an operator link is own.
+func (s *Store) PrivateCallOwnSignIn(ctx context.Context, actor PrivateCallActor) (bool, error) {
+	var own bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM credentials c
+		WHERE c.id = ? AND c.principal_id = ? AND `+privateCallOwnCredential+`)`,
+		actor.CredentialID, actor.PrincipalID).Scan(&own)
+	return own, err
+}
+
+// A zero credential asks whether the callee has any signed-in device of their
+// own. #2031 can additionally require a recipient reachable by the ring stream.
 func privateCallCredentialLive(ctx context.Context, tx execer, actor PrivateCallActor, now time.Time) (bool, error) {
 	var live bool
 	err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM credentials c JOIN principals p ON p.id = c.principal_id
 		WHERE p.id = ? AND p.disabled_at IS NULL AND p.kind = 'human' AND (? = 0 OR c.id = ?)
 		AND NOT EXISTS (SELECT 1 FROM guest_visits g WHERE g.principal_id = p.id AND g.state <> 'converted')
-		AND `+
+		AND `+privateCallOwnCredential+` AND `+
 		liveCredentialWhere(now)+`)`, actor.PrincipalID, actor.CredentialID, actor.CredentialID).Scan(&live) // #nosec G202 -- liveCredentialWhere builds SQL from a time integer.
 	return live, err
 }

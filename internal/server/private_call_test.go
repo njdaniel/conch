@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -34,10 +35,32 @@ func privateCallHTTPFixture(t *testing.T) (*authFixture, store.Principal, string
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.srv.store.BindPrivateCallConversation(ctx, 42, f.alice.ID, bob.ID); err != nil {
+	db := privateCallFixtureDB(t, f)
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS blocks (
+		owner_id INTEGER NOT NULL REFERENCES principals(id),
+		blocked_id INTEGER NOT NULL REFERENCES principals(id),
+		created_at INTEGER NOT NULL, PRIMARY KEY (owner_id, blocked_id)) WITHOUT ROWID`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO private_call_pairs (conversation_id, lo, hi) VALUES (42, ?, ?)`,
+		min(f.alice.ID, bob.ID), max(f.alice.ID, bob.ID)); err != nil {
 		t.Fatal(err)
 	}
 	return f, bob, bobTok, bobSecondTok
+}
+
+func privateCallFixtureDB(t *testing.T, f *authFixture) *sql.DB {
+	t.Helper()
+	path, ok := testDBPaths.Load(f.srv)
+	if !ok {
+		t.Fatal("missing fixture database path")
+	}
+	db, err := sql.Open("sqlite", path.(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
 }
 
 func decodePrivateCallResponse(t *testing.T, rec *httptest.ResponseRecorder, want int) schema.PrivateCallResponseV1 {
@@ -199,7 +222,7 @@ func TestPrivateCallHTTPPermissionLoss(t *testing.T) {
 		t.Fatalf("revoked ring: %+v", cancelled)
 	}
 	unavailable := decodePrivateCallResponse(t, f.do(t, "POST", privateCallTestPair,
-		f.aliceTok, `{"action_id":"invite-again"}`), http.StatusCreated).Call
+		f.aliceTok, `{"action_id":"invite-again"}`), http.StatusOK).Call
 	if unavailable.State != schema.PrivateCallStateUnavailable || unavailable.Reason != "" {
 		t.Fatalf("unavailable: %+v", unavailable)
 	}
@@ -307,9 +330,25 @@ func TestServeReconcilesAndSweepsPrivateCalls(t *testing.T) {
 }
 
 func TestPrivateCallHTTPAuthentication(t *testing.T) {
-	f := newAuthFixture(t, AuthRequired)
+	f, bob, bobTok, _ := privateCallHTTPFixture(t)
 	off := newAuthFixture(t, AuthOff)
-	const attempt = "/v1/calls/abcdefghijklmnopqrstuv/"
+	ctx := context.Background()
+	_, issued, err := f.srv.store.CreateCredential(ctx, fmt.Sprintf("principal:%d", f.root.ID), bob.ID, "operator issued", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	link, err := f.srv.store.CreateSignInLink(ctx, fmt.Sprintf("principal:%d", f.root.ID), f.root.ID,
+		bob.ID, schema.CreateSignInLinkRequestV1{}, f.srv.now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	redeemed, err := f.srv.store.RedeemSignInLink(ctx, store.HashSignInLinkCode(link.Code), f.srv.now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := decodePrivateCallResponse(t, f.do(t, "POST", privateCallTestPair,
+		f.aliceTok, `{"action_id":"invite"}`), http.StatusCreated).Call
+	attempt := "/v1/calls/" + call.ID + "/"
 	for _, route := range []struct {
 		method, path string
 	}{
@@ -328,6 +367,10 @@ func TestPrivateCallHTTPAuthentication(t *testing.T) {
 				http.StatusForbidden, "forbidden")
 			assertErrorBody(t, off.do(t, route.method, route.path, "", ""),
 				http.StatusBadRequest, schema.ErrorCodeDMRequireAuth)
+			for _, token := range []string{issued, redeemed.Token} {
+				assertErrorBody(t, f.do(t, route.method, route.path, token, privateCallTestCommand(call, "action")),
+					http.StatusForbidden, schema.ErrorCodeOwnSignInRequired)
+			}
 			req := httptest.NewRequest(route.method, route.path, nil)
 			req.Header.Set("Authorization", "Bearer "+f.rootTok)
 			req.Header.Set("Conch-Preview-As", fmt.Sprint(f.alice.ID))
@@ -338,4 +381,96 @@ func TestPrivateCallHTTPAuthentication(t *testing.T) {
 			}
 		})
 	}
+	decodePrivateCallResponse(t, f.do(t, "POST", attempt+"decline", bobTok,
+		privateCallTestCommand(call, "decline")), http.StatusOK)
+}
+
+func TestPrivateCallHTTPBlockDuringRingAndHistory(t *testing.T) {
+	f, bob, bobTok, _ := privateCallHTTPFixture(t)
+	ctx := context.Background()
+	now := time.Now()
+	f.srv.now = func() time.Time { return now }
+
+	unknown := f.do(t, "GET", "/v1/dms/43/calls", bobTok, "")
+	assertErrorBody(t, unknown, http.StatusNotFound, schema.ErrorCodeDMNotFound)
+	checkUnknown := func() {
+		t.Helper()
+		rec := f.do(t, "GET", privateCallTestPair, bobTok, "")
+		if rec.Code != unknown.Code || rec.Body.String() != unknown.Body.String() {
+			t.Fatalf("known pair without a visible call: %d %s", rec.Code, rec.Body)
+		}
+	}
+	checkUnknown()
+	db := privateCallFixtureDB(t, f)
+	setBlock := func(owner, blocked int64) {
+		t.Helper()
+		if _, err := db.ExecContext(ctx, "INSERT INTO blocks VALUES (?, ?, ?)", owner, blocked, now.UnixMilli()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setBlock(bob.ID, f.alice.ID)
+	unavailable := decodePrivateCallResponse(t, f.do(t, "POST", privateCallTestPair,
+		f.aliceTok, `{"action_id":"unavailable"}`), http.StatusOK).Call
+	if unavailable.State != schema.PrivateCallStateUnavailable || unavailable.Reason != "" {
+		t.Fatalf("blocked invite = %+v", unavailable)
+	}
+	checkUnknown()
+	if _, err := db.ExecContext(ctx, "DELETE FROM blocks"); err != nil {
+		t.Fatal(err)
+	}
+	ring := decodePrivateCallResponse(t, f.do(t, "POST", privateCallTestPair,
+		f.aliceTok, `{"action_id":"ring"}`), http.StatusCreated).Call
+	setBlock(f.alice.ID, bob.ID)
+	now = ring.RingDeadline.Time()
+	rec := f.do(t, "POST", "/v1/calls/"+ring.ID+"/accept", bobTok, privateCallTestCommand(ring, "late"))
+	if ended := privateCallTestConflict(t, rec, schema.PrivateCallStateCancelled); ended.Reason != "" {
+		t.Fatalf("block reason in call: %+v", ended)
+	}
+}
+
+func TestPrivateCallHTTPInviteLimits(t *testing.T) {
+	t.Run("principal", func(t *testing.T) {
+		f, _, _, _ := privateCallHTTPFixture(t)
+		now := time.Now()
+		f.srv.now = func() time.Time { return now }
+		for i := 0; i < 3; i++ {
+			assertErrorBody(t, f.do(t, "POST", "/v1/dms/43/calls", f.aliceTok, fmt.Sprintf(`{"action_id":"missing%d"}`, i)),
+				http.StatusNotFound, schema.ErrorCodeDMNotFound)
+		}
+		rec := f.do(t, "POST", privateCallTestPair, f.aliceTok, `{"action_id":"valid"}`)
+		assertErrorBody(t, rec, http.StatusTooManyRequests, "rate_limited")
+		if got := rec.Header().Get("Retry-After"); got != "20" {
+			t.Fatalf("Retry-After = %q, want 20", got)
+		}
+		now = now.Add(20 * time.Second)
+		decodePrivateCallResponse(t, f.do(t, "POST", privateCallTestPair, f.aliceTok,
+			`{"action_id":"valid"}`), http.StatusCreated)
+	})
+
+	t.Run("pair", func(t *testing.T) {
+		f, _, bobTok, _ := privateCallHTTPFixture(t)
+		now := time.Now()
+		f.srv.now = func() time.Time { return now }
+		for i := 0; i < 3; i++ {
+			// Refill the principal bucket between attempts.
+			call := decodePrivateCallResponse(t, f.do(t, "POST", privateCallTestPair, f.aliceTok,
+				fmt.Sprintf(`{"action_id":"invite%d"}`, i)), http.StatusCreated).Call
+			decodePrivateCallResponse(t, f.do(t, "POST", "/v1/calls/"+call.ID+"/decline", bobTok,
+				privateCallTestCommand(call, fmt.Sprintf("decline%d", i))), http.StatusOK)
+			now = now.Add(20 * time.Second)
+		}
+		replay := decodePrivateCallResponse(t, f.do(t, "POST", privateCallTestPair, f.aliceTok,
+			`{"action_id":"invite2"}`), http.StatusOK)
+		if !replay.Replayed || replay.Call.State != schema.PrivateCallStateDeclined {
+			t.Fatalf("pair limit blocked a replay: %+v", replay)
+		}
+		rec := f.do(t, "POST", privateCallTestPair, f.aliceTok, `{"action_id":"next"}`)
+		assertErrorBody(t, rec, http.StatusTooManyRequests, "rate_limited")
+		if got := rec.Header().Get("Retry-After"); got != "540" {
+			t.Fatalf("Retry-After = %q, want 540", got)
+		}
+		now = now.Add(540 * time.Second)
+		decodePrivateCallResponse(t, f.do(t, "POST", privateCallTestPair, f.aliceTok,
+			`{"action_id":"next"}`), http.StatusCreated)
+	})
 }

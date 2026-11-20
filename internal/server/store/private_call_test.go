@@ -21,6 +21,13 @@ func newPrivateCallFixture(t *testing.T, s *Store) *privateCallFixture {
 	t.Helper()
 	ctx := context.Background()
 	f := &privateCallFixture{t: t, s: s, now: time.Now().UTC().Truncate(time.Millisecond)}
+	// The block migration comes from #1832, which is outside this test base.
+	if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS blocks (
+		owner_id INTEGER NOT NULL REFERENCES principals(id),
+		blocked_id INTEGER NOT NULL REFERENCES principals(id),
+		created_at INTEGER NOT NULL, PRIMARY KEY (owner_id, blocked_id)) WITHOUT ROWID`); err != nil {
+		t.Fatal(err)
+	}
 	for i, person := range []*PrivateCallActor{&f.a, &f.b, &f.b2, &f.c} {
 		if person == &f.b2 {
 			person.PrincipalID = f.b.PrincipalID
@@ -38,7 +45,8 @@ func newPrivateCallFixture(t *testing.T, s *Store) *privateCallFixture {
 		person.CredentialID = cred.ID
 	}
 	for i, person := range []PrivateCallActor{f.a, f.c} {
-		if err := s.BindPrivateCallConversation(ctx, int64(i+1), person.PrincipalID, f.b.PrincipalID); err != nil {
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO private_call_pairs (conversation_id, lo, hi) VALUES (?, ?, ?)`,
+			i+1, min(person.PrincipalID, f.b.PrincipalID), max(person.PrincipalID, f.b.PrincipalID)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -288,6 +296,36 @@ func TestPrivateCallSelectedCredentialRevocation(t *testing.T) {
 	}
 }
 
+func TestPrivateCallRepeatLimitCountsUndeliveredAndExpiredInvites(t *testing.T) {
+	f := newPrivateCallFixture(t, openTestStore(t))
+	ctx := context.Background()
+	if _, err := f.s.db.ExecContext(ctx, "INSERT INTO blocks VALUES (?, ?, ?)",
+		f.b.PrincipalID, f.a.PrincipalID, f.now.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		out := f.invite(1, f.a, fmt.Sprintf("unavailable%d", i))
+		if out.Call.State != schema.PrivateCallStateUnavailable {
+			t.Fatalf("blocked invite: %+v", out)
+		}
+	}
+	if _, err := f.s.db.ExecContext(ctx, "DELETE FROM blocks"); err != nil {
+		t.Fatal(err)
+	}
+	ring := f.invite(1, f.a, "ring").Call
+	if ring.State != schema.PrivateCallStateRinging {
+		t.Fatalf("third invite: %+v", ring)
+	}
+	f.now = ring.RingDeadline.Time()
+	limited := f.invite(1, f.a, "fourth")
+	if limited.Code != schema.ErrorCodeRateLimited || limited.Call.ID != "" || limited.RetryAfter != 10*time.Minute-schema.PrivateCallRingSeconds*time.Second {
+		t.Fatalf("fourth invite: %+v", limited)
+	}
+	if got := f.stored(ring.ID); got.State != schema.PrivateCallStateMissed {
+		t.Fatalf("third invite after expiry: %+v", got)
+	}
+}
+
 func TestPrivateCallReconcileAfterReopen(t *testing.T) {
 	ctx := context.Background()
 	path := newTestDBPath(t)
@@ -384,8 +422,8 @@ func TestPrivateCallHistoryPageWithTiedTimestamps(t *testing.T) {
 	seen := make(map[string]bool, schema.MaxPrivateCallHistoryPage+1)
 	for i := 0; i <= schema.MaxPrivateCallHistoryPage; i++ {
 		call := f.invite(1, f.a, fmt.Sprintf("invite%d", i)).Call
-		if got := f.act(call, f.b, schema.PrivateCallEventDecline, fmt.Sprintf("decline%d", i)); got.Call.State != schema.PrivateCallStateDeclined {
-			t.Fatalf("decline: %+v", got)
+		if got := f.act(call, f.a, schema.PrivateCallEventCancel, fmt.Sprintf("cancel%d", i)); got.Call.State != schema.PrivateCallStateCancelled {
+			t.Fatalf("cancel: %+v", got)
 		}
 		seen[call.ID] = false
 	}

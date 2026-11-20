@@ -27,7 +27,7 @@ func (s *Server) routeTable() []route {
 		{pattern: "GET /v1/events/ws", access: accessAuthenticated, handler: hf(s.handleEventsWS), acceptsTicket: true},
 		rt("POST /v1/ws-tickets", accessAuthenticated, hf(s.handleCreateWSTicket)),
 		rt("GET /v1/whoami", accessAuthenticated, hf(s.handleWhoAmI)),
-		rt("POST /v1/dms/{conversation}/calls", accessAuthenticated, hf(s.handleInvitePrivateCall)),
+		rt("POST /v1/dms/{conversation}/calls", accessAuthenticated, s.privateCallInviteHandler()),
 		rt("GET /v1/dms/{conversation}/calls", accessAuthenticated, hf(s.handleListPrivateCalls)),
 		rt("GET /v1/calls/current", accessAuthenticated, hf(s.handleCurrentPrivateCall)),
 		rt("POST /v1/calls/{call}/accept", accessAuthenticated, s.privateCallAction(schema.PrivateCallEventAccept)),
