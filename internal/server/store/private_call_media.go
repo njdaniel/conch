@@ -29,7 +29,16 @@ var privateCallMediaMigration = []string{
 	)`,
 }
 
-func retirePrivateCallMedia(ctx context.Context, tx execer, id string) error {
+// Index the same ended_at written transactionally with room retirement.
+var privateCallMediaWatchMigration = []string{
+	`CREATE INDEX IF NOT EXISTS private_calls_ended_at ON private_calls (ended_at) WHERE ended_at IS NOT NULL`,
+}
+
+// LiveKit refresh tokens have a 10-minute TTL plus about 60 seconds of
+// expiry leeway. Watch for recreated rooms on the fast pass for that long.
+const privateCallMediaWatchWindow = 11 * time.Minute
+
+func retireCallRoom(ctx context.Context, tx execer, id string) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM call_room_holders WHERE call_id = ?`, id); err != nil {
 		return err
 	}
@@ -122,18 +131,23 @@ func (s *Store) PrivateCallMediaRoomLive(ctx context.Context, name string) (bool
 }
 
 type PrivateCallMediaRoom struct {
-	CallID, Name       string
-	Revision           int64
-	Retired            bool
-	CallerID, CalleeID int64
+	CallID, Name           string
+	Revision               int64
+	Retired, DeletePending bool
+	CallerID, CalleeID     int64
 }
 
-// PrivateCallMediaRooms is the private poller's worklist, ordered with retired
-// rooms first so deletion does not wait behind participant observations.
-func (s *Store) PrivateCallMediaRooms(ctx context.Context) ([]PrivateCallMediaRoom, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT r.call_id, r.name, c.revision, r.retired, c.caller, c.callee
+// PrivateCallMediaRooms returns live rooms, pending deletes and recent
+// tombstones. Read recent tombstones by ended_at so old ones stay off the fast path.
+func (s *Store) PrivateCallMediaRooms(ctx context.Context, now time.Time) ([]PrivateCallMediaRoom, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT r.call_id, r.name, c.revision, r.retired, r.delete_pending, c.caller, c.callee
 		FROM call_rooms r JOIN private_calls c ON c.id = r.call_id
-		WHERE r.retired = 0 OR r.delete_pending = 1 ORDER BY r.retired DESC, r.call_id`)
+		WHERE r.retired = 0 OR r.delete_pending = 1
+		UNION ALL
+		SELECT r.call_id, r.name, c.revision, r.retired, r.delete_pending, c.caller, c.callee
+		FROM private_calls c JOIN call_rooms r ON r.call_id = c.id
+		WHERE c.ended_at > ? AND r.retired = 1 AND r.delete_pending = 0
+		ORDER BY retired DESC, delete_pending DESC, call_id`, now.Add(-privateCallMediaWatchWindow).UnixMilli())
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +155,7 @@ func (s *Store) PrivateCallMediaRooms(ctx context.Context) ([]PrivateCallMediaRo
 	var rooms []PrivateCallMediaRoom
 	for rows.Next() {
 		var r PrivateCallMediaRoom
-		if err := rows.Scan(&r.CallID, &r.Name, &r.Revision, &r.Retired, &r.CallerID, &r.CalleeID); err != nil {
+		if err := rows.Scan(&r.CallID, &r.Name, &r.Revision, &r.Retired, &r.DeletePending, &r.CallerID, &r.CalleeID); err != nil {
 			return nil, err
 		}
 		rooms = append(rooms, r)
@@ -199,4 +213,33 @@ func (s *Store) PrivateCallRoomStates(ctx context.Context, names []string) (map[
 		states[name] = retired
 	}
 	return states, rows.Err()
+}
+
+// ObservePrivateCallEndpoints applies media poller observations in poll
+// order for the attempt revision observed. Each
+// credential is the selected credential seen in the room, or zero when
+// absent. A late observation cannot resurrect an expired attempt.
+func (s *Store) ObservePrivateCallEndpoints(ctx context.Context, id string, revision, callerCredential, calleeCredential int64, clock func() time.Time) error {
+	return s.withImmediateTx(ctx, func(tx execer) error {
+		c, err := privateCallByID(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		if c.Revision != revision || (c.State != schema.PrivateCallStateAccepted && c.State != schema.PrivateCallStateActive) {
+			return nil
+		}
+		now := clock().Truncate(time.Millisecond)
+		if changed, err := refreshPrivateCall(ctx, tx, &c, now); changed || err != nil {
+			return err
+		}
+		callerPresent := callerCredential == c.callerCredential
+		calleePresent := calleeCredential == c.calleeCredential
+		if c.State == schema.PrivateCallStateAccepted {
+			if callerPresent && calleePresent {
+				return applyPrivateCallServerEvent(ctx, tx, &c, schema.PrivateCallEventJoined, now)
+			}
+			return nil
+		}
+		return recordPrivateCallAbsence(ctx, tx, c, callerPresent, calleePresent, now)
+	})
 }

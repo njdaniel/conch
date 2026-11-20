@@ -47,6 +47,16 @@ func (m *fakePrivateCallMedia) JoinToken(p livekit.JoinParams) (string, error) {
 	return m.signer.JoinToken(p)
 }
 
+func (m *fakePrivateCallMedia) ListRooms(_ context.Context) ([]livekit.Room, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rooms := make([]livekit.Room, 0, len(m.rooms))
+	for name := range m.rooms {
+		rooms = append(rooms, livekit.Room{Name: name})
+	}
+	return rooms, nil
+}
+
 func (m *fakePrivateCallMedia) ListParticipantsIfRoomExists(_ context.Context, name string) ([]livekit.Participant, error) {
 	if m.listHook != nil {
 		m.listHook()
@@ -93,7 +103,7 @@ func addFakePrivateCallMedia(t *testing.T, s *Server) *fakePrivateCallMedia {
 		t.Fatal(err)
 	}
 	m := &fakePrivateCallMedia{signer: signer, rooms: make(map[string][]livekit.Participant)}
-	s.voice.callMedia = m
+	s.callMedia = m
 	return m
 }
 
@@ -232,6 +242,62 @@ func TestPrivateCallMediaRevocationDuringCreate(t *testing.T) {
 	}
 }
 
+func TestPrivateCallMediaRevocationDuringActiveCall(t *testing.T) {
+	for _, action := range []string{"disable principal", "revoke credential"} {
+		t.Run(action, func(t *testing.T) {
+			f, bob, bobTok, _ := privateCallHTTPFixture(t)
+			media := addFakePrivateCallMedia(t, f.srv)
+			call := answerPrivateCallMediaTest(t, f, invitePrivateCallMediaTest(t, f, "first"), bobTok, "answer")
+			path := "/v1/calls/" + call.ID + "/session"
+			aliceSession := privateCallSessionTest(t, f.do(t, "POST", path, f.aliceTok, ""))
+			bobSession := privateCallSessionTest(t, f.do(t, "POST", path, bobTok, ""))
+			media.rooms[aliceSession.Room] = []livekit.Participant{
+				{Identity: aliceSession.Identity}, {Identity: bobSession.Identity},
+			}
+			f.srv.voice.runPrivateCallMediaPass(t.Context())
+			current := f.do(t, "GET", "/v1/calls/current", f.aliceTok, "")
+			var snapshot schema.PrivateCallSnapshotV1
+			if err := json.Unmarshal(current.Body.Bytes(), &snapshot); current.Code != http.StatusOK ||
+				err != nil || snapshot.Call == nil || snapshot.Call.State != schema.PrivateCallStateActive {
+				t.Fatalf("call did not become active: %d, %s", current.Code, current.Body)
+			}
+
+			if action == "disable principal" {
+				rec := f.do(t, "POST", fmt.Sprintf("/v1/principals/%d/disable", bob.ID), f.rootTok, "")
+				if rec.Code != http.StatusOK {
+					t.Fatalf("disable principal: %d, %s", rec.Code, rec.Body)
+				}
+			} else {
+				rec := f.do(t, "DELETE", "/v1/credentials/current", bobTok, "")
+				if rec.Code != http.StatusNoContent {
+					t.Fatalf("revoke credential: %d, %s", rec.Code, rec.Body)
+				}
+			}
+
+			// Drive the lifecycle and media passes without background timers.
+			if err := f.srv.store.SweepPrivateCalls(t.Context(), f.srv.now); err != nil {
+				t.Fatal(err)
+			}
+			f.srv.voice.runPrivateCallMediaPass(t.Context())
+			if _, exists := media.rooms[aliceSession.Room]; exists {
+				t.Fatal("revocation left both endpoints' room in LiveKit")
+			}
+			if rec := f.do(t, "POST", path, bobTok, ""); rec.Code != http.StatusUnauthorized {
+				t.Fatalf("revoked endpoint session: %d, %s", rec.Code, rec.Body)
+			}
+			rec := f.do(t, "POST", path, f.aliceTok, "")
+			var conflict schema.PrivateCallConflictV1
+			if err := json.Unmarshal(rec.Body.Bytes(), &conflict); rec.Code != http.StatusConflict || err != nil ||
+				conflict.Code != schema.ErrorCodeCallStateChanged || conflict.Call.State != schema.PrivateCallStateEnded {
+				t.Fatalf("peer session after revocation: %d, %s", rec.Code, rec.Body)
+			}
+			if len(media.signed) != 2 {
+				t.Fatal("session signed a grant following revocation")
+			}
+		})
+	}
+}
+
 func TestPrivateCallMediaPollSeesLatestHolders(t *testing.T) {
 	f, _, bobTok, _ := privateCallHTTPFixture(t)
 	media := addFakePrivateCallMedia(t, f.srv)
@@ -244,7 +310,7 @@ func TestPrivateCallMediaPollSeesLatestHolders(t *testing.T) {
 	}
 	// Take the worklist snapshot, then issue Bob's first grant and connect
 	// both endpoints while ListParticipants is in progress.
-	rooms, err := f.srv.store.PrivateCallMediaRooms(t.Context())
+	rooms, err := f.srv.store.PrivateCallMediaRooms(t.Context(), f.srv.now())
 	if err != nil || len(rooms) != 1 {
 		t.Fatalf("media worklist: %d rooms, %v", len(rooms), err)
 	}
@@ -303,15 +369,20 @@ func TestPrivateCallMediaDeletionWaitsForCreate(t *testing.T) {
 // The earlier channel-room revocation test (§10, finding 10) measured that
 // with auto-create disabled, LiveKit refused its own refresh token after
 // DeleteRoom. Expect the same for private calls. With auto-create enabled,
-// either token can recreate the retired room and get another refresh token. Expect each recreation to be disconnected
-// by the next successful room sweep (30 s cadence plus RPC/queue time).
-// For a healthy, unsaturated service, expect retirement to begin within the
-// 1 s call state sweep and 1 s media pass, plus up to 4 s for room control.
+// either token can recreate the retired room and get another refresh token.
+// For 11 minutes from retirement, expect a listed recreation to be deleted
+// on the next successful 1 s media pass, plus ListRooms/DeleteRoom RPC and
+// queue time. Later recreations wait for the 30 s sweep plus RPC/queue time.
+// On a healthy, unsaturated service, initial revocation takes up to 1 s for
+// the call-state sweep and 1 s for the media pass, plus any ListRooms RPC
+// and up to 4 s for room control.
 // Repeat with both endpoints connected, media unavailable at revocation and
 // restored later, and with conchd restarted before cleanup can succeed.
 func TestPrivateCallMediaRetirementRetriesAndStaleRejoin(t *testing.T) {
 	f, _, bobTok, _ := privateCallHTTPFixture(t)
 	media := addFakePrivateCallMedia(t, f.srv)
+	now := f.srv.now().Truncate(time.Millisecond)
+	f.srv.now = func() time.Time { return now }
 	call := answerPrivateCallMediaTest(t, f, invitePrivateCallMediaTest(t, f, "first"), bobTok, "answer-first")
 	old := privateCallSessionTest(t, f.do(t, "POST", "/v1/calls/"+call.ID+"/session", f.aliceTok, ""))
 	media.rooms[old.Room] = []livekit.Participant{{Identity: old.Identity}}
@@ -331,29 +402,42 @@ func TestPrivateCallMediaRetirementRetriesAndStaleRejoin(t *testing.T) {
 	}
 	defer func() { _ = reopened.Close() }()
 	restarted := New(f.srv.cfg, reopened)
+	restarted.now = f.srv.now
 	poller := restarted.voice
-	poller.callMedia = media
+	restarted.callMedia = media
 	media.deleteFailed = false
 	poller.runPrivateCallMediaPass(t.Context())
 	if _, ok := media.rooms[old.Room]; ok {
 		t.Fatal("cleanup retry did not disconnect the endpoint and remove the room")
 	}
-	if rooms, err := f.srv.store.PrivateCallMediaRooms(t.Context()); err != nil || len(rooms) != 0 {
-		t.Fatalf("completed deletion is still pending: %d rooms, %v", len(rooms), err)
+	rooms, err := reopened.PrivateCallMediaRooms(t.Context(), now)
+	if err != nil || len(rooms) != 1 || !rooms[0].Retired || rooms[0].DeletePending {
+		t.Fatalf("confirmed deletion should leave a watched tombstone: %+v, %v", rooms, err)
 	}
 	for _, st := range []*store.Store{f.srv.store, reopened} {
 		if err := st.SetVoiceRoomPrefix("replacement-"); err != nil {
 			t.Fatal(err)
 		}
 	}
+	// Simulate LiveKit auto-creating the old room on a stale token. Its old
+	// prefix no longer matches, so only the tombstone can find it.
+	now = now.Add(11*time.Minute - time.Millisecond)
+	media.rooms[old.Room] = []livekit.Participant{{Identity: old.Identity}}
+	poller.runPrivateCallMediaPass(t.Context())
+	if _, exists := media.rooms[old.Room]; exists {
+		t.Fatal("next media pass left a recreated room within the refresh window")
+	}
+	now = now.Add(time.Millisecond)
+	media.rooms[old.Room] = []livekit.Participant{{Identity: old.Identity}}
+	poller.runPrivateCallMediaPass(t.Context())
+	if _, exists := media.rooms[old.Room]; !exists {
+		t.Fatal("media pass deleted a recreated room after the refresh window")
+	}
 	next := answerPrivateCallMediaTest(t, f, invitePrivateCallMediaTest(t, f, "next"), bobTok, "answer-next")
 	fresh := privateCallSessionTest(t, f.do(t, "POST", "/v1/calls/"+next.ID+"/session", f.aliceTok, ""))
 	if fresh.Room == old.Room {
 		t.Fatal("new attempt reused the retired room")
 	}
-	// Simulate LiveKit auto-creating the old room on a stale token. Its old
-	// prefix no longer matches, so only the tombstone can find it.
-	media.rooms[old.Room] = []livekit.Participant{{Identity: old.Identity}}
 	lk := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/twirp/livekit.RoomService/ListRooms" {
 			http.NotFound(w, r)
@@ -384,7 +468,7 @@ func TestPrivateCallMediaWithoutLiveKit(t *testing.T) {
 	if rec.Code != http.StatusServiceUnavailable || errCode(t, rec.Body.String()) != schema.ErrorCodeVoiceNotConfigured {
 		t.Fatalf("session without LiveKit: %d, %s", rec.Code, rec.Body)
 	}
-	if rooms, err := f.srv.store.PrivateCallMediaRooms(t.Context()); err != nil || len(rooms) != 0 {
+	if rooms, err := f.srv.store.PrivateCallMediaRooms(t.Context(), f.srv.now()); err != nil || len(rooms) != 0 {
 		t.Fatalf("unconfigured call media reserved a room: %d, %v", len(rooms), err)
 	}
 	rec = f.do(t, "POST", "/v1/channels/general/messages", f.aliceTok, `{"body":"messaging still works"}`)

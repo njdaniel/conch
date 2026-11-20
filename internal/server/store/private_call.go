@@ -61,8 +61,10 @@ var privateCallMigration = []string{
 	`CREATE INDEX IF NOT EXISTS private_call_actions_expiry ON private_call_actions (expires_at)`,
 }
 
-// Register migrations 51 and 52 after the ordered migrations declared by the store.
-func init() { migrations = append(migrations, privateCallMigration, privateCallMediaMigration) }
+// Register migrations 51 through 53 after the ordered migrations declared by the store.
+func init() {
+	migrations = append(migrations, privateCallMigration, privateCallMediaMigration, privateCallMediaWatchMigration)
+}
 
 var (
 	ErrPrivateCallNotFound = errors.New("store: private call not found")
@@ -297,7 +299,7 @@ func transitionPrivateCall(ctx context.Context, tx execer, c *privateCall, row s
 	}
 	if c.State.Terminal() {
 		// Retire the room before releasing the participants for another call.
-		if err := retirePrivateCallMedia(ctx, tx, c.ID); err != nil {
+		if err := retireCallRoom(ctx, tx, c.ID); err != nil {
 			return err
 		}
 		_, err = tx.ExecContext(ctx, `DELETE FROM private_call_holders WHERE call_id = ?`, c.ID)

@@ -345,8 +345,7 @@ func transmitEvents(channelID int64, rows []transmitRow) []voiceEvent {
 // (and the sockets that stream it) answers "not configured" without a
 // special case. Its loops run only when voice is configured.
 type voicePoller struct {
-	s         *Server
-	callMedia privateCallMediaService // optional test replacement for the LiveKit client
+	s *Server
 	// A bounded set of locks for private room creation and deletion, keyed by name.
 	callRoomLocks [64]sync.Mutex
 	// now is the clock. Tests replace it; nothing else may.

@@ -6,6 +6,7 @@ import (
 	"hash/crc32"
 	"log/slog"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 
@@ -17,14 +18,15 @@ import (
 type privateCallMediaService interface {
 	CreateRoom(context.Context, string) error
 	JoinToken(livekit.JoinParams) (string, error)
+	ListRooms(context.Context) ([]livekit.Room, error)
 	ListParticipantsIfRoomExists(context.Context, string) ([]livekit.Participant, error)
 	RemoveParticipant(context.Context, string, string) error
 	DeleteRoom(context.Context, string) error
 }
 
 func (p *voicePoller) privateCallMedia() privateCallMediaService {
-	if p.callMedia != nil {
-		return p.callMedia
+	if p.s.callMedia != nil {
+		return p.s.callMedia
 	}
 	if p.s.lk != nil {
 		return p.s.lk
@@ -138,9 +140,25 @@ func (p *voicePoller) loopPrivateCallMedia(ctx context.Context) {
 }
 
 func (p *voicePoller) runPrivateCallMediaPass(ctx context.Context) {
-	rooms, err := p.s.store.PrivateCallMediaRooms(ctx)
+	rooms, err := p.s.store.PrivateCallMediaRooms(ctx, p.s.now())
 	if err == nil {
-		err = runPrivateCallRoomJobs(ctx, rooms, p.reconcilePrivateCallRoom)
+		var listed map[string]bool
+		if slices.ContainsFunc(rooms, func(room store.PrivateCallMediaRoom) bool {
+			return room.Retired && !room.DeletePending
+		}) {
+			listCtx, cancel := context.WithTimeout(ctx, voiceEvictTimeout)
+			var liveRooms []livekit.Room
+			liveRooms, err = p.privateCallMedia().ListRooms(listCtx)
+			cancel()
+			listed = make(map[string]bool, len(liveRooms))
+			for _, room := range liveRooms {
+				listed[room.Name] = true
+			}
+		}
+		rooms = slices.DeleteFunc(rooms, func(room store.PrivateCallMediaRoom) bool {
+			return room.Retired && !room.DeletePending && !listed[room.Name]
+		})
+		err = errors.Join(err, runPrivateCallRoomJobs(ctx, rooms, p.reconcilePrivateCallRoom))
 	}
 	if err != nil && ctx.Err() == nil {
 		slog.WarnContext(ctx, "private call media pass failed; retrying", "error", err)
