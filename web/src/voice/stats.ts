@@ -126,7 +126,9 @@ export function callQuality(report: StatsReport, previous?: StatsReport): CallQu
   const lost = inbound.packetsLost;
   const oldLost = old?.packetsLost;
   // Lost packets can arrive late and reduce the signed loss counter.
-  const lostInInterval = lost !== undefined && oldLost !== undefined && Number.isFinite(lost) && Number.isFinite(oldLost) ? Math.max(0, lost - oldLost) : undefined;
+  const lostInInterval = lost !== undefined && oldLost !== undefined && Number.isFinite(lost) && Number.isFinite(oldLost) && lost >= oldLost
+    ? lost - oldLost
+    : undefined;
   const elapsed = delta(inbound.timestamp, old?.timestamp);
   const total = (received ?? 0) + (lostInInterval ?? 0);
   const lossPercent = elapsed !== undefined && elapsed > 0 && received !== undefined && lostInInterval !== undefined && total > 0
@@ -204,48 +206,94 @@ interface Reading {
   readonly playback: Playback | undefined;
 }
 
-// Start immediately, then sample every two seconds while open. A slow getStats
-// does not overlap the next tick, and a result already in flight is discarded
-// when the panel closes. Baselines are local to one opening and track instance.
+type Sample = Reading & (
+  | { readonly kind: 'audio'; readonly principal: number; readonly quality: CallQuality | undefined }
+  | { readonly kind: 'sent'; readonly quality: SentShare | undefined }
+  | { readonly kind: 'received'; readonly principal: number; readonly quality: ReceivedShare | undefined }
+);
+
+// After looking up the track, check that it still has the same role in the readout.
+function sameRole(source: DiagnosticsSource | Sample, requested: DiagnosticsSource | undefined): boolean {
+  return requested?.kind === source.kind
+    && (requested.kind === 'sent' || ('principal' in source && requested.principal === source.principal));
+}
+
+// Start immediately, then sample every two seconds while open. Publish each
+// source as it resolves; a source whose read is still pending is not asked again.
 export function startDiagnostics(sources: () => readonly DiagnosticsSource[], publish: (stats: Diagnostics) => void): () => void {
-  let previous = new Map<StatsTrack, Reading>();
+  const latest = new Map<StatsTrack, Sample>();
   let stopped = false;
-  let busy = false;
-  const tick = async () => {
-    if (busy) return;
-    busy = true;
+  // One read in flight per track: a slow getStats skips its own next ticks
+  // and still counts when it lands, without holding up any other source.
+  const pending = new Set<StatsTrack>();
+  const requestedSources = () => new Map(sources().map((source) => [source.track, source]));
+  const prune = (requested: ReadonlyMap<StatsTrack, DiagnosticsSource>) => {
+    const size = latest.size;
+    for (const [track, sample] of latest) {
+      if (!sameRole(sample, requested.get(track))) latest.delete(track);
+    }
+    return latest.size !== size;
+  };
+  const publishLatest = () => {
     const calls = new Map<number, CallQuality>();
     const received = new Map<number, ReceivedShare>();
-    const current = new Map<StatsTrack, Reading>();
     let sent: SentShare | undefined;
-    await Promise.all(sources().map(async (source) => {
-      const { track } = source;
-      const report = await track.getRTCStatsReport().catch(() => undefined);
-      if (stopped || report === undefined) return;
-      const old = previous.get(track);
-      const video = source.kind === 'received' ? source.video : undefined;
-      const playback = video?.getVideoPlaybackQuality?.();
-      current.set(track, { report, video, playback });
-      if (source.kind === 'audio') {
-        const quality = callQuality(report, old?.report);
-        if (quality !== undefined) calls.set(source.principal, quality);
-      } else if (source.kind === 'sent') {
-        sent = sentShare(report, old?.report);
-      } else {
-        const quality = receivedShare(report, old?.report, playback, old?.video === video ? old?.playback : undefined);
-        if (quality !== undefined) received.set(source.principal, quality);
+    for (const sample of latest.values()) {
+      if (sample.kind === 'sent') sent = sample.quality;
+      else if (sample.quality !== undefined) {
+        if (sample.kind === 'audio') calls.set(sample.principal, sample.quality);
+        else received.set(sample.principal, sample.quality);
       }
-    }));
-    if (stopped) return;
-    previous = current;
-    busy = false;
+    }
     publish({ calls, sent, received });
   };
-  void tick();
-  const timer = setInterval(() => { void tick(); }, 2000);
+  const read = async (source: DiagnosticsSource) => {
+    const { track } = source;
+    pending.add(track);
+    const report = await track.getRTCStatsReport().catch(() => undefined);
+    pending.delete(track);
+    if (stopped) return;
+
+    const requested = requestedSources();
+    const removed = prune(requested);
+    const current = requested.get(track);
+    if (current === undefined || !sameRole(source, current)) {
+      if (removed) publishLatest();
+      return;
+    }
+    if (report === undefined) {
+      latest.delete(track);
+    } else {
+      const old = latest.get(track);
+      const video = current.kind === 'received' ? current.video : undefined;
+      const playback = video?.getVideoPlaybackQuality?.();
+      const reading = { report, video, playback };
+      switch (current.kind) {
+        case 'audio':
+          latest.set(track, { ...reading, kind: current.kind, principal: current.principal, quality: callQuality(report, old?.report) });
+          break;
+        case 'sent':
+          latest.set(track, { ...reading, kind: current.kind, quality: sentShare(report, old?.report) });
+          break;
+        case 'received': {
+          const quality = receivedShare(report, old?.report, playback, old?.video === video ? old?.playback : undefined);
+          latest.set(track, { ...reading, kind: current.kind, principal: current.principal, quality });
+          break;
+        }
+      }
+    }
+    publishLatest();
+  };
+  const tick = () => {
+    const requested = requestedSources();
+    if (prune(requested) || requested.size === 0) publishLatest();
+    for (const source of requested.values()) if (!pending.has(source.track)) void read(source);
+  };
+  tick();
+  const timer = setInterval(tick, 2000);
   return () => {
     stopped = true;
     clearInterval(timer);
-    previous.clear();
+    latest.clear();
   };
 }

@@ -1,10 +1,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { callQuality, receivedShare, sentShare, startDiagnostics, type Diagnostics, type StatsReport } from './stats';
+import { callQuality, receivedShare, sentShare, startDiagnostics, type Diagnostics, type DiagnosticsSource, type StatsReport } from './stats';
 
 // Synthetic RTCStatsReport snapshots for replay. Each map is a sender or
 // receiver report, with opaque IDs linking entries within that report.
 type Stat = NonNullable<ReturnType<StatsReport['get']>>;
 const report = (...entries: (Stat & { readonly id: string })[]): StatsReport => new Map(entries.map((stat) => [stat.id, stat]));
+
+function pendingReport() {
+  let resolve!: (stats: StatsReport) => void;
+  const promise = new Promise<StatsReport>((finish) => { resolve = finish; });
+  return { promise, resolve };
+}
 
 const audio = { id: 'audio-in', type: 'inbound-rtp', kind: 'audio', ssrc: 10, transportId: 'sub', remoteId: 'audio-out' };
 const audioBefore = report(
@@ -65,6 +71,11 @@ describe('call quality', () => {
     expect(callQuality(replaced, audioBefore)?.lossPercent).toBeUndefined();
     expect(callQuality(reset, audioBefore)?.lossPercent).toBeUndefined();
   });
+
+  it('leaves loss blank for an interval with a decreasing lost-packet counter', () => {
+    const latePackets = report({ ...audio, timestamp: 5000, packetsReceived: 700, packetsLost: 1 });
+    expect(callQuality(latePackets, audioAfter)?.lossPercent).toBeUndefined();
+  });
 });
 
 describe('screen-share quality', () => {
@@ -113,7 +124,8 @@ describe('sampling', () => {
     ], publish);
 
     await vi.advanceTimersByTimeAsync(1999);
-    expect(publish).toHaveBeenCalledTimes(1);
+    expect(mic.getRTCStatsReport).toHaveBeenCalledTimes(1);
+    expect(publish.mock.lastCall?.[0].calls.get(5)?.jitterMs).toBe(4);
     await vi.advanceTimersByTimeAsync(1);
     const sample = publish.mock.lastCall?.[0];
     expect(sample?.calls.get(5)?.lossPercent).toBe(2);
@@ -126,19 +138,67 @@ describe('sampling', () => {
     expect(watch.getRTCStatsReport).toHaveBeenCalledTimes(2);
   });
 
-  it('skips overlapping ticks and discards a read still in flight when closed', async () => {
+  it('publishes the other sources while one read is pending, and does not ask that source again', async () => {
     vi.useFakeTimers();
-    let finish!: (stats: StatsReport) => void;
-    const pending = new Promise<StatsReport>((resolve) => { finish = resolve; });
-    const track = { getRTCStatsReport: vi.fn(() => pending) };
-    const publish = vi.fn();
-    const stop = startDiagnostics(() => [{ kind: 'sent', track }], publish);
-    await vi.advanceTimersByTimeAsync(4000);
-    expect(track.getRTCStatsReport).toHaveBeenCalledTimes(1);
-    stop();
-    finish(sendAfter('cpu'));
-    await vi.advanceTimersByTimeAsync(4000);
-    expect(track.getRTCStatsReport).toHaveBeenCalledTimes(1);
-    expect(publish).not.toHaveBeenCalled();
+    const pending = new Promise<StatsReport>(() => {});
+    const slow = { getRTCStatsReport: vi.fn(() => pending) };
+    const mic = { getRTCStatsReport: vi.fn().mockResolvedValueOnce(audioBefore).mockResolvedValue(audioAfter) };
+    const publish = vi.fn<(value: Diagnostics) => void>();
+    const stop = startDiagnostics(() => [{ kind: 'sent', track: slow }, { kind: 'audio', principal: 5, track: mic }], publish);
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(publish.mock.lastCall?.[0].calls.get(5)?.jitterMs).toBe(4);
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(slow.getRTCStatsReport).toHaveBeenCalledTimes(1);
+      expect(mic.getRTCStatsReport).toHaveBeenCalledTimes(2);
+      expect(publish.mock.lastCall?.[0].calls.get(5)?.lossPercent).toBe(2);
+    } finally {
+      stop();
+    }
+  });
+
+  it('discards a late report after the source is removed between ticks', async () => {
+    vi.useFakeTimers();
+    const { promise, resolve } = pendingReport();
+    const track = { getRTCStatsReport: vi.fn<() => Promise<StatsReport>>().mockResolvedValueOnce(sendBefore).mockReturnValue(promise) };
+    let requested: readonly DiagnosticsSource[] = [{ kind: 'sent', track }];
+    const publish = vi.fn<(value: Diagnostics) => void>();
+    const stop = startDiagnostics(() => requested, publish);
+    try {
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(publish.mock.lastCall?.[0].sent?.size).toBe('1280×720');
+      expect(track.getRTCStatsReport).toHaveBeenCalledTimes(2);
+      publish.mockClear();
+      requested = [];
+      resolve(sendAfter('cpu'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(publish.mock.lastCall?.[0]).toEqual({ calls: new Map(), sent: undefined, received: new Map() });
+      expect(publish.mock.calls.every(([snapshot]) => snapshot.sent === undefined)).toBe(true);
+    } finally {
+      stop();
+    }
+  });
+
+  it('counts a slow read when it lands, without asking that source again meanwhile', async () => {
+    vi.useFakeTimers();
+    const { promise, resolve } = pendingReport();
+    const track = {
+      getRTCStatsReport: vi.fn<() => Promise<StatsReport>>().mockReturnValueOnce(promise).mockResolvedValue(audioAfter),
+    };
+    const publish = vi.fn<(value: Diagnostics) => void>();
+    const stop = startDiagnostics(() => [{ kind: 'audio', principal: 5, track }], publish);
+    try {
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(track.getRTCStatsReport).toHaveBeenCalledTimes(1);
+      expect(publish.mock.lastCall?.[0].calls.get(5)).toBeUndefined();
+      resolve(audioBefore);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(publish.mock.lastCall?.[0].calls.get(5)?.jitterMs).toBe(4);
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(track.getRTCStatsReport).toHaveBeenCalledTimes(2);
+      expect(publish.mock.lastCall?.[0].calls.get(5)?.lossPercent).toBe(2);
+    } finally {
+      stop();
+    }
   });
 });

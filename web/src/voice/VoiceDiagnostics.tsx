@@ -25,7 +25,14 @@ function VoiceDiagnosticsReadout({ client, participants = [], sharing, watched, 
   const [stats, setStats] = useState<Diagnostics>();
   useEffect(() => {
     if (client === undefined) return;
-    return startDiagnostics(() => client.diagnosticsSources(), setStats);
+    let stopped = false;
+    const stop = startDiagnostics(() => client.diagnosticsSources(), (sample) => {
+      if (!stopped) setStats(sample);
+    });
+    return () => {
+      stopped = true;
+      stop();
+    };
   }, [client]);
   const sent = stats?.sent;
   return (
