@@ -29,6 +29,7 @@ func rewindToBeforeCommunity(t *testing.T, path string) {
 	}
 	defer func() { _ = db.Close() }()
 	for _, stmt := range []string{
+		"DROP TABLE blocks",                      // migration 51 (issue #1832)
 		"DROP TABLE push_registrations",          // migration 49 (issue #1714)
 		"DROP TABLE notification_preferences",    // migration 48 (issue #1713)
 		"ALTER TABLE channels DROP COLUMN topic", // migration 47 (issue #1503)

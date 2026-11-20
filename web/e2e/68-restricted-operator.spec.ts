@@ -265,7 +265,7 @@ test('R1669 an operator with manage_members off is offered no removal, disabling
     await row.getByRole('button', { name: open, exact: true }).click();
     const panel = page.getByRole('region', { name: 'Members list' });
     const prow = panel.locator('li').filter({ has: page.locator('.ag-name').getByText(target.name, { exact: true }) });
-    await expect(await menuOf(prow, target.name)).toHaveText(['Remove from voice', 'Ban from channel', 'Remove from channel', 'Make manager', 'Stop deciding approvals']);
+    await expect(await menuOf(prow, target.name)).toHaveText(['Remove from voice', 'Ban from channel', 'Remove from channel', 'Make manager', 'Stop deciding approvals', 'Block…']);
     await page.keyboard.press('Escape');
 
     const membersPermission = { status: 403, code: 'permission_denied', permission: 'manage_members' } as const;

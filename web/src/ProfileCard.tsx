@@ -1,3 +1,4 @@
+import { BlockToggle } from './blocks';
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
 import { Avatar } from './Icons';
 import { IdentityMarks } from './Identity';
@@ -168,6 +169,7 @@ export function ProfileCard({ id, person, viewer, name: surfaceName, className =
               {shownPerson.state}{shownPerson.live > 1 ? ` (${String(shownPerson.live)} sessions)` : ''}
             </p>
           ) : null}
+          <BlockToggle id={id} name={name} viewer={viewer} />
           <button ref={closeButton} type="button" className="profile-card-close" onClick={close}>Close</button>
         </div>
       ) : null}

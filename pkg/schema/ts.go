@@ -533,6 +533,12 @@ var TSTypes = []TSType{
 	{Value: NotificationSummaryV1{}, Family: "notification-summary-v1", Schema: NotificationSummarySchemaV1},
 	{Value: ListPendingNotificationsResponseV1{}, Family: "list-pending-notifications-response-v1"},
 
+	// Personal blocks (issue #1832, docs/design/blocks.md): one entry, the
+	// caller's list, and the events signal that their list changed.
+	{Value: BlockV1{}, Family: "block-v1"},
+	{Value: ListBlocksResponseV1{}, Family: "list-blocks-response-v1"},
+	{Value: BlocksChangedV1{}, Family: "blocks-changed-v1", Schema: BlocksChangedSchemaV1},
+
 	// The body of every refusal.
 	{Value: Error{}, Name: "ErrorV0", Family: "error"},
 }

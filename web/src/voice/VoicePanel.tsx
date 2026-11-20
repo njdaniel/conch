@@ -1,3 +1,4 @@
+import { useBlockedVoiceMute, useBlocksContext } from '../blocks';
 import { ModerationConfirm, useMayModerate, useMayModerateIn } from '../Moderation';
 // The voice section. Every state says what is true: not set up, not in voice,
 // connecting, connected, reconnecting, unavailable, or stopped with the reason.
@@ -45,7 +46,7 @@ import { ModerationConfirm, useMayModerate, useMayModerateIn } from '../Moderati
 // §7.1, #1509): the people's tiles join them only with the person's choice to
 // view, and a focused stream is the main picture with every other tile in the
 // strip (design §7.4).
-import { useContext, useEffect, useRef, useState, type KeyboardEvent as KeyEvent, type RefObject } from 'react';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent as KeyEvent, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { readHideNonVideo, writeHideNonVideo } from '../api';
 import { archivedLine } from '../archived';
@@ -563,6 +564,7 @@ export function VoicePanel({
           leaves the controls where they were. The phone's strip is the one
           row, of four controls (issue #1028). */}
       <div className="voice-bar">
+        {inVoice ? <BlockedVoiceMute voice={voice} others={others} /> : null}
         {strip ? null : (
           <Roster channel={rosterChannel ?? undefined} mayModerate={mayModerateRoster} roster={roster} people={people} viewer={viewer} viewerName={viewerName} elsewhere={elsewhere} speaking={speaking} volumes={inVoice ? state.volumes : noVolumes} />
         )}
@@ -983,6 +985,19 @@ export function Roster({ channel, mayModerate: standing, roster, people, viewer,
 
 // Nobody turned down: the roster while this page is not in voice.
 const noVolumes: ReadonlyMap<number, number> = new Map();
+// BlockedVoiceMute holds the default mute of blocked people (issue #1832)
+// while this page is in voice: a component, so its hooks run in a fixed order
+// whatever the panel shows. It renders nothing.
+function BlockedVoiceMute({ voice, others }: { readonly voice: VoiceControl; readonly others: readonly { readonly principal: number }[] }) {
+  const { blocked } = useBlocksContext();
+  const client = voice.client;
+  const setVolume = useCallback((principal: number, volume: number) => { client.setVolume(principal, volume); }, [client]);
+  const ids = others.map((o) => o.principal).join(',');
+  // The room by its ids, so a new array of the same people is not a change.
+  const room = useMemo(() => (ids === '' ? [] : ids.split(',').map((id) => ({ principal: Number(id) }))), [ids]);
+  useBlockedVoiceMute(blocked, room, voice.state.volumes, setVolume);
+  return null;
+}
 
 // percent is a volume as the page shows it: 0.4 is 40.
 const percent = (volume: number): number => Math.round(volume * 100);
@@ -998,6 +1013,7 @@ function VolumeTag({ volume }: { readonly volume: number | undefined }) {
 // of 5%. It changes only how loud this page plays them.
 function Volumes({ voice, others }: { readonly voice: VoiceControl; readonly others: readonly { readonly principal: number; readonly name: string }[] }) {
   const { state, client } = voice;
+  const { blocked } = useBlocksContext();
   if (others.length === 0) return null;
   return (
     <fieldset className="voice-volumes">
@@ -1023,6 +1039,17 @@ function Volumes({ voice, others }: { readonly voice: VoiceControl; readonly oth
             <span className="voice-volume-value" aria-hidden="true">
               {value}%
             </span>
+            {value === 0 && blocked.has(o.principal) ? (
+              <button
+                type="button"
+                className="voice-volume-unmute"
+                onClick={() => {
+                  client.setVolume(o.principal, 1);
+                }}
+              >
+                Unmute {o.name} (blocked, muted for you)
+              </button>
+            ) : null}
           </div>
         );
       })}

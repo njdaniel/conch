@@ -1131,6 +1131,23 @@ BEGIN SELECT RAISE(ABORT, 'message removals are permanent'); END`,
 	// 50: distinguish author removals from moderation, including a moderator
 	// removing their own message. Existing rows keep their original meaning.
 	{`ALTER TABLE message_removals ADD COLUMN by_author INTEGER NOT NULL DEFAULT 0 CHECK (by_author IN (0, 1))`},
+	// 51: personal blocks (issue #1832, docs/design/blocks.md). One row per
+	// (owner, blocked) pair: owner_id would rather not see or be alerted
+	// about blocked_id. It is a preference of the owner's, read only for the
+	// owner (their list, their feed, their wakes) and never for anyone
+	// else, so no audit row is written: the audit log is read by operators,
+	// and a block is not theirs to see. At most schema.MaxBlocks rows per
+	// owner, enforced in PutBlock. The primary key serves "does owner block
+	// author?", the only question the alert paths ask. Nothing is backfilled.
+	{
+		`CREATE TABLE blocks (
+	owner_id   INTEGER NOT NULL REFERENCES principals (id),
+	blocked_id INTEGER NOT NULL REFERENCES principals (id),
+	created_at INTEGER NOT NULL,
+	PRIMARY KEY (owner_id, blocked_id),
+	CHECK (owner_id <> blocked_id)
+) WITHOUT ROWID`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction

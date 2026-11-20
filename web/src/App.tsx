@@ -67,6 +67,7 @@ import { useChannelRefresh } from './useChannelRefresh';
 import { MembersPanel } from './agents/MembersPanel';
 import { CommunityMembers } from './Members';
 import { useDirectoryChanged } from './useDirectoryChanged';
+import { BlockedPeople, BlocksProvider, useBlocks } from './blocks';
 import { RunDetail } from './agents/RunDetail';
 import { useAgents } from './agents/useAgents';
 import { useNow } from './agents/useNow';
@@ -668,6 +669,8 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     readWho();
     previewSignal();
   }, [readWho, previewSignal]);
+  // The person's block list (issue #1832): a guest keeps none.
+  const blocks = useBlocks(signedIn && principal !== null && principal.kind === 'human' && visit === null);
   const directory = useDirectoryChanged();
   const directorySignal = directory.signal;
   const directoryChanged = useCallback(() => {
@@ -693,6 +696,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     onChannelsChanged: refreshChannels,
     onPermissionsChanged: permissionsChanged,
     onDirectoryChanged: directoryChanged,
+    onBlocksChanged: blocks.signal,
   });
   const manifestReads = useManifestReadControl(signedIn, directory.tick);
   // The server's word that the directory changed (issue #993): the community
@@ -775,6 +779,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     editEvent,
     readStateEvent,
     onOpen,
+    blocked: blocks.blocked,
   });
   // "Notify me when Conch is closed" (issue #1826). Only a person with a full
   // credential: the server refuses a guest and an agent.
@@ -1762,6 +1767,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
         <ManifestReads.Provider value={manifestReads}>
         <PreviewEntry.Provider value={previewEntry}>
         <ComposerAttachmentProvider value={composerAttachments}>
+        <BlocksProvider value={blocks}>
         <Lobby
           origin={origin}
           name={shownName}
@@ -1880,6 +1886,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                   void notifications.enableNative();
                 }}
               />
+              {auth.principal.kind === 'human' && visit === null ? <BlockedPeople /> : null}
               {/* A person renames themselves; an agent's name is an operator's to
                   set, and a guest's is its handle (issue #713). */}
               {auth.principal.kind === 'human' && visit === null ? (
@@ -2161,6 +2168,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           onSignOutEverywhere={signOutEverywhere}
           signOutProblem={everywhereFailed}
         />
+        </BlocksProvider>
         </ComposerAttachmentProvider>
         </PreviewEntry.Provider>
         </ManifestReads.Provider>
