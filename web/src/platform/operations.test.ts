@@ -13,7 +13,7 @@ const routesSource = readFileSync('../internal/server/routes.go', 'utf8');
 // without their names (the server calls a principal {principal_id}, the table
 // {principal}).
 const pattern = (method: string, path: string) => `${method} ${path.replace(/\{\w+\}/g, '{}')}`;
-const served = new Set([...routesSource.matchAll(/"((?:GET|POST|PUT|DELETE) \/[^"\s]*)"/g)].map((match) => {
+const served = new Set([...routesSource.matchAll(/"((?:GET|POST|PUT|PATCH|DELETE) \/[^"\s]*)"/g)].map((match) => {
   const [method = '', path = ''] = (match[1] ?? '').split(' ');
   return pattern(method, path);
 }));
@@ -53,7 +53,25 @@ describe('the operation table', () => {
   // server issues of #2013). Each is listed here until its route is
   // registered; a listed operation that the server does serve fails, so this
   // list can only shrink and is empty when the server catches up.
-  const awaitingServer = new Set<OperationId>(entries.map(([id]) => id).filter((id) => /^dm|Dm/.test(id)));
+  const awaitingServer = new Set<OperationId>([
+    'openDm',
+    'listDms',
+    'dmSnapshot',
+    'getDm',
+    'listDmMessages',
+    'listDmChanges',
+    'postDmMessage',
+    'editDmMessage',
+    'removeDmMessage',
+    'markDmRead',
+    'setDmState',
+    'searchDmMessages',
+    'uploadDmFile',
+    'dmFileMeta',
+    'dmFileBytes',
+    'getDmPreferences',
+    'putDmPreferences',
+  ]);
 
   it.each(entries)('%s is a route conchd serves', (id, entry) => {
     const route = served.has(pattern(entry.method, entry.path));

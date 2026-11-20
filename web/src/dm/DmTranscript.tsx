@@ -16,7 +16,7 @@ import type { DMConversationV1, DMFileV1, DMMessageV1, DMReadStateV1 } from '../
 import { dateTimeOf, timeOf } from '../time';
 import type { DmApi, DmFailure } from './api';
 import { DmComposer } from './DmComposer';
-import { cannotMessage, noAccess, type Pending } from './model';
+import { cannotMessage, noAccess, type Pending, type PendingSends } from './model';
 import { useDmTranscript } from './useDmTranscript';
 
 export interface DmConversationViewProps {
@@ -28,6 +28,7 @@ export interface DmConversationViewProps {
   readonly viewer: number;
   readonly draft: string;
   readonly onDraft: (conversation: number, text: string) => void;
+  readonly pendingSends?: PendingSends;
   readonly onRead?: (state: DMReadStateV1) => void;
 }
 
@@ -245,8 +246,8 @@ function Search({ api, conversation, viewer, name, onClose }: {
   );
 }
 
-export function DmTranscript({ conversationId, api, scope, viewer, draft, onDraft, onRead }: DmConversationViewProps) {
-  const t = useDmTranscript(api, scope, conversationId, onRead);
+export function DmTranscript({ conversationId, api, scope, viewer, draft, onDraft, onRead, pendingSends }: DmConversationViewProps) {
+  const t = useDmTranscript(api, scope, conversationId, onRead, pendingSends);
   const { state } = t;
   const [searching, setSearching] = useState(false);
   // The text being written is state here (the provider's drafts only keep it
@@ -255,7 +256,7 @@ export function DmTranscript({ conversationId, api, scope, viewer, draft, onDraf
   const log = useRef<HTMLDivElement>(null);
   const conversation: DMConversationV1 | null = state.conversation;
   const peer = conversation === null ? '' : conversation.peer_name === undefined || conversation.peer_name.trim() === '' ? 'Former member' : conversation.peer_name;
-  const lastKey = t.messages.length + state.pending.length;
+  const lastKey = t.messages.length + t.pending.length;
 
   useEffect(() => {
     setSearching(false);
@@ -313,7 +314,7 @@ export function DmTranscript({ conversationId, api, scope, viewer, draft, onDraf
           </button>
         )}
         {state.olderFailed ? <p role="alert" className="hint">Could not load earlier messages.</p> : null}
-        {t.messages.length === 0 && state.pending.length === 0 ? <p className="empty">{`No messages yet. Say hello to ${peer}.`}</p> : null}
+        {t.messages.length === 0 && t.pending.length === 0 ? <p className="empty">{`No messages yet. Say hello to ${peer}.`}</p> : null}
         <ol aria-label="Messages in order, oldest first">
           {t.messages.map((m) => (
             <MessageRow
@@ -328,7 +329,7 @@ export function DmTranscript({ conversationId, api, scope, viewer, draft, onDraf
               onRemove={t.remove}
             />
           ))}
-          {state.pending.map((p) => (
+          {t.pending.map((p) => (
             <PendingRow key={p.nonce} pending={p} onRetry={() => void t.retry(p.nonce)} onDiscard={() => { t.discard(p.nonce); }} />
           ))}
         </ol>

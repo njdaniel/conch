@@ -22,7 +22,7 @@ import { archivedLine, channelArchived, isArchived } from './archived';
 import { ChannelSettingsAsk } from './ChannelSettingsAsk';
 import { RenameChannel } from './RenameChannel';
 import { SetTopic } from './SetTopic';
-import { DmProvider } from './dm/DmContext';
+import { DmContext, useDmValue } from './dm/DmContext';
 import { dmApi, inertApi } from './dm/api';
 import { scopeKey } from './dm/keys';
 import { channelFromHash, messageFromHash, forgetChannel, hashForChannel, rememberChannel, rememberedChannel, showChannelInAddress, takeLinkFromAddress } from './route';
@@ -202,6 +202,13 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   }, [restoring]);
 
   const signedIn = auth.phase === 'signedIn';
+  const principal = auth.phase === 'signedIn' ? auth.principal : null;
+  // A temporary guest's live visit (issue #713), and how the page names the
+  // person: a guest by its attribution, never by the text of its handle.
+  const visit = principal === null ? null : visitOf(principal);
+  const dm = useDmValue(principal?.kind === 'human' && visit === null ? dmApi : inertApi, scopeKey(origin, principal?.id ?? 0), principal?.id ?? 0);
+  const selectDm = dm.inbox.select;
+  const showingDm = dm.inbox.state.selected !== null;
 
   // The lobby loads the caller's channels. A 401 here, or anywhere later,
   // sends the page back to sign-in.
@@ -360,6 +367,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
       setHighlightedId(null);
       const name = channelFromHash(window.location.hash);
       if (name === null) return;
+      selectDm(null);
       const held = channelsNow.current;
       if (held.selected !== null && !held.channels.some((c) => c.name === name)) {
         if (messageFromHash(window.location.hash) !== null) setLinkNotice("This message isn't available");
@@ -372,7 +380,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     return () => {
       window.removeEventListener('hashchange', onHash);
     };
-  }, [signedIn, dispatchChannels]);
+  }, [signedIn, dispatchChannels, selectDm]);
 
   // The open channel is remembered and in the address, under its new name
   // once it is renamed. The hash is set as when another channel is opened:
@@ -552,9 +560,10 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   const onOpen = useCallback(
     (name: string) => {
       setSearchOpen(false);
+      selectDm(null);
       dispatchChannels({ type: 'select', name });
     },
-    [dispatchChannels],
+    [dispatchChannels, selectDm],
   );
   const getAfter = useCallback((name: string) => lastId(chatFor(chatNow.current, name)), []);
   // One older page at a time, and none past maxHeld.
@@ -563,10 +572,6 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     return held.older === 'loading' || !canLoadOlder(held) ? null : oldestId(held);
   }, []);
 
-  const principal = auth.phase === 'signedIn' ? auth.principal : null;
-  // A temporary guest's live visit (issue #713), and how the page names the
-  // person: a guest by its attribution, never by the text of its handle.
-  const visit = principal === null ? null : visitOf(principal);
   const shownName = principal === null ? '' : displayName(principal);
   const selected = signedIn ? channels.selected : null;
   const currentChannel = channels.channels.find((c) => c.name === selected) ?? null;
@@ -753,8 +758,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     channels: channels.channels,
     loaded: channels.loaded,
     open: channelId === null ? null : selected,
-    // No read mark is made while a preview hides the conversation.
-    paused: previewing,
+    paused: previewing || showingDm,
     ready: held?.history === 'ready',
     newest: head === undefined ? null : { id: head.id, author: head.author_id },
     atBottom: bottom.channel === channelId ? bottom.atBottom : true,
@@ -767,7 +771,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     reload: reloadReadState,
   });
   const notifications = useNotifications({
-    openChannel: previewing ? null : channelId,
+    openChannel: previewing || showingDm ? null : channelId,
     signedIn,
     origin,
     principal: principal === null ? null : { id: principal.id, name: shownName },
@@ -1766,7 +1770,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
         <PreviewEntry.Provider value={previewEntry}>
         <ComposerAttachmentProvider value={composerAttachments}>
         {/* Direct messages (ADR-017): people only, with their own sign-in. */}
-        <DmProvider api={auth.principal.kind === 'human' && visit === null ? dmApi : inertApi} scope={scopeKey(origin, auth.principal.id)} me={auth.principal.id}>
+        <DmContext.Provider value={dm}>
         <Lobby
           origin={origin}
           name={shownName}
@@ -2037,6 +2041,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                   channels={channels.channels}
                   onJoined={(channel) => {
                     setSearchOpen(false);
+                    selectDm(null);
                     dispatchChannels({ type: 'created', channel });
                   }}
                   onLeft={leftChannel}
@@ -2050,6 +2055,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                     canPublic={canDo(auth.principal, 'create_public_channels')}
                     canPrivate={canDo(auth.principal, 'create_private_channels')}
                     onCreated={(channel) => {
+                      selectDm(null);
                       dispatchChannels({ type: 'created', channel });
                     }}
                     onUnauthorized={onUnauthorized}
@@ -2166,7 +2172,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           onSignOutEverywhere={signOutEverywhere}
           signOutProblem={everywhereFailed}
         />
-        </DmProvider>
+        </DmContext.Provider>
         </ComposerAttachmentProvider>
         </PreviewEntry.Provider>
         </ManifestReads.Provider>

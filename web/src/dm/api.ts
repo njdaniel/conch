@@ -75,7 +75,8 @@ export type DmFrame =
   | { readonly type: 'edited'; readonly frame: DMMessageEditedV1 }
   | { readonly type: 'removed'; readonly frame: DMMessageRemovedV1 }
   | { readonly type: 'changed'; readonly conversation: number }
-  | { readonly type: 'lost' }; // the socket closed; a snapshot follows the reconnect
+  | { readonly type: 'lost' } // the socket closed; a snapshot follows the reconnect
+  | { readonly type: 'poll' };
 
 export interface HistoryQuery {
   readonly order: 'asc' | 'desc';
@@ -85,7 +86,7 @@ export interface HistoryQuery {
 
 export interface DmApi {
   snapshot: () => Promise<DmResult<DMSnapshotV1>>;
-  list: (state?: DMState, cursor?: string) => Promise<DmResult<ListDMConversationsResponseV1>>;
+  list: (state?: Exclude<DMState, 'hidden'>, cursor?: string) => Promise<DmResult<ListDMConversationsResponseV1>>;
   open: (peer: number) => Promise<DmResult<DMConversationV1>>;
   get: (conversation: number) => Promise<DmResult<DMConversationV1>>;
   history: (conversation: number, query: HistoryQuery) => Promise<DmResult<ListDMMessagesResponseV1>>;
@@ -236,11 +237,14 @@ export const dmApi: DmApi = {
     const request: DMPreferencesV1 = { accept };
     return write(call('putDmPreferences'), request, dmPreferencesV1, (parsed) => parsed as DMPreferencesV1);
   },
-  // The per-person events stream is #2040's. Until the web client opens it,
-  // nothing is pushed: the inbox and an open transcript catch up from the
-  // snapshot and the changes route when they mount and when the window is
-  // focused, which is the same recovery a dropped socket needs.
-  live: () => () => undefined,
+  // Use the REST recovery routes while visible until #2040 connects the
+  // per-person events stream.
+  live: (listener) => {
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') listener({ type: 'poll' });
+    }, 15_000);
+    return () => { window.clearInterval(timer); };
+  },
 };
 
 // inertApi is the API for a page that has no DMs to offer (a guest, an agent):

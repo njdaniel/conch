@@ -3,10 +3,10 @@
 // by (scope, conversation): an answer that arrives for a key the hook has left
 // is dropped by the reducer, so switching conversations, accounts or servers
 // can never show another conversation's messages (no matter what is late).
-import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useReducer, useRef, useSyncExternalStore } from 'react';
 import type { DMConversationV1, DMMessageV1, DMReadStateV1 } from '../schema/generated';
 import type { DmApi, DmFailure, DmFrame } from './api';
-import { merge, ordered, revisionOf, settle, type Held, type Pending } from './model';
+import { merge, ordered, pendingSends, revisionOf, settle, type Held, type Pending, type PendingSends } from './model';
 
 // What the person may do in the open conversation. 'gone' is a conversation
 // that is not theirs (any more): one state for "no such" and "not yours".
@@ -20,9 +20,7 @@ export interface TranscriptState {
   readonly older: number | null;
   readonly loadingOlder: boolean;
   readonly olderFailed: boolean;
-  readonly revision: number;
   readonly lastRead: number;
-  readonly pending: readonly Pending[];
   readonly access: Access;
 }
 
@@ -34,9 +32,7 @@ const empty = (key: string): TranscriptState => ({
   older: null,
   loadingOlder: false,
   olderFailed: false,
-  revision: 0,
   lastRead: 0,
-  pending: [],
   access: 'ok',
 });
 
@@ -53,9 +49,6 @@ type Action = { readonly key: string } & (
   | { readonly type: 'merge'; readonly messages: readonly DMMessageV1[] }
   | { readonly type: 'conversation'; readonly conversation: DMConversationV1 }
   | { readonly type: 'read'; readonly lastRead: number }
-  | { readonly type: 'pending'; readonly pending: Pending }
-  | { readonly type: 'pendingStatus'; readonly nonce: string; readonly status: Pending['status']; readonly failure?: DmFailure | 'unconfirmed' }
-  | { readonly type: 'discard'; readonly nonce: string }
   | { readonly type: 'access'; readonly access: Access }
 );
 
@@ -71,9 +64,7 @@ export function reduce(state: TranscriptState, action: Action): TranscriptState 
         conversation: action.conversation,
         messages,
         older: action.older,
-        revision: revisionOf(action.messages, Math.max(state.revision, action.conversation.revision)),
         lastRead: Math.max(state.lastRead, action.conversation.last_read_id),
-        pending: settle(state.pending, action.messages),
       };
     }
     case 'status':
@@ -81,30 +72,17 @@ export function reduce(state: TranscriptState, action: Action): TranscriptState 
     case 'olderStart':
       return { ...state, loadingOlder: true, olderFailed: false };
     case 'olderDone':
-      return { ...state, loadingOlder: false, messages: merge(state.messages, action.messages), older: action.older, revision: revisionOf(action.messages, state.revision) };
+      return { ...state, loadingOlder: false, messages: merge(state.messages, action.messages), older: action.older };
     case 'olderFailed':
       return { ...state, loadingOlder: false, olderFailed: true };
     case 'merge': {
       const messages = merge(state.messages, action.messages);
-      const pending = settle(state.pending, action.messages);
-      const revision = revisionOf(action.messages, state.revision);
-      return messages === state.messages && pending === state.pending && revision === state.revision ? state : { ...state, messages, pending, revision };
+      return messages === state.messages ? state : { ...state, messages };
     }
     case 'conversation':
-      return { ...state, conversation: action.conversation, revision: Math.max(state.revision, action.conversation.revision) };
+      return { ...state, conversation: action.conversation };
     case 'read':
       return action.lastRead > state.lastRead ? { ...state, lastRead: action.lastRead } : state;
-    case 'pending':
-      return { ...state, pending: [...state.pending.filter((p) => p.nonce !== action.pending.nonce), action.pending] };
-    case 'pendingStatus':
-      return {
-        ...state,
-        pending: state.pending.map((p) =>
-          p.nonce === action.nonce ? { nonce: p.nonce, body: p.body, fileIds: p.fileIds, status: action.status, ...(action.failure === undefined ? {} : { failure: action.failure }) } : p,
-        ),
-      };
-    case 'discard':
-      return { ...state, pending: state.pending.filter((p) => p.nonce !== action.nonce) };
     case 'access':
       return state.access === action.access ? state : { ...state, access: action.access };
   }
@@ -113,6 +91,7 @@ export function reduce(state: TranscriptState, action: Action): TranscriptState 
 export interface Transcript {
   readonly state: TranscriptState;
   readonly messages: readonly DMMessageV1[];
+  readonly pending: readonly Pending[];
   readonly send: (body: string, fileIds: readonly number[]) => Promise<boolean>;
   readonly retry: (nonce: string) => Promise<void>;
   readonly discard: (nonce: string) => void;
@@ -124,8 +103,12 @@ export interface Transcript {
 
 const newNonce = (): string => globalThis.crypto.randomUUID();
 
-export function useDmTranscript(api: DmApi, scope: string, conversation: number, onRead?: (state: DMReadStateV1) => void): Transcript {
+export function useDmTranscript(api: DmApi, scope: string, conversation: number, onRead?: (state: DMReadStateV1) => void, kept?: PendingSends): Transcript {
   const key = `${scope}/${String(conversation)}`;
+  const local = useMemo(() => pendingSends(), [key]);
+  const sends = kept ?? local;
+  const pending = useSyncExternalStore(sends.subscribe, sends.get);
+  const recovery = useMemo(() => ({ after: null as number | null, running: false, requested: false, active: false, load: 0 }), [api, key]);
   const [raw, dispatch] = useReducer(reduce, key, empty);
   // Until the reset effect has run for a new key, show an empty state for it:
   // a render never shows the previous key's messages.
@@ -137,8 +120,9 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
   read.current = onRead;
 
   const act = useCallback((action: Without<Action, 'key'>) => {
+    if ('messages' in action) sends.update((held) => settle(held, action.messages));
     dispatch({ ...action, key });
-  }, [key]);
+  }, [key, sends]);
 
   const fail = useCallback((failure: DmFailure) => {
     if (failure === 'not_found') act({ type: 'status', status: 'gone' });
@@ -147,35 +131,62 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
     else if (failure === 'unavailable') act({ type: 'access', access: 'unavailable' });
   }, [act]);
 
-  // catchUp reads what changed above the revision held: a message, an edit or a
-  // removal that came while a frame was missed.
+  // Only history's baseline and successful changes pages advance this
+  // cursor. A write reply or live frame can arrive ahead of unseen changes.
   const catchUp = useCallback(async () => {
-    let after = live.current.revision;
-    for (let page = 0; page < 20; page++) {
-      const result = await api.changes(conversation, after);
-      if (!result.ok) {
-        if (result.failure === 'not_found') act({ type: 'status', status: 'gone' });
-        return;
-      }
-      act({ type: 'merge', messages: result.value.messages });
-      const next = result.value.next_after;
-      if (next === undefined || next <= after) return;
-      after = next;
+    const active = () => recovery.active;
+    const requested = () => recovery.requested;
+    if (recovery.after === null || !active()) return;
+    if (recovery.running) {
+      recovery.requested = true;
+      return;
     }
-  }, [api, conversation, act]);
+    recovery.running = true;
+    try {
+      for (let page = 0; page < 20 && active(); page++) {
+        recovery.requested = false;
+        const after: number = recovery.after;
+        const result = await api.changes(conversation, after);
+        if (!active()) return;
+        if (!result.ok) {
+          if (result.failure === 'not_found') {
+            recovery.after = null;
+            act({ type: 'status', status: 'gone' });
+          }
+          return;
+        }
+        act({ type: 'merge', messages: result.value.messages });
+        recovery.after = revisionOf(result.value.messages, after);
+        const more = result.value.next_after !== undefined && result.value.next_after > after;
+        if (!more && !requested()) return;
+      }
+    } finally {
+      recovery.running = false;
+    }
+  }, [api, conversation, act, recovery]);
 
   const load = useCallback(async () => {
-    const [info, page] = await Promise.all([api.get(conversation), api.history(conversation, { order: 'desc' })]);
+    // Read the baseline before history so changes concurrent with history
+    // never fall below the recovery cursor.
+    const request = ++recovery.load;
+    const current = () => recovery.active && recovery.load === request;
+    const info = await api.get(conversation);
+    if (!current()) return;
+    const page = info.ok ? await api.history(conversation, { order: 'desc' }) : info;
+    if (!current()) return;
     if (!info.ok || !page.ok) {
-      const failure = !info.ok ? info.failure : !page.ok ? page.failure : 'network';
+      const failure = !page.ok ? page.failure : 'network';
       act({ type: 'status', status: failure === 'not_found' ? 'gone' : 'failed' });
       return;
     }
+    recovery.after = info.value.revision;
     act({ type: 'loaded', conversation: info.value, messages: [...page.value.messages].reverse(), older: page.value.next_before ?? null });
-  }, [api, conversation, act]);
+    if (revisionOf(page.value.messages, info.value.revision) > info.value.revision) void catchUp();
+  }, [api, conversation, act, recovery, catchUp]);
 
   useEffect(() => {
     dispatch({ type: 'reset', key });
+    recovery.active = true;
     void load();
     // A frame for this conversation; other conversations are the inbox's.
     const stop = api.live((frame: DmFrame) => {
@@ -186,7 +197,7 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
           const message = frame.type === 'message' ? frame.message : frame.frame.message;
           if (message.conversation_id !== conversation) return;
           act({ type: 'merge', messages: [message] });
-          if (message.revision > live.current.revision + 1) void catchUp();
+          if (recovery.after !== null && message.revision > recovery.after + 1) void catchUp();
           return;
         }
         case 'changed':
@@ -196,10 +207,12 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
           const mine = frame.snapshot.conversations.find((c) => c.id === conversation);
           if (mine === undefined) return;
           act({ type: 'conversation', conversation: mine });
-          if (mine.revision > live.current.revision) void catchUp();
+          if (recovery.after !== null && mine.revision > recovery.after) void catchUp();
           return;
         }
+        case 'poll':
         case 'lost':
+          void catchUp();
           return;
       }
     });
@@ -208,10 +221,11 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
     };
     document.addEventListener('visibilitychange', onFocus);
     return () => {
+      recovery.active = false;
       stop();
       document.removeEventListener('visibilitychange', onFocus);
     };
-  }, [api, key, conversation, load, catchUp, act]);
+  }, [api, key, conversation, load, catchUp, act, recovery]);
 
   // The read mark follows the newest message the person can see here.
   const newest = useMemo(() => (state.messages.size === 0 ? 0 : Math.max(...state.messages.keys())), [state.messages]);
@@ -220,6 +234,7 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
     if (reading.current?.key === key && reading.current.id >= newest) return;
     reading.current = { key, id: newest };
     void api.markRead(conversation, newest).then((result) => {
+      if (!recovery.active) return;
       if (!result.ok) {
         if (reading.current?.key === key) reading.current = null;
         return;
@@ -227,43 +242,51 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
       act({ type: 'read', lastRead: result.value.last_read_id });
       read.current?.(result.value);
     });
-  }, [api, key, conversation, state.status, state.lastRead, newest, act]);
+  }, [api, key, conversation, state.status, state.lastRead, newest, act, recovery]);
 
-  const transmit = useCallback(async (nonce: string, body: string, fileIds: readonly number[]): Promise<boolean> => {
+  const discard = useCallback((nonce: string) => {
+    sends.update((held) => held.filter((p) => p.nonce !== nonce));
+  }, [sends]);
+
+  const transmit = useCallback(async (send: Pending): Promise<boolean> => {
+    const { nonce, body, fileIds } = send;
     const result = await api.send(conversation, { body, ...(fileIds.length === 0 ? {} : { file_ids: [...fileIds] }), client_nonce: nonce });
     if (result.ok) {
       act({ type: 'merge', messages: [result.message] });
-      act({ type: 'discard', nonce });
+      discard(nonce);
+      if (recovery.after !== null && result.message.revision > recovery.after + 1) void catchUp();
       return true;
     }
-    act({ type: 'pendingStatus', nonce, status: result.failure === 'unconfirmed' || result.failure === 'network' ? 'unconfirmed' : 'failed', failure: result.failure });
+    const status = result.failure === 'unconfirmed' || result.failure === 'network' ? 'unconfirmed' : 'failed';
+    sends.update((held) => held.map((p) => p.nonce === nonce ? { ...p, status, failure: result.failure } : p));
     if (result.failure !== 'unconfirmed') fail(result.failure);
     return false;
-  }, [api, conversation, act, fail]);
+  }, [api, conversation, act, discard, recovery, catchUp, sends, fail]);
 
   const send = useCallback(async (body: string, fileIds: readonly number[]): Promise<boolean> => {
     if (body.trim() === '') return false;
-    const nonce = newNonce();
-    act({ type: 'pending', pending: { nonce, body, fileIds, status: 'sending' } });
-    return transmit(nonce, body, fileIds);
-  }, [act, transmit]);
+    const pending: Pending = { nonce: newNonce(), body, fileIds, status: 'sending' };
+    sends.update((held) => [...held, pending]);
+    return transmit(pending);
+  }, [sends, transmit]);
 
   const retry = useCallback(async (nonce: string) => {
-    const held = live.current.pending.find((p) => p.nonce === nonce);
-    if (held === undefined || held.status === 'sending') return;
-    act({ type: 'pendingStatus', nonce, status: 'sending' });
-    await transmit(nonce, held.body, held.fileIds);
-  }, [act, transmit]);
+    const send = sends.get().find((p) => p.nonce === nonce);
+    if (send === undefined || send.status === 'sending') return;
+    sends.update((held) => held.map((p) => p.nonce === nonce ? { ...p, status: 'sending' } : p));
+    await transmit(send);
+  }, [sends, transmit]);
 
   const edit = useCallback(async (message: number, body: string): Promise<DmFailure | null> => {
     const result = await api.edit(conversation, message, body);
     if (result.ok) {
       act({ type: 'merge', messages: [result.value] });
+      if (recovery.after !== null && result.value.revision > recovery.after + 1) void catchUp();
       return null;
     }
     fail(result.failure);
     return result.failure;
-  }, [api, conversation, act, fail]);
+  }, [api, conversation, act, fail, recovery, catchUp]);
 
   const remove = useCallback(async (message: number): Promise<DmFailure | null> => {
     const result = await api.remove(conversation, message);
@@ -290,10 +313,11 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
 
   return {
     state,
+    pending,
     messages: useMemo(() => ordered(state.messages), [state.messages]),
     send,
     retry,
-    discard: useCallback((nonce: string) => { act({ type: 'discard', nonce }); }, [act]),
+    discard,
     edit,
     remove,
     loadOlder,

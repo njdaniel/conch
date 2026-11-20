@@ -53,6 +53,7 @@ import {
   writeTalkKeyLabel,
   writeVoiceMode,
 } from './api';
+import { dmApi } from './dm/api';
 
 afterEach(async () => {
   vi.unstubAllGlobals();
@@ -112,6 +113,18 @@ async function signedInFrom(storage: Storage, token: string): Promise<void> {
   const result = await restore();
   expect(result.ok).toBe(true);
 }
+
+describe('DM file authorization', () => {
+  it.each([
+    ['upload', () => dmApi.uploadFile(12, 'draft.png', 'image/png', new Blob(['x']), new AbortController().signal)],
+    ['download', () => dmApi.fileBytes(12, 41)],
+  ] as const)('signs out when a DM %s gets a 401', async (_name, fileRequest) => {
+    await signedInFrom(window.sessionStorage, memberToken);
+    serve(() => json({}, 401));
+    expect(await fileRequest()).toEqual({ ok: false, failure: 'unauthorized' });
+    expect(hasToken()).toBe(false);
+  });
+});
 
 describe('openSocket', () => {
   it('answers a plain network failure, carrying nothing of the error, when the WebSocket constructor throws', async () => {
@@ -1161,6 +1174,7 @@ describe('a credential replaced while a call was out', () => {
 
   const file = { schema: 'conch.file.v1', id: 17, channel_id: 4, uploader_id: 2, filename: 'a.png', media_type: 'image/png', size: 3, sha256: 'a'.repeat(64), created_at: at };
   const uploading = '/v2/channels/ops/files?filename=a.png';
+  const dmDownload = '/v1/dms/12/files/41/content';
 
   // A stand-in server whose password change rotates memberToken into
   // rotatedToken: once it has, the old one is refused (and the new one too,
@@ -1197,7 +1211,7 @@ describe('a credential replaced while a call was out', () => {
       if (c.path === '/v1/ws-tickets') return json({ ticket: 'conch_wst_T', expires_at: at }, 201);
       if (c.path === '/v1/reauth') return json({ until: '2099-10-31T12:10:00.000Z' });
       if (c.path === uploading) return json(file, 201);
-      if (c.path === '/v2/files/17') return new Response(new Uint8Array([1, 2, 3]));
+      if (c.path === '/v2/files/17' || c.path === dmDownload) return new Response(new Uint8Array([1, 2, 3]));
       return new Response(null, { status: 204 });
     });
     return { calls, held, state };
@@ -1511,6 +1525,7 @@ describe('a credential replaced while a call was out', () => {
   it.each([
     { name: 'an upload', path: uploading, method: 'POST', run: () => uploadFile('ops', 'a.png', 'image/png', new Blob([new Uint8Array([1, 2, 3])]), new AbortController().signal), want: { ok: true, file } },
     { name: 'a download', path: '/v2/files/17', method: 'GET', run: () => fetchFileBytes(17), want: { ok: true, value: expect.any(Blob) as unknown } },
+    { name: 'a DM download', path: dmDownload, method: 'GET', run: () => dmApi.fileBytes(12, 41), want: { ok: true, value: expect.any(Blob) as unknown } },
   ])('sends $name again with the new credential', async ({ path, method, run, want }) => {
     const server = await signedInToChange();
     const old = holding(server, method, path, memberToken);

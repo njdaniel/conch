@@ -58,6 +58,27 @@ export function settle(pending: readonly Pending[], arrived: readonly DMMessageV
   return kept.length === pending.length ? pending : kept;
 }
 
+// Each conversation keeps its sends across transcript mounts for this sign-in.
+export function pendingSends() {
+  let pending: readonly Pending[] = [];
+  const listeners = new Set<() => void>();
+  return {
+    get: () => pending,
+    subscribe: (listener: () => void) => {
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    },
+    update: (apply: (held: readonly Pending[]) => readonly Pending[]) => {
+      const next = apply(pending);
+      if (next === pending) return;
+      pending = next;
+      for (const listener of listeners) listener();
+    },
+  };
+}
+
+export type PendingSends = ReturnType<typeof pendingSends>;
+
 // What the person is told when the peer cannot be reached: one line for every
 // reason, never which (ADR-017).
 export const cannotMessage = "Can't send a message to this person";

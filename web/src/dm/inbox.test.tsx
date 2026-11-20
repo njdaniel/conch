@@ -5,7 +5,7 @@ import { windowOf } from '../fakewindow';
 import { Lobby } from '../Lobby';
 import { ProfileCard } from '../ProfileCard';
 import { initialChannels } from '../state/channels';
-import type { DmApi } from './api';
+import { dmApi, type DmApi } from './api';
 import { DmContextProbe } from './probe';
 import { DmInbox } from './DmInbox';
 import { DmProvider } from './DmContext';
@@ -86,16 +86,62 @@ describe('the inbox', () => {
     expect(screen.getByTestId('selected').textContent).toBe('13');
   });
 
-  it('hides a conversation for the viewer only, and shows hidden ones again on request', async () => {
-    const f = fake({ list: vi.fn(() => Promise.resolve({ ok: true as const, value: { conversations: [{ ...conversation(), id: 20, peer_name: 'Ken', state: 'hidden' as const }] } })) });
-    render(provide(f.api, <DmInbox />));
+  it('hides a conversation and can reopen it with Message', async () => {
+    const f = fake();
+    render(provide(f.api, <><DmInbox /><ProfileCard id={5} person={{ name: 'Grace', kind: 'human' }} viewer={me} /></>));
     fireEvent.click(await screen.findByRole('button', { name: 'Hide the conversation with Grace' }));
     await waitFor(() => { expect(screen.queryByRole('button', { name: 'Hide the conversation with Grace' })).toBeNull(); });
     expect(f.api.setState).toHaveBeenCalledWith(12, 'hidden');
-    fireEvent.click(screen.getByRole('button', { name: 'Show hidden conversations' }));
-    const hidden = await screen.findByRole('list', { name: 'Hidden conversations' });
-    expect(within(hidden).getByText('Ken')).toBeDefined();
-    expect(within(hidden).getByRole('button', { name: 'Show the conversation with Ken' })).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: 'Grace' }));
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Grace' })).getByRole('button', { name: 'Message Grace' }));
+    await screen.findByRole('button', { name: 'Hide the conversation with Grace' });
+    expect(f.api.list).not.toHaveBeenCalled();
+  });
+
+  it('pages open and archived rows beyond the snapshot cap without double-counting overlap', async () => {
+    const top = conversation();
+    const older = { ...top, id: 21, peer_name: 'Ken', unread: 3 };
+    const archived = { ...top, id: 22, peer_name: 'Margaret', unread: 5, state: 'archived' as const };
+    const list = vi.fn<DmApi['list']>()
+      .mockResolvedValueOnce({ ok: true, value: { conversations: [top], next_cursor: 'older' } })
+      .mockResolvedValueOnce({ ok: true, value: { conversations: [older] } })
+      .mockResolvedValueOnce({ ok: true, value: { conversations: [archived] } });
+    const f = fake({ snapshot: vi.fn(() => Promise.resolve({ ok: true as const, value: { ...snapshot(), more: true } })), list });
+    render(provide(f.api, <DmInbox />));
+    expect(await screen.findByRole('button', { name: /^Margaret/ })).toBeDefined();
+    expect(screen.getByRole('heading', { name: /Direct messages/ }).textContent).toContain('9 unread');
+    expect(list.mock.calls).toEqual([['open', undefined], ['open', 'older'], ['archived', undefined]]);
+  });
+
+  it('refreshes for incoming changes while the page stays visible', async () => {
+    const snapshotCall = vi.fn<DmApi['snapshot']>()
+      .mockResolvedValueOnce({ ok: true, value: { ...snapshot(), conversations: [] } })
+      .mockResolvedValueOnce({ ok: true, value: snapshot() });
+    const f = fake({ snapshot: snapshotCall });
+    render(provide(f.api, <DmInbox />));
+    await screen.findByText(/No direct messages yet/);
+    act(() => { f.frames({ type: 'poll' }); });
+    expect(await screen.findByRole('list', { name: 'Conversations' })).toBeDefined();
+  });
+
+  it('polls with the production adapter only while visible and subscribed', () => {
+    vi.useFakeTimers();
+    const listener = vi.fn();
+    const stop = dmApi.live(listener);
+    try {
+      vi.advanceTimersByTime(15_000);
+      expect(listener).toHaveBeenCalledWith({ type: 'poll' });
+      Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
+      vi.advanceTimersByTime(15_000);
+      expect(listener).toHaveBeenCalledTimes(1);
+      stop();
+      Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
+      vi.advanceTimersByTime(15_000);
+      expect(listener).toHaveBeenCalledTimes(1);
+    } finally {
+      stop();
+      vi.useRealTimers();
+    }
   });
 
   it('shows and changes the contact preference', async () => {

@@ -24,12 +24,11 @@ function moveFocus(event: KeyboardEvent<HTMLUListElement>) {
   rows[(at + (event.key === 'ArrowDown' ? 1 : rows.length - 1)) % rows.length]?.focus();
 }
 
-function Row({ conversation, selected, onOpen, onHide, hidden }: {
+function Row({ conversation, selected, onOpen, onHide }: {
   readonly conversation: DMConversationV1;
   readonly selected: boolean;
   readonly onOpen: () => void;
   readonly onHide: () => void;
-  readonly hidden: boolean;
 }) {
   const name = peerName(conversation);
   return (
@@ -40,8 +39,8 @@ function Row({ conversation, selected, onOpen, onHide, hidden }: {
         {conversation.last_message_at === undefined ? null : <time className="hint">{timeOf(conversation.last_message_at)}</time>}
         {conversation.unread > 0 ? <span className="badge">{`${String(conversation.unread)} unread`}</span> : null}
       </button>
-      <button type="button" className="dm-hide" aria-label={`${hidden ? 'Show' : 'Hide'} the conversation with ${name}`} onClick={onHide}>
-        {hidden ? 'Show' : 'Hide'}
+      <button type="button" className="dm-hide" aria-label={`Hide the conversation with ${name}`} onClick={onHide}>
+        Hide
       </button>
     </li>
   );
@@ -70,17 +69,17 @@ export function DmInbox({ onOpen }: { readonly onOpen?: (conversation: number) =
   }, [ready, scope, preferences]);
   if (dm === null) return null;
   const { inbox, api } = dm;
-  const { status, conversations, enabled, selected, hidden } = inbox.state;
+  const { status, conversations, enabled, selected } = inbox.state;
   // A server that serves no DMs shows nothing at all.
   if (status === 'unsupported') return null;
   const open = (id: number) => {
     inbox.select(id);
     onOpen?.(id);
   };
-  async function hide(conversation: DMConversationV1, to: 'hidden' | 'open') {
+  async function hide(conversation: DMConversationV1) {
     setProblem('');
-    const failure = await inbox.setState(conversation, to);
-    if (failure !== null) setProblem(to === 'hidden' ? 'Could not hide the conversation.' : 'Could not show the conversation.');
+    const failure = await inbox.setState(conversation, 'hidden');
+    if (failure !== null) setProblem('Could not hide the conversation.');
   }
   async function choose(value: DMAcceptPolicy) {
     setPreference('');
@@ -107,24 +106,13 @@ export function DmInbox({ onOpen }: { readonly onOpen?: (conversation: number) =
       {status === 'ready' && conversations.length > 0 ? (
         <ul aria-label="Conversations" onKeyDown={moveFocus}>
           {conversations.map((c) => (
-            <Row key={c.id} conversation={c} selected={selected === c.id} hidden={false} onOpen={() => { open(c.id); }} onHide={() => void hide(c, 'hidden')} />
+            <Row key={c.id} conversation={c} selected={selected === c.id} onOpen={() => { open(c.id); }} onHide={() => void hide(c)} />
           ))}
         </ul>
       ) : null}
       {problem === '' ? null : <p role="alert" className="hint">{problem}</p>}
       {status === 'ready' ? (
         <>
-          {hidden === null ? (
-            <button type="button" className="link-button" onClick={() => void inbox.showHidden()}>Show hidden conversations</button>
-          ) : hidden.length === 0 ? (
-            <p className="hint">No hidden conversations.</p>
-          ) : (
-            <ul aria-label="Hidden conversations" onKeyDown={moveFocus}>
-              {hidden.map((c) => (
-                <Row key={c.id} conversation={c} selected={false} hidden onOpen={() => { open(c.id); }} onHide={() => void hide(c, 'open')} />
-              ))}
-            </ul>
-          )}
           <label className="dm-preference">
             Who can message me
             <select

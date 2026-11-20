@@ -106,7 +106,7 @@ export function useReadState({
   const [visible, setVisible] = useState(() => document.visibilityState !== 'hidden');
   // Reading means the newest message is on screen: at the bottom, in a tab that
   // can be seen.
-  const reading = atBottom && visible;
+  const reading = !paused && atBottom && visible;
 
   const marks = useRef(newMarks());
   // Freeze the mark for this visit before sending any read of the open history.
@@ -166,7 +166,7 @@ export function useReadState({
         setOpening((previous) => ({ ...previous, settled: true }));
         return;
       }
-      const { channels: known, open: current, ready: held, reading: now } = latest.current;
+      const { channels: known, open: current, ready: held, reading: now, paused: hidden } = latest.current;
       const ids = new Set(known.map((c) => c.id));
       for (const state of result.value) {
         if (ids.has(state.channel_id)) marks.current.acked.set(state.channel_id, Math.max(marks.current.acked.get(state.channel_id) ?? 0, state.last_read_id));
@@ -191,7 +191,7 @@ export function useReadState({
       // does not flicker. The trade-off: if it turns out not to be read (the
       // reader is scrolled up, say), the count comes back only with the next
       // read.
-      if (current !== null && !held) next.delete(current);
+      if (current !== null && !held && !hidden) next.delete(current);
       setCounts((prev) => {
         for (const [id, count] of prev) {
           if (ids.has(id) && (marks.current.changed.get(id) ?? 0) > version) next.set(id, count);
@@ -347,7 +347,7 @@ export function useReadState({
   // The mark moves to the newest message shown: when a channel is opened, when
   // a message arrives at the bottom, and when the newest comes back into view.
   useEffect(() => {
-    if (!signedIn || openId === null || !opening.settled || !ready || !reading || off.current || paused) return;
+    if (!signedIn || openId === null || !opening.settled || !ready || !reading || off.current) return;
     setCount(openId, 0);
     const m = marks.current;
     if (newestId <= (m.marked.get(openId) ?? 0)) return;
@@ -375,7 +375,7 @@ export function useReadState({
         if (!off.current && !latest.current.paused && latest.current.connected && id > (m.marked.get(channel) ?? 0)) send(channel, id);
       }, last + markInterval - now),
     );
-  }, [signedIn, openId, opening.settled, ready, reading, newestId, status, send, setCount, paused]);
+  }, [signedIn, openId, opening.settled, ready, reading, newestId, status, send, setCount]);
 
   // The counts by name, as the list shows them, from the names it holds now.
   const byName = useMemo(() => {

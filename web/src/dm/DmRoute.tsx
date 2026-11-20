@@ -22,7 +22,7 @@ export function DmRoute({ conversationId, view = transcriptView, onClose }: {
 }) {
   const dm = useDm();
   if (dm === null) return null;
-  const { api, scope, me, inbox, drafts } = dm;
+  const { api, scope, me, inbox, drafts, sendsFor } = dm;
   return (
     <div className="dm-route" data-conversation={`dm:${String(conversationId)}`}>
       {onClose === undefined ? null : (
@@ -36,6 +36,7 @@ export function DmRoute({ conversationId, view = transcriptView, onClose }: {
           viewer: me,
           draft: drafts.get(conversationId),
           onDraft: (conversation, text) => { drafts.set(conversation, text); },
+          pendingSends: sendsFor(conversationId),
           onRead: inbox.read,
         })}
       </div>

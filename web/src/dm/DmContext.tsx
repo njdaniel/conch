@@ -5,6 +5,7 @@
 // voice destination (the voice strip is mounted beside it, untouched).
 import { createContext, useContext, useMemo, type ReactNode } from 'react';
 import { dmApi, type DmApi } from './api';
+import { pendingSends, type PendingSends } from './model';
 import { useDmInbox, type Inbox } from './useDmInbox';
 
 export interface DmDrafts {
@@ -18,15 +19,20 @@ export interface DmValue {
   readonly me: number;
   readonly inbox: Inbox;
   readonly drafts: DmDrafts;
+  readonly sendsFor: (conversation: number) => PendingSends;
 }
 
-const DmContext = createContext<DmValue | null>(null);
+export const DmContext = createContext<DmValue | null>(null);
 
 // useDm is null outside a DmProvider (a guest, an agent, a page whose server
 // has no DMs): every DM control then simply is not there.
 export const useDm = (): DmValue | null => useContext(DmContext);
 
 export function DmProvider({ scope, me, api = dmApi, children }: { readonly scope: string; readonly me: number; readonly api?: DmApi; readonly children: ReactNode }) {
+  return <DmContext.Provider value={useDmValue(api, scope, me)}>{children}</DmContext.Provider>;
+}
+
+export function useDmValue(api: DmApi, scope: string, me: number): DmValue {
   const inbox = useDmInbox(api, scope);
   // Drafts are per conversation (kind and id, never an id alone) and live as
   // long as the scope: an account or server change drops them.
@@ -40,6 +46,15 @@ export function DmProvider({ scope, me, api = dmApi, children }: { readonly scop
       },
     };
   }, [scope]);
-  const value = useMemo<DmValue>(() => ({ api, scope, me, inbox, drafts }), [api, scope, me, inbox, drafts]);
-  return <DmContext.Provider value={value}>{children}</DmContext.Provider>;
+  const sendsFor = useMemo(() => {
+    const held = new Map<number, PendingSends>();
+    return (conversation: number) => {
+      const existing = held.get(conversation);
+      if (existing !== undefined) return existing;
+      const sends = pendingSends();
+      held.set(conversation, sends);
+      return sends;
+    };
+  }, [scope]);
+  return useMemo(() => ({ api, scope, me, inbox, drafts, sendsFor }), [api, scope, me, inbox, drafts, sendsFor]);
 }

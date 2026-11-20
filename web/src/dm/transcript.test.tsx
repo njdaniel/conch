@@ -2,6 +2,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DMMessageV1 } from '../schema/generated';
 import type { DmApi } from './api';
+import { DmProvider } from './DmContext';
+import { DmRoute } from './DmRoute';
 import { DmTranscript } from './DmTranscript';
 import { removedBody } from './model';
 import { conversation, fake, fixture, later, me, ownMessage, peerMessage, removedMessage, type Fake } from './testkit';
@@ -109,6 +111,29 @@ describe('the transcript', () => {
     expect(send.mock.calls[1]?.[1].client_nonce).toBe(send.mock.calls[0]?.[1].client_nonce);
     await waitFor(() => { expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull(); });
     expect(bodies().filter((b) => b === 'hello')).toHaveLength(1);
+  });
+
+  it('keeps the send and its attachments when the reply arrives after switching routes', async () => {
+    const answer = later<Awaited<ReturnType<DmApi['send']>>>();
+    const send = vi.fn<DmApi['send']>()
+      .mockReturnValueOnce(answer.promise)
+      .mockResolvedValueOnce({ ok: true, message: { ...ownMessage(), id: 4311, revision: 7, body: 'draft.pdf' } });
+    const f = fake({ send });
+    const page = (id: number) => <DmProvider api={f.api} scope={scope} me={me}><DmRoute conversationId={id} /></DmProvider>;
+    const { rerender } = render(page(12));
+    await ready();
+    fireEvent.change(screen.getByLabelText('Attach a file'), { target: { files: [new File(['x'], 'draft.pdf')] } });
+    await screen.findByRole('list', { name: 'Attached files' });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    rerender(page(14));
+    await ready();
+    await act(async () => { answer.resolve({ ok: false, failure: 'unconfirmed' }); await answer.promise; });
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+    rerender(page(12));
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }));
+    await waitFor(() => { expect(send).toHaveBeenCalledTimes(2); });
+    expect(send.mock.calls[1]).toEqual(send.mock.calls[0]);
+    expect(send.mock.calls[1]?.[1].file_ids).toEqual([41]);
   });
 
   it('says one generic line when the peer cannot be reached, whatever the reason, and stops offering the composer', async () => {
@@ -244,6 +269,48 @@ describe('the transcript', () => {
     act(() => { f.frames({ type: 'message', message: { ...peerMessage(), id: 4313, revision: 10, body: 'live one' } }); });
     await waitFor(() => { expect(bodies()).toContain('missed one'); });
     expect(f.api.changes).toHaveBeenCalledWith(12, 6);
+    expect(bodies().slice(-2)).toEqual(['missed one', 'live one']);
+  });
+
+  it('recovers a missed removal after a higher send response and a failed changes request', async () => {
+    const removal = { ...ownMessage(), revision: 7, removed: true, body: removedBody, file_ids: undefined };
+    const changes = vi.fn<DmApi['changes']>()
+      .mockResolvedValueOnce({ ok: false, failure: 'network' })
+      .mockResolvedValueOnce({ ok: true, value: { messages: [removal] } });
+    const f = fake({
+      changes,
+      send: vi.fn<DmApi['send']>().mockResolvedValue({ ok: true, message: { ...ownMessage(), id: 4311, revision: 8, body: 'new message' } }),
+    });
+    mount(f);
+    await ready();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Message to Grace' }), { target: { value: 'new message' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await screen.findByText('new message');
+    await act(async () => {
+      f.frames({ type: 'poll' });
+      await Promise.resolve();
+    });
+    expect(changes.mock.calls).toEqual([[12, 6], [12, 6]]);
+    expect(await screen.findByText(removedBody)).toBeDefined();
+  });
+
+  it('retries a failed live gap from the same revision', async () => {
+    const missed = { ...peerMessage(), id: 4312, revision: 7, body: 'missed one' };
+    const changes = vi.fn<DmApi['changes']>()
+      .mockResolvedValueOnce({ ok: false, failure: 'network' })
+      .mockResolvedValueOnce({ ok: true, value: { messages: [missed] } });
+    const f = fake({ changes });
+    mount(f);
+    await ready();
+    await act(async () => {
+      f.frames({ type: 'message', message: { ...peerMessage(), id: 4313, revision: 8, body: 'live one' } });
+      await Promise.resolve();
+    });
+    await act(async () => {
+      f.frames({ type: 'poll' });
+      await Promise.resolve();
+    });
+    expect(changes.mock.calls).toEqual([[12, 6], [12, 6]]);
     expect(bodies().slice(-2)).toEqual(['missed one', 'live one']);
   });
 
