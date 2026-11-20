@@ -1166,15 +1166,16 @@ jobs:
           cache: npm
           cache-dependency-path: spikes/mobile/android/package-lock.json
 
-      # The JDK and the SDK only. The Gradle home (GRADLE_USER_HOME, also under
-      # CONCH_CACHE) is not cached: it would cost more of the repository's cache
-      # budget than it saves.
+      # Cache the JDK, SDK and Android CLI bootstrap state. The Gradle home
+      # (GRADLE_USER_HOME, also under CONCH_CACHE) would cost more of the
+      # repository's cache budget than it saves.
       - name: Android toolchain cache
         uses: actions/cache@v4
         with:
           path: |
             ${{ env.CONCH_CACHE }}/jdk-*
             ${{ env.CONCH_CACHE }}/android-sdk
+            ${{ env.CONCH_CACHE }}/android-user-home
           key: android-spike-toolchain-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('spikes/mobile/android/toolchain.sh') }}
 
       - name: install pinned Android toolchain
@@ -1182,7 +1183,15 @@ jobs:
           CONCH_ACCEPT_ANDROID_LICENCES: '1'
           # The APK build needs no emulator or system image.
           CONCH_ANDROID_NO_EMULATOR: '1'
-        run: ./toolchain.sh
+        run: |
+          install_home=$(mktemp -d "$TMPDIR/home.XXXXXX")
+          # toolchain.sh passes --no-metrics. The first-run licence notice
+          # describes the flag even when the CLI was invoked with it.
+          HOME="$install_home" ./toolchain.sh
+          test ! -e "$install_home/.android"
+          test -x "$CONCH_CACHE/android-user-home/bin/android-cli"
+          test -d "$CONCH_CACHE/android-user-home/cli/bundles"
+          test -s "$CONCH_CACHE/android-sdk/licenses/android-sdk-license"
 
       - name: install npm dependencies and check licences, types and unit tests
         # check.sh runs npm ci --ignore-scripts, npm test and the Gradle lockfile checks.
