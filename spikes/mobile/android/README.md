@@ -8,15 +8,19 @@ React Native 0.88.1, React 19.3.0, Node 24.21.0 (`.nvmrc`, `engines`), JDK 17 (T
 
 Deviation from the RN template: it names compileSdk 37, Build-Tools 37.0.0 and targetSdk 36. Here they are 35, 36.0.0 and 35, per the pins. It builds as is. The iOS project, `react-native-safe-area-context` and `@react-native/new-app-screen` are dropped.
 
-## Toolchain (no root, all under `~/.cache/conch`)
+## Toolchain (Linux x86-64, no root)
 
-    CONCH_ACCEPT_ANDROID_LICENCES=1 ./toolchain.sh   # accepts Google's SDK licence for that SDK only
-    source ~/.cache/conch/android-env.sh
+    CONCH_ACCEPT_ANDROID_LICENCES=1 ./toolchain.sh
+    source "${CONCH_CACHE:-$HOME/.cache/conch}/android-env.sh"
     nvm use                                          # 24.21.0
     npm ci
     (cd android && ./gradlew assembleDebug)
 
 Roughly 13 GB for the SDK, system image, Gradle cache and AVD, plus about 3 GB of build output in `android/app/build`. `CONCH_ANDROID_NO_EMULATOR=1` skips the emulator and the system image, for a build-only toolchain (CI uses it).
+
+The installer puts the JDK and SDK under `CONCH_CACHE` (default `~/.cache/conch`) and uses `$CONCH_CACHE/android-user-home` for the Android CLI download, bundle and state. It passes `--no-metrics` on every CLI invocation. The JDK and command-line tools archives have pinned digests. The launcher downloads the CLI from Google's rolling latest URL, and the CLI manages SDK archives without an option for Conch's own digest pins. The installed Platform-Tools revision must be 37.0.3. The optional emulator and system image use the current stable revisions.
+
+Set `CONCH_ACCEPT_ANDROID_LICENCES=1` once you accept the [Android SDK License Agreement](https://developer.android.com/studio/terms) for this installation. The Android CLI displays the agreement link on first use and records package licences in `android-sdk/licenses` without prompting.
 
 ## Standalone APK for the device run (#1920)
 
