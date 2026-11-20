@@ -2427,27 +2427,10 @@ export type UploadResult =
 // server's early 413, which answers before reading), so a byte counter would
 // be a lie. A 401 signs out, as everywhere.
 export async function uploadFile(channel: string, name: string, mediaType: string, bytes: Blob, signal: AbortSignal): Promise<UploadResult> {
-  let held = current();
-  if (held === null) return { ok: false, outcome: 'unauthorized' };
-  let res: Response;
-  for (let sent = 0; ; sent++) {
-    try {
-      res = await platform.http.upload(call('uploadFile', { channel }, fileQuery(name)), held.token, mediaType, bytes, signal);
-    } catch {
-      if (signal.aborted) return { ok: false, outcome: 'cancelled' };
-      noteNoAnswer();
-      return { ok: false, outcome: 'network' };
-    }
-    if (!res.ok) await noteRefusal(res);
-    if (res.status !== 401) break;
-    // A 401 is answered before the bytes are stored: sent again with a
-    // credential since replaced, it is still one file (issue #1000).
-    await discard(res);
-    const next = await settleRefusal(held, true);
-    if (next === null) return { ok: false, outcome: 'unauthorized' };
-    if (next === 'stale' || sent + 1 >= resends) return { ok: false, outcome: 'network' };
-    held = next;
-  }
+  const reply = await authedFile((token) => platform.http.upload(call('uploadFile', { channel }, fileQuery(name)), token, mediaType, bytes, signal), signal);
+  if (reply.kind === 'unauthorized') return { ok: false, outcome: 'unauthorized' };
+  if (reply.kind === 'none') return { ok: false, outcome: signal.aborted ? 'cancelled' : 'network' };
+  const { res } = reply;
   if (!res.ok) return { ok: false, outcome: 'refused', ...(await requestRefusal(res, 'The server refused the upload')) };
   try {
     const parsed: unknown = await res.json();
@@ -2477,24 +2460,10 @@ export async function getFileMeta(id: number): Promise<FileResult<FileV1>> {
 // always application/octet-stream with nosniff: the caller that renders them
 // must validate the content itself, and never trust the stored media type.
 export async function fetchFileBytes(id: number): Promise<FileResult<Blob>> {
-  let held = current();
-  if (held === null) return { ok: false, failure: 'unauthorized' };
-  let res: Response;
-  for (let sent = 0; ; sent++) {
-    try {
-      res = await platform.http.download(call('fileBytes', { id }), held.token);
-    } catch {
-      noteNoAnswer();
-      return { ok: false, failure: 'network' };
-    }
-    if (!res.ok) await noteRefusal(res);
-    if (res.status !== 401) break;
-    await discard(res);
-    const next = await settleRefusal(held, true);
-    if (next === null) return { ok: false, failure: 'unauthorized' };
-    if (next === 'stale' || sent + 1 >= resends) return { ok: false, failure: 'network' };
-    held = next;
-  }
+  const reply = await authedFile((token) => platform.http.download(call('fileBytes', { id }), token));
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  const { res } = reply;
   if (res.status === 404) {
     await discard(res);
     return { ok: false, failure: 'unavailable' };
@@ -3477,3 +3446,42 @@ function publishRemoval(data: unknown) {
     if (message?.removed === true) for (const receive of removalWatchers) receive(message);
   } catch { /* Unknown frames are ignored. */ }
 }
+
+// A file request can retry after a 401 because the refusal precedes any write.
+async function authedFile(send: (token: string) => Promise<Response>, signal?: AbortSignal): Promise<PostReply> {
+  let held = current();
+  if (held === null) return { kind: 'unauthorized' };
+  for (let sent = 0; sent < resends; sent++) {
+    if (signal?.aborted) return { kind: 'none' };
+    let res: Response;
+    try {
+      res = await send(held.token);
+    } catch {
+      if (!signal?.aborted) noteNoAnswer();
+      return { kind: 'none' };
+    }
+    if (!res.ok) await noteRefusal(res);
+    if (res.status !== 401) return { kind: 'reply', res };
+    await discard(res);
+    const next = await settleRefusal(held, true);
+    if (next === null) return { kind: 'unauthorized' };
+    if (next === 'stale') return { kind: 'none' };
+    held = next;
+  }
+  return { kind: 'none' };
+}
+
+// The DM adapter uses the same credential and refusal handling as channels.
+export const dmTransport = {
+  read: authed,
+  write: authedSend,
+  upload: (request: Call, mediaType: string, bytes: Blob, signal: AbortSignal) =>
+    authedFile((token) => platform.http.upload(request, token, mediaType, bytes, signal), signal),
+  download: (request: Call) => authedFile((token) => platform.http.download(request, token)),
+} as const;
+
+// The request builders the direct-message adapter uses. The operation table is
+// read by this module and the platform alone (hygiene.test.ts), so dm/api.ts
+// takes its builders from here and never names the table itself.
+export const dmRequest = { call, queryOf } as const;
+export type DmCall = Call;

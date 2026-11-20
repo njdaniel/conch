@@ -7,6 +7,7 @@ import { ManifestReads } from './admin/AIAdminCard';
 import { Avatar } from './Icons';
 import { IdentityMarks } from './Identity';
 import { ProfileCard } from './ProfileCard';
+import { MessageAction } from './dm/MessageAction';
 import { memberName } from './guestName';
 import { ActionsMenu, useOpeners, type MenuItem } from './MessageMenu';
 import type { Entry } from './agents/join';
@@ -420,6 +421,7 @@ function PeopleGroup({ title, people, controls }: { readonly title: string; read
                 onOpenChange={(open) => { controls.setRowUi?.(person.id, { profileOpen: open }); }}
                 onDisappear={controls.onProfileDisappear}
               />
+              <MessageAction id={person.id} name={person.name} person={{ ...person, guest: member?.guest }} viewer={controls.viewer.id} />
               {person.live > 1 ? <span> ({person.live} sessions)</span> : null} <span className="ag-status">{person.state}</span>
             </MemberRow>
           );
@@ -535,6 +537,7 @@ function CommunityRow({
           so giving it the viewer ID would add a second You badge when open. */}
       <ProfileCard id={person.id} person={person} className="community-name" onDisappear={onProfileDisappear} describedBy={person.id === viewer ? selfBadge : undefined} />
       <IdentityMarks {...person} id={person.id} viewer={viewer} markIds={{ you: selfBadge }} />
+      <MessageAction id={person.id} name={person.name} person={person} viewer={viewer} />
       {person.voice_allowed === undefined ? null : <span className="hint">{person.voice_allowed ? ' · voice on' : ' · voice off'}</span>}
       {person.may_invite === undefined ? null : <span className="hint">{person.may_invite ? ' · can invite' : ' · cannot invite'}</span>}
       {person.invited_by === undefined ? null : <span className="hint">{` · invited by ${inviter?.name ?? `#${String(person.invited_by)}`}`}</span>}

@@ -2,6 +2,7 @@ import { BlockToggle } from './blocks';
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
 import { Avatar } from './Icons';
 import { IdentityMarks } from './Identity';
+import { MessageAction } from './dm/MessageAction';
 import { longPressMs } from './MessageMenu';
 import type { IdentityInput } from './identityMarks';
 import type { Entry } from './agents/join';
@@ -110,6 +111,13 @@ export function ProfileCard({ id, person, viewer, name: surfaceName, className =
   function keyDown(event: KeyboardEvent<HTMLDivElement>) {
     if (event.nativeEvent.isComposing) return;
     if (event.key !== 'Escape' && event.key !== 'Tab') return;
+    // Tab moves among the card's own controls (the Message action, then Close)
+    // and leaves the card only past either end of them.
+    if (event.key === 'Tab') {
+      const controls = [...event.currentTarget.querySelectorAll<HTMLElement>('button:not([disabled])')];
+      const edge = event.shiftKey ? controls[0] : controls[controls.length - 1];
+      if (controls.length > 1 && document.activeElement !== edge) return;
+    }
     event.preventDefault();
     event.stopPropagation();
     close();
@@ -169,6 +177,7 @@ export function ProfileCard({ id, person, viewer, name: surfaceName, className =
               {shownPerson.state}{shownPerson.live > 1 ? ` (${String(shownPerson.live)} sessions)` : ''}
             </p>
           ) : null}
+          <MessageAction id={id} name={name} person={shownPerson} viewer={viewer} onOpened={close} />
           <BlockToggle id={id} name={name} viewer={viewer} />
           <button ref={closeButton} type="button" className="profile-card-close" onClick={close}>Close</button>
         </div>

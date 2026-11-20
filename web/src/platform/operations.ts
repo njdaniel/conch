@@ -1,4 +1,24 @@
-import { disablePrincipalResponseV1, listChannelBansResponseV1, revokeIssuedResponseV1 } from '../schema/generated';
+import {
+  disablePrincipalResponseV1,
+  dmConversationV1,
+  dmFileV1,
+  dmPreferencesV1,
+  dmReadStateV1,
+  dmSnapshotV1,
+  editDMMessageRequestV1,
+  editDMMessageResponseV1,
+  listChannelBansResponseV1,
+  listDMChangesResponseV1,
+  listDMConversationsResponseV1,
+  listDMMessagesResponseV1,
+  openDMRequestV1,
+  openDMResponseV1,
+  postDMMessageRequestV1,
+  postDMMessageResponseV1,
+  revokeIssuedResponseV1,
+  searchDMMessagesResponseV1,
+  setDMStateRequestV1,
+} from '../schema/generated';
 import { reactionSummaryV1, reactionSummariesResponseV1, listReactorsResponseV1 } from '../schema/reaction';
 // The operation table: every request the client makes of conchd, keyed by a
 // stable id. Pure data and generated validators, with no DOM and no window, so
@@ -153,7 +173,7 @@ import { fromServer, type Validator } from '../schema/validate';
 export type Auth = 'bearer' | 'none';
 
 export interface Operation {
-  readonly method: 'GET' | 'POST' | 'PUT' | 'DELETE';
+  readonly method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   // The path template: {name} is replaced by the encoded parameter of that
   // name. A query is not part of the template; a call names it.
   readonly path: string;
@@ -410,6 +430,28 @@ export const operations = {
   fileBytes: op('GET', '/v2/files/{id}', 'bearer'),
   listReadState: op('GET', '/v1/read-state', 'bearer', { response: reply(listReadStateResponseV1) }),
   markRead: op('PUT', '/v1/channels/{channel}/read-state', 'bearer', { request: check(markReadRequestV1), response: reply(readStateV1) }),
+
+  // Local direct messages (issue #2016, ADR-017, pkg/schema/dm.go): one
+  // conversation per pair of people, in an id space of its own. Every route is
+  // for a person's own sign-in; the server decides each one again. A DM is
+  // never reached through a channel operation, nor a channel through these.
+  openDm: op('POST', '/v1/dms', 'bearer', { request: check(openDMRequestV1), response: reply(openDMResponseV1) }),
+  listDms: op('GET', '/v1/dms', 'bearer', { response: reply(listDMConversationsResponseV1) }),
+  dmSnapshot: op('GET', '/v1/dms/snapshot', 'bearer', { response: reply(dmSnapshotV1) }),
+  getDm: op('GET', '/v1/dms/{conversation}', 'bearer', { response: reply(dmConversationV1) }),
+  listDmMessages: op('GET', '/v1/dms/{conversation}/messages', 'bearer', { response: reply(listDMMessagesResponseV1) }),
+  listDmChanges: op('GET', '/v1/dms/{conversation}/changes', 'bearer', { response: reply(listDMChangesResponseV1) }),
+  postDmMessage: op('POST', '/v1/dms/{conversation}/messages', 'bearer', { request: check(postDMMessageRequestV1), response: reply(postDMMessageResponseV1) }),
+  editDmMessage: op('PATCH', '/v1/dms/{conversation}/messages/{message}', 'bearer', { request: check(editDMMessageRequestV1), response: reply(editDMMessageResponseV1) }),
+  removeDmMessage: op('DELETE', '/v1/dms/{conversation}/messages/{message}', 'bearer'),
+  markDmRead: op('PUT', '/v1/dms/{conversation}/read-state', 'bearer', { request: check(markReadRequestV1), response: reply(dmReadStateV1) }),
+  setDmState: op('PUT', '/v1/dms/{conversation}/state', 'bearer', { request: check(setDMStateRequestV1), response: reply(dmConversationV1) }),
+  searchDmMessages: op('GET', '/v1/dms/{conversation}/search', 'bearer', { response: reply(searchDMMessagesResponseV1) }),
+  uploadDmFile: op('POST', '/v1/dms/{conversation}/files', 'bearer', { response: reply(dmFileV1) }),
+  dmFileMeta: op('GET', '/v1/dms/{conversation}/files/{file}', 'bearer', { response: reply(dmFileV1) }),
+  dmFileBytes: op('GET', '/v1/dms/{conversation}/files/{file}/content', 'bearer'),
+  getDmPreferences: op('GET', '/v1/dms/preferences', 'bearer', { response: reply(dmPreferencesV1) }),
+  putDmPreferences: op('PUT', '/v1/dms/preferences', 'bearer', { request: check(dmPreferencesV1), response: reply(dmPreferencesV1) }),
 
   // Live feeds. A ticket is a single-use credential for one socket: main asks
   // for it and opens the socket itself, so the renderer never holds one.

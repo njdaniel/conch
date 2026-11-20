@@ -13,7 +13,7 @@ const routesSource = readFileSync('../internal/server/routes.go', 'utf8');
 // without their names (the server calls a principal {principal_id}, the table
 // {principal}).
 const pattern = (method: string, path: string) => `${method} ${path.replace(/\{\w+\}/g, '{}')}`;
-const served = new Set([...routesSource.matchAll(/"((?:GET|POST|PUT|DELETE) \/[^"\s]*)"/g)].map((match) => {
+const served = new Set([...routesSource.matchAll(/"((?:GET|POST|PUT|PATCH|DELETE) \/[^"\s]*)"/g)].map((match) => {
   const [method = '', path = ''] = (match[1] ?? '').split(' ');
   return pattern(method, path);
 }));
@@ -48,8 +48,35 @@ describe('the operation table', () => {
     expect(served.has('GET /v1/whoami')).toBe(true);
   });
 
+  // The direct message routes (issue #2016, pkg/schema/dm.go) are a contract
+  // the web client is built against before conchd serves them (ADR-017, the
+  // server issues of #2013). Each is listed here until its route is
+  // registered; a listed operation that the server does serve fails, so this
+  // list can only shrink and is empty when the server catches up.
+  const awaitingServer = new Set<OperationId>([
+    'openDm',
+    'listDms',
+    'dmSnapshot',
+    'getDm',
+    'listDmMessages',
+    'listDmChanges',
+    'postDmMessage',
+    'editDmMessage',
+    'removeDmMessage',
+    'markDmRead',
+    'setDmState',
+    'searchDmMessages',
+    'uploadDmFile',
+    'dmFileMeta',
+    'dmFileBytes',
+    'getDmPreferences',
+    'putDmPreferences',
+  ]);
+
   it.each(entries)('%s is a route conchd serves', (id, entry) => {
-    expect(served.has(pattern(entry.method, entry.path)), `${id}: ${entry.method} ${entry.path}`).toBe(true);
+    const route = served.has(pattern(entry.method, entry.path));
+    if (awaitingServer.has(id)) expect(route, `${id} is served now: take it out of awaitingServer`).toBe(false);
+    else expect(route, `${id}: ${entry.method} ${entry.path}`).toBe(true);
   });
 
   it('has one entry per request: no method and path twice', () => {
@@ -149,6 +176,24 @@ describe('the operation table', () => {
     const sockets = entries.filter(([, entry]) => entry.socket === true);
     expect(sockets.map(([id]) => id).sort()).toEqual(['eventsSocket', 'messagesSocket', 'occupancySocket', 'voiceSocket']);
     for (const [, entry] of sockets) expect(entry.method).toBe('GET');
+  });
+});
+
+describe('the direct message operations', () => {
+  it('are the routes of pkg/schema/dm.go, in a conversation id space of their own', () => {
+    expect(pathOf(call('openDm'))).toBe('/v1/dms');
+    expect(pathOf(call('listDmMessages', { conversation: 12 }, queryOf({ order: 'desc' })))).toBe('/v1/dms/12/messages?order=desc');
+    expect(operations.editDmMessage.method).toBe('PATCH');
+    expect(pathOf(call('editDmMessage', { conversation: 12, message: 42 }))).toBe('/v1/dms/12/messages/42');
+    expect(pathOf(call('removeDmMessage', { conversation: 12, message: 42 }))).toBe('/v1/dms/12/messages/42');
+    expect(pathOf(call('dmFileMeta', { conversation: 12, file: 41 }))).toBe('/v1/dms/12/files/41');
+  });
+  it('are reads and writes of people with a bearer credential, and none can be previewed', () => {
+    for (const [id, entry] of entries) {
+      if (!/^dm|Dm/.test(id)) continue;
+      expect(entry.auth, id).toBe('bearer');
+      expect(entry.previewable, id).toBeUndefined();
+    }
   });
 });
 
