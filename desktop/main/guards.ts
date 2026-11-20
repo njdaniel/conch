@@ -8,7 +8,7 @@
 // two: HTTP and WebSocket requests to exactly the live grant's LiveKit origin,
 // and one screen capture by the rules of display-capture.ts. WebRTC (ICE,
 // STUN, TURN) and WebTransport are not requests this module sees.
-import type { MainLog } from './diagnostics.ts';
+import { GeometricSampler, type MainLog } from './diagnostics.ts';
 import type { App, Event, Session, WebContents } from 'electron';
 
 import { displayPermission, type DisplayCapture } from './display-capture.ts';
@@ -154,9 +154,14 @@ export function guardSession(ses: Session, deps: GuardDeps): void {
   // observer the smoke test reads: the refused origin stays in the local log. WebRTC
   // (ICE, STUN, TURN) and WebTransport never reach onBeforeRequest: they are
   // outside this filter and the CSP's connect-src alike.
+  // A page can make requests without limit, so the export samples them
+  // (1, 2, 4, 8 ...) and carries the count: a loop can't evict the ring (#2091).
+  const blockedSamples = new GeometricSampler<'blocked'>();
+  let blocked = 0;
   ses.webRequest.onBeforeRequest((details, callback) => {
     if (foreign(details.url) && !livekitAllowed(details.url, deps.liveOrigin?.() ?? null)) {
-      deps.log('conch-desktop: blocked a request', { ring: true });
+      blocked++;
+      if (blockedSamples.sample('blocked')) deps.log(`conch-desktop: blocked a request; ${String(blocked)} so far`, { ring: true });
       deps.log(`conch-desktop: blocked a request to ${describe(details.url)}`);
       callback({ cancel: true });
       return;

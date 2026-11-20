@@ -89,19 +89,74 @@ function fixture(realGestures?: Gestures, diagnostics?: DiagnosticsApi): Fixture
   };
 }
 
-it('samples repeated IPC refusals in the export ring and keeps the local count', async () => {
+// The alignment, reason masking and flood sequences from refuse.mjs.
+const refusalProbes: readonly {
+  name: string;
+  exercise: (f: Fixture) => Promise<void>;
+  total: number;
+  reasons: readonly (readonly [reason: string, logged: number])[];
+}[] = [
+  {
+    name: 'silent refusals in the old sampling slots',
+    exercise: async (f) => {
+      const event = f.event();
+      const report = () => f.ipc.invoke(event, 'reportVoiceDiagnostic', ['sdk-warning']);
+      for (let i = 0; i < 60; i++) expect((await report()).ok).toBe(true);
+      expect((await report()).ok).toBe(false);
+      for (let round = 0; round < 50; round++) {
+        for (let i = 0; i < (round === 0 ? 98 : 99); i++) {
+          await f.ipc.invoke(event, 'diagnosticsSave', ['x'.repeat(i % 7)]);
+        }
+        await report();
+      }
+    },
+    total: 5_000,
+    reasons: [['shape', 10], ['rate', 4_939]],
+  },
+  {
+    name: 'a single reason in all old sampling slots',
+    exercise: async (f) => {
+      const event = f.event();
+      await f.ipc.invoke(event, 'no-such-name', []);
+      for (let round = 0; round < 3; round++) {
+        for (let i = 0; i < (round === 0 ? 98 : 99); i++) {
+          await f.ipc.invoke(event, 'diagnosticsSave', [1]);
+        }
+        await f.ipc.invoke(event, 'no-such-name', []);
+      }
+    },
+    total: 300,
+    reasons: [['name', 4], ['shape', 10], ['rate', 286]],
+  },
+  {
+    name: 'a flood of one reason',
+    exercise: async (f) => {
+      const event = f.event();
+      for (let i = 0; i < 50_100; i++) await f.ipc.invoke(event, 'no-such-name', []);
+    },
+    total: 50_100,
+    reasons: [['name', 50_100]],
+  },
+];
+
+it.each(refusalProbes)('samples logged refusals by reason with $name', async ({ exercise, total, reasons }) => {
   const f = fixture();
-  f.ring.record('voice: helper 1 attached');
-  const event = f.event();
-  for (let n = 0; n < 550; n += 1) {
-    await f.ipc.invoke(event, 'unknown-private-name', []);
+  const history = 'voice: helper 1 lost: ack-timeout';
+  f.ring.record(history);
+  await exercise(f);
+
+  expect(f.ipc.refusals).toBe(total);
+  const local = f.logs.filter((line) => line.includes('refused an IPC call'));
+  const exported = f.ring.lines().filter((line) => line.includes('refused an IPC call'));
+  const sampled = new Set<string>();
+  for (const [reason, count] of reasons) {
+    const lines = local.filter((line) => line.includes(`(${reason})`));
+    expect(lines).toHaveLength(count);
+    for (let n = 1; n <= count; n *= 2) sampled.add(lines[n - 1] ?? '');
   }
-  expect(f.ipc.refusals).toBe(550);
-  expect(f.logs).toHaveLength(550);
-  expect(f.ring.lines()).toEqual([
-    'voice: helper 1 attached',
-    ...[1, 100, 200, 300, 400, 500].map((count) => `conch-desktop: refused an IPC call (name); ${String(count)} so far`),
-  ]);
+  expect(local).toHaveLength(reasons.reduce((sum, [, count]) => sum + count, 0));
+  expect(exported).toEqual(local.filter((line) => sampled.has(line)));
+  expect(f.ring.lines()[0]).toBe(history);
 });
 
 describe('voice renderer diagnostics', () => {
@@ -1448,13 +1503,18 @@ describe('the diagnostics bundle (issue #2084)', () => {
     if (!first.ok) throw new Error('preview refused');
     const shown = first.value as ReturnType<Diagnostics['preview']>;
     expect(shown.text).toContain('first preview');
+    expect(shown.text).toContain('IPC refusals since start: 1\n');
     ring.record('second preview');
+    // Even a silent rate refusal contributes to the live header.
+    for (let i = 0; i < 60; i++) expect((await f.ipc.invoke(f.event(), 'reportVoiceDiagnostic', ['sdk-warning'])).ok).toBe(true);
+    expect((await f.ipc.invoke(f.event(), 'reportVoiceDiagnostic', ['sdk-warning'])).ok).toBe(false);
     f.contents.emit('input-event', {}, { type: 'mouseUp' });
     const second = await f.ipc.invoke(f.event(), 'diagnosticsPreview', []);
     if (!second.ok) throw new Error('second preview refused');
     const newer = second.value as ReturnType<Diagnostics['preview']>;
     expect(newer.id).not.toBe(shown.id);
     expect(newer.text).toContain('second preview');
+    expect(newer.text).toContain('IPC refusals since start: 2\n');
 
     const refused = { ok: false, kind: 'refused' };
     expect(await f.ipc.invoke(f.event(), 'diagnosticsPreview', ['x'])).toEqual(refused);
