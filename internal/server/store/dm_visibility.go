@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"time"
 
@@ -50,11 +51,11 @@ import (
 var ErrDMNotFound = errors.New("store: direct message conversation not found")
 
 // dmStandingCond holds when principal ?N is a human, enabled, and not a
-// guest (a guest is one exactly while its visit is active, migration 31; a
-// guest who converted to a member stands). It is a format with one verb, the parameter number.
+// guest with an active or ended visit. A guest who converted to a member
+// stands. It is a format with one verb, the parameter number.
 const dmStandingCond = `EXISTS (SELECT 1 FROM principals sp WHERE sp.id = ?%[1]d
 	AND sp.kind = 'human' AND sp.disabled_at IS NULL
-	AND NOT EXISTS (SELECT 1 FROM guest_visits sg WHERE sg.principal_id = sp.id AND sg.state = 'active'))`
+	AND NOT EXISTS (SELECT 1 FROM guest_visits sg WHERE sg.principal_id = sp.id AND sg.state <> 'converted'))`
 
 // dmVisibleCond is the whole rule, over a dm_conversations row aliased c and
 // the viewer as parameter ?1.
@@ -103,14 +104,14 @@ func dmViewTx(ctx context.Context, q execer, viewer, convID int64) (dmRow, error
 	return r, nil
 }
 
-// dmPairTx finds the conversation of two principals in a write's transaction:
-// its id, or 0 when the pair has none. It is a lookup by pair, which only
-// the opener asks, after standing is checked; it hands out nothing but the
-// id, and OpenDM then runs dmViewTx before returning anything.
-func dmPairTx(ctx context.Context, q execer, a, b int64) (int64, error) {
-	lo, hi := min(a, b), max(a, b)
+// dmPairTx finds the conversation of viewer and peer, or returns 0. OpenDM
+// first looks up only a pair the viewer can see. It may reuse an invisible
+// pair after checking contact eligibility, and makes it visible before reading it.
+func dmPairTx(ctx context.Context, q execer, viewer, peer int64, visibleOnly bool) (int64, error) {
+	lo, hi := min(viewer, peer), max(viewer, peer)
 	var id int64
-	err := q.QueryRowContext(ctx, `SELECT id FROM dm_conversations WHERE lo = ? AND hi = ?`, lo, hi).Scan(&id)
+	err := q.QueryRowContext(ctx, `SELECT c.id FROM dm_conversations c WHERE c.lo = ?2 AND c.hi = ?3
+		AND (NOT ?4 OR (`+dmVisibleCond+`))`, viewer, lo, hi, visibleOnly).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
 	}
@@ -134,9 +135,9 @@ func (s *Store) dmReadTx(ctx context.Context, fn func(tx execer) error) error {
 // DMConversation is a conversation as one of its participants sees it. The
 // pair is the same for both; State, LastReadID and Unread are the viewer's.
 type DMConversation struct {
-	ID        int64
-	Lo, Hi    int64
-	PeerID    int64
+	ID     int64
+	Lo, Hi int64
+	PeerID int64
 	// CreatedAt is when the conversation first became visible to the peer:
 	// the time of its first message. It is zero until there is one; an open
 	// never sets it, so it tells nothing about who opened first.
@@ -616,19 +617,44 @@ func (s *Store) DMReadMarkFor(ctx context.Context, viewer, convID int64) (DMRead
 	return out, err
 }
 
-// dmNonceReplayTx finds the message author already sent to convID with this
-// client nonce no earlier than since, and returns its id, or 0 if none. The
-// caller has run dmViewTx.
-func dmNonceReplayTx(ctx context.Context, q execer, convID, author int64, nonce string, since time.Time) (int64, error) {
+// dmNonceReplayTx returns the ID of a matching send, 0 if the nonce is new
+// or expired, or ErrDMNonceConflict if it was used with different inputs.
+// The caller has run dmViewTx. Revision 1 holds the original body after an
+// edit, and attachment rows keep their order even after removal.
+func dmNonceReplayTx(ctx context.Context, q execer, post DMPost, since time.Time) (int64, error) {
 	var id int64
-	err := q.QueryRowContext(ctx, `SELECT id FROM direct_messages
-		WHERE conversation_id = ? AND author_id = ? AND client_nonce = ? AND created_at >= ?
-		ORDER BY id DESC LIMIT 1`, convID, author, nonce, since.UnixMilli()).Scan(&id)
+	var body string
+	err := q.QueryRowContext(ctx, `SELECT m.id, COALESCE(r.body, m.body)
+		FROM direct_messages m LEFT JOIN direct_message_revisions r ON r.message_id = m.id AND r.revision = 1
+		WHERE m.conversation_id = ? AND m.author_id = ? AND m.client_nonce = ? AND m.created_at >= ?
+		ORDER BY m.id DESC LIMIT 1`, post.ConversationID, post.AuthorID, post.ClientNonce, since.UnixMilli()).Scan(&id, &body)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
 	}
 	if err != nil {
-		return 0, fmt.Errorf("store: look up client nonce in conversation %d: %w", convID, err)
+		return 0, fmt.Errorf("store: look up client nonce in conversation %d: %w", post.ConversationID, err)
+	}
+	if body != post.Body {
+		return 0, ErrDMNonceConflict
+	}
+	rows, err := q.QueryContext(ctx, `SELECT id FROM dm_files WHERE message_id = ? ORDER BY position, id`, id)
+	if err != nil {
+		return 0, fmt.Errorf("store: read original attachments of direct message %d: %w", id, err)
+	}
+	defer func() { _ = rows.Close() }()
+	var files []int64
+	for rows.Next() {
+		var fid int64
+		if err := rows.Scan(&fid); err != nil {
+			return 0, fmt.Errorf("store: read original attachments of direct message %d: %w", id, err)
+		}
+		files = append(files, fid)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("store: read original attachments of direct message %d: %w", id, err)
+	}
+	if !slices.Equal(files, post.FileIDs) {
+		return 0, ErrDMNonceConflict
 	}
 	return id, nil
 }

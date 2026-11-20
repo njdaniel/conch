@@ -150,8 +150,8 @@ func TestOpenDMOpposedConcurrentOpensMakeOneConversation(t *testing.T) {
 	const each = 8
 	var wg sync.WaitGroup
 	type res struct {
-		c       DMConversation
-		err     error
+		c   DMConversation
+		err error
 	}
 	results := make(chan res, 2*each)
 	start := make(chan struct{})
@@ -183,6 +183,48 @@ func TestOpenDMOpposedConcurrentOpensMakeOneConversation(t *testing.T) {
 	if err := f.s.db.QueryRow("SELECT COUNT(*) FROM dm_conversations").Scan(&n); err != nil || n != 1 {
 		t.Errorf("%d conversation rows (%v), want 1", n, err)
 	}
+}
+
+func TestOpenDMUnreachablePeerSilentOpen(t *testing.T) {
+	ctx := context.Background()
+	f := newDMFixture(t)
+	silent := f.open(t, f.alice, f.bob)
+	for _, peer := range []Principal{f.alice, f.carol} {
+		if _, err := f.s.DisablePrincipal(ctx, "system", peer.ID); err != nil {
+			t.Fatal(err)
+		}
+		got, err := f.s.OpenDM(ctx, f.bob.ID, peer.ID, f.tick())
+		if !errors.Is(err, ErrDMContactUnavailable) || got != (DMConversation{}) {
+			t.Errorf("open with %s = %+v, %v; want contact unavailable", peer.Name, got, err)
+		}
+	}
+	if _, err := f.s.DMConversationFor(ctx, f.bob.ID, silent.ID); !errors.Is(err, ErrDMNotFound) {
+		t.Errorf("refused open gave the caller visibility: %v", err)
+	}
+}
+
+func TestOpenDMGuestVisitStanding(t *testing.T) {
+	ctx := context.Background()
+	f := newDMFixture(t)
+	for _, guest := range []Principal{f.bob, f.carol} {
+		if _, err := f.s.db.Exec(`INSERT INTO guest_visits (principal_id, handle, origin, state, started_at, expires_at, idle_ms)
+			VALUES (?, ?, 'address', 'active', 1, 2, 1000)`, guest.ID, guest.Name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := f.s.EndGuestVisit(ctx, "system", f.bob.ID, schema.GuestEndOperator); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := f.s.OpenDM(ctx, f.alice.ID, f.bob.ID, f.tick()); !errors.Is(err, ErrPrincipalNotFound) || got != (DMConversation{}) {
+		t.Errorf("open to former guest = %+v, %v; want principal not found", got, err)
+	}
+	if _, err := f.s.OpenDM(ctx, f.bob.ID, f.alice.ID, f.tick()); !errors.Is(err, ErrDMNoStanding) {
+		t.Errorf("open by former guest = %v; want no standing", err)
+	}
+	if _, err := f.s.db.Exec(`UPDATE guest_visits SET state = 'converted', converted_at = 2 WHERE principal_id = ?`, f.carol.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.openPair(t, f.alice, f.carol)
 }
 
 func TestOpenDMRollbackThenRetry(t *testing.T) {
@@ -231,17 +273,21 @@ func TestDMTablesRefuseWhatTheRulesForbid(t *testing.T) {
 		sql  string
 		args []any
 	}{
-		{"a conversation with oneself", `INSERT INTO dm_conversations (lo, hi, created_at) VALUES (?, ?, 1)`, []any{a, a}},
-		{"an unsorted pair", `INSERT INTO dm_conversations (lo, hi, created_at) VALUES (?, ?, 1)`, []any{b, a}},
-		{"an agent in a pair", `INSERT INTO dm_conversations (lo, hi, created_at) VALUES (?, ?, 1)`, []any{a, f.agent.ID}},
-		{"a missing principal", `INSERT INTO dm_conversations (lo, hi, created_at) VALUES (?, ?, 1)`, []any{a, 9999}},
+		{"a conversation with oneself", `INSERT INTO dm_conversations (id, lo, hi, created_at) VALUES (1, ?, ?, 1)`, []any{a, a}},
+		{"an unsorted pair", `INSERT INTO dm_conversations (id, lo, hi, created_at) VALUES (1, ?, ?, 1)`, []any{b, a}},
+		{"an agent in a pair", `INSERT INTO dm_conversations (id, lo, hi, created_at) VALUES (1, ?, ?, 1)`, []any{a, f.agent.ID}},
+		{"a missing principal", `INSERT INTO dm_conversations (id, lo, hi, created_at) VALUES (1, ?, ?, 1)`, []any{a, 9999}},
+		{"an implicit id", `INSERT INTO dm_conversations (lo, hi, created_at) VALUES (?, ?, 1)`, []any{a, b}},
+		{"a zero id", `INSERT INTO dm_conversations (id, lo, hi, created_at) VALUES (0, ?, ?, 1)`, []any{a, b}},
+		{"a fractional id", `INSERT INTO dm_conversations (id, lo, hi, created_at) VALUES (1.5, ?, ?, 1)`, []any{a, b}},
+		{"an unsafe id", `INSERT INTO dm_conversations (id, lo, hi, created_at) VALUES (?, ?, ?, 1)`, []any{dmMaxConversationID + 1, a, b}},
 	} {
 		if err := exec(c.sql, c.args...); err == nil {
 			t.Errorf("%s: the insert succeeded", c.name)
 		}
 	}
 	conv := f.openPair(t, f.alice, f.bob)
-	if err := exec(`INSERT INTO dm_conversations (lo, hi, created_at) VALUES (?, ?, 1)`, a, b); err == nil {
+	if err := exec(`INSERT INTO dm_conversations (id, lo, hi, created_at) VALUES (?, ?, ?, 1)`, conv.ID%dmMaxConversationID+1, a, b); err == nil {
 		t.Error("a second row for one pair was accepted")
 	}
 	msg := f.send(t, conv, f.alice, "hello")
@@ -289,9 +335,13 @@ func TestDMIDSpacesAreSeparate(t *testing.T) {
 	if m1.ID == m2.ID {
 		t.Fatalf("two messages share id %d", m1.ID)
 	}
-	// The DM ids count from their own tables, not after the channel's.
-	if m1.ID != 1 || ab.ID != 1 {
-		t.Errorf("first conversation %d and message %d, want 1 and 1: own id spaces", ab.ID, m1.ID)
+	if m1.ID != 1 {
+		t.Errorf("first DM message id = %d, want 1 despite existing channel messages", m1.ID)
+	}
+	for _, c := range []DMConversation{ab, ac} {
+		if c.ID <= 0 || c.ID > dmMaxConversationID {
+			t.Errorf("conversation ID %d is outside the positive JavaScript-safe range", c.ID)
+		}
 	}
 	var n int
 	if err := f.s.db.QueryRow("SELECT COUNT(*) FROM messages").Scan(&n); err != nil || n != 3 {
@@ -499,6 +549,63 @@ func TestInsertDMMessageReplayWindow(t *testing.T) {
 			t.Errorf("%s: returned the first send", c.name)
 		}
 	}
+}
+
+func TestDMNonceConflictsUseOriginalSend(t *testing.T) {
+	ctx := context.Background()
+	f := newDMFixture(t)
+	conv := f.open(t, f.alice, f.bob)
+	post := DMPost{ConversationID: conv.ID, AuthorID: f.alice.ID, Body: "original", ClientNonce: "retry"}
+	for _, name := range []string{"a.png", "b.png"} {
+		file, err := f.s.AddDMFile(ctx, NewDMFile{ConversationID: conv.ID, UploaderID: f.alice.ID,
+			Filename: name, MediaType: "image/png", Size: 3, SHA256: fmt.Sprintf("%064d", 7)}, f.tick())
+		if err != nil {
+			t.Fatal(err)
+		}
+		post.FileIDs = append(post.FileIDs, file.ID)
+	}
+	first, replayed, err := f.s.InsertDMMessage(ctx, post, f.tick())
+	if err != nil || replayed {
+		t.Fatalf("first send = %+v, replayed %v, %v", first, replayed, err)
+	}
+	check := func(t *testing.T, current DMMessage) {
+		t.Helper()
+		for _, tc := range []struct {
+			name string
+			body string
+			ids  []int64
+		}{
+			{"different body", "edited", post.FileIDs},
+			{"files reordered", post.Body, []int64{post.FileIDs[1], post.FileIDs[0]}},
+			{"files omitted", post.Body, nil},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				changed := post
+				changed.Body, changed.FileIDs = tc.body, tc.ids
+				if got, replayed, err := f.s.InsertDMMessage(ctx, changed, f.tick()); !errors.Is(err, ErrDMNonceConflict) || replayed || got.ID != 0 {
+					t.Errorf("different send = %+v, replayed %v, %v; want nonce conflict", got, replayed, err)
+				}
+			})
+		}
+		got, replayed, err := f.s.InsertDMMessage(ctx, post, f.tick())
+		if err != nil || !replayed || !reflect.DeepEqual(got, current) {
+			t.Errorf("identical retry = %+v, replayed %v, %v; want %+v", got, replayed, err, current)
+		}
+		if c, err := f.s.DMConversationFor(ctx, f.alice.ID, conv.ID); err != nil || c.LastMessageID != first.ID || c.Revision != current.Revision {
+			t.Errorf("after retries: %+v, %v; want no new messages or revisions", c, err)
+		}
+	}
+	t.Run("posted", func(t *testing.T) { check(t, first) })
+	edit, err := f.s.EditDMMessage(ctx, f.alice.ID, conv.ID, first.ID, "edited", f.tick)
+	if err != nil || !edit.Changed {
+		t.Fatalf("edit = %+v, %v", edit, err)
+	}
+	t.Run("edited", func(t *testing.T) { check(t, edit.Message) })
+	removal, err := f.s.RemoveDMMessage(ctx, f.alice.ID, conv.ID, first.ID, f.tick())
+	if err != nil || !removal.Changed {
+		t.Fatalf("remove = %+v, %v", removal, err)
+	}
+	t.Run("removed", func(t *testing.T) { check(t, removal.Message) })
 }
 
 func TestDMFilesAttachRules(t *testing.T) {
@@ -794,6 +901,9 @@ func TestDMViewerStateIsPerViewer(t *testing.T) {
 	// Bob archives: his list changes, alice's does not.
 	if c, err := f.s.SetDMState(ctx, f.bob.ID, conv.ID, schema.DMStateArchived, f.tick()); err != nil || c.State != schema.DMStateArchived {
 		t.Fatalf("archive = %+v, %v", c, err)
+	}
+	if c, err := f.s.OpenDM(ctx, f.bob.ID, f.alice.ID, f.tick()); err != nil || c.State != schema.DMStateArchived {
+		t.Errorf("open while archived = %+v, %v", c, err)
 	}
 	if inList(f.bob, schema.DMStateOpen) || !inList(f.bob, schema.DMStateArchived) || !inList(f.alice, schema.DMStateOpen) {
 		t.Error("archiving leaked across viewers or missed the archive list")

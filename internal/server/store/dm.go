@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"strings"
@@ -43,14 +45,16 @@ var (
 	// space (strings.TrimSpace). It is checked after the conversation is
 	// shown to the author and before contact, the order of schema's header.
 	ErrDMEmptyBody = errors.New("store: a direct message body is empty or only white space")
+	// ErrDMNonceConflict is a retry within the nonce window with different send inputs.
+	ErrDMNonceConflict = errors.New("store: direct message client nonce already used for a different message")
 )
 
 // dmAct is what dmContactTx is asked about.
 type dmAct int
 
 const (
-	// dmActOpen creates a conversation that does not exist yet. Resuming one
-	// that exists needs no contact: reading history is for its participants.
+	// dmActOpen introduces a conversation to the caller. Resuming one already
+	// visible to the caller needs no contact.
 	dmActOpen dmAct = iota
 	// dmActSend is a send or an edit.
 	dmActSend
@@ -58,9 +62,8 @@ const (
 
 // dmContactTx is the single seam of eligibility: whether from may contact to
 // now, for a new conversation or a write. It is called inside the write's
-// transaction, after from has been shown to stand and after the conversation
-// (if any) has been shown visible to from, so a refusal here leaks nothing
-// the caller did not already know.
+// transaction, after from has been shown to stand. An open applies this check
+// to every pair the caller cannot already see, including a peer's silent open.
 //
 // Today it checks the one thing the tables decide: to is a human, is enabled
 // and is not a guest. Blocks (#1832), the recipient's contact preference, the
@@ -83,24 +86,19 @@ func dmContactTx(ctx context.Context, tx execer, from, to int64, act dmAct) erro
 }
 
 // OpenDM opens or resumes the conversation between caller and peer and
-// returns it as caller sees it; created is true when this call made it. One
-// IMMEDIATE transaction, so two opens of one pair, from either side, make one
-// conversation and return one id, and a failure leaves nothing behind.
+// returns the caller's view. An IMMEDIATE transaction ensures simultaneous
+// opens of the same pair return one id and a failed open leaves no changes.
 //
 // The checks, in order, each refusal storing nothing:
 //
 //  1. caller stands (ErrDMNoStanding);
-//  2. peer is not caller (ErrDMSelf), exists (ErrPrincipalNotFound) and is a
-//     human (ErrDMNotHuman);
-//  3. a pair that has no conversation yet needs dmContactTx
-//     (ErrDMContactUnavailable). A pair that has one is resumed whatever the
-//     peer's state: history stays readable.
+//  2. peer is not caller (ErrDMSelf), exists and has not ended a guest visit
+//     (ErrPrincipalNotFound), and is a human (ErrDMNotHuman);
+//  3. an open of a conversation the caller cannot already see needs
+//     dmContactTx (ErrDMContactUnavailable).
 //
-// It records that caller has opened the conversation, and clears an archive
-// or hide of caller's. It creates nothing the peer can see: the peer's view
-// of the conversation exists only once it has a message (dm_visibility.go),
-// and opening writes no message, no audit row and nothing the peer's reads
-// look at.
+// Opening records the caller's view, reopens it if hidden, and preserves an
+// archive. The peer's visibility stays governed by dmVisibleCond.
 func (s *Store) OpenDM(ctx context.Context, caller, peer int64, now time.Time) (conv DMConversation, err error) {
 	err = s.withImmediateTx(ctx, func(tx execer) error {
 		var err error
@@ -123,7 +121,8 @@ func openDMTx(ctx context.Context, tx execer, caller, peer int64, now time.Time)
 		return DMConversation{}, ErrDMSelf
 	}
 	var kind string
-	switch err := tx.QueryRowContext(ctx, "SELECT kind FROM principals WHERE id = ?", peer).Scan(&kind); {
+	switch err := tx.QueryRowContext(ctx, `SELECT p.kind FROM principals p WHERE p.id = ?
+		AND NOT EXISTS (SELECT 1 FROM guest_visits v WHERE v.principal_id = p.id AND v.state = 'ended')`, peer).Scan(&kind); {
 	case errors.Is(err, sql.ErrNoRows):
 		return DMConversation{}, ErrPrincipalNotFound
 	case err != nil:
@@ -132,7 +131,7 @@ func openDMTx(ctx context.Context, tx execer, caller, peer int64, now time.Time)
 	if PrincipalKind(kind) != PrincipalHuman {
 		return DMConversation{}, ErrDMNotHuman
 	}
-	id, err := dmPairTx(ctx, tx, caller, peer)
+	id, err := dmPairTx(ctx, tx, caller, peer, true)
 	if err != nil {
 		return DMConversation{}, err
 	}
@@ -140,30 +139,55 @@ func openDMTx(ctx context.Context, tx execer, caller, peer int64, now time.Time)
 		if err := dmContactTx(ctx, tx, caller, peer, dmActOpen); err != nil {
 			return DMConversation{}, err
 		}
-		// The write lock is held, so no one else inserts this pair between
-		// the lookup and here; DO NOTHING and a second lookup would still
-		// make a lost race harmless, and UNIQUE (lo, hi) makes a second
-		// conversation impossible.
-		if _, err := tx.ExecContext(ctx,
-			"INSERT INTO dm_conversations (lo, hi, created_at) VALUES (?, ?, ?) ON CONFLICT (lo, hi) DO NOTHING",
-			min(caller, peer), max(caller, peer), now.UnixMilli()); err != nil {
-			return DMConversation{}, fmt.Errorf("store: open conversation of %d and %d: %w", caller, peer, err)
-		}
-		if id, err = dmPairTx(ctx, tx, caller, peer); err != nil {
+		// Consult a prior silent open only after the caller passes contact checks.
+		if id, err = dmPairTx(ctx, tx, caller, peer, false); err != nil {
 			return DMConversation{}, err
 		}
 		if id == 0 {
-			return DMConversation{}, fmt.Errorf("store: open conversation of %d and %d: no row after insert", caller, peer)
+			id, err = insertDMPairTx(ctx, tx, caller, peer, now)
+			if err != nil {
+				return DMConversation{}, err
+			}
 		}
 	}
-	if err := setDMStateTx(ctx, tx, caller, id, schema.DMStateOpen, now); err != nil {
-		return DMConversation{}, err
+	if _, err := tx.ExecContext(ctx, `INSERT INTO dm_viewer_state (principal_id, conversation_id, state, updated_at)
+		VALUES (?, ?, 'open', ?)
+		ON CONFLICT (principal_id, conversation_id) DO UPDATE SET state = 'open', updated_at = excluded.updated_at
+		WHERE dm_viewer_state.state = 'hidden'`, caller, id, now.UnixMilli()); err != nil {
+		return DMConversation{}, fmt.Errorf("store: open conversation %d for principal %d: %w", id, caller, err)
 	}
-	conv, err := dmConversationTx(ctx, tx, caller, id)
-	if err != nil {
-		return DMConversation{}, err
+	return dmConversationTx(ctx, tx, caller, id)
+}
+
+// dmMaxConversationID is the largest integer JavaScript represents exactly
+// across the entire positive ID range.
+const dmMaxConversationID int64 = 1<<53 - 1
+
+// insertDMPairTx assigns an ID independent of when the pair was opened.
+// The write lock protects pair uniqueness between lookup and insert. An ID
+// collision with any other pair is retried without handing out that ID.
+func insertDMPairTx(ctx context.Context, tx execer, a, b int64, now time.Time) (int64, error) {
+	lo, hi := min(a, b), max(a, b)
+	for {
+		var buf [8]byte
+		if _, err := rand.Read(buf[:]); err != nil {
+			return 0, fmt.Errorf("store: generate conversation id: %w", err)
+		}
+		id := int64(binary.LittleEndian.Uint64(buf[:]) & uint64(dmMaxConversationID))
+		if id == 0 {
+			continue
+		}
+		res, err := tx.ExecContext(ctx, `INSERT INTO dm_conversations (id, lo, hi, created_at)
+			VALUES (?, ?, ?, ?) ON CONFLICT (id) DO NOTHING`, id, lo, hi, now.UnixMilli())
+		if err != nil {
+			return 0, fmt.Errorf("store: insert conversation of %d and %d: %w", lo, hi, err)
+		}
+		if n, err := res.RowsAffected(); err != nil {
+			return 0, fmt.Errorf("store: insert conversation of %d and %d: %w", lo, hi, err)
+		} else if n == 1 {
+			return id, nil
+		}
 	}
-	return conv, nil
 }
 
 // setDMStateTx stores viewer's own state of convID. Only a participant may
@@ -222,12 +246,13 @@ type DMPost struct {
 // earlier send instead. One IMMEDIATE transaction, the checks in order, each
 // refusal storing nothing:
 //
-//  1. the author may see the conversation (ErrDMNotFound);
-//  1a. the body is not empty or only white space (ErrDMEmptyBody);
+//  1. the author may see the conversation (ErrDMNotFound) and the body is
+//     not empty or only white space (ErrDMEmptyBody);
 //  2. the author may contact the peer now (dmContactTx, ErrDMContactUnavailable);
 //  3. an earlier message of this author in this conversation carries the same
-//     nonce, within schema.DMClientNonceWindowSeconds: that message is
-//     returned, nothing is written (replayed);
+//     nonce, within schema.DMClientNonceWindowSeconds: identical inputs
+//     return that message as it now reads (replayed); different inputs
+//     return ErrDMNonceConflict. Neither path writes anything;
 //  4. every file is the author's to attach (ErrDMFileNotAttachable);
 //  5. the message row, its files' attachment, and, for each participant whose
 //     conversation is hidden, the reopening: a message opens a hidden
@@ -247,7 +272,7 @@ func (s *Store) InsertDMMessage(ctx context.Context, post DMPost, now time.Time)
 			return err
 		}
 		since := now.Add(-schema.DMClientNonceWindowSeconds * time.Second)
-		prior, err := dmNonceReplayTx(ctx, tx, post.ConversationID, post.AuthorID, post.ClientNonce, since)
+		prior, err := dmNonceReplayTx(ctx, tx, post, since)
 		if err != nil {
 			return err
 		}

@@ -10,9 +10,10 @@ package store
 // dm_conversations is the ordered pair, stored once: lo < hi, UNIQUE, both
 // human principals (the insert trigger, since a CHECK cannot read another
 // table). Nothing in a row ever changes, and a row is never deleted, so a
-// conversation can not gain a member or lose its id. The DM id space is
-// its own: dm_conversations, direct_messages and dm_files each number
-// themselves, apart from channels, messages and files.
+// conversation can not gain a member or lose its id. Its id is explicitly
+// assigned at random so it carries no information about who opened first.
+// Conversations, direct messages and DM files each have their own id space,
+// apart from channels, messages and files.
 //
 // dm_viewer_state is one participant's own view: the archive/hide state
 // (absent = open) and, by being there, that the participant has opened the
@@ -34,8 +35,9 @@ var dmMigration = []string{
 	hi         INTEGER NOT NULL REFERENCES principals (id),
 	created_at INTEGER NOT NULL,
 	CHECK (lo < hi),
+	CHECK (typeof(id) = 'integer' AND id BETWEEN 1 AND 9007199254740991),
 	UNIQUE (lo, hi)
-)`,
+) WITHOUT ROWID`,
 	`CREATE INDEX dm_conversations_by_hi ON dm_conversations (hi, lo)`,
 	`CREATE TRIGGER dm_conversations_humans BEFORE INSERT ON dm_conversations
 WHEN (SELECT COUNT(*) FROM principals WHERE id IN (NEW.lo, NEW.hi) AND kind = 'human') <> 2

@@ -72,7 +72,7 @@ func TestOnlyDMVisibilityGoReadsDMRows(t *testing.T) {
 	src := string(data)
 	for _, reader := range []string{
 		"DMConversationFor", "ListDMConversations", "DMMessageFor", "ListDMMessagesPage",
-		"SearchDMMessages", "DMReadMarkFor", "DMFileVisibleTo",
+		"ListDMChanges", "SearchDMMessages", "DMReadMarkFor", "DMFileVisibleTo",
 	} {
 		i := strings.Index(src, "func (s *Store) "+reader+"(")
 		if i < 0 {
@@ -112,7 +112,7 @@ func TestDMRowReadPattern(t *testing.T) {
 		{"UPDATE dm_files SET message_id = ? WHERE id = ? RETURNING filename", true},
 		{"INSERT INTO direct_messages (body) VALUES (?)", false},
 		{"UPDATE dm_files SET message_id = ? WHERE id = ?", false},
-		{"INSERT INTO dm_conversations (lo, hi) VALUES (?, ?) ON CONFLICT (lo, hi) DO NOTHING", false},
+		{"INSERT INTO dm_conversations (id, lo, hi) VALUES (?, ?, ?) ON CONFLICT (id) DO NOTHING", false},
 		{"CREATE TABLE dm_files (", false},
 		{"conversation_id INTEGER NOT NULL REFERENCES dm_conversations (id)", false},
 		{"CREATE INDEX direct_messages_by_conversation ON direct_messages (conversation_id, id)", false},
