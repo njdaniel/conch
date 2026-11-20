@@ -62,9 +62,16 @@ BEGIN SELECT RAISE(ABORT, 'only a participant has a view of a conversation'); EN
 	created_at       INTEGER NOT NULL,
 	edited_at        INTEGER,
 	client_nonce     TEXT    NOT NULL,
+	revision         INTEGER NOT NULL CHECK (revision >= 1),
 	fts_conversation TEXT GENERATED ALWAYS AS ('d' || conversation_id) VIRTUAL
 )`,
 	`CREATE INDEX direct_messages_by_conversation ON direct_messages (conversation_id, id)`,
+	// The conversation's revision (schema.DMConversationV1.Revision) is
+	// stored with the changes themselves: each message, edit and removal
+	// takes the next number, so a message's revision is that of its latest
+	// change and the conversation's is the largest of its messages'. UNIQUE
+	// makes a number go to one message only, so two changes never share one.
+	`CREATE UNIQUE INDEX direct_messages_by_revision ON direct_messages (conversation_id, revision)`,
 	`CREATE INDEX direct_messages_by_nonce ON direct_messages (conversation_id, author_id, client_nonce)`,
 	`CREATE TRIGGER direct_messages_author BEFORE INSERT ON direct_messages
 WHEN NOT EXISTS (SELECT 1 FROM dm_conversations WHERE id = NEW.conversation_id AND NEW.author_id IN (lo, hi))
@@ -74,8 +81,9 @@ BEGIN SELECT RAISE(ABORT, 'only a participant writes in a conversation'); END`,
 WHEN NEW.id IS NOT OLD.id OR NEW.conversation_id IS NOT OLD.conversation_id
   OR NEW.author_id IS NOT OLD.author_id OR NEW.created_at IS NOT OLD.created_at
   OR NEW.client_nonce IS NOT OLD.client_nonce
+  OR NEW.revision <= OLD.revision
   OR EXISTS (SELECT 1 FROM direct_message_removals WHERE message_id = OLD.id)
-BEGIN SELECT RAISE(ABORT, 'only the body and edited_at of a message that stands may change'); END`,
+BEGIN SELECT RAISE(ABORT, 'only the body, edited_at and revision of a message that stands may change, the revision only forward'); END`,
 	`CREATE TRIGGER direct_messages_edited_at_forward BEFORE UPDATE OF edited_at ON direct_messages
 WHEN NEW.edited_at IS NULL OR NEW.edited_at <= COALESCE(OLD.edited_at, OLD.created_at)
 BEGIN SELECT RAISE(ABORT, 'edited_at must move forward'); END`,

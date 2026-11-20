@@ -96,7 +96,7 @@ func dmSnapshot(t *testing.T, s *Store, viewers ...Principal) map[int64][]DMMess
 	ctx := context.Background()
 	out := map[int64][]DMMessage{}
 	for _, v := range viewers {
-		convs, err := s.ListDMConversations(ctx, v.ID, schema.DMStateOpen, 0, 50)
+		convs, err := s.ListDMConversations(ctx, v.ID, schema.DMStateOpen, DMListCursor{}, 50)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -210,14 +210,14 @@ func TestDMMigrationUpgradeReopenAndRestore(t *testing.T) {
 	// The upgraded database holds DMs, and they do not touch the channel.
 	step := now
 	tick := func() time.Time { step = step.Add(time.Second); return step }
-	ab, _, err := s.OpenDM(ctx, alice.ID, bob.ID, tick())
+	ab, err := s.OpenDM(ctx, alice.ID, bob.ID, tick())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.OpenDM(ctx, bob.ID, alice.ID, tick()); err != nil {
+	if _, err := s.OpenDM(ctx, bob.ID, alice.ID, tick()); err != nil {
 		t.Fatal(err)
 	}
-	cd, _, err := s.OpenDM(ctx, carol.ID, dave.ID, tick())
+	cd, err := s.OpenDM(ctx, carol.ID, dave.ID, tick())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,8 +259,8 @@ func TestDMMigrationUpgradeReopenAndRestore(t *testing.T) {
 		t.Errorf("after a reopen:\n got %v\nwant %v", got, want)
 	}
 	// The same pair opened again is the same conversation.
-	if c, created, err := again.OpenDM(ctx, bob.ID, alice.ID, tick()); err != nil || created || c.ID != ab.ID {
-		t.Errorf("reopen then open = %+v, created %v, %v; want conversation %d", c, created, err, ab.ID)
+	if c, err := again.OpenDM(ctx, bob.ID, alice.ID, tick()); err != nil || c.ID != ab.ID {
+		t.Errorf("reopen then open = %+v, %v; want conversation %d", c, err, ab.ID)
 	}
 	if err := again.Close(); err != nil {
 		t.Fatal(err)
@@ -277,8 +277,8 @@ func TestDMMigrationUpgradeReopenAndRestore(t *testing.T) {
 	if got := dmSnapshot(t, rs, alice, bob, carol, dave); !reflect.DeepEqual(got, want) {
 		t.Errorf("restored copy:\n got %v\nwant %v", got, want)
 	}
-	if c, created, err := rs.OpenDM(ctx, dave.ID, carol.ID, tick()); err != nil || created || c.ID != cd.ID {
-		t.Errorf("restored copy opens = %+v, created %v, %v; want the same pair and id %d", c, created, err, cd.ID)
+	if c, err := rs.OpenDM(ctx, dave.ID, carol.ID, tick()); err != nil || c.ID != cd.ID {
+		t.Errorf("restored copy opens = %+v, %v; want the same pair and id %d", c, err, cd.ID)
 	}
 	var pairs int
 	if err := rs.db.QueryRow("SELECT COUNT(*) FROM dm_conversations").Scan(&pairs); err != nil || pairs != 2 {

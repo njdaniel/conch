@@ -137,7 +137,14 @@ type DMConversation struct {
 	ID        int64
 	Lo, Hi    int64
 	PeerID    int64
+	// CreatedAt is when the conversation first became visible to the peer:
+	// the time of its first message. It is zero until there is one; an open
+	// never sets it, so it tells nothing about who opened first.
 	CreatedAt time.Time
+	// Revision is the conversation's change counter: 0 until the first
+	// message, then the number of messages, edits and removals so far (the
+	// revision of the latest one).
+	Revision int64
 	// State is the viewer's own archive/hide state; open when never set.
 	State schema.DMState
 	// LastMessageID is the newest message's id, 0 when there is none, and
@@ -151,9 +158,11 @@ type DMConversation struct {
 
 // dmSelectConversation reads one conversation's per-viewer columns; ?1 is the
 // viewer and ?2 the conversation.
-const dmSelectConversation = `SELECT c.id, c.lo, c.hi, c.created_at, COALESCE(vs.state, 'open'),
-	COALESCE(lm.id, 0), COALESCE(lm.created_at, 0), COALESCE(rm.last_read_id, 0)
+const dmSelectConversation = `SELECT c.id, c.lo, c.hi, COALESCE(fm.created_at, 0), COALESCE(vs.state, 'open'),
+	COALESCE(lm.id, 0), COALESCE(lm.created_at, 0), COALESCE(rm.last_read_id, 0),
+	COALESCE((SELECT MAX(revision) FROM direct_messages WHERE conversation_id = c.id), 0)
 	FROM dm_conversations c
+	LEFT JOIN direct_messages fm ON fm.id = (SELECT MIN(id) FROM direct_messages WHERE conversation_id = c.id)
 	LEFT JOIN direct_messages lm ON lm.id = (SELECT MAX(id) FROM direct_messages WHERE conversation_id = c.id)
 	LEFT JOIN dm_viewer_state vs ON vs.conversation_id = c.id AND vs.principal_id = ?1
 	LEFT JOIN dm_read_marks rm ON rm.conversation_id = c.id AND rm.principal_id = ?1`
@@ -162,10 +171,12 @@ func scanDMConversation(row interface{ Scan(...any) error }, viewer int64) (DMCo
 	var c DMConversation
 	var created, lastAt int64
 	var state string
-	if err := row.Scan(&c.ID, &c.Lo, &c.Hi, &created, &state, &c.LastMessageID, &lastAt, &c.LastReadID); err != nil {
+	if err := row.Scan(&c.ID, &c.Lo, &c.Hi, &created, &state, &c.LastMessageID, &lastAt, &c.LastReadID, &c.Revision); err != nil {
 		return DMConversation{}, err
 	}
-	c.CreatedAt = time.UnixMilli(created)
+	if c.Revision > 0 {
+		c.CreatedAt = time.UnixMilli(created)
+	}
 	c.State = schema.DMState(state)
 	if c.LastMessageID > 0 {
 		c.LastMessageAt = time.UnixMilli(lastAt)
@@ -219,30 +230,54 @@ func (s *Store) DMConversationFor(ctx context.Context, viewer, convID int64) (DM
 	return out, err
 }
 
+// DMListCursor is where the next page of ListDMConversations starts: the
+// sort key of the last conversation of the previous one. The zero value
+// starts from the top. The server wraps it in an opaque cursor; it is never
+// read by a client.
+type DMListCursor struct {
+	// Empty is true once the page has passed into the conversations with no
+	// message, which come after every one that has a message.
+	Empty bool
+	// At is the last conversation's last_message_at in milliseconds (unused
+	// when Empty) and ID its id.
+	At, ID int64
+}
+
+// IsZero reports whether c starts from the top.
+func (c DMListCursor) IsZero() bool { return c == DMListCursor{} }
+
 // ListDMConversations returns up to limit of viewer's conversations in state
-// (open or archived: a hidden conversation is in no list), newest message
-// first, with last message id below before (0 starts from the newest). Only
-// conversations with at least one message are listed: an opened pair nobody
-// has written in is not an inbox entry, for the opener either. A viewer who
-// does not stand gets none.
-func (s *Store) ListDMConversations(ctx context.Context, viewer int64, state schema.DMState, before int64, limit int) ([]DMConversation, error) {
+// (open or archived: a hidden conversation is in no list) after cursor, in
+// the order of schema.ListDMConversationsResponseV1: last_message_at
+// descending (ties by id descending), then those with no message, by id
+// descending. A conversation with no message is listed only for a viewer who
+// opened it (the visibility rule); the other participant has none until the
+// first message. A viewer who does not stand gets none.
+func (s *Store) ListDMConversations(ctx context.Context, viewer int64, state schema.DMState, cursor DMListCursor, limit int) ([]DMConversation, error) {
 	if limit <= 0 {
 		return nil, fmt.Errorf("store: list conversations: limit must be positive, got %d", limit)
 	}
 	if state != schema.DMStateOpen && state != schema.DMStateArchived {
 		return nil, errors.New("store: list conversations: only the open and archived lists exist")
 	}
-	if before < 0 {
-		return nil, errors.New("store: list conversations: a cursor is never negative")
+	if cursor.ID < 0 || cursor.At < 0 || (cursor.Empty && cursor.At != 0) {
+		return nil, errors.New("store: list conversations: a bad cursor")
 	}
-	if before == 0 {
-		before = math.MaxInt64
+	// ?3 is the cursor's group (0 has messages, 1 none), ?4 its time, ?5 its
+	// id: the sort key is (no message, last_message_at DESC, id DESC).
+	group := 0
+	if cursor.Empty {
+		group = 1
 	}
 	var out []DMConversation
 	err := s.dmReadTx(ctx, func(tx execer) error {
-		rows, err := tx.QueryContext(ctx, dmSelectConversation+` WHERE `+dmVisibleCond+`
-			AND lm.id IS NOT NULL AND COALESCE(vs.state, 'open') = ?2 AND lm.id < ?3
-			ORDER BY lm.id DESC LIMIT ?4`, viewer, string(state), before, limit)
+		rows, err := tx.QueryContext(ctx, dmSelectConversation+` WHERE `+dmVisibleCond+` AND COALESCE(vs.state, 'open') = ?2
+			AND (?3 = 0 AND ?4 = 0 AND ?5 = 0
+			  OR (lm.id IS NULL) > ?3
+			  OR (lm.id IS NULL) = ?3 AND (?3 = 1 AND c.id < ?5
+			       OR ?3 = 0 AND (lm.created_at < ?4 OR lm.created_at = ?4 AND c.id < ?5)))
+			ORDER BY lm.id IS NULL, lm.created_at DESC, c.id DESC LIMIT ?6`,
+			viewer, string(state), group, cursor.At, cursor.ID, limit)
 		if err != nil {
 			return fmt.Errorf("store: list conversations of %d: %w", viewer, err)
 		}
@@ -270,6 +305,14 @@ func (s *Store) ListDMConversations(ctx context.Context, viewer int64, state sch
 	return out, err
 }
 
+// CursorAfter is the cursor that continues a list after c.
+func (c DMConversation) CursorAfter() DMListCursor {
+	if c.LastMessageID == 0 {
+		return DMListCursor{Empty: true, ID: c.ID}
+	}
+	return DMListCursor{At: c.LastMessageAt.UnixMilli(), ID: c.ID}
+}
+
 // DMMessage is one message of a conversation as its viewer reads it: a
 // removed one is the tombstone, with the author's removal body, no files and
 // no edit time.
@@ -286,6 +329,9 @@ type DMMessage struct {
 	// ClientNonce is the nonce the author sent it with, set only on the
 	// author's own copies: the peer's never carry it.
 	ClientNonce string
+	// Revision is the conversation's revision at this copy's latest change:
+	// its send, its latest edit or its removal.
+	Revision int64
 }
 
 // dmMessageColumns selects what a DMMessage is made of from direct_messages m
@@ -294,7 +340,7 @@ type DMMessage struct {
 const dmMessageColumns = `m.id, m.conversation_id, m.author_id,
 	CASE WHEN r.message_id IS NULL THEN m.body ELSE '' END, m.created_at,
 	CASE WHEN r.message_id IS NULL THEN m.edited_at END,
-	r.message_id IS NOT NULL, m.client_nonce`
+	r.message_id IS NOT NULL, m.client_nonce, m.revision`
 
 const dmMessageFrom = ` FROM direct_messages m LEFT JOIN direct_message_removals r ON r.message_id = m.id`
 
@@ -308,7 +354,7 @@ func scanDMMessagesTx(ctx context.Context, q execer, rows *sql.Rows, viewer int6
 		var m DMMessage
 		var created int64
 		var edited sql.NullInt64
-		if err := rows.Scan(&m.ID, &m.ConversationID, &m.AuthorID, &m.Body, &created, &edited, &m.Removed, &m.ClientNonce); err != nil {
+		if err := rows.Scan(&m.ID, &m.ConversationID, &m.AuthorID, &m.Body, &created, &edited, &m.Removed, &m.ClientNonce, &m.Revision); err != nil {
 			return nil, err
 		}
 		m.CreatedAt = time.UnixMilli(created)
@@ -429,6 +475,49 @@ func (s *Store) ListDMMessagesPage(ctx context.Context, viewer, convID int64, pa
 		return nil
 	})
 	return out, err
+}
+
+// ListDMChanges returns up to limit messages of conversation convID whose
+// revision is above after, each once as it is now (its send, its latest edit
+// or its tombstone), ascending by revision, as viewer reads them;
+// ErrDMNotFound when viewer may not see the conversation. It is a read, so it
+// asks for visibility and nothing about contact: a block or a switch does not
+// refuse it. Removed messages are in it, as tombstones.
+func (s *Store) ListDMChanges(ctx context.Context, viewer, convID, after int64, limit int) ([]DMMessage, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("store: list changes: limit must be positive, got %d", limit)
+	}
+	if after < 0 {
+		return nil, errors.New("store: list changes: a revision is never negative")
+	}
+	var out []DMMessage
+	err := s.dmReadTx(ctx, func(tx execer) error {
+		if _, err := dmViewTx(ctx, tx, viewer, convID); err != nil {
+			return err
+		}
+		rows, err := tx.QueryContext(ctx, `SELECT `+dmMessageColumns+dmMessageFrom+
+			` WHERE m.conversation_id = ? AND m.revision > ? ORDER BY m.revision ASC LIMIT ?`,
+			convID, after, limit)
+		if err != nil {
+			return fmt.Errorf("store: list changes of conversation %d: %w", convID, err)
+		}
+		if out, err = scanDMMessagesTx(ctx, tx, rows, viewer); err != nil {
+			return fmt.Errorf("store: list changes of conversation %d: %w", convID, err)
+		}
+		return nil
+	})
+	return out, err
+}
+
+// dmNextRevisionTx is the revision the next change of convID takes: one above
+// the largest held. The write lock is held by the caller, so it is not taken
+// twice.
+func dmNextRevisionTx(ctx context.Context, q execer, convID int64) (int64, error) {
+	var rev int64
+	if err := q.QueryRowContext(ctx, `SELECT COALESCE(MAX(revision), 0) + 1 FROM direct_messages WHERE conversation_id = ?`, convID).Scan(&rev); err != nil {
+		return 0, fmt.Errorf("store: next revision of conversation %d: %w", convID, err)
+	}
+	return rev, nil
 }
 
 // SearchDMMessages returns up to limit messages of conversation convID, as

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/njdaniel/conch/pkg/schema"
@@ -38,6 +39,10 @@ var (
 	// ErrDMNotAuthor is an edit or removal of a message the editor did not
 	// write. There is no moderator removal of a direct message.
 	ErrDMNotAuthor = errors.New("store: only the author changes a direct message")
+	// ErrDMEmptyBody is a send or an edit whose body is empty or only white
+	// space (strings.TrimSpace). It is checked after the conversation is
+	// shown to the author and before contact, the order of schema's header.
+	ErrDMEmptyBody = errors.New("store: a direct message body is empty or only white space")
 )
 
 // dmAct is what dmContactTx is asked about.
@@ -96,45 +101,44 @@ func dmContactTx(ctx context.Context, tx execer, from, to int64, act dmAct) erro
 // of the conversation exists only once it has a message (dm_visibility.go),
 // and opening writes no message, no audit row and nothing the peer's reads
 // look at.
-func (s *Store) OpenDM(ctx context.Context, caller, peer int64, now time.Time) (conv DMConversation, created bool, err error) {
+func (s *Store) OpenDM(ctx context.Context, caller, peer int64, now time.Time) (conv DMConversation, err error) {
 	err = s.withImmediateTx(ctx, func(tx execer) error {
 		var err error
-		conv, created, err = openDMTx(ctx, tx, caller, peer, now)
+		conv, err = openDMTx(ctx, tx, caller, peer, now)
 		return err
 	})
 	if err != nil {
-		return DMConversation{}, false, err
+		return DMConversation{}, err
 	}
-	return conv, created, nil
+	return conv, nil
 }
 
-func openDMTx(ctx context.Context, tx execer, caller, peer int64, now time.Time) (DMConversation, bool, error) {
+func openDMTx(ctx context.Context, tx execer, caller, peer int64, now time.Time) (DMConversation, error) {
 	if ok, err := dmViewerStandsTx(ctx, tx, caller); err != nil {
-		return DMConversation{}, false, err
+		return DMConversation{}, err
 	} else if !ok {
-		return DMConversation{}, false, ErrDMNoStanding
+		return DMConversation{}, ErrDMNoStanding
 	}
 	if caller == peer {
-		return DMConversation{}, false, ErrDMSelf
+		return DMConversation{}, ErrDMSelf
 	}
 	var kind string
 	switch err := tx.QueryRowContext(ctx, "SELECT kind FROM principals WHERE id = ?", peer).Scan(&kind); {
 	case errors.Is(err, sql.ErrNoRows):
-		return DMConversation{}, false, ErrPrincipalNotFound
+		return DMConversation{}, ErrPrincipalNotFound
 	case err != nil:
-		return DMConversation{}, false, fmt.Errorf("store: read principal %d: %w", peer, err)
+		return DMConversation{}, fmt.Errorf("store: read principal %d: %w", peer, err)
 	}
 	if PrincipalKind(kind) != PrincipalHuman {
-		return DMConversation{}, false, ErrDMNotHuman
+		return DMConversation{}, ErrDMNotHuman
 	}
 	id, err := dmPairTx(ctx, tx, caller, peer)
 	if err != nil {
-		return DMConversation{}, false, err
+		return DMConversation{}, err
 	}
-	created := id == 0
-	if created {
+	if id == 0 {
 		if err := dmContactTx(ctx, tx, caller, peer, dmActOpen); err != nil {
-			return DMConversation{}, false, err
+			return DMConversation{}, err
 		}
 		// The write lock is held, so no one else inserts this pair between
 		// the lookup and here; DO NOTHING and a second lookup would still
@@ -143,23 +147,23 @@ func openDMTx(ctx context.Context, tx execer, caller, peer int64, now time.Time)
 		if _, err := tx.ExecContext(ctx,
 			"INSERT INTO dm_conversations (lo, hi, created_at) VALUES (?, ?, ?) ON CONFLICT (lo, hi) DO NOTHING",
 			min(caller, peer), max(caller, peer), now.UnixMilli()); err != nil {
-			return DMConversation{}, false, fmt.Errorf("store: open conversation of %d and %d: %w", caller, peer, err)
+			return DMConversation{}, fmt.Errorf("store: open conversation of %d and %d: %w", caller, peer, err)
 		}
 		if id, err = dmPairTx(ctx, tx, caller, peer); err != nil {
-			return DMConversation{}, false, err
+			return DMConversation{}, err
 		}
 		if id == 0 {
-			return DMConversation{}, false, fmt.Errorf("store: open conversation of %d and %d: no row after insert", caller, peer)
+			return DMConversation{}, fmt.Errorf("store: open conversation of %d and %d: no row after insert", caller, peer)
 		}
 	}
 	if err := setDMStateTx(ctx, tx, caller, id, schema.DMStateOpen, now); err != nil {
-		return DMConversation{}, false, err
+		return DMConversation{}, err
 	}
 	conv, err := dmConversationTx(ctx, tx, caller, id)
 	if err != nil {
-		return DMConversation{}, false, err
+		return DMConversation{}, err
 	}
-	return conv, created, nil
+	return conv, nil
 }
 
 // setDMStateTx stores viewer's own state of convID. Only a participant may
@@ -200,8 +204,8 @@ func (s *Store) SetDMState(ctx context.Context, viewer, convID int64, state sche
 	return out, nil
 }
 
-// DMPost is a message to send. The caller has checked that Body is neither
-// empty nor too long, as for a channel post.
+// DMPost is a message to send. The caller has checked that Body is not too
+// long; InsertDMMessage refuses one that is empty or only white space.
 type DMPost struct {
 	ConversationID int64
 	AuthorID       int64
@@ -219,6 +223,7 @@ type DMPost struct {
 // refusal storing nothing:
 //
 //  1. the author may see the conversation (ErrDMNotFound);
+//  1a. the body is not empty or only white space (ErrDMEmptyBody);
 //  2. the author may contact the peer now (dmContactTx, ErrDMContactUnavailable);
 //  3. an earlier message of this author in this conversation carries the same
 //     nonce, within schema.DMClientNonceWindowSeconds: that message is
@@ -234,6 +239,9 @@ func (s *Store) InsertDMMessage(ctx context.Context, post DMPost, now time.Time)
 		row, err := dmViewTx(ctx, tx, post.AuthorID, post.ConversationID)
 		if err != nil {
 			return err
+		}
+		if strings.TrimSpace(post.Body) == "" {
+			return ErrDMEmptyBody
 		}
 		if err := dmContactTx(ctx, tx, post.AuthorID, row.peer(post.AuthorID), dmActSend); err != nil {
 			return err
@@ -262,9 +270,13 @@ func (s *Store) InsertDMMessage(ctx context.Context, post DMPost, now time.Time)
 				return ErrDMFileNotAttachable
 			}
 		}
+		rev, err := dmNextRevisionTx(ctx, tx, post.ConversationID)
+		if err != nil {
+			return err
+		}
 		res, err := tx.ExecContext(ctx,
-			`INSERT INTO direct_messages (conversation_id, author_id, body, created_at, client_nonce) VALUES (?, ?, ?, ?, ?)`,
-			post.ConversationID, post.AuthorID, post.Body, now.UnixMilli(), post.ClientNonce)
+			`INSERT INTO direct_messages (conversation_id, author_id, body, created_at, client_nonce, revision) VALUES (?, ?, ?, ?, ?, ?)`,
+			post.ConversationID, post.AuthorID, post.Body, now.UnixMilli(), post.ClientNonce, rev)
 		if err != nil {
 			return fmt.Errorf("store: write message in conversation %d: %w", post.ConversationID, err)
 		}
@@ -321,8 +333,8 @@ type DMMessageEdit struct {
 //     revision, and the row, with the search index following by trigger.
 //
 // edited_at is strictly after created_at and strictly increasing, whatever
-// the clock does. No audit row is written. The emptiness and size of body
-// are the caller's checks.
+// the clock does. No audit row is written. Its size is the caller's check; an
+// empty or whitespace-only body is ErrDMEmptyBody.
 func (s *Store) EditDMMessage(ctx context.Context, editor, convID, messageID int64, body string, clock func() time.Time) (DMMessageEdit, error) {
 	var out DMMessageEdit
 	err := s.withImmediateTx(ctx, func(tx execer) error {
@@ -336,6 +348,9 @@ func (s *Store) EditDMMessage(ctx context.Context, editor, convID, messageID int
 		}
 		if author != editor {
 			return ErrDMNotAuthor
+		}
+		if strings.TrimSpace(body) == "" {
+			return ErrDMEmptyBody
 		}
 		if removed {
 			return ErrMessageNotEditable
@@ -377,9 +392,13 @@ func (s *Store) EditDMMessage(ctx context.Context, editor, convID, messageID int
 			messageID, revision, body, at.UnixMilli()); err != nil {
 			return fmt.Errorf("store: keep revision %d of message %d: %w", revision, messageID, err)
 		}
+		rev, err := dmNextRevisionTx(ctx, tx, convID)
+		if err != nil {
+			return err
+		}
 		res, err := tx.ExecContext(ctx,
-			"UPDATE direct_messages SET body = ?, edited_at = ? WHERE id = ? AND conversation_id = ? AND author_id = ?",
-			body, at.UnixMilli(), messageID, convID, editor)
+			"UPDATE direct_messages SET body = ?, edited_at = ?, revision = ? WHERE id = ? AND conversation_id = ? AND author_id = ?",
+			body, at.UnixMilli(), rev, messageID, convID, editor)
 		if err != nil {
 			return fmt.Errorf("store: edit message %d: %w", messageID, err)
 		}
@@ -432,6 +451,15 @@ func (s *Store) RemoveDMMessage(ctx context.Context, remover, convID, messageID 
 			return ErrDMNotAuthor
 		}
 		if !removed {
+			rev, err := dmNextRevisionTx(ctx, tx, convID)
+			if err != nil {
+				return err
+			}
+			// The revision moves first: a tombstone freezes the row.
+			if _, err := tx.ExecContext(ctx,
+				"UPDATE direct_messages SET revision = ? WHERE id = ?", rev, messageID); err != nil {
+				return fmt.Errorf("store: remove message %d: %w", messageID, err)
+			}
 			if _, err := tx.ExecContext(ctx,
 				"INSERT INTO direct_message_removals (message_id, conversation_id, removed_by, removed_at) VALUES (?, ?, ?, ?)",
 				messageID, convID, remover, now.Truncate(time.Millisecond).UnixMilli()); err != nil {

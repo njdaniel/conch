@@ -49,7 +49,7 @@ func (f *dmFixture) tick() time.Time {
 
 func (f *dmFixture) open(t *testing.T, caller, peer Principal) DMConversation {
 	t.Helper()
-	c, _, err := f.s.OpenDM(context.Background(), caller.ID, peer.ID, f.tick())
+	c, err := f.s.OpenDM(context.Background(), caller.ID, peer.ID, f.tick())
 	if err != nil {
 		t.Fatalf("OpenDM(%s, %s): %v", caller.Name, peer.Name, err)
 	}
@@ -122,7 +122,7 @@ func TestOpenDMRules(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			before := f.auditCount(t)
-			conv, _, err := f.s.OpenDM(ctx, c.caller, c.peer, f.tick())
+			conv, err := f.s.OpenDM(ctx, c.caller, c.peer, f.tick())
 			if !errors.Is(err, c.want) {
 				t.Fatalf("OpenDM = %v, want %v", err, c.want)
 			}
@@ -151,7 +151,6 @@ func TestOpenDMOpposedConcurrentOpensMakeOneConversation(t *testing.T) {
 	var wg sync.WaitGroup
 	type res struct {
 		c       DMConversation
-		created bool
 		err     error
 	}
 	results := make(chan res, 2*each)
@@ -162,8 +161,8 @@ func TestOpenDMOpposedConcurrentOpensMakeOneConversation(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				<-start
-				c, created, err := f.s.OpenDM(ctx, pair[0], pair[1], time.Now())
-				results <- res{c, created, err}
+				c, err := f.s.OpenDM(ctx, pair[0], pair[1], time.Now())
+				results <- res{c, err}
 			}()
 		}
 	}
@@ -171,18 +170,14 @@ func TestOpenDMOpposedConcurrentOpensMakeOneConversation(t *testing.T) {
 	wg.Wait()
 	close(results)
 	ids := map[int64]int{}
-	created := 0
 	for r := range results {
 		if r.err != nil {
 			t.Fatalf("OpenDM: %v", r.err)
 		}
 		ids[r.c.ID]++
-		if r.created {
-			created++
-		}
 	}
-	if len(ids) != 1 || created != 1 {
-		t.Errorf("ids = %v, created %d times; want one id, created once", ids, created)
+	if len(ids) != 1 {
+		t.Errorf("ids = %v; want one id from every open", ids)
 	}
 	var n int
 	if err := f.s.db.QueryRow("SELECT COUNT(*) FROM dm_conversations").Scan(&n); err != nil || n != 1 {
@@ -196,9 +191,9 @@ func TestOpenDMRollbackThenRetry(t *testing.T) {
 	boom := errors.New("boom")
 	// The open succeeds inside a transaction that then fails: nothing stays.
 	err := f.s.withImmediateTx(ctx, func(tx execer) error {
-		c, created, err := openDMTx(ctx, tx, f.alice.ID, f.bob.ID, f.tick())
-		if err != nil || !created || c.ID == 0 {
-			t.Fatalf("openDMTx = %+v, %v, %v", c, created, err)
+		c, err := openDMTx(ctx, tx, f.alice.ID, f.bob.ID, f.tick())
+		if err != nil || c.ID == 0 {
+			t.Fatalf("openDMTx = %+v, %v", c, err)
 		}
 		return boom
 	})
@@ -214,16 +209,16 @@ func TestOpenDMRollbackThenRetry(t *testing.T) {
 	// A cancelled context is the same: it stores nothing and a retry works.
 	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, _, err := f.s.OpenDM(cancelled, f.alice.ID, f.bob.ID, f.tick()); err == nil {
+	if _, err := f.s.OpenDM(cancelled, f.alice.ID, f.bob.ID, f.tick()); err == nil {
 		t.Fatal("OpenDM with a cancelled context succeeded")
 	}
-	c, created, err := f.s.OpenDM(ctx, f.bob.ID, f.alice.ID, f.tick())
-	if err != nil || !created {
-		t.Fatalf("retry = %+v, created %v, %v; want a new conversation", c, created, err)
+	c, err := f.s.OpenDM(ctx, f.bob.ID, f.alice.ID, f.tick())
+	if err != nil || c.ID == 0 {
+		t.Fatalf("retry = %+v, %v; want a new conversation", c, err)
 	}
-	again, created, err := f.s.OpenDM(ctx, f.alice.ID, f.bob.ID, f.tick())
-	if err != nil || created || again.ID != c.ID {
-		t.Errorf("second open = %+v, created %v, %v; want id %d resumed", again, created, err, c.ID)
+	again, err := f.s.OpenDM(ctx, f.alice.ID, f.bob.ID, f.tick())
+	if err != nil || again.ID != c.ID {
+		t.Errorf("second open = %+v, %v; want id %d resumed", again, err, c.ID)
 	}
 }
 
@@ -257,7 +252,7 @@ func TestDMTablesRefuseWhatTheRulesForbid(t *testing.T) {
 	}{
 		{"moving a pair", `UPDATE dm_conversations SET hi = ? WHERE id = ?`, []any{f.carol.ID, conv.ID}},
 		{"deleting a pair", `DELETE FROM dm_conversations WHERE id = ?`, []any{conv.ID}},
-		{"a third member writing", `INSERT INTO direct_messages (conversation_id, author_id, body, created_at, client_nonce) VALUES (?, ?, 'x', 1, 'z')`, []any{conv.ID, f.carol.ID}},
+		{"a third member writing", `INSERT INTO direct_messages (conversation_id, author_id, body, created_at, client_nonce, revision) VALUES (?, ?, 'x', 1, 'z', 99)`, []any{conv.ID, f.carol.ID}},
 		{"a third member's view", `INSERT INTO dm_viewer_state (principal_id, conversation_id, state, updated_at) VALUES (?, ?, 'open', 1)`, []any{f.carol.ID, conv.ID}},
 		{"a third member's upload", `INSERT INTO dm_files (conversation_id, uploader_id, filename, media_type, size, sha256, created_at) VALUES (?, ?, 'f', 't', 1, ?, 1)`, []any{conv.ID, f.carol.ID, fmt.Sprintf("%064d", 1)}},
 		{"moving a message", `UPDATE direct_messages SET conversation_id = 99 WHERE id = ?`, []any{msg.ID}},
@@ -339,9 +334,15 @@ func TestEmptyConversationIsInvisibleToTheRecipient(t *testing.T) {
 	}
 	for _, st := range []schema.DMState{schema.DMStateOpen, schema.DMStateArchived} {
 		for _, who := range []Principal{f.alice, f.bob} {
-			got, err := f.s.ListDMConversations(ctx, who.ID, st, 0, 10)
-			if err != nil || len(got) != 0 {
-				t.Errorf("%s's %s list = %v, %v; an empty pair is in nobody's list", who.Name, st, got, err)
+			got, err := f.s.ListDMConversations(ctx, who.ID, st, DMListCursor{}, 10)
+			// The opener has it as an entry with no message (and no
+			// created_at); the recipient has nothing until the first message.
+			want := 0
+			if who.ID == f.alice.ID && st == schema.DMStateOpen {
+				want = 1
+			}
+			if err != nil || len(got) != want {
+				t.Errorf("%s's %s list = %v, %v; want %d entries", who.Name, st, got, err, want)
 			}
 		}
 	}
@@ -358,9 +359,9 @@ func TestEmptyConversationIsInvisibleToTheRecipient(t *testing.T) {
 
 	// Opening from the other side resumes the same conversation, and is how
 	// that side gets a handle on it.
-	again, created, err := f.s.OpenDM(ctx, f.bob.ID, f.alice.ID, f.tick())
-	if err != nil || created || again.ID != conv.ID {
-		t.Fatalf("recipient opens = %+v, %v, %v; want the same id resumed", again, created, err)
+	again, err := f.s.OpenDM(ctx, f.bob.ID, f.alice.ID, f.tick())
+	if err != nil || again.ID != conv.ID {
+		t.Fatalf("recipient opens = %+v, %v; want the same id resumed", again, err)
 	}
 
 	// The first message makes it the recipient's too, with no further step.
@@ -369,7 +370,7 @@ func TestEmptyConversationIsInvisibleToTheRecipient(t *testing.T) {
 	if c, err := f.s.DMConversationFor(ctx, f.carol.ID, conv2.ID); err != nil || c.Unread != 1 || c.LastMessageID == 0 {
 		t.Errorf("recipient after a message: %+v, %v; want it visible with 1 unread", c, err)
 	}
-	got, err := f.s.ListDMConversations(ctx, f.carol.ID, schema.DMStateOpen, 0, 10)
+	got, err := f.s.ListDMConversations(ctx, f.carol.ID, schema.DMStateOpen, DMListCursor{}, 10)
 	if err != nil || len(got) != 1 || got[0].ID != conv2.ID || got[0].PeerID != f.alice.ID {
 		t.Errorf("recipient's list = %+v, %v", got, err)
 	}
@@ -393,8 +394,8 @@ func TestDisablingHidesConversationsAndEnablingResumesThem(t *testing.T) {
 	if _, _, err := f.s.InsertDMMessage(ctx, DMPost{ConversationID: conv.ID, AuthorID: f.alice.ID, Body: "x", ClientNonce: "k"}, f.tick()); !errors.Is(err, ErrDMContactUnavailable) {
 		t.Errorf("a send to a disabled person = %v", err)
 	}
-	if c, created, err := f.s.OpenDM(ctx, f.alice.ID, f.bob.ID, f.tick()); err != nil || created || c.ID != conv.ID {
-		t.Errorf("resuming with a disabled person = %+v, %v, %v; reading stays possible", c, created, err)
+	if c, err := f.s.OpenDM(ctx, f.alice.ID, f.bob.ID, f.tick()); err != nil || c.ID != conv.ID {
+		t.Errorf("resuming with a disabled person = %+v, %v; reading stays possible", c, err)
 	}
 	if _, err := f.s.EnablePrincipal(ctx, "system", f.bob.ID); err != nil {
 		t.Fatal(err)
@@ -781,7 +782,7 @@ func TestDMViewerStateIsPerViewer(t *testing.T) {
 	f.send(t, conv, f.alice, "one")
 	inList := func(who Principal, st schema.DMState) bool {
 		t.Helper()
-		l, err := f.s.ListDMConversations(ctx, who.ID, st, 0, 10)
+		l, err := f.s.ListDMConversations(ctx, who.ID, st, DMListCursor{}, 10)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -821,13 +822,13 @@ func TestDMViewerStateIsPerViewer(t *testing.T) {
 	if _, err := f.s.SetDMState(ctx, f.bob.ID, conv.ID, schema.DMStateHidden, f.tick()); err != nil {
 		t.Fatal(err)
 	}
-	if c, _, err := f.s.OpenDM(ctx, f.bob.ID, f.alice.ID, f.tick()); err != nil || c.State != schema.DMStateOpen {
+	if c, err := f.s.OpenDM(ctx, f.bob.ID, f.alice.ID, f.tick()); err != nil || c.State != schema.DMStateOpen {
 		t.Errorf("open after hide = %+v, %v", c, err)
 	}
 	if _, err := f.s.SetDMState(ctx, f.bob.ID, conv.ID, "gone", f.tick()); err == nil {
 		t.Error("a state outside the vocabulary was accepted")
 	}
-	if _, err := f.s.ListDMConversations(ctx, f.bob.ID, schema.DMStateHidden, 0, 5); err == nil {
+	if _, err := f.s.ListDMConversations(ctx, f.bob.ID, schema.DMStateHidden, DMListCursor{}, 5); err == nil {
 		t.Error("the hidden list exists")
 	}
 }
@@ -840,11 +841,11 @@ func TestListDMConversationsOrderAndPaging(t *testing.T) {
 	f.send(t, ac, f.carol, "2")
 	f.send(t, ad, f.dave, "3")
 	f.send(t, ab, f.bob, "4") // ab is now the newest
-	got, err := f.s.ListDMConversations(ctx, f.alice.ID, schema.DMStateOpen, 0, 2)
+	got, err := f.s.ListDMConversations(ctx, f.alice.ID, schema.DMStateOpen, DMListCursor{}, 2)
 	if err != nil || len(got) != 2 || got[0].ID != ab.ID || got[1].ID != ad.ID {
 		t.Fatalf("first page = %+v, %v; want ab then ad", got, err)
 	}
-	next, err := f.s.ListDMConversations(ctx, f.alice.ID, schema.DMStateOpen, got[1].LastMessageID, 2)
+	next, err := f.s.ListDMConversations(ctx, f.alice.ID, schema.DMStateOpen, got[1].CursorAfter(), 2)
 	if err != nil || len(next) != 1 || next[0].ID != ac.ID {
 		t.Fatalf("second page = %+v, %v; want ac", next, err)
 	}
