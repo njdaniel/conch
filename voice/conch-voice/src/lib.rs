@@ -682,10 +682,14 @@ mod tests {
     fn mute_key_press_matches_the_schema_fixture() {
         let mut out = Vec::new();
         write_mute_key_press(&mut out).unwrap();
-        assert_eq!(
-            out,
+        // A Windows checkout may give the fixture CRLF line endings.
+        let fixture: Vec<u8> =
             include_bytes!("../../../pkg/schema/testdata/mute-key-event-v1.json")
-        );
+                .iter()
+                .copied()
+                .filter(|b| *b != b'\r')
+                .collect();
+        assert_eq!(out, fixture);
     }
 
     #[cfg(windows)]

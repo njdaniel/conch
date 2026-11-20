@@ -200,7 +200,9 @@ describe('global mute key', () => {
     const gate = new DocumentGate();
     gate.commit({ frameToken: 'dock' });
     const send = vi.fn<(channel: string, view: NativeVoiceView) => void>();
-    svc.subscribe((view) => deliverVoice({ contents: () => ({ send }), gate: () => gate }, view));
+    svc.subscribe((view) => {
+      deliverVoice({ contents: () => ({ send }), gate: () => gate }, view);
+    });
 
     const commands: { muted: boolean; apply: () => void }[] = [];
     vi.spyOn(fake, 'setMute').mockImplementation((muted) => new Promise((ack) => {
@@ -224,10 +226,10 @@ describe('global mute key', () => {
     await locked;
 
     expect(fake.state).toMatchObject({ status: 'running', helper: { muted: true } });
-    expect(send).toHaveBeenLastCalledWith(VOICE_EVENTS, expect.objectContaining({
-      helper: expect.objectContaining({ muted: true }),
-      mutedByLock: true,
-    }));
+    const [channel, view] = send.mock.lastCall ?? [];
+    expect(channel).toBe(VOICE_EVENTS);
+    expect(view?.helper?.muted).toBe(true);
+    expect(view?.mutedByLock).toBe(true);
     expect(trayModel({ profile: 'Home', voice: svc.state(), sharing: false, pending: false }).stateLine).toBe('Muted');
     await svc.leave();
   });

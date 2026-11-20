@@ -106,7 +106,9 @@ export class Lifecycle {
     // A known lock already queued its mute. Otherwise, queue one now behind
     // any unmute on the helper's control channel.
     if (state === 'unavailable' && !this.#locked && this.#canMute()) {
-      void this.#mute().catch(() => this.#deps.log('lifecycle: an action at loss of lock observation failed'));
+      void this.#mute().catch(() => {
+        this.#deps.log('lifecycle: an action at loss of lock observation failed');
+      });
     }
   }
 
