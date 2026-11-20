@@ -313,8 +313,8 @@ func TestAuthorRemovalMigrationPreservesOldModeratorTombstone(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Reconstruct the previous schema, including a moderator's own removal.
-	// Migration 51 (issue #2042): credential provenance.
-	for _, stmt := range []string{"ALTER TABLE credentials DROP COLUMN self_made", "ALTER TABLE sign_in_links DROP COLUMN self_made"} {
+	// Migration 52 (issue #2042): credential provenance and account notices.
+	for _, stmt := range []string{"DROP TABLE account_notices", "ALTER TABLE credentials DROP COLUMN self_made", "ALTER TABLE sign_in_links DROP COLUMN self_made"} {
 		if _, err := s.db.Exec(stmt); err != nil {
 			t.Fatal(err)
 		}

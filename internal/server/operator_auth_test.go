@@ -627,6 +627,7 @@ var reauthDecisions = map[string]reauthDecision{
 	"DELETE /v1/credentials/mine/{id}":                                                     {reauthNone, "ends one of the caller's own sign-ins"},
 	"POST /v1/sign-in-links/mine":                                                          {reauthNone, "a member's own device link: the handler refuses operators and asks its own recent password proof (#712)"},
 	"DELETE /v1/sign-in-links/mine/{id}":                                                   {reauthNone, "closes one of the caller's own device links"},
+	"DELETE /v1/notices/mine/{id}":                                                         {reauthNone, "dismisses one of the caller's own notices; grants nothing (issue #2042)"},
 	"POST /v1/guest/end":                                                                   {reauthNone, "a guest ends its own visit"},
 	"POST /v1/guest/convert":                                                               {reauthNone, "a guest makes its own account: no operator acts, and it proves itself with the visit's credential and, when the policy is closed, an operator's permit"},
 	"POST /v1/password/mine":                                                               {reauthNone, "proves itself: a setup token or an enrolment link"},

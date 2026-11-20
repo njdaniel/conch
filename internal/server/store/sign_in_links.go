@@ -256,6 +256,9 @@ type usableLink struct {
 	purpose   schema.SignInLinkPurpose
 	label     string
 	principal Principal
+	// createdBy is the principal who made the link: the person themself for
+	// a device link, an act_as_members holder for any other.
+	createdBy int64
 	// selfMade says the credential its redemption issues is the person's
 	// own (issue #2042): a device link its person made on a self-made
 	// credential. Every other link is made by another.
@@ -375,7 +378,7 @@ func usableSignInLinkTx(ctx context.Context, tx execer, codeHash string, now tim
 	// made by someone else (an act_as_members holder), whatever its row says
 	// (issue #2042).
 	self := l.purpose == schema.SignInLinkPurposeDevice && l.createdBy == l.principalID && l.selfMade
-	return usableLink{id: l.id, purpose: l.purpose, label: l.label, principal: p, selfMade: self}, nil
+	return usableLink{id: l.id, purpose: l.purpose, label: l.label, principal: p, createdBy: l.createdBy, selfMade: self}, nil
 }
 
 // usableLinkOfTx is usableSignInLinkTx for a route that takes only the

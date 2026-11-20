@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -24,6 +25,19 @@ import (
 // TestSelfMadeCredentialRoutes holds each entry to a registered,
 // authenticated route that is not previewable (a preview reads as the
 // member, which is exactly what these routes must not allow).
+//
+// The rules for every route that fills it:
+//
+//   - A route that serves both HTTP and a WebSocket upgrade calls the check
+//     (selfMadeCredential, or listing it here) before the upgrade, so a
+//     refused credential is answered with an HTTP status and never gets a
+//     socket.
+//   - MCP tools bypass guard: /mcp has its own bearer authentication and
+//     never passes through this check. No MCP tool may read or write a
+//     person's DMs or calls.
+//   - An agent can never pass: an agent's credential is made by the
+//     principal who issued it, never by the agent, so it is refused here, and
+//     ADR-017 confirms agents reach no DM or call.
 //
 // It is empty until the routes exist: #2019, #2021, #2030 and #2040
 // register the DM and call routes and the per-person stream, and each adds
@@ -76,25 +90,16 @@ func (s *Server) selfMadeCredential(w http.ResponseWriter, r *http.Request) bool
 		s.refuseCredentialMadeByAnother(w, r, caller)
 		return false
 	}
-	var self bool
-	if cred, ok := requestCredentialFrom(ctx); ok {
-		self = cred.SelfMade
-	} else if id, ok := credentialIDFrom(ctx); ok {
-		var err error
-		self, err = s.store.CredentialSelfMade(ctx, id)
-		switch {
-		case errors.Is(err, store.ErrCredentialNotFound):
-			writeUnauthenticated(w)
-			return false
-		case err != nil:
-			slog.ErrorContext(ctx, "provenance: read credential failed", "credential", id, "error", err)
-			writeInternalError(w)
-			return false
-		}
-	} else {
-		// A caller with no credential: never the middleware's doing under
-		// AuthRequired. Deny rather than allow.
+	self, err := s.requestCredentialSelfMade(ctx)
+	switch {
+	case errors.Is(err, errNoRequestCredential), errors.Is(err, store.ErrCredentialNotFound):
+		// No credential under AuthRequired is never the middleware's doing:
+		// deny rather than allow.
 		writeUnauthenticated(w)
+		return false
+	case err != nil:
+		slog.ErrorContext(ctx, "provenance: read credential failed", "error", err)
+		writeInternalError(w)
 		return false
 	}
 	if !self {
@@ -102,6 +107,25 @@ func (s *Server) selfMadeCredential(w http.ResponseWriter, r *http.Request) bool
 		return false
 	}
 	return true
+}
+
+// errNoRequestCredential is a request that carries no credential.
+var errNoRequestCredential = errors.New("server: the request has no credential")
+
+// requestCredentialSelfMade reports whether the credential ctx's request came
+// with was made by its own principal. The middleware leaves the whole
+// credential in ctx for a bearer request; a socket opened with a ticket has
+// only its id, and the provenance is read from the store by it. A request
+// with no credential is errNoRequestCredential, a credential that no longer
+// exists store.ErrCredentialNotFound.
+func (s *Server) requestCredentialSelfMade(ctx context.Context) (bool, error) {
+	if cred, ok := requestCredentialFrom(ctx); ok {
+		return cred.SelfMade, nil
+	}
+	if id, ok := credentialIDFrom(ctx); ok {
+		return s.store.CredentialSelfMade(ctx, id)
+	}
+	return false, errNoRequestCredential
 }
 
 // refuseCredentialMadeByAnother writes 403 own_sign_in_required, audited

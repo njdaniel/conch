@@ -43,7 +43,7 @@ import (
 // made by another: which path made it is not on record, and a wrong "self"
 // would let an operator's credential read someone's messages, while a wrong
 // "another" costs the person one sign-in.
-const credentialProvenanceMigration = 51
+const credentialProvenanceMigration = 52
 
 // credentialMaker says who made a credential: its principal (madeBySelf) or
 // another principal or nobody known (madeByAnother). It is what

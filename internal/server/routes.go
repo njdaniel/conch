@@ -397,6 +397,11 @@ func (s *Server) routeTable() []route {
 		rt("POST /v1/sign-in-links/mine", accessAuthenticated, hf(s.handleCreateDeviceLink)),
 		rt("GET /v1/sign-in-links/mine", accessAuthenticated, hf(s.handleListOwnDeviceLinks)),
 		rt("DELETE /v1/sign-in-links/mine/{id}", accessAuthenticated, hf(s.handleCloseOwnDeviceLink)),
+		// Account notices (issue #2042): what the member is told about their
+		// own account, such as a password set through a link someone else
+		// made. Their own, on a sign-in of their own. See account_notices.go.
+		rt("GET /v1/notices/mine", accessAuthenticated, hf(s.handleListAccountNotices)),
+		rt("DELETE /v1/notices/mine/{id}", accessAuthenticated, hf(s.handleDismissAccountNotice)),
 		// Operator sign-in and setup (issue #709). The second step of an
 		// operator's sign-in and the setup token's redemption are exempt, as
 		// the sign-in is, limited before any work and over HTTPS or loopback

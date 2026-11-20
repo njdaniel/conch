@@ -860,7 +860,7 @@ func (s *Store) EnrollPassword(ctx context.Context, actor string, in PasswordEnr
 				return ErrEnrollmentProofRequired
 			}
 		}
-		var linkID int64
+		var linkID, linkMaker int64
 		if in.ProofHash != "" {
 			l, err := usableLinkOfTx(ctx, tx, in.ProofHash, now, schema.SignInLinkPurposeEnrollment)
 			if err != nil {
@@ -873,9 +873,13 @@ func (s *Store) EnrollPassword(ctx context.Context, actor string, in PasswordEnr
 				return err
 			}
 			linkID = l.id
+			linkMaker = l.createdBy
 		}
 		replaced, err := setPasswordTx(ctx, tx, in.PrincipalID, in.Record, now)
 		if err != nil {
+			return err
+		}
+		if err := noticePasswordSetByLinkTx(ctx, tx, in.PrincipalID, linkMaker, now); err != nil {
 			return err
 		}
 		via := "enrollment"
@@ -1116,6 +1120,9 @@ func (s *Store) ResetPassword(ctx context.Context, codeHash, record string, now 
 		id := l.principal.ID
 		replaced, err := setPasswordTx(ctx, tx, id, record, now)
 		if err != nil {
+			return err
+		}
+		if err := noticePasswordSetByLinkTx(ctx, tx, id, l.createdBy, now); err != nil {
 			return err
 		}
 		actor := signInLinkSubject(l.id)

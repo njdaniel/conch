@@ -146,6 +146,11 @@ var principalReads = []principalRead{
 	{"store/operator_auth.go", "Store.PendingLoginOf", 1, readOwnOrInternal},
 	{"store/operator_auth.go", "Store.RedeemSetupToken", 1, readOwnOrInternal},
 	{"store/operator_auth.go", "issueSetupTokenTx", 1, readOwnOrInternal},
+	// #2042: the name of the principal who made a link, written into the
+	// notice of the member whose password it set, in the transaction that
+	// sets it; the member reads their own notice, which carries only that
+	// name, and no list of principals.
+	{"store/account_notices.go", "noticePasswordSetByLinkTx", 1, readOwnOrInternal},
 	{"store/passwords.go", "Store.LoginCandidate", 1, readOwnOrInternal},
 	// #1361: migration 44 asks only whether any principal exists.
 	{"store/camera_default.go", "pinCameraOff", 1, readOwnOrInternal},

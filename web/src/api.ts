@@ -155,9 +155,11 @@ import {
 import { listNetsResponseV1, type NetV1 } from './schema/net';
 import {
   createSignInLinkResponseV1,
+  listAccountNoticesResponseV1,
   listOwnSignInLinksResponseV1,
   redeemSignInLinkResponseV1,
   signInLinkPreviewV1,
+  type AccountNoticeV1,
   type CreateDeviceLinkRequestV1,
   type CreateSignInLinkRequestV1,
   type RedeemSignInLinkRequestV1,
@@ -1160,6 +1162,22 @@ export async function listDeviceLinks(): Promise<ApiResult<SignInLinkV1[]>> {
 // nothing; another's id is sign_in_link_not_found.
 export async function closeDeviceLink(id: number): Promise<InviteResult<null>> {
   return readDone(await authedSend(call('closeSignInLink', { id })));
+}
+
+// listAccountNotices reads what the server tells this person about their own
+// account and they have not dismissed (GET /v1/notices/mine, issue #2042):
+// today, a password set through a link another principal made. The server
+// answers an empty list to a sign-in someone else made for them, so an empty
+// list is not a promise that there is nothing to say.
+export async function listAccountNotices(): Promise<ApiResult<AccountNoticeV1[]>> {
+  const result = await authed(call('listNotices'), listAccountNoticesResponseV1);
+  return result.ok ? { ok: true, value: result.value.notices } : result;
+}
+
+// dismissAccountNotice dismisses one of this person's own notices; the
+// dismissal is theirs alone. Another's id is notice_not_found.
+export async function dismissAccountNotice(id: number): Promise<InviteResult<null>> {
+  return readDone(await authedSend(call('dismissNotice', { id })));
 }
 
 // Guest entry, for an operator (issue #714, design §2): the joining

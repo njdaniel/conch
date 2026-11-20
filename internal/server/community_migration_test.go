@@ -85,8 +85,9 @@ func TestCommunityMigrationApprovalChain(t *testing.T) {
 	for _, stmt := range []string{
 		// Undo migration 41's DDL (archived_at), then migration 40's: the
 		// database is as a server at 39 held it.
-		"ALTER TABLE credentials DROP COLUMN self_made",   // migration 51 (issue #2042)
-		"ALTER TABLE sign_in_links DROP COLUMN self_made", // migration 51
+		"DROP TABLE account_notices",                      // migration 52 (issue #2042)
+		"ALTER TABLE credentials DROP COLUMN self_made",   // migration 52 (issue #2042)
+		"ALTER TABLE sign_in_links DROP COLUMN self_made", // migration 52
 		"DROP TABLE push_registrations",                   // migration 49 (issue #1714)
 		"DROP TABLE notification_preferences",             // migration 48 (issue #1713)
 		"ALTER TABLE channels DROP COLUMN topic",          // migration 47 (issue #1503)

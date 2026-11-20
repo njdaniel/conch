@@ -308,6 +308,8 @@ func walkCases(t *testing.T) []walkCase {
 		{key: "setup", stdin: walkSetupToken + "\n" + walkPassword + "\n123456\n", args: func(u, _ string) []string { return []string{"setup", "--server", u} }},
 		{key: "device-link create", quietWhenOK: true, args: func(u, _ string) []string { return []string{"device-link", "create", "--server", u} }},
 		{key: "device-link list", args: func(u, _ string) []string { return []string{"device-link", "list", "--server", u} }},
+		{key: "notices", args: func(u, _ string) []string { return []string{"notices", "--server", u} }},
+		{key: "notices dismiss", quietWhenOK: true, args: func(u, _ string) []string { return []string{"notices", "dismiss", "--server", u, "3"} }},
 		{key: "device-link close", quietWhenOK: true, args: func(u, _ string) []string { return []string{"device-link", "close", "--server", u, "9"} }},
 		{key: "admin join status", ownWords: true, args: func(u, _ string) []string { return []string{"admin", "join", "status", "--server", u} }},
 		{key: "admin join set", ownWords: true, args: func(u, _ string) []string {
@@ -597,7 +599,11 @@ func hostileServer(t *testing.T, ok, whoamiOK bool) *httptest.Server {
 				Token: walkToken, Auth: schema.AuthStateV1{Scope: schema.CredentialScopeSetup}})
 		case "POST /v1/totp/enroll":
 			write(w, http.StatusOK, schema.TOTPEnrollmentV1{Secret: hostile, Issuer: hostile, Account: hostile, Algorithm: hostile, Digits: 6, PeriodSeconds: 30, URI: hostile})
-		case "POST /v1/totp/confirm", "DELETE /v1/sign-in-links/mine/9":
+		case "GET /v1/notices/mine":
+			write(w, http.StatusOK, schema.ListAccountNoticesResponseV1{Notices: []schema.AccountNoticeV1{
+				{ID: 3, Kind: schema.AccountNoticeKindPasswordSetByLink, ByName: hostile, At: ts},
+				{ID: 4, Kind: schema.AccountNoticeKind(hostile), ByName: hostile, At: ts}}})
+		case "POST /v1/totp/confirm", "DELETE /v1/sign-in-links/mine/9", "DELETE /v1/notices/mine/3":
 			w.WriteHeader(http.StatusNoContent)
 		case "POST /v1/sign-in-links/mine":
 			write(w, http.StatusCreated, schema.CreateSignInLinkResponseV1{SignInLink: schema.SignInLinkV1{ID: 3, PrincipalID: 42, CreatedBy: 42, CreatedAt: ts, ExpiresAt: ts, Label: hostile}, Code: walkSignInCode})

@@ -32,10 +32,13 @@ const roleLabels: Readonly<Record<Role, string>> = { member: 'Members', operator
 // The sentences the issue and the design fix, word for word.
 export const actAsMembersSentence = "can sign in as, and post as, any member who isn't an owner";
 export const auditSentence = "sees every member and every private channel's name in the audit trail";
-// What act_as_members no longer reaches (issue #2042, decision 4 on #2013):
-// a credential or link made for a member by someone else is refused on
-// their direct messages and calls, so the member must sign in themselves.
-export const actAsMembersPrivate = 'It does not reach their direct messages or calls.';
+// What act_as_members does not reach (issue #2042, decisions 4 and B on
+// #2013): a credential or link made for a member by someone else is refused
+// on their direct messages and calls, so the member must sign in themselves;
+// a password set through a link someone else made is audited and told to the
+// member. It does not claim more: on a server without end-to-end encryption
+// the operator can still reach messages through the database.
+export const actAsMembersPrivate = 'It does not reach their direct messages or calls directly; a password set or reset through a link someone else made is recorded in the audit log and the member is told.';
 export const actAsMembersNotEnded = 'Taking this away does not end credentials and hooks already issued; the answer lists them.';
 export const ownersLine = 'Owners hold every permission.';
 export const managersBlock = 'In their channels: add and remove members, rename, stop a share, moderate. Set per channel in Channels.';

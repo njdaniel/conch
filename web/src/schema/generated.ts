@@ -3760,6 +3760,37 @@ export const listOwnSignInLinksResponseV1 = object<ListOwnSignInLinksResponseV1>
   sign_in_links: array(signInLinkV1),
 });
 
+// schema.AccountNoticeKind: closed on the server and client-tolerant, so a value this
+// bundle does not know is kept and shown by its name; KnownAccountNoticeKind is the known ones.
+export type KnownAccountNoticeKind = 'password_set_by_link';
+export type AccountNoticeKind = KnownAccountNoticeKind | (string & {});
+
+export const accountNoticeKind = tolerant<KnownAccountNoticeKind>({ password_set_by_link: true });
+
+// schema.AccountNoticeV1
+export interface AccountNoticeV1 {
+  id: number;
+  kind: AccountNoticeKind;
+  by_name: string;
+  at: string;
+}
+
+export const accountNoticeV1 = object<AccountNoticeV1>({
+  id: int,
+  kind: accountNoticeKind,
+  by_name: str,
+  at: timestamp,
+});
+
+// schema.ListAccountNoticesResponseV1
+export interface ListAccountNoticesResponseV1 {
+  notices: AccountNoticeV1[];
+}
+
+export const listAccountNoticesResponseV1 = object<ListAccountNoticesResponseV1>({
+  notices: array(accountNoticeV1),
+});
+
 // schema.HealthVoice
 export type HealthVoice = 'ok' | 'unavailable' | 'not_configured';
 
