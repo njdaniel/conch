@@ -148,10 +148,45 @@ func changedDoc(conversation int64) schema.DMChangedV1 {
 	return schema.DMChangedV1{Schema: schema.DMChangedSchemaV1, ConversationID: conversation, Kind: schema.DMChangeRead}
 }
 
-func dmMessageDoc(id int64) schema.DMMessageV1 {
+// dmMessageDoc is message id of conversation conv, as of revision rev.
+func dmMessageDoc(conv, id, rev int64) schema.DMMessageV1 {
 	return schema.DMMessageV1{
-		Schema: schema.DMMessageSchemaV1, ID: id, ConversationID: 12, AuthorID: 5,
+		Schema: schema.DMMessageSchemaV1, ID: id, ConversationID: conv, AuthorID: 5, Revision: rev,
 		CreatedAt: schema.NewTimestamp(time.Date(2026, 11, 19, 9, 0, 0, 0, time.UTC)), Body: "hi",
+	}
+}
+
+func dmEditedDoc(conv, id, rev int64) schema.DMMessageEditedV1 {
+	m := dmMessageDoc(conv, id, rev)
+	at := schema.NewTimestamp(time.Date(2026, 11, 19, 9, 5, 0, 0, time.UTC))
+	m.EditedAt = &at
+	return schema.DMMessageEditedV1{Schema: schema.DMMessageEditedSchemaV1, Message: m}
+}
+
+func dmRemovedDoc(conv, id, rev int64) schema.DMMessageRemovedV1 {
+	m := dmMessageDoc(conv, id, rev)
+	m.Body, m.Removed = schema.MessageRemovedByAuthorBody, true
+	return schema.DMMessageRemovedV1{Schema: schema.DMMessageRemovedSchemaV1, Message: m}
+}
+
+// snapshotConv is a conversation of the pair (3, 5) as the snapshot lists it,
+// at revision rev with its last message lastID.
+func snapshotConv(id, rev, lastID int64) schema.DMConversationV1 {
+	at := schema.NewTimestamp(time.Date(2026, 11, 19, 9, 0, 0, 0, time.UTC))
+	return schema.DMConversationV1{
+		Schema: schema.DMConversationSchemaV1, ID: id, ParticipantIDs: []int64{3, 5}, CreatedAt: &at,
+		PeerID: 5, State: schema.DMStateOpen, Revision: rev, LastMessageID: lastID, LastMessageAt: &at,
+	}
+}
+
+// expectMessage reads one frame and expects it to be a dm.message with this
+// id and revision.
+func (c *personClient) expectMessage(id, rev int64) {
+	c.t.Helper()
+	raw := c.raw()
+	var m schema.DMMessageV1
+	if personSchemaOf(c.t, raw) != schema.DMMessageSchemaV1 || json.Unmarshal(raw, &m) != nil || m.ID != id || m.Revision != rev {
+		c.t.Fatalf("next frame is %s, want message %d at revision %d", raw, id, rev)
 	}
 }
 
@@ -244,7 +279,7 @@ func TestPersonStreamOpens(t *testing.T) {
 		if helloA.InstanceID == helloB.InstanceID {
 			t.Fatalf("both sockets were given instance id %s", helloA.InstanceID)
 		}
-		if len(snapA.Conversations) != 0 || snapA.HighWater != 0 || snapA.DMsEnabled {
+		if len(snapA.Conversations) != 0 || snapA.DMsEnabled {
 			t.Errorf("the default snapshot = %+v, want empty and DMs not available", snapA)
 		}
 		// A reconnect is a new socket: a new id.
@@ -261,7 +296,7 @@ func TestPersonStreamOpens(t *testing.T) {
 		f.srv.dmSnapshotSource = func(_ context.Context, id int64) (schema.DMSnapshotV1, error) {
 			asked = append(asked, id)
 			s, _ := f.srv.emptyDMSnapshot(context.Background(), id)
-			s.HighWater, s.DMsEnabled = 4310, true
+			s.DMsEnabled = true
 			return s, nil
 		}
 		t.Cleanup(func() { f.srv.dmSnapshotSource = nil })
@@ -269,7 +304,7 @@ func TestPersonStreamOpens(t *testing.T) {
 		if len(asked) != 1 || asked[0] != f.bob.ID {
 			t.Errorf("source asked for %v, want only bob %d", asked, f.bob.ID)
 		}
-		if snap.HighWater != 4310 || !snap.DMsEnabled {
+		if !snap.DMsEnabled {
 			t.Errorf("snapshot = %+v", snap)
 		}
 	})
@@ -292,32 +327,123 @@ func TestPersonStreamOpens(t *testing.T) {
 }
 
 // TestPersonStreamSnapshotOrdering: a frame published while the snapshot is
-// being taken is held and sent after it, unless the snapshot already holds
-// it (an id at or below high_water), so nothing falls between the two.
+// being taken is held and sent after it, unless the snapshot already reflects
+// it (a revision at or below the one the snapshot reported for that
+// conversation), so nothing falls between the two. The ordering is per
+// conversation: message ids of two conversations are not compared.
 func TestPersonStreamSnapshotOrdering(t *testing.T) {
 	f := newRunFixture(t)
 	base := wsTestServer(t, f.srv)
 	f.srv.dmSnapshotSource = func(ctx context.Context, id int64) (schema.DMSnapshotV1, error) {
-		for _, msg := range []int64{40, 41, 42} {
-			if err := f.srv.person.publish(id, dmMessageDoc(msg)); err != nil {
+		// Conversation 12 is at revision 41 in the snapshot, 13 at 3; 14 is not
+		// listed (hidden, or past More), so all of its frames are sent.
+		for _, d := range []personDoc{
+			dmMessageDoc(12, 40, 40), dmMessageDoc(12, 41, 41), // reflected
+			dmEditedDoc(12, 40, 41),  // an edit at the snapshot's revision: reflected
+			dmRemovedDoc(13, 900, 3), // reflected, though its id is above 12's revisions
+			dmMessageDoc(12, 42, 42), // above: sent
+			dmEditedDoc(13, 900, 4),  // above: sent
+			dmRemovedDoc(12, 40, 43), // above: sent
+			dmMessageDoc(14, 7, 1),   // conversation not in the snapshot: sent
+			changedDoc(12),           // a signal has no revision: sent
+		} {
+			if err := f.srv.person.publish(id, d); err != nil {
 				t.Errorf("publish: %v", err)
 			}
 		}
 		s, _ := f.srv.emptyDMSnapshot(ctx, id)
-		s.HighWater = 41 // 40 and 41 are in the snapshot; 42 is not
+		s.Conversations = []schema.DMConversationV1{snapshotConv(12, 41, 41), snapshotConv(13, 3, 900)}
 		return s, nil
 	}
 	c := dialPerson(t, base, f.aliceTok)
 	c.open()
-	raw := c.raw()
-	var m schema.DMMessageV1
-	if personSchemaOf(t, raw) != schema.DMMessageSchemaV1 || json.Unmarshal(raw, &m) != nil || m.ID != 42 {
-		t.Fatalf("first frame after the snapshot = %s, want message 42", raw)
+	c.expectMessage(42, 42)
+	for _, want := range []struct {
+		schema string
+		id     int64
+	}{{schema.DMMessageEditedSchemaV1, 900}, {schema.DMMessageRemovedSchemaV1, 40}, {schema.DMMessageSchemaV1, 7}} {
+		raw := c.raw()
+		var head struct {
+			Schema  string `json:"schema"`
+			Message struct {
+				ID int64 `json:"id"`
+			} `json:"message"`
+			ID int64 `json:"id"`
+		}
+		if err := json.Unmarshal(raw, &head); err != nil {
+			t.Fatal(err)
+		}
+		if got := head.ID + head.Message.ID; head.Schema != want.schema || got != want.id {
+			t.Fatalf("frame = %s, want %s of message %d", raw, want.schema, want.id)
+		}
 	}
-	if err := f.srv.person.publish(f.alice.ID, changedDoc(9)); err != nil {
+	c.expectChanged(12) // nothing reflected by the snapshot was sent
+}
+
+// TestPersonStreamDeliveryNeedsCurrentAccess: the rule is asked for every DM
+// frame when it is written, for the person it is written to; a frame it
+// refuses is dropped (a blocked pair gets none of the pair's frames, on any
+// socket of either person, the author's own other devices included); a
+// failing rule closes the socket rather than letting a frame through.
+func TestPersonStreamDeliveryNeedsCurrentAccess(t *testing.T) {
+	f := newRunFixture(t)
+	base := wsTestServer(t, f.srv)
+	blocked := map[int64]bool{} // principal -> blocked from conversation 12
+	f.srv.dmFrameAccess = func(_ context.Context, principal, conv int64) (bool, error) {
+		if conv == 99 {
+			return false, errors.New("store down")
+		}
+		return conv != 12 || !blocked[principal], nil
+	}
+	alice1, alice2, bob := dialPerson(t, base, f.aliceTok), dialPerson(t, base, f.aliceTok2), dialPerson(t, base, f.bobTok)
+	for _, c := range []*personClient{alice1, alice2, bob} {
+		c.open()
+	}
+
+	// Open: everyone gets it.
+	for _, id := range []int64{f.alice.ID, f.bob.ID} {
+		if err := f.srv.person.publish(id, dmMessageDoc(12, 1, 1)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	alice1.expectMessage(1, 1)
+	alice2.expectMessage(1, 1)
+	bob.expectMessage(1, 1)
+
+	// A block holds: neither side is sent a frame of the pair, the author's
+	// removal of their own message included, on all of the author's sockets.
+	blocked[f.alice.ID], blocked[f.bob.ID] = true, true
+	for _, id := range []int64{f.alice.ID, f.bob.ID} {
+		for _, d := range []personDoc{dmRemovedDoc(12, 1, 2), changedDoc(12), dmMessageDoc(13, 2, 1)} {
+			if err := f.srv.person.publish(id, d); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	// Only the other conversation's frame arrives: the block is on one pair.
+	alice1.expectMessage(2, 1)
+	alice2.expectMessage(2, 1)
+	bob.expectMessage(2, 1)
+
+	// The block lifts: frames flow again.
+	blocked[f.alice.ID], blocked[f.bob.ID] = false, false
+	if err := f.srv.person.publish(f.alice.ID, dmMessageDoc(12, 3, 3)); err != nil {
 		t.Fatal(err)
 	}
-	c.expectChanged(9) // 40 and 41 were not sent
+	alice1.expectMessage(3, 3)
+	alice2.expectMessage(3, 3)
+
+	// A rule that fails closes the socket; the other person's is untouched.
+	if err := f.srv.person.publish(f.bob.ID, dmMessageDoc(99, 1, 1)); err != nil {
+		t.Fatal(err)
+	}
+	if ce := bob.closed(); ce.Code != websocket.StatusInternalError {
+		t.Errorf("a failed access check closed with %d %q, want 1011", ce.Code, ce.Reason)
+	}
+	if err := f.srv.person.publish(f.alice.ID, changedDoc(5)); err != nil {
+		t.Fatal(err)
+	}
+	alice1.expectChanged(5)
 }
 
 // TestPersonStreamCarriesOnlyFramesAddressedToIt: a frame goes to the sockets

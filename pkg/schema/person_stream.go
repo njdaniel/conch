@@ -18,8 +18,8 @@ import (
 // the channel events socket. The frames, in the order a socket sees them:
 //
 //  1. PersonStreamHelloV1, once, first: the socket's own instance id.
-//  2. DMSnapshotV1, once: the reconnect snapshot (its HighWater says which DM
-//     message frames to expect after it).
+//  2. DMSnapshotV1, once: the reconnect snapshot (each conversation's Revision says which
+//     DM frames to expect after it: those above it).
 //  3. Then, as they happen and only those addressed to this person:
 //     DMMessageV1, DMMessageEditedV1, DMMessageRemovedV1 and DMChangedV1.
 //     Call frames are added to this list by the call issue (#2029); a client

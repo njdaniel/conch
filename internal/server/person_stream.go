@@ -42,8 +42,20 @@ import (
 // on and which names no one. Frames are addressed by principal id:
 // a frame published for principal 7 reaches only 7's sockets. A frame that
 // arrives while the snapshot is being taken is held and sent after it; a DM
-// message at or below the snapshot's high-water mark is a duplicate of the
-// snapshot and is not sent (DMSnapshotV1).
+// frame for a conversation at or below the Revision the snapshot reported for
+// that conversation is already reflected in the snapshot and is not sent
+// (DMSnapshotV1: the ordering is per conversation, by Revision; there is no
+// global high-water mark). What a socket missed while it was away is not
+// replayed here: the client reads it from GET /v1/dms/{c}/changes?after=.
+//
+// Delivery needs current access, decided when a frame is about to be written,
+// not when it was queued (direct-messages.md §3.2): the credential is live,
+// the person is enabled, and dmFrameAccess (installed by the DM store, which
+// holds the block relation of #1832) says the person may be sent frames of
+// that conversation now. During a block neither participant gets a frame of
+// the pair, the author's own other devices included. A frame the person may
+// not have is dropped, not queued for later; a failed check closes the socket
+// (fail closed), and the client reconnects and re-reads.
 //
 // Who may open it: a verified human member's own credential. An agent
 // (403 human_required) and a guest (403 guest_not_allowed) are refused before
@@ -79,41 +91,51 @@ type personDoc interface{ Validate() error }
 type personFrameKind struct {
 	// schema is the schema name the frame carries, for logs.
 	schema string
-	// accept reports whether doc is this kind's document, and the DM message
-	// id it carries (0 for a kind that carries none; used to drop a message
-	// the snapshot already holds).
-	accept func(doc personDoc) (messageID int64, ok bool)
+	// accept reports whether doc is this kind's document, the DM conversation
+	// it concerns and the conversation Revision it carries (0 for a kind with
+	// none; used to drop a change the snapshot already reflects).
+	accept func(doc personDoc) (dmKey, bool)
+}
+
+// dmKey says which conversation a DM frame is about and at which revision of
+// it. Zero values mean the frame carries none.
+type dmKey struct {
+	conversationID int64
+	revision       int64
 }
 
 // kindOf builds the registry entry for document type T.
-func kindOf[T personDoc](name string, messageID func(T) int64) personFrameKind {
-	return personFrameKind{schema: name, accept: func(doc personDoc) (int64, bool) {
+func kindOf[T personDoc](name string, key func(T) dmKey) personFrameKind {
+	return personFrameKind{schema: name, accept: func(doc personDoc) (dmKey, bool) {
 		d, ok := doc.(T)
 		if !ok {
-			return 0, false
+			return dmKey{}, false
 		}
-		if messageID == nil {
-			return 0, true
-		}
-		return messageID(d), true
+		return key(d), true
 	}}
+}
+
+func messageKey(m schema.DMMessageV1) dmKey {
+	return dmKey{conversationID: m.ConversationID, revision: m.Revision}
 }
 
 // personFrameKinds is the registry. Only the frames of ADR-017 that are
 // addressed to one person belong here. The hello and the snapshot are the
 // socket's own and are not published, so they are not in it.
 var personFrameKinds = []personFrameKind{
-	kindOf(schema.DMMessageSchemaV1, func(m schema.DMMessageV1) int64 { return m.ID }),
-	kindOf[schema.DMMessageEditedV1](schema.DMMessageEditedSchemaV1, nil),
-	kindOf[schema.DMMessageRemovedV1](schema.DMMessageRemovedSchemaV1, nil),
-	kindOf[schema.DMChangedV1](schema.DMChangedSchemaV1, nil),
+	kindOf(schema.DMMessageSchemaV1, messageKey),
+	kindOf(schema.DMMessageEditedSchemaV1, func(f schema.DMMessageEditedV1) dmKey { return messageKey(f.Message) }),
+	kindOf(schema.DMMessageRemovedSchemaV1, func(f schema.DMMessageRemovedV1) dmKey { return messageKey(f.Message) }),
+	// A change signal names a conversation but no revision: it is never
+	// dropped as a duplicate (it only asks the client to re-read).
+	kindOf(schema.DMChangedSchemaV1, func(f schema.DMChangedV1) dmKey { return dmKey{conversationID: f.ConversationID} }),
 	// TODO(#2029): the call frames (call.state) are registered here.
 }
 
 // personFrame is one encoded, validated frame in a socket's queue.
 type personFrame struct {
-	raw       []byte
-	messageID int64 // the DM message it carries, 0 for none
+	raw []byte
+	key dmKey // the DM conversation and revision it carries
 }
 
 var errPersonFrameKind = errors.New("server: a document that is not a person-stream frame")
@@ -121,7 +143,7 @@ var errPersonFrameKind = errors.New("server: a document that is not a person-str
 // newPersonFrame validates and encodes doc if a registered kind accepts it.
 func newPersonFrame(doc personDoc) (personFrame, error) {
 	for _, k := range personFrameKinds {
-		id, ok := k.accept(doc)
+		key, ok := k.accept(doc)
 		if !ok {
 			continue
 		}
@@ -132,7 +154,7 @@ func newPersonFrame(doc personDoc) (personFrame, error) {
 		if err != nil {
 			return personFrame{}, fmt.Errorf("server: encode person stream %s frame: %w", k.schema, err)
 		}
-		return personFrame{raw: raw, messageID: id}, nil
+		return personFrame{raw: raw, key: key}, nil
 	}
 	return personFrame{}, fmt.Errorf("%w: %T", errPersonFrameKind, doc)
 }
@@ -298,6 +320,15 @@ func (h *personHub) isClosed() bool {
 // socket is subscribed, so a frame published while it runs is held, not lost.
 type dmSnapshotSource func(ctx context.Context, principalID int64) (schema.DMSnapshotV1, error)
 
+// dmFrameAccess reports whether principalID may be sent frames of DM
+// conversation conversationID right now: no personal block either way between
+// the pair (#1832), DMs enabled for the person, and the person a participant.
+// The DM store installs it; nil means every DM frame is allowed, which is
+// right only while no DM store exists and nothing publishes a DM frame. It is
+// asked for every DM frame at write time, so a block that lands while a frame
+// is queued stops it.
+type dmFrameAccess func(ctx context.Context, principalID, conversationID int64) (bool, error)
+
 // emptyDMSnapshot is the source until the DM store is installed: no
 // conversations, and DMs not available (dms_enabled false), which is the
 // truth while no DM backend exists on this server.
@@ -416,7 +447,7 @@ func (s *Server) handlePersonEventsWS(w http.ResponseWriter, r *http.Request) {
 	}
 	// The snapshot is taken after the subscription, so a frame published
 	// while it is being built is queued, and sent after it unless the
-	// snapshot already holds it (high-water).
+	// snapshot already reflects it (its conversation's Revision).
 	snap, err := s.personSnapshot(ctx, caller.ID)
 	if err != nil {
 		slog.ErrorContext(ctx, "person stream: snapshot failed", "principal", caller.ID, "error", err)
@@ -430,7 +461,7 @@ func (s *Server) handlePersonEventsWS(w http.ResponseWriter, r *http.Request) {
 	defer done()
 	ticker := time.NewTicker(s.credRecheckInterval)
 	defer ticker.Stop()
-	ps := &personStream{s: s, conn: conn, sub: sub, principalID: caller.ID, credID: credID, highWater: snap.HighWater}
+	ps := &personStream{s: s, conn: conn, sub: sub, principalID: caller.ID, credID: credID, snapRevisions: snapshotRevisions(snap)}
 	ps.run(ctx, snap, ticker.C)
 }
 
@@ -441,7 +472,19 @@ type personStream struct {
 	sub         *personSub
 	principalID int64
 	credID      int64
-	highWater   int64 // DM messages at or below it are in the snapshot
+	// snapRevisions is the Revision the snapshot reported for each
+	// conversation it lists: a frame for one of them at or below it is
+	// already in the snapshot. A conversation the snapshot does not list has
+	// no entry, and its frames are all sent.
+	snapRevisions map[int64]int64
+}
+
+func snapshotRevisions(snap schema.DMSnapshotV1) map[int64]int64 {
+	revs := make(map[int64]int64, len(snap.Conversations))
+	for _, c := range snap.Conversations {
+		revs[c.ID] = c.Revision
+	}
+	return revs
 }
 
 // run sends the hello, the snapshot and then frames until the peer leaves,
@@ -504,14 +547,37 @@ func (p *personStream) flush(ctx context.Context) bool {
 		return false
 	}
 	for _, f := range frames {
-		if f.messageID != 0 && f.messageID <= p.highWater {
+		if f.key.revision != 0 && f.key.revision <= p.snapRevisions[f.key.conversationID] {
 			continue // the snapshot already reflects it
+		}
+		if f.key.conversationID != 0 {
+			allowed, err := p.dmAccess(ctx, f.key.conversationID)
+			if err != nil {
+				if ctx.Err() == nil {
+					slog.ErrorContext(ctx, "person stream: access check failed", "principal", p.principalID, "error", err)
+				}
+				closeWS(ctx, p.conn, schema.SocketCloseError, websocket.StatusInternalError, "access check failed")
+				return false
+			}
+			if !allowed {
+				continue // no access now: this person is sent nothing of it
+			}
 		}
 		if !p.write(ctx, f.raw) {
 			return false
 		}
 	}
 	return true
+}
+
+// dmAccess asks the installed rule whether this person may be sent frames of
+// the conversation now.
+func (p *personStream) dmAccess(ctx context.Context, conversationID int64) (bool, error) {
+	check := p.s.dmFrameAccess
+	if check == nil {
+		return true, nil
+	}
+	return check(ctx, p.principalID, conversationID)
 }
 
 func (p *personStream) sendDoc(ctx context.Context, doc personDoc) bool {

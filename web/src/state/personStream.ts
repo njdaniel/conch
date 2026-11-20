@@ -37,7 +37,7 @@ export type PersonFrame =
   // connection and is not a credential.
   | { readonly kind: 'hello'; readonly hello: PersonStreamHelloV1 }
   // The second: the reconnect snapshot. It replaces what the client holds;
-  // a message frame at or below its high_water is a duplicate to ignore.
+  // a frame for a conversation at or below that conversation's revision in it is a duplicate to ignore.
   | { readonly kind: 'snapshot'; readonly snapshot: DMSnapshotV1 }
   | { readonly kind: 'dm_message'; readonly message: DMMessageV1 }
   | { readonly kind: 'dm_message_edited'; readonly edited: DMMessageEditedV1 }
