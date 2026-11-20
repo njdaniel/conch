@@ -156,7 +156,7 @@ export function activationFactory(env: ActivationEnv, live: Live): (spec: Activa
 
 // probe asks an address whether it is a Conch server: /healthz, with no
 // credential, through the same client (so the same trust and redirect rules).
-export function prober(log: (line: string) => void): (origin: string) => Promise<ProbeResult> {
+export function prober(log: MainLog): (origin: string) => Promise<ProbeResult> {
   return async (origin) => {
     const session = new Session();
     session.setOrigin(origin);
@@ -196,7 +196,7 @@ export function healthReader(): (origin: string) => Promise<HealthResult> {
 // revoker tells a server that a credential held for a profile that is not
 // active is over: a session of its own, the same client, the same revocation as
 // sign-out. It never raises.
-export function revoker(log: (line: string) => void): (origin: string, token: string) => Promise<'ended' | 'unconfirmed' | 'unsent'> {
+export function revoker(log: MainLog): (origin: string, token: string) => Promise<'ended' | 'unconfirmed' | 'unsent'> {
   return async (origin, token) => {
     const session = new Session();
     const client = new Client({ fetch: globalThis.fetch, session });
@@ -210,7 +210,7 @@ export function revoker(log: (line: string) => void): (origin: string, token: st
 // verifier asks a server who a stored credential is, in a session of its own
 // and before any window holds it (issue #945: a restored credential is checked
 // against the principal its profile is bound to). It never raises.
-export function verifier(log: (line: string) => void): (origin: string, token: string) => Promise<StoredCheck> {
+export function verifier(log: MainLog): (origin: string, token: string) => Promise<StoredCheck> {
   return async (origin, token) => {
     const session = new Session();
     const client = new Client({ fetch: globalThis.fetch, session });

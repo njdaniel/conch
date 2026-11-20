@@ -25,6 +25,7 @@
 // source (lifecycle-linux.ts or lifecycle-windows.ts) reports under its own
 // name: the screen is locked if any source says so.
 
+import type { MainLog } from './diagnostics.ts';
 // A lock-state source: logind's LockedHint and Lock/Unlock signals, or the
 // idle-state poll (a second signal), or Windows powerMonitor.
 export type LockSource = 'logind' | 'idle' | 'powerMonitor';
@@ -54,7 +55,7 @@ export interface LifecycleDeps {
   };
   readonly companion: { end(reason: LifecycleEnd): Promise<unknown> };
   readonly notifications: { setLocked(locked: boolean): void };
-  readonly log: (line: string) => void;
+  readonly log: MainLog;
   readonly muteBoundMs?: number;
 }
 

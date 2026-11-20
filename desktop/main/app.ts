@@ -76,7 +76,7 @@ export function registerScheme(): void {
 }
 
 // The diagnostics ring (issue #2084) keeps only main's fixed diagnostic
-// context. Call sites mark lines containing free-form data as local only.
+// context. Call sites opt in explicitly with fixed diagnostic text.
 const ring = new LogRing();
 const log = diagnosticsLogger(ring, (line) => { console.error(line); });
 
@@ -214,7 +214,7 @@ export async function start(): Promise<void> {
 
   // Only the owning process registers the Windows invite handler. Failure
   // leaves pasted invites available; never include argv or a link in the log.
-  if (!registerInviteProtocol(app)) log('conch-desktop: could not register the conch: protocol');
+  if (!registerInviteProtocol(app)) log('conch-desktop: could not register the conch: protocol', { ring: true });
 
   // The app's settings, once the data root is known (below). Until then, and
   // with none, closing the last window quits.
@@ -276,7 +276,7 @@ export async function start(): Promise<void> {
   // One that cannot be read supports nothing. The development flag is honoured
   // only by an unpackaged build, and says so on the log.
   const allowlist = parseCompat(await readFile(join(appPath, 'out', 'compat.json'), 'utf8').catch(() => ''));
-  if (allowlist === null) log('conch-desktop: compat.json is missing or malformed; no server release is supported');
+  if (allowlist === null) log('conch-desktop: compat.json is missing or malformed; no server release is supported', { ring: true });
   const override = allowUnlisted(app.isPackaged, process.argv);
   if (override) log(`conch-desktop: ${OVERRIDE_FLAG}: servers that are not on the tested list are allowed (development build)`);
 
@@ -284,7 +284,7 @@ export async function start(): Promise<void> {
   // which the vault itself creates and nothing else.
   const root = app.getPath('userData');
   const checked = await prepareRoot(root);
-  if (!checked.ok) log('conch-desktop: the data directory is not private to you; nothing will be saved');
+  if (!checked.ok) log('conch-desktop: the data directory is not private to you; nothing will be saved', { ring: true });
   const files = createProfileFiles(root);
   const maximized = process.platform === 'win32'
     ? new WindowMaximized(checked.ok ? createSettingsFiles(root, 'window-state.json') : memorySettingsFiles(), log)
@@ -477,7 +477,7 @@ export async function start(): Promise<void> {
   // profile can turn it on; the default becomes on only in a later change that
   // cites a passed L-S6 receipt.
   const shareAudio = linuxShareAudioEnabled(process.env, process.platform);
-  if (shareAudio) log('conch-desktop: CONCH_LINUX_SHARE_AUDIO is on: the Linux screen share offers its sound (experimental)');
+  if (shareAudio) log('conch-desktop: CONCH_LINUX_SHARE_AUDIO is on: the Linux screen share offers its sound (experimental)', { ring: true });
   // Set once Lifecycle exists (below); voice and the companion read it.
   let screenLocked: () => boolean = () => false;
   let unmuteBlocked: () => boolean = () => true;

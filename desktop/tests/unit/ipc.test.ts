@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import type { Feeds } from '../../main/api/feeds.ts';
 import type { Files } from '../../main/files.ts';
 import type { Service } from '../../main/api/service.ts';
-import { Diagnostics, LogRing } from '../../main/diagnostics.ts';
+import { Diagnostics, diagnosticsLogger, LogRing } from '../../main/diagnostics.ts';
 import { DocumentGate } from '../../main/document.ts';
 import { Gestures, LINK_GESTURE_MS } from '../../main/gestures.ts';
 import { checkCaller, Ipc, parseRequest, plain, type CompanionApi, type DiagnosticsApi, type InstalledApi, type IntegrationsApi, type InvitesApi, type NotificationsApi, type ProfilesApi, type VoiceApi, type SettingsApi, type ContentsLike, type FrameLike, type InvokeEvent } from '../../main/ipc.ts';
@@ -26,6 +26,7 @@ interface Fixture {
   readonly main: FrameLike;
   readonly calls: [string, unknown][];
   readonly logs: string[];
+  readonly ring: LogRing;
   readonly clock: { now: number };
   // Whether main's compatibility verdict lets a sign-in happen (issue #946).
   readonly permit: { value: boolean };
@@ -56,6 +57,7 @@ function fixture(realGestures?: Gestures, diagnostics?: DiagnosticsApi): Fixture
     return name === 'signInPermitted' ? () => permit.value : record(`profiles.${name}`);
   } });
   const logs: string[] = [];
+  const ring = new LogRing();
   const clock = { now: 1_000_000 };
   const input = { recent: false };
   const files = new Proxy({} as Files, { get: (_t, name: string) => record(`files.${name}`) });
@@ -73,9 +75,9 @@ function fixture(realGestures?: Gestures, diagnostics?: DiagnosticsApi): Fixture
   const installed = new Proxy({} as InstalledApi, { get: (_t, name: string) => record(`installed.${name}`) });
   const share = new ShareAllowance({ now: () => clock.now, generation: () => gate.generation });
   let owned: ContentsLike = contents;
-  const ipc = new Ipc({ owned: () => owned, gate, service, feeds, files, gestures, profiles, voice, invites, notifications, settings, integrations, companion, share, installed, ...(diagnostics === undefined ? {} : { diagnostics }), now: () => clock.now, log: (line) => logs.push(line) });
+  const ipc = new Ipc({ owned: () => owned, gate, service, feeds, files, gestures, profiles, voice, invites, notifications, settings, integrations, companion, share, installed, ...(diagnostics === undefined ? {} : { diagnostics }), now: () => clock.now, log: diagnosticsLogger(ring, (line) => logs.push(line)) });
   return {
-    ipc, gate, contents, main, calls, logs, clock, permit, input, share, activation,
+    ipc, gate, contents, main, calls, logs, ring, clock, permit, input, share, activation,
     event: (over = {}) => ({ sender: owned, senderFrame: owned.mainFrame, ...over }),
     replaceWindow: () => {
       const replacement = frame('replacement');
@@ -86,6 +88,21 @@ function fixture(realGestures?: Gestures, diagnostics?: DiagnosticsApi): Fixture
     },
   };
 }
+
+it('samples repeated IPC refusals in the export ring and keeps the local count', async () => {
+  const f = fixture();
+  f.ring.record('voice: helper 1 attached');
+  const event = f.event();
+  for (let n = 0; n < 550; n += 1) {
+    await f.ipc.invoke(event, 'unknown-private-name', []);
+  }
+  expect(f.ipc.refusals).toBe(550);
+  expect(f.logs).toHaveLength(550);
+  expect(f.ring.lines()).toEqual([
+    'voice: helper 1 attached',
+    ...[1, 100, 200, 300, 400, 500].map((count) => `conch-desktop: refused an IPC call (name); ${String(count)} so far`),
+  ]);
+});
 
 describe('voice renderer diagnostics', () => {
   it('accepts only fixed codes and leaves raw console text, URLs and tokens out of the log', async () => {

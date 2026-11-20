@@ -25,6 +25,7 @@
 //     the screen is locked, setMute(false) is refused (`locked`) and every
 //     start is muted, so nothing transmits again until a deliberate unmute
 //     after unlock (issue #1588).
+import type { MainLog } from '../diagnostics.ts';
 import { VOICE_CONTROL_STOP_KILL_AFTER_MS, type VoiceControlTalkMode } from '../../../web/src/schema/generated.ts';
 import type {
   NativeVoiceDevicesResult,
@@ -123,7 +124,7 @@ export interface VoiceServiceDeps {
   // The identity in force, or null (no profile, signed out, no private data
   // directory).
   readonly identity: () => Promise<VoiceIdentity | null>;
-  readonly log: (line: string) => void;
+  readonly log: MainLog;
   // Test seams for the key-device listing (issue #1381).
   readonly keyDevices?: KeyDeviceDeps;
   readonly platform?: NodeJS.Platform;
@@ -345,7 +346,7 @@ export class VoiceService {
       const view = this.plain();
       if (view.status !== 'running' || view.channel === null || view.helper === undefined || view.generation !== generation) return;
       const muted = this.pendingMute?.muted ?? view.helper.muted;
-      void this.applyMute(!muted, true).catch(() => { this.deps.log('voice: the mute key command failed'); });
+      void this.applyMute(!muted, true).catch(() => { this.deps.log('voice: the mute key command failed', { ring: true }); });
     });
   }
 
@@ -474,7 +475,7 @@ export class VoiceService {
           extraArgs: HELPER_ARGS,
         });
       } catch {
-        this.deps.log('voice: the start failed unexpectedly');
+        this.deps.log('voice: the start failed unexpectedly', { ring: true });
         result = { status: 'failed', generation: this.lastGeneration, reason: 'spawn-failed' };
       }
       if (!identity.current() || epoch !== this.epoch) {
@@ -499,7 +500,7 @@ export class VoiceService {
   // helper already running is not touched (this is reached only when none is),
   // and leave still works.
   private updatePending(): NativeVoiceView {
-    this.deps.log('voice: start refused: the installed files were replaced; restart to finish the update');
+    this.deps.log('voice: start refused: the installed files were replaced; restart to finish the update', { ring: true });
     const view: NativeVoiceView = { status: 'unavailable', generation: this.lastGeneration, channel: null, problem: UPDATE_PENDING, retryable: false };
     this.override = view;
     this.emit(view);
@@ -562,7 +563,7 @@ export class VoiceService {
   // too, so after a replacement it is refused with the join's reason.
   private async oneShotRefused(): Promise<boolean> {
     if (!(await this.replaced())) return false;
-    this.deps.log('voice: one-shot run refused: the installed files were replaced; restart to finish the update');
+    this.deps.log('voice: one-shot run refused: the installed files were replaced; restart to finish the update', { ring: true });
     return true;
   }
 
@@ -595,7 +596,7 @@ export class VoiceService {
       return { ok: true, devices, disclosure: KEY_DEVICE_DISCLOSURE };
     } catch {
       // No device name or path in the log.
-      this.deps.log('voice: the key device list failed');
+      this.deps.log('voice: the key device list failed', { ring: true });
       return { ok: false, error: 'failed' };
     }
   }
@@ -666,7 +667,7 @@ export class VoiceService {
     let timer: NodeJS.Timeout | undefined;
     const late = new Promise<void>((resolve) => {
       timer = setTimeout(() => {
-        this.deps.log('voice: the helper did not stop within its bound');
+        this.deps.log('voice: the helper did not stop within its bound', { ring: true });
         resolve();
       }, this.bound);
     });

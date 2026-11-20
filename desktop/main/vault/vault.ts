@@ -89,9 +89,9 @@ export function createVault(deps: VaultDeps): Vault {
   const write = (id: string, data: Uint8Array): Promise<void> =>
     writeCredential(deps.root, id, data, { syncDir: deps.syncDir });
 
-  const event = (name: string, profileId: string): void => {
-    deps.log(`vault: ${name}`);
-    deps.log(`vault: ${name} profile=${profileId}`, { ring: false });
+  const event = (name: NotProtected['kind'] | 'unsafe-root' | 'put-failed' | 'read-failed' | 'corrupt' | 'decrypt-failed' | 'reencrypt-failed' | 'remove-failed', profileId: string): void => {
+    deps.log(`vault: ${name}`, { ring: true });
+    deps.log(`vault: ${name} profile=${profileId}`);
   };
 
   async function doPut(profileId: string, secret: string): Promise<PutResult> {
