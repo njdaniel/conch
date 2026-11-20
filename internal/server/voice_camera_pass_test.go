@@ -102,25 +102,65 @@ func TestVoiceCameraIdle(t *testing.T) {
 
 // TestVoiceCameraDisplacedConnection (S5, the server's half): another
 // device of the same person takes p<id>'s place. The claim is the person's
-// and survives on the new connection, which publishes no camera: it ends
-// idle 5 s after the last pass that saw the old one's.
+// and survives on the new connection even if the poller sees the gap in
+// between. With no new camera it ends idle 5 s after the last pass that saw
+// the old one's. A holder who stays absent ends with left.
 func TestVoiceCameraDisplacedConnection(t *testing.T) {
-	f, room := newCameraFixture(t)
-	f.at(1_000)
-	f.mustCamera(t, "ann", "")
-	f.camTrack(room, "ann", true, false)
-	f.at(2_000)
-	f.pass(t)
-	f.lk.setRoom(room, fakeParticipant{identity: f.identity("ann"), joinedMs: 50_000}, mustParticipant(t, f, room, "ann2"))
-	f.at(3_000)
-	f.pass(t)
-	if got := f.cameras(t, f.ops, ""); !slices.Equal(got, []string{"ann"}) {
-		t.Fatalf("cameras %q right after the displacement, want ann's", got)
-	}
-	f.at(7_000)
-	f.pass(t)
-	if got := f.cameraHolders(room); len(got) != 0 {
-		t.Errorf("claims %q 5 s after the last camera was seen, want none", got)
+	for _, tt := range []struct {
+		name      string
+		gap       bool
+		replaced  bool
+		endsAt    int
+		endReason schema.VoiceCameraEndReason
+	}{
+		{"replacement in the first listing", false, true, 7_000, schema.VoiceCameraEndIdle},
+		{"replacement after missing listings", true, true, 7_000, schema.VoiceCameraEndIdle},
+		{"holder really left", true, false, 4_500, schema.VoiceCameraEndLeft},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f, room := newCameraFixture(t)
+			f.at(1_000)
+			f.mustCamera(t, "ann", "")
+			f.camTrack(room, "ann", true, false)
+			f.at(2_000)
+			f.pass(t)
+			other := mustParticipant(t, f, room, "ann2")
+			if tt.gap {
+				f.lk.setRoom(room, other)
+				for _, ms := range []int{3_000, 3_500} {
+					f.at(ms)
+					f.pass(t)
+					if got := f.cameraHolders(room); !slices.Equal(got, []string{"ann"}) {
+						t.Fatalf("claims at %d ms = %q, want ann's during the gap; audit %q", ms, got, f.cameraRows(t))
+					}
+				}
+			}
+			if tt.replaced {
+				f.lk.setRoom(room, fakeParticipant{identity: f.identity("ann"), joinedMs: 4_000}, other)
+				f.at(4_000)
+				f.pass(t)
+				if got := f.cameras(t, f.ops, ""); !slices.Equal(got, []string{"ann"}) {
+					t.Fatalf("cameras %q right after the displacement, want ann's", got)
+				}
+			}
+			f.at(tt.endsAt - 1)
+			f.pass(t)
+			if got := f.cameraHolders(room); !slices.Equal(got, []string{"ann"}) {
+				t.Fatalf("claims before the deadline = %q, want ann's", got)
+			}
+			f.at(tt.endsAt)
+			f.pass(t)
+			if got := f.cameraHolders(room); len(got) != 0 {
+				t.Errorf("claims at the deadline = %q, want none", got)
+			}
+			if e := f.snapAs(t, f.ops, "ann").CameraEnded; e == nil || e.Reason != tt.endReason {
+				t.Errorf("camera_ended = %+v, want %s", e, tt.endReason)
+			}
+			want := []string{"ann started", "system stopped principal=ann reason=" + string(tt.endReason)}
+			if got := f.cameraRows(t); !slices.Equal(got, want) {
+				t.Errorf("rows %q, want %q", got, want)
+			}
+		})
 	}
 }
 

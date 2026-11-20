@@ -59,6 +59,10 @@ const (
 	// figures (§4.5).
 	voiceCameraFirstTrack = 15 * time.Second
 	voiceCameraTrackGone  = 5 * time.Second
+	// A LiveKit participant listing can fall between removing the displaced
+	// connection and listing its replacement. Allow one maximum poll gap
+	// from the first absence for the same principal to be seen again (S5).
+	voiceCameraHandoffGrace = voicePassGapMax
 	// voiceCameraAdoptWindow is how long after a rotation ended a claim
 	// (reason=rotated) a request naming it may adopt it as a new claim in
 	// the same channel (§4.2). A server constant, not published.
@@ -105,6 +109,10 @@ type voiceCamera struct {
 	// and lastTrack when one last did.
 	published bool
 	lastTrack time.Time
+	// missingSince is the first pass that listed no direct connection since
+	// the holder was last seen. A replacement clears it without renewing the
+	// claim or its idle deadline.
+	missingSince time.Time
 }
 
 // voiceCameraTrack is what the passes know of one track they found unclaimed
@@ -1108,8 +1116,13 @@ func (p *voicePoller) judgeCamerasLocked(r *voiceRoomState, now time.Time, seen 
 		case lost[pid]:
 			ended = p.endCameraLocked(r, pid, voiceCameraStopAccessLost, 0)
 		case !here:
-			ended = p.endCameraLocked(r, pid, voiceCameraStopLeft, 0)
+			if c.missingSince.IsZero() {
+				c.missingSince = now
+			} else if now.Sub(c.missingSince) >= voiceCameraHandoffGrace {
+				ended = p.endCameraLocked(r, pid, voiceCameraStopLeft, 0)
+			}
 		default:
+			c.missingSince = time.Time{}
 			// A muted camera sends nothing, and is not a camera on. A claim
 			// covers one camera track, the first LiveKit lists; any other is
 			// judged below as one nobody claimed (the security review of
