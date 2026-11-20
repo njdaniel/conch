@@ -11,6 +11,7 @@ package schema
 // constants, its Valid() switch or its …Names() string disagree with the list
 // here, so a value added to Go and not here fails go test.
 var Vocabularies = map[string][]string{
+	"AccountNoticeKind": values(AccountNoticeKindPasswordSetByLink),
 	"ActivityKind": values(
 		ActivityKindRunStarted, ActivityKindCommandStarted, ActivityKindCommandFinished,
 		ActivityKindReplyPosted, ActivityKindApprovalRequested, ActivityKindApprovalResolved,

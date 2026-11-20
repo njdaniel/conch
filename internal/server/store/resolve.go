@@ -79,6 +79,9 @@ type RequestCredential struct {
 	// where password-only is allowed: it reaches only the authenticator routes and its
 	// own end (ADR-011 item 2.1, the middleware's setupTOTPOnlyRoutes).
 	SetupTOTPOnly bool
+	// SelfMade says its principal made it for themselves (issue #2042,
+	// provenance.go): the DM and call routes refuse one that is not.
+	SelfMade bool
 }
 
 // ResolveRequestCredential is ResolveCredentialDetail for the authentication
@@ -112,12 +115,12 @@ func (s *Store) resolveCredential(ctx context.Context, token string, admitSetup 
 	err := s.db.QueryRowContext(ctx,
 		`SELECT c.id, c.token_hash, c.expires_at, c.revoked_at, c.renew_ms, p.disabled_at, p.id, p.kind, p.name, p.role, p.owner, p.created_at,
 		        p.invited_by, p.invite_id, p.may_invite, p.voice_allowed, `+idleBoundColumns+`,
-		        c.auth_generation = p.auth_generation, c.scope, c.recent_auth_until, c.setup_totp_only
+		        c.auth_generation = p.auth_generation, c.scope, c.recent_auth_until, c.setup_totp_only, c.self_made
 		 FROM credentials c JOIN principals p ON p.id = c.principal_id
 		 WHERE c.token_hash = ?`, want,
 	).Scan(&cred.ID, &storedHash, &expiresAt, &revokedAt, &renewMs, &disabled, &p.ID, &kind, &p.Name, &role, &p.Owner, &createdAt,
 		&invitedBy, &inviteID, &p.MayInvite, &p.VoiceAllowed, &idle.createdAt, &idle.idleMs, &idle.lastUsedAt,
-		&idle.guestState, &idle.guestExpiresAt, &generationCurrent, &scope, &recentAuth, &cred.SetupTOTPOnly)
+		&idle.guestState, &idle.guestExpiresAt, &generationCurrent, &scope, &recentAuth, &cred.SetupTOTPOnly, &cred.SelfMade)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Principal{}, RequestCredential{}, ErrCredentialInvalid
 	}

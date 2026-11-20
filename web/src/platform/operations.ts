@@ -85,6 +85,7 @@ import {
   listMessagesResponseV2,
   listNetsResponseV1,
   listOwnCredentialsResponseV1,
+  listAccountNoticesResponseV1,
   listOwnSignInLinksResponseV1,
   listReadStateResponseV1,
   listOwnPushRegistrationsResponseV1,
@@ -265,6 +266,9 @@ export const operations = {
   }),
   listSignInLinks: op('GET', '/v1/sign-in-links/mine', 'bearer', { response: reply(listOwnSignInLinksResponseV1) }),
   closeSignInLink: op('DELETE', '/v1/sign-in-links/mine/{id}', 'bearer'),
+  // The member's own account notices (issue #2042): read and dismissed on a sign-in of their own.
+  listNotices: op('GET', '/v1/notices/mine', 'bearer', { response: reply(listAccountNoticesResponseV1) }),
+  dismissNotice: op('DELETE', '/v1/notices/mine/{id}', 'bearer'),
   previewSignInLink: op('POST', '/v1/sign-in-links/preview', 'none', { request: check(signInLinkPreviewRequestV1), response: reply(signInLinkPreviewV1) }),
   redeemSignInLink: op('POST', '/v1/sign-in-links/redeem', 'none', {
     request: check(redeemSignInLinkRequestV1),

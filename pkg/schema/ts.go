@@ -424,6 +424,9 @@ var TSTypes = []TSType{
 	{Value: RedeemSetupTokenResponseV1{}, Family: "redeem-setup-token-response-v1"},
 	{Value: CreateDeviceLinkRequestV1{}, Family: "create-device-link-request-v1"},
 	{Value: ListOwnSignInLinksResponseV1{}, Family: "list-own-sign-in-links-response-v1"},
+	// Account notices (issue #2042): the member's own, dismissible.
+	{Value: AccountNoticeV1{}, Family: "account-notice-v1"},
+	{Value: ListAccountNoticesResponseV1{}, Family: "list-account-notices-response-v1"},
 
 	// The server's health, which carries its version (the sign-in page shows
 	// it). Not a versioned payload, so it has no fixture family.
@@ -676,6 +679,8 @@ var TSVocabularyModes = map[string]TSVocabularyMode{
 	"PermissionPreset":   TSTolerant,
 	"PermissionsWarning": TSTolerant,
 	"IssuedKind":         TSTolerant,
+	// Account notices (account_notice.go): a later kind of notice.
+	"AccountNoticeKind": TSTolerant,
 	// Joining and the community model (guest.go, invite_v2.go, ADR-013):
 	// a later warning, link kind or directory scope.
 	"JoinWarning":    TSTolerant,
