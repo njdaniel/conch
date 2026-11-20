@@ -40,10 +40,10 @@ func TestDMGoldenFixtures(t *testing.T) {
 	}{
 		{"dm-conversation-v1.json", func() dmValidator { return new(DMConversationV1) }},
 		{"dm-conversation-v1-new.json", func() dmValidator { return new(DMConversationV1) }},
-		{"dm-conversation-v1-archived-unavailable.json", func() dmValidator { return new(DMConversationV1) }},
+		{"dm-conversation-v1-archived.json", func() dmValidator { return new(DMConversationV1) }},
 		{"open-dm-request-v1.json", func() dmValidator { return new(OpenDMRequestV1) }},
-		{"open-dm-response-v1.json", func() dmValidator { return &openDMResponseCheck{} }},
-		{"open-dm-response-v1-resumed.json", func() dmValidator { return &openDMResponseCheck{} }},
+		{"open-dm-response-v1.json", func() dmValidator { return new(OpenDMResponseV1) }},
+		{"open-dm-response-v1-resumed.json", func() dmValidator { return new(OpenDMResponseV1) }},
 		{"list-dm-conversations-response-v1.json", func() dmValidator { return new(ListDMConversationsResponseV1) }},
 		{"list-dm-conversations-response-v1-empty.json", func() dmValidator { return new(ListDMConversationsResponseV1) }},
 		{"dm-message-v1.json", func() dmValidator { return new(DMMessageV1) }},
@@ -65,6 +65,8 @@ func TestDMGoldenFixtures(t *testing.T) {
 		{"list-dm-messages-response-v1.json", func() dmValidator { return new(ListDMMessagesResponseV1) }},
 		{"list-dm-messages-response-v1-catch-up.json", func() dmValidator { return new(ListDMMessagesResponseV1) }},
 		{"list-dm-messages-response-v1-empty.json", func() dmValidator { return new(ListDMMessagesResponseV1) }},
+		{"list-dm-changes-response-v1.json", func() dmValidator { return new(ListDMChangesResponseV1) }},
+		{"list-dm-changes-response-v1-empty.json", func() dmValidator { return new(ListDMChangesResponseV1) }},
 		{"search-dm-messages-response-v1.json", func() dmValidator { return new(SearchDMMessagesResponseV1) }},
 		{"dm-read-state-v1.json", func() dmValidator { return new(DMReadStateV1) }},
 		{"dm-read-state-v1-never.json", func() dmValidator { return new(DMReadStateV1) }},
@@ -79,6 +81,7 @@ func TestDMGoldenFixtures(t *testing.T) {
 		{"notification-summary-v2-channel.json", func() dmValidator { return new(NotificationSummaryV2) }},
 		{"list-pending-notifications-response-v2.json", func() dmValidator { return new(ListPendingNotificationsResponseV2) }},
 		{"list-pending-notifications-response-v2-empty.json", func() dmValidator { return new(ListPendingNotificationsResponseV2) }},
+		{"list-pending-notifications-response-v2-empty-more.json", func() dmValidator { return new(ListPendingNotificationsResponseV2) }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.file, func(t *testing.T) { assertValidGoldenFixture(t, tt.file, tt.new) })
@@ -97,34 +100,56 @@ func (dmServerSettingsCheck) Validate() error { return nil }
 func (dmPermissionReqCheck) Validate() error  { return nil }
 func (dmPermissionRespCheck) Validate() error { return nil }
 
-// openDMResponseCheck and postDMResponseCheck give the two response bodies,
-// which promise only what they embed, a Validate for the fixture test.
-type openDMResponseCheck struct{ OpenDMResponseV1 }
-
-func (r openDMResponseCheck) Validate() error { return r.Conversation.Validate() }
-
+// postDMResponseCheck gives the send response, which promises only what it
+// embeds, a Validate for the fixture test.
 type postDMResponseCheck struct{ PostDMMessageResponseV1 }
 
 func (r postDMResponseCheck) Validate() error { return r.Message.Validate() }
 
+// strictDMDecode decodes body into into with unknown fields refused, as the
+// server does.
+func strictDMDecode(body string, into any) error {
+	dec := json.NewDecoder(strings.NewReader(body))
+	dec.DisallowUnknownFields()
+	return dec.Decode(into)
+}
+
 // TestDMRequestsRefuseChannelOnlyFields pins ADR-017 Decision 5: a DM send
 // or edit has no payload, audience, thread or mention field, so the server's
-// strict decoding refuses a body that carries one (400 invalid_request).
+// strict decoding refuses a body that carries one (400 invalid_request). Each
+// case adds one forbidden field to an otherwise valid body, and the valid body
+// is decoded first, so a refusal is the field's doing alone; a field the
+// request type began to accept would fail its own case.
 func TestDMRequestsRefuseChannelOnlyFields(t *testing.T) {
-	for _, field := range []string{"payload", "audience", "thread_root_id", "mentions", "channel_id"} {
-		for name, into := range map[string]any{"send": new(PostDMMessageRequestV1), "edit": new(EditDMMessageRequestV1)} {
-			body := `{"body":"hi","client_nonce":"n","` + field + `":1}`
-			dec := json.NewDecoder(strings.NewReader(body))
-			dec.DisallowUnknownFields()
-			if err := dec.Decode(into); err == nil {
-				t.Errorf("%s accepts %q", name, field)
-			}
+	requests := []struct {
+		name      string
+		base      string
+		new       func() any
+		forbidden []string
+	}{
+		{"send", `"body":"hi","client_nonce":"n"`, func() any { return new(PostDMMessageRequestV1) },
+			[]string{"payload", "audience", "thread_root_id", "mentions", "channel_id", "conversation_id", "author_id", "reactions"}},
+		// An edit takes the text and nothing else: not files, and not a
+		// client nonce, which belongs to a send.
+		{"edit", `"body":"hi"`, func() any { return new(EditDMMessageRequestV1) },
+			[]string{"payload", "audience", "thread_root_id", "mentions", "channel_id", "conversation_id", "author_id", "file_ids", "client_nonce"}},
+		{"open", `"peer_id":5`, func() any { return new(OpenDMRequestV1) },
+			[]string{"payload", "channel_id", "conversation_id", "created", "body"}},
+	}
+	for _, rq := range requests {
+		if err := strictDMDecode("{"+rq.base+"}", rq.new()); err != nil {
+			t.Fatalf("%s: the base body does not decode: %v", rq.name, err)
+		}
+		for _, field := range rq.forbidden {
+			t.Run(rq.name+"/"+field, func(t *testing.T) {
+				if err := strictDMDecode("{"+rq.base+`,"`+field+`":1}`, rq.new()); err == nil {
+					t.Errorf("%s accepts %q", rq.name, field)
+				}
+			})
 		}
 	}
 	// Blocking is #1832's, not the DM contract's: the preference has no list.
-	dec := json.NewDecoder(strings.NewReader(`{"accept":"everyone","blocked":[1]}`))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(new(DMPreferencesV1)); err == nil {
+	if err := strictDMDecode(`{"accept":"everyone","blocked":[1]}`, new(DMPreferencesV1)); err == nil {
 		t.Error("DMPreferencesV1 accepts a block list")
 	}
 }
@@ -160,18 +185,77 @@ func TestDMErrorCodes(t *testing.T) {
 	})
 }
 
+// TestDMRefusalBodiesAreGeneric pins the privacy contract of the refusals
+// (design §3.2): each DM refusal's body is exactly DMRefusalError(code), a
+// fixed message with no reason in it, and the same bytes as its fixture. A
+// message that said "blocked", named a preference, a switch or an account
+// state, or took the input, would fail here.
+func TestDMRefusalBodiesAreGeneric(t *testing.T) {
+	fixtures := map[string]string{
+		ErrorCodeDMNotFound:          "error-dm-not-found.json",
+		ErrorCodeContactUnavailable:  "error-contact-unavailable.json",
+		ErrorCodeDMsOff:              "error-dms-off.json",
+		ErrorCodeOwnSignInRequired:   "error-own-sign-in-required.json",
+		ErrorCodeDMNonceConflict:     "error-dm-nonce-conflict.json",
+		ErrorCodeDMRequireAuth:       "error-dm-require-auth.json",
+		ErrorCodeDMFileNotAttachable: "error-dm-file-not-attachable.json",
+	}
+	// What a refusal must never say: why a contact is refused, or who did it.
+	reasons := []string{"block", "prefer", "disabled", "switch", "operator", "nobody", "hidden", "guest", "visible", "banned", "removed", "offline", "busy", "act-as", "impersonat", "exist"}
+	seen := map[string]string{}
+	for code, file := range fixtures {
+		t.Run(code, func(t *testing.T) {
+			want, ok := DMRefusalError(code)
+			if !ok {
+				t.Fatalf("DMRefusalError(%q) is not a DM refusal", code)
+			}
+			if want.Code != code || want.Message == "" || want.RetryAfterSeconds != 0 || want.Permission != "" {
+				t.Errorf("DMRefusalError(%q) = %+v", code, want)
+			}
+			// Bodies are byte-identical to the fixture, so a changed message
+			// changes a reviewed file.
+			raw, err := os.ReadFile(filepath.Join("testdata", file)) // #nosec G304 -- fixture name from this test's own table
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := json.MarshalIndent(want, "", "  ")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(raw) != string(got)+"\n" {
+				t.Errorf("fixture %s is not the pinned body\ngot:\n%s\nwant:\n%s", file, raw, got)
+			}
+			assertGoldenFixture(t, file, func() any { return new(Error) })
+			for _, w := range reasons {
+				// "exist" is only forbidden of the contact refusals: dm_not_found
+				// must say one thing for "none" and "not yours".
+				if strings.Contains(strings.ToLower(want.Message), w) && (w != "exist" || code != ErrorCodeDMNotFound) {
+					t.Errorf("%s message %q names a reason (%q)", code, want.Message, w)
+				}
+			}
+			if other, dup := seen[want.Message]; dup {
+				t.Errorf("%s and %s share a message", code, other)
+			}
+			seen[want.Message] = code
+		})
+	}
+	if _, ok := DMRefusalError("principal_not_found"); ok {
+		t.Error("DMRefusalError claims a code that is not a DM refusal")
+	}
+}
+
 func TestDMValidate(t *testing.T) {
 	at := NewTimestamp(time.Date(2026, 11, 19, 9, 0, 0, 0, time.UTC))
 	later := NewTimestamp(time.Date(2026, 11, 19, 9, 5, 0, 0, time.UTC))
 	conv := func() DMConversationV1 {
 		return DMConversationV1{
-			Schema: DMConversationSchemaV1, ID: 12, ParticipantIDs: []int64{3, 5}, CreatedAt: at,
-			PeerID: 5, PeerAvailable: true, State: DMStateOpen,
+			Schema: DMConversationSchemaV1, ID: 12, ParticipantIDs: []int64{3, 5}, CreatedAt: &at,
+			PeerID: 5, State: DMStateOpen, Revision: 7,
 			LastMessageID: 40, LastMessageAt: &later, LastReadID: 30, Unread: 2,
 		}
 	}
 	msg := func(id int64) DMMessageV1 {
-		return DMMessageV1{Schema: DMMessageSchemaV1, ID: id, ConversationID: 12, AuthorID: 3, CreatedAt: at, Body: "hi"}
+		return DMMessageV1{Schema: DMMessageSchemaV1, ID: id, ConversationID: 12, AuthorID: 3, CreatedAt: at, Revision: id, Body: "hi"}
 	}
 	tests := []struct {
 		name string
@@ -186,6 +270,14 @@ func TestDMValidate(t *testing.T) {
 		{"conversation pair not canonical", func() DMConversationV1 { c := conv(); c.ParticipantIDs = []int64{5, 3}; return c }(), false},
 		{"conversation peer outside the pair", func() DMConversationV1 { c := conv(); c.PeerID = 9; return c }(), false},
 		{"conversation unknown state", func() DMConversationV1 { c := conv(); c.State = "muted"; return c }(), false},
+		{"conversation empty, no created_at", func() DMConversationV1 {
+			c := conv()
+			c.CreatedAt, c.LastMessageID, c.LastMessageAt, c.LastReadID, c.Unread, c.Revision = nil, 0, nil, 0, 0, 0
+			return c
+		}(), true},
+		{"conversation with a message but no created_at", func() DMConversationV1 { c := conv(); c.CreatedAt = nil; return c }(), false},
+		{"conversation with a message at revision 0", func() DMConversationV1 { c := conv(); c.Revision = 0; return c }(), false},
+		{"conversation negative revision", func() DMConversationV1 { c := conv(); c.Revision = -1; return c }(), false},
 		{"conversation last_message_at without id", func() DMConversationV1 { c := conv(); c.LastMessageID, c.LastReadID = 0, 0; return c }(), false},
 		{"conversation read past the newest", func() DMConversationV1 { c := conv(); c.LastReadID = 41; return c }(), false},
 		{"conversation unread over cap", func() DMConversationV1 { c := conv(); c.Unread = MaxUnreadCount + 1; return c }(), false},
@@ -193,6 +285,7 @@ func TestDMValidate(t *testing.T) {
 		{"message", msg(40), true},
 		{"message with channel schema", func() DMMessageV1 { m := msg(40); m.Schema = MessageSchemaV2; return m }(), false},
 		{"message no conversation", func() DMMessageV1 { m := msg(40); m.ConversationID = 0; return m }(), false},
+		{"message no revision", func() DMMessageV1 { m := msg(40); m.Revision = 0; return m }(), false},
 		{"message no body", func() DMMessageV1 { m := msg(40); m.Body = ""; return m }(), false},
 		{"message duplicate files", func() DMMessageV1 { m := msg(40); m.FileIDs = []int64{4, 4}; return m }(), false},
 		{"message empty file list", func() DMMessageV1 { m := msg(40); m.FileIDs = []int64{}; return m }(), false},
@@ -219,6 +312,10 @@ func TestDMValidate(t *testing.T) {
 		{"post nonce at the bound", PostDMMessageRequestV1{Body: "hi", ClientNonce: strings.Repeat("a", MaxDMClientNonceBytes)}, true},
 		{"post too many files", PostDMMessageRequestV1{Body: "hi", ClientNonce: "n", FileIDs: []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}}, false},
 		{"post no body", PostDMMessageRequestV1{ClientNonce: "n"}, false},
+		// A channel send and a DM edit refuse these, so a DM send does too.
+		{"post whitespace only", PostDMMessageRequestV1{Body: " \t\n ", ClientNonce: "n"}, false},
+		{"post whitespace only with a file", PostDMMessageRequestV1{Body: "  ", ClientNonce: "n", FileIDs: []int64{1}}, false},
+		{"post text with spaces around", PostDMMessageRequestV1{Body: " hi ", ClientNonce: "n"}, true},
 		{"post empty file list is none", PostDMMessageRequestV1{Body: "hi", ClientNonce: "n", FileIDs: []int64{}}, true},
 
 		{"edit", EditDMMessageRequestV1{Body: "hi"}, true},
@@ -235,14 +332,38 @@ func TestDMValidate(t *testing.T) {
 		{"open", OpenDMRequestV1{PeerID: 5}, true},
 		{"open no peer", OpenDMRequestV1{}, false},
 
-		{"history newest page", ListDMMessagesResponseV1{Messages: []DMMessageV1{msg(30), msg(40)}, NextBefore: 30}, true},
-		{"history null", ListDMMessagesResponseV1{}, false},
-		{"history descending", ListDMMessagesResponseV1{Messages: []DMMessageV1{msg(40), msg(30)}}, false},
-		{"history two cursors", ListDMMessagesResponseV1{Messages: []DMMessageV1{msg(30), msg(40)}, NextBefore: 30, NextAfter: 40}, false},
-		{"history cursor off the edge", ListDMMessagesResponseV1{Messages: []DMMessageV1{msg(30), msg(40)}, NextBefore: 29}, false},
-		{"history cursor on empty page", ListDMMessagesResponseV1{Messages: []DMMessageV1{}, NextAfter: 40}, false},
-		{"history two conversations", ListDMMessagesResponseV1{Messages: []DMMessageV1{msg(30), func() DMMessageV1 { m := msg(40); m.ConversationID = 13; return m }()}}, false},
-		{"history over the page", ListDMMessagesResponseV1{Messages: make([]DMMessageV1, MaxDMPageSize+1)}, false},
+		// The default is the channel's: oldest first, paged with after.
+		{"history oldest first", ListDMMessagesResponseV1{Order: DMOrderAsc, Messages: []DMMessageV1{msg(30), msg(40)}, NextAfter: 40}, true},
+		{"history newest page", ListDMMessagesResponseV1{Order: DMOrderDesc, Messages: []DMMessageV1{msg(40), msg(30)}, NextBefore: 30}, true},
+		{"history no order", ListDMMessagesResponseV1{Messages: []DMMessageV1{msg(30), msg(40)}}, false},
+		{"history unknown order", ListDMMessagesResponseV1{Order: "newest", Messages: []DMMessageV1{}}, false},
+		{"history null", ListDMMessagesResponseV1{Order: DMOrderAsc}, false},
+		{"history asc but descending", ListDMMessagesResponseV1{Order: DMOrderAsc, Messages: []DMMessageV1{msg(40), msg(30)}}, false},
+		{"history desc but ascending", ListDMMessagesResponseV1{Order: DMOrderDesc, Messages: []DMMessageV1{msg(30), msg(40)}}, false},
+		{"history two cursors", ListDMMessagesResponseV1{Order: DMOrderAsc, Messages: []DMMessageV1{msg(30), msg(40)}, NextBefore: 30, NextAfter: 40}, false},
+		{"history asc with next_before", ListDMMessagesResponseV1{Order: DMOrderAsc, Messages: []DMMessageV1{msg(30), msg(40)}, NextBefore: 30}, false},
+		{"history desc with next_after", ListDMMessagesResponseV1{Order: DMOrderDesc, Messages: []DMMessageV1{msg(40), msg(30)}, NextAfter: 40}, false},
+		{"history cursor off the edge", ListDMMessagesResponseV1{Order: DMOrderAsc, Messages: []DMMessageV1{msg(30), msg(40)}, NextAfter: 39}, false},
+		{"history cursor on empty page", ListDMMessagesResponseV1{Order: DMOrderAsc, Messages: []DMMessageV1{}, NextAfter: 40}, false},
+		{"history two conversations", ListDMMessagesResponseV1{Order: DMOrderAsc, Messages: []DMMessageV1{msg(30), func() DMMessageV1 { m := msg(40); m.ConversationID = 13; return m }()}}, false},
+		{"history over the page", ListDMMessagesResponseV1{Order: DMOrderAsc, Messages: make([]DMMessageV1, MaxDMPageSize+1)}, false},
+
+		// The changes route is ordered by revision, not id: an edit of an old
+		// message follows a newer message.
+		{"changes", ListDMChangesResponseV1{Messages: []DMMessageV1{
+			func() DMMessageV1 { m := msg(50); m.Revision = 8; return m }(),
+			func() DMMessageV1 { m := msg(30); m.Revision = 9; m.EditedAt = &later; return m }()}, NextAfter: 9}, true},
+		{"changes empty", ListDMChangesResponseV1{Messages: []DMMessageV1{}}, true},
+		{"changes null", ListDMChangesResponseV1{}, false},
+		{"changes out of revision order", ListDMChangesResponseV1{Messages: []DMMessageV1{msg(40), msg(30)}}, false},
+		{"changes repeat revision", ListDMChangesResponseV1{Messages: []DMMessageV1{msg(40), func() DMMessageV1 { m := msg(41); m.Revision = 40; return m }()}}, false},
+		{"changes repeat a message", ListDMChangesResponseV1{Messages: []DMMessageV1{msg(40), func() DMMessageV1 { m := msg(40); m.Revision = 41; return m }()}}, false},
+		{"changes cursor off the edge", ListDMChangesResponseV1{Messages: []DMMessageV1{msg(30), msg(40)}, NextAfter: 30}, false},
+		{"changes over the page", ListDMChangesResponseV1{Messages: make([]DMMessageV1, MaxDMChangesPage+1)}, false},
+		{"changes of two conversations", ListDMChangesResponseV1{Messages: []DMMessageV1{msg(30), func() DMMessageV1 { m := msg(40); m.ConversationID = 13; return m }()}}, false},
+
+		{"open response", OpenDMResponseV1{Conversation: conv()}, true},
+		{"open response without a conversation", OpenDMResponseV1{}, false},
 
 		{"search", SearchDMMessagesResponseV1{Messages: []DMMessageV1{msg(40), msg(30)}, NextBefore: 30}, true},
 		{"search ascending", SearchDMMessagesResponseV1{Messages: []DMMessageV1{msg(30), msg(40)}}, false},
@@ -272,12 +393,15 @@ func TestDMValidate(t *testing.T) {
 		{"changed no kind", DMChangedV1{Schema: DMChangedSchemaV1, ConversationID: 12}, false},
 		{"changed no conversation", DMChangedV1{Schema: DMChangedSchemaV1, Kind: DMChangeRead}, false},
 
-		{"snapshot", DMSnapshotV1{Schema: DMSnapshotSchemaV1, Conversations: []DMConversationV1{conv()}, HighWater: 40, TakenAt: at}, true},
-		{"snapshot below a conversation", DMSnapshotV1{Schema: DMSnapshotSchemaV1, Conversations: []DMConversationV1{conv()}, HighWater: 39, TakenAt: at}, false},
-		{"snapshot archived", DMSnapshotV1{Schema: DMSnapshotSchemaV1, Conversations: []DMConversationV1{func() DMConversationV1 { c := conv(); c.State = DMStateArchived; return c }()}, HighWater: 40, TakenAt: at}, false},
-		{"snapshot twice", DMSnapshotV1{Schema: DMSnapshotSchemaV1, Conversations: []DMConversationV1{conv(), conv()}, HighWater: 40, TakenAt: at}, false},
+		{"snapshot", DMSnapshotV1{Schema: DMSnapshotSchemaV1, Conversations: []DMConversationV1{conv()}, TakenAt: at}, true},
+		// Archived conversations are in the snapshot: a message received while
+		// offline in one is found by its revision, as in an open one.
+		{"snapshot archived", DMSnapshotV1{Schema: DMSnapshotSchemaV1, Conversations: []DMConversationV1{func() DMConversationV1 { c := conv(); c.State = DMStateArchived; return c }()}, TakenAt: at}, true},
+		{"snapshot hidden", DMSnapshotV1{Schema: DMSnapshotSchemaV1, Conversations: []DMConversationV1{func() DMConversationV1 { c := conv(); c.State = DMStateHidden; return c }()}, TakenAt: at}, false},
+		{"snapshot twice", DMSnapshotV1{Schema: DMSnapshotSchemaV1, Conversations: []DMConversationV1{conv(), conv()}, TakenAt: at}, false},
 		{"snapshot null", DMSnapshotV1{Schema: DMSnapshotSchemaV1, TakenAt: at}, false},
 		{"snapshot no time", DMSnapshotV1{Schema: DMSnapshotSchemaV1, Conversations: []DMConversationV1{}}, false},
+		{"snapshot over the cap", DMSnapshotV1{Schema: DMSnapshotSchemaV1, Conversations: make([]DMConversationV1, MaxDMSnapshotConversations+1), TakenAt: at}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -336,6 +460,11 @@ func TestNotificationSummaryV2Validate(t *testing.T) {
 		{"page cursor not URL-safe", ListPendingNotificationsResponseV2{Summaries: []NotificationSummaryV2{}, Cursor: "a/b"}, false},
 		{"page cursor too long", ListPendingNotificationsResponseV2{Summaries: []NotificationSummaryV2{}, Cursor: strings.Repeat("a", MaxDMCursorBytes+1)}, false},
 		{"page empty, no cursor", ListPendingNotificationsResponseV2{Summaries: []NotificationSummaryV2{}}, true},
+		// An empty page that examined candidates carries the cursor that moves
+		// past them, even with more behind it.
+		{"page empty, cursor, more", ListPendingNotificationsResponseV2{Summaries: []NotificationSummaryV2{}, Cursor: "c_9", More: true}, true},
+		// A nonempty page always gives the client its resume position.
+		{"page with summaries, no cursor, no more", ListPendingNotificationsResponseV2{Summaries: []NotificationSummaryV2{sum(direct, NotificationKindDirect)}}, false},
 		{"page null", ListPendingNotificationsResponseV2{}, false},
 		{"page more without a cursor", ListPendingNotificationsResponseV2{Summaries: []NotificationSummaryV2{}, More: true}, false},
 		// v1 never carries a DM: its kind "direct" is refused there.
@@ -354,6 +483,79 @@ func TestNotificationSummaryV2Validate(t *testing.T) {
 				t.Fatal("Validate() = nil, want an error")
 			}
 		})
+	}
+}
+
+// TestPendingV2CannotStall pins the progress rule: a page that says More must
+// have moved the cursor past ?after=, so a client never asks the same question
+// twice. The stall the review found is an empty page, from a bounded scan of
+// candidates that produced no summary, answering More with the cursor it was
+// given.
+func TestPendingV2CannotStall(t *testing.T) {
+	tests := []struct {
+		name  string
+		after string
+		page  ListPendingNotificationsResponseV2
+		ok    bool
+	}{
+		{"empty page advanced past muted rows", "pf_a", ListPendingNotificationsResponseV2{Summaries: []NotificationSummaryV2{}, Cursor: "pf_b", More: true}, true},
+		{"empty page, same cursor, more: the stall", "pf_a", ListPendingNotificationsResponseV2{Summaries: []NotificationSummaryV2{}, Cursor: "pf_a", More: true}, false},
+		{"empty page at the start, more, with a cursor", "", ListPendingNotificationsResponseV2{Summaries: []NotificationSummaryV2{}, Cursor: "pf_b", More: true}, true},
+		{"nothing examined: after echoed, no more", "pf_a", ListPendingNotificationsResponseV2{Summaries: []NotificationSummaryV2{}, Cursor: "pf_a"}, true},
+		{"nothing examined at the start", "", ListPendingNotificationsResponseV2{Summaries: []NotificationSummaryV2{}}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.page.Validate(); err != nil {
+				t.Fatalf("Validate() = %v", err)
+			}
+			err := tt.page.CheckProgress(tt.after)
+			if tt.ok && err != nil {
+				t.Fatalf("CheckProgress() = %v, want nil", err)
+			}
+			if !tt.ok && err == nil {
+				t.Fatal("CheckProgress() = nil, want an error")
+			}
+		})
+	}
+}
+
+// TestDMWireRevealsNoPriorOpenOrAccountState pins that no DM document
+// carries what would tell a reader something they were not shown: a
+// "created" flag or a 201, or a peer-availability flag, would reveal that
+// the peer opened first, or that the peer's account is gone.
+func TestDMWireRevealsNoPriorOpenOrAccountState(t *testing.T) {
+	files, err := filepath.Glob(filepath.Join("testdata", "*dm-*.json"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("no DM fixtures found (%v)", err)
+	}
+	for _, file := range files {
+		raw, err := os.ReadFile(file) // #nosec G304 -- a fixture path this test globbed from its own testdata
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc any
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			continue
+		}
+		for _, key := range []string{"created", "peer_available", "available", "blocked", "blocked_by", "reason"} {
+			if hasKey(doc, key) {
+				t.Errorf("%s carries %q", filepath.Base(file), key)
+			}
+		}
+	}
+	// The empty conversation Alice opened and Bob opens next is one document,
+	// whoever opened it: no created_at, no revision above 0, nothing sent.
+	raw, err := os.ReadFile(filepath.Join("testdata", "dm-conversation-v1-new.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c DMConversationV1
+	if err := json.Unmarshal(raw, &c); err != nil {
+		t.Fatal(err)
+	}
+	if c.CreatedAt != nil || c.Revision != 0 || c.LastMessageID != 0 {
+		t.Errorf("an empty conversation shows %+v", c)
 	}
 }
 

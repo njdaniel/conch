@@ -18,7 +18,8 @@ import (
 // ListPendingNotificationsResponseV1 and never holds a DM; GET
 // /v2/notifications/pending answers ListPendingNotificationsResponseV2 with
 // both. The two share the request, the candidate bound and the More rule of
-// v1 (notification.go), but not the cursor: v2's is opaque, because DM
+// v1 (notification.go), but not the cursor: v2's is opaque and moves on every
+// examined candidate (see ListPendingNotificationsResponseV2), because DM
 // message ids are an id space of their own and no number orders them against
 // channel message ids.
 //
@@ -143,7 +144,23 @@ func (s NotificationSummaryV2) Validate() error {
 
 // ListPendingNotificationsResponseV2 is the answer to GET
 // /v2/notifications/pending?after=<cursor>: ListPendingNotificationsResponseV1
-// with v2 summaries, by the same rules except the cursor.
+// with v2 summaries, by the same rules except the cursor and the two below.
+//
+// A DM is a candidate only for a credential that a live DM frame would be
+// delivered to now (the delivery rule in dm.go's header, design §3.2): the
+// credential is a person's own sign-in, and not an act-as credential or an
+// agent's; the person is one of the conversation's pair and enabled; and no
+// personal block holds between the pair. v1's guard (a human holding a
+// credential) is not enough, because it admits an operator-issued act-as
+// credential, which ADR-017 Decision 7 bars from every DM route; a feed that
+// reused it would hand that credential a conversation id, an author and a
+// preview of a DM it may not read. For any credential that fails the test,
+// DMs are not candidates: never examined, never counted, never a summary, a
+// cursor position or a More, so the feed is exactly what it would be with no
+// DMs on the server (and the credential still gets its channel summaries).
+// The test is made per candidate at request time, so access that ends stops
+// the next page. The server's and the person's own DM switches do not apply:
+// they refuse new contact, not reading what was already said to the reader.
 //
 // The cursor is opaque, a string, not v1's message id: channel message ids
 // and DM message ids are separate id spaces (DMMessageV1), so no one number
@@ -151,9 +168,23 @@ func (s NotificationSummaryV2) Validate() error {
 // ?after= and never reads it; an empty ?after= starts from the oldest
 // pending summary. Summaries are in the order the server delivers them,
 // oldest first by posted_at, and a (context, message_id) pair appears once.
-// Cursor is the position after the last summary; on an empty page it is the
-// ?after= the request carried, or empty at the start. A cursor the server
-// did not issue, or longer than MaxDMCursorBytes, is invalid_request.
+// A cursor the server did not issue, or longer than MaxDMCursorBytes, is
+// invalid_request.
+//
+// Progress. A bounded scan can examine candidates and select none: a long
+// run of channel messages the reader muted, or whose notification policy
+// refuses them, with a pending DM beyond the bound. So the cursor is the
+// position of the last eligible candidate examined for this answer, whether
+// or not it became a summary, never behind the last summary and never behind
+// ?after=. An empty page therefore carries a cursor whenever the scan
+// examined anything past ?after=, and More is true only when a further
+// request starts strictly past ?after= (CheckProgress): a client never
+// rescans the same rows, and never needs to handle More with an unchanged
+// cursor. A page that has summaries always has a cursor, so a client always
+// holds its resume position. Only when nothing at all was examined (no
+// candidate past ?after=) is the cursor ?after= itself, or empty at the
+// start, and then More is false. Like v1's, the cursor is never a function
+// of messages the reader may not see.
 type ListPendingNotificationsResponseV2 struct {
 	Summaries []NotificationSummaryV2 `json:"summaries"`
 	Cursor    string                  `json:"cursor,omitempty"`
@@ -162,8 +193,8 @@ type ListPendingNotificationsResponseV2 struct {
 
 // Validate reports whether the page is well-formed: a list, not null, of at
 // most MaxPendingNotificationsPage valid summaries, no one twice and none
-// earlier than the one before, and a cursor of URL-safe characters that is
-// present whenever there is more.
+// earlier than the one before, a cursor of URL-safe characters, present
+// whenever there are summaries or there is more.
 func (r ListPendingNotificationsResponseV2) Validate() error {
 	if r.Summaries == nil {
 		return errors.New("schema: pending notifications summaries must be a list, not null")
@@ -197,8 +228,22 @@ func (r ListPendingNotificationsResponseV2) Validate() error {
 	if r.Cursor != "" && !validDMToken(r.Cursor, MaxDMCursorBytes) {
 		return fmt.Errorf("schema: pending notifications cursor must be 1 to %d URL-safe characters", MaxDMCursorBytes)
 	}
+	if len(r.Summaries) > 0 && r.Cursor == "" {
+		return errors.New("schema: pending notifications cursor is required when there are summaries")
+	}
 	if r.More && r.Cursor == "" {
 		return errors.New("schema: pending notifications cursor is required when more is true")
+	}
+	return nil
+}
+
+// CheckProgress reports whether the page, answering a request whose ?after=
+// was after, lets a client make progress: when More is true the cursor must
+// differ from after, so asking again cannot rescan the same rows. A client
+// treats a violation as a server fault and does not loop on it.
+func (r ListPendingNotificationsResponseV2) CheckProgress(after string) error {
+	if r.More && r.Cursor == after {
+		return errors.New("schema: pending notifications more is true but the cursor did not advance past after")
 	}
 	return nil
 }

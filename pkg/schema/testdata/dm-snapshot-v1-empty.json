@@ -2,7 +2,6 @@
   "schema": "conch.dm_snapshot.v1",
   "conversations": [],
   "more": false,
-  "high_water": 0,
   "taken_at": "2026-11-19T10:05:00.000Z",
   "dms_enabled": true
 }

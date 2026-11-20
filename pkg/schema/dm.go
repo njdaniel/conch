@@ -31,7 +31,8 @@ import (
 //	GET  /v1/dms?state=&cursor=&limit=         list (ListDMConversationsResponseV1)
 //	GET  /v1/dms/snapshot                      reconnect snapshot (DMSnapshotV1)
 //	GET  /v1/dms/{conversation}                one conversation (DMConversationV1)
-//	GET  /v1/dms/{conversation}/messages       history (ListDMMessagesResponseV1)
+//	GET  /v1/dms/{conversation}/messages?order=&after=|before=&limit=   history, the channel conventions (ListDMMessagesResponseV1)
+//	GET  /v1/dms/{conversation}/changes?after=&limit=   what changed since a revision (ListDMChangesResponseV1)
 //	POST /v1/dms/{conversation}/messages       send (PostDMMessageRequestV1 → PostDMMessageResponseV1)
 //	PATCH /v1/dms/{conversation}/messages/{message}  edit your own (EditDMMessageRequestV1 → EditDMMessageResponseV1)
 //	DELETE /v1/dms/{conversation}/messages/{message} remove your own (204, no body; a repeat is 204 too)
@@ -45,11 +46,27 @@ import (
 //	PUT  /v1/principals/{id}/dm-permission     one person's switch (DMPermissionRequestV1 → DMPermissionResponseV1)
 //
 // Events: the per-person events stream (#2040) carries DMMessageV1 (a new
-// message, to both participants' sockets, the author's other devices
-// included), DMMessageEditedV1 and DMMessageRemovedV1 (an edit and a removal
+// message), DMMessageEditedV1 and DMMessageRemovedV1 (an edit and a removal
 // of one already sent) and DMChangedV1 (a signal to re-read one
 // conversation). On connect, and on every reconnect, the stream's first DM
-// frame is a DMSnapshotV1; see its comment for the ordering promise.
+// frame is a DMSnapshotV1; see its comment for the per-conversation ordering
+// promise (by Revision).
+//
+// Delivery is decided per participant at fan-out time, against current
+// state, never when the conversation was opened (design §3.2). A frame (a
+// message, an edit, a removal, a change signal; the author's own and the
+// peer's alike) goes to a participant's socket only while that participant
+// has current access: the credential is live and is the person's own (not an
+// act-as credential), the person is enabled, and no personal block (#1832)
+// holds in either direction between the pair. While a block holds, no DM
+// frame of the pair is delivered to either participant: removing one's own
+// message after the peer blocked you sends the peer nothing, and sends your
+// other devices nothing either, so the stream shows neither of them that a
+// block exists. Reads are not refused by a block, so a client catches up
+// from the snapshot and the changes route, which hold the same content; a
+// socket whose person loses access closes. A frame never names a principal
+// the receiver may not see, and the same rule governs the pending feed
+// (notification_v2.go).
 //
 // Not in v1 (ADR-017 Decision 5): reactions, threads, mentions, audiences and
 // typed payloads. A DM carries no payload field at all, so an approval or
@@ -61,25 +78,39 @@ import (
 // and a block of either direction is one of the reasons for
 // ErrorCodeContactUnavailable.
 //
-// Refusals, in the order the server checks them (design §3.1), each a rule's
-// name, never the input:
+// Refusals, in the order the server checks them (design §3.1; the first
+// that applies answers, so a later check never shows through an earlier
+// one), each a rule's name, never the input. The body of each is exactly
+// DMRefusalError(code): one fixed message per code, with no reason text:
 //
-//   - 404 ErrorCodeDMNotFound: no such conversation, or the caller is not one
-//     of its pair, whatever the caller's role. One answer, one body.
-//   - 404 principal_not_found (existing): on open, the target does not exist,
-//     has ended, or is hidden from the caller. One body for all three.
-//   - 400 invalid_request (existing): the target is the caller, or an agent;
-//     a malformed request or cursor; a body that tries a payload, audience or
-//     thread (the request types here have no such fields and are decoded with
-//     unknown fields refused).
-//   - 403 ErrorCodeContactUnavailable: the target is visible but cannot be
-//     contacted now (disabled, a block either way, their preference, their
-//     switch, a guest, or hide-members visibility). One code, one message;
-//     it never says which, and never who blocked whom.
-//   - 403 ErrorCodeDMsOff: the caller's own DMs, or the server's, are
-//     switched off. It says nothing about anyone else.
-//   - 403 ErrorCodeOwnSignInRequired: the caller's credential is an act-as
-//     credential; it is refused on every DM route, reads included.
+//  1. 401 (existing): no live credential.
+//  2. 403 forbidden (existing): the caller is an agent.
+//  3. 403 ErrorCodeOwnSignInRequired: the caller's credential is an act-as
+//     credential; refused on every DM route, reads included.
+//  4. 403 ErrorCodeDMsOff: on a write (send, edit, call invite) and on an
+//     open that would create a conversation, the caller's own DMs or the
+//     server's are switched off. It is answered before anything about the
+//     conversation or the peer is looked up, so a send to a conversation
+//     that does not exist is dms_off too. It says nothing about anyone else.
+//     Reads, removing one's own message, and an open that only resumes an
+//     existing conversation are not refused by it.
+//  5. 429 rate_limited (existing): the per-person buckets of design §5.
+//     Refused attempts spend them too, so probing costs tokens.
+//  6. 404 ErrorCodeDMNotFound: no such conversation, or the caller is not
+//     one of its pair, whatever the caller's role. One answer, one body.
+//     404 principal_not_found (existing): on open, the target does not
+//     exist, has ended, or is hidden from the caller. One body for all three.
+//  7. 400 invalid_request (existing): a malformed request or cursor; a body
+//     that tries a payload, audience or thread (the request types here have
+//     no such fields and are decoded with unknown fields refused); on open,
+//     the target is the caller, or an agent.
+//  8. 403 ErrorCodeContactUnavailable: the target is visible but cannot be
+//     contacted now (disabled, a guest, a block either way, their preference,
+//     their switch, hide-members visibility). One code, one message; it never says
+//     which, and never who blocked whom. It applies to an open that would
+//     create a conversation, to send and to edit, and to nothing else: a
+//     read, a removal of one's own message, and an open of a conversation
+//     that already exists (a blocked or unreachable peer included) succeed.
 //
 // Everything here is additive: new types, constants and error codes, and the
 // optional PrincipalAdminV1.DMAllowed. The one change to a published family
@@ -115,6 +146,8 @@ const (
 	MaxDMConversationsPage = 50
 	// MaxDMSnapshotConversations is the most conversations a snapshot holds.
 	MaxDMSnapshotConversations = 200
+	// MaxDMChangesPage is the most messages one changes page holds.
+	MaxDMChangesPage = 100
 	// MaxDMClientNonceBytes is the longest client nonce a send may carry.
 	MaxDMClientNonceBytes = 64
 	// DMClientNonceWindowSeconds is how long the server remembers a send's
@@ -138,16 +171,21 @@ const (
 	// caller's role, operators included.
 	ErrorCodeDMNotFound = "dm_not_found"
 	// ErrorCodeContactUnavailable: the target is visible to the caller but
-	// cannot be contacted (HTTP 403), on open, send or edit: disabled, a
-	// block in either direction (#1832), the target's contact preference, the
-	// target's per-person switch, a guest, or hide-members visibility. The
-	// caller learns only "can't contact", never which, so no refusal
-	// announces a block or a preference. Reading and removing one's own
-	// messages in an existing conversation is not refused by it.
+	// cannot be contacted (HTTP 403), on an open that would create a
+	// conversation, on send and on edit: disabled, a block in either
+	// direction (#1832), the target's contact preference, the target's
+	// per-person switch, a guest, or hide-members visibility. The caller
+	// learns only "can't contact", never which, so no refusal announces a
+	// block or a preference. Reading, removing one's own messages, and
+	// opening a conversation that already exists are not refused by it, even
+	// with a blocked or unreachable peer: they succeed, read only.
 	ErrorCodeContactUnavailable = "contact_unavailable"
 	// ErrorCodeDMsOff: the caller's own direct messages are switched off by
-	// an operator, or the server-wide switch is off (HTTP 403), on open, send
-	// and edit. It says nothing about anyone but the caller and the server.
+	// an operator, or the server-wide switch is off (HTTP 403), on send, edit
+	// and an open that would create a conversation. It is checked before the
+	// conversation or the peer is looked up (the order in the header), so it
+	// answers a send to a conversation that does not exist as well as to one
+	// that does. It says nothing about anyone but the caller and the server.
 	ErrorCodeDMsOff = "dms_off"
 	// ErrorCodeOwnSignInRequired: the caller's credential is an act-as
 	// credential (HTTP 403, ADR-017 Decision 7), so every DM route refuses
@@ -168,6 +206,45 @@ const (
 	// this too and never says which.
 	ErrorCodeDMFileNotAttachable = "dm_file_not_attachable"
 )
+
+// The fixed message of each DM refusal. A refusal's body is exactly
+// DMRefusalError(code): the message is one string per code, never built from
+// the input, the peer, a block, a preference or a switch, so no reason can
+// leak through its text (ADR-017 Decisions 3, 7 and 10; design §3.2).
+const (
+	DMNotFoundMessage           = "conversation not found"
+	DMContactUnavailableMessage = "this person can't be messaged right now"
+	DMsOffMessage               = "direct messages are turned off"
+	DMOwnSignInRequiredMessage  = "direct messages need your own sign-in"
+	DMNonceConflictMessage      = "that client nonce was already used for a different message"
+	DMRequireAuthMessage        = "direct messages need authentication to be on"
+	DMFileNotAttachableMessage  = "that file can't be attached to this message"
+)
+
+// DMRefusalError returns the error body for one of the DM refusal codes, and
+// false for any other code.
+func DMRefusalError(code string) (Error, bool) {
+	var msg string
+	switch code {
+	case ErrorCodeDMNotFound:
+		msg = DMNotFoundMessage
+	case ErrorCodeContactUnavailable:
+		msg = DMContactUnavailableMessage
+	case ErrorCodeDMsOff:
+		msg = DMsOffMessage
+	case ErrorCodeOwnSignInRequired:
+		msg = DMOwnSignInRequiredMessage
+	case ErrorCodeDMNonceConflict:
+		msg = DMNonceConflictMessage
+	case ErrorCodeDMRequireAuth:
+		msg = DMRequireAuthMessage
+	case ErrorCodeDMFileNotAttachable:
+		msg = DMFileNotAttachableMessage
+	default:
+		return Error{}, false
+	}
+	return Error{Code: code, Message: msg}, true
+}
 
 // DMState is where a conversation sits in one participant's list. It is that
 // participant's own: archiving or hiding a conversation changes nothing for
@@ -239,10 +316,10 @@ const (
 	// DMChangeState: the reader's own DMState changed, on another device,
 	// or a hidden conversation opened again.
 	DMChangeState DMChangeKind = "state"
-	// DMChangeParticipant: what the conversation shows of the peer changed:
-	// their name, or their account was disabled or enabled. Never sent for
-	// a change to the peer's contact preferences, a block, or an operator's
-	// switch.
+	// DMChangeParticipant: the peer's display name changed, as the reader
+	// may see it. Never sent for the peer's account being disabled or
+	// enabled, a change to their contact preferences, a block, or an
+	// operator's switch: none of those is on the wire.
 	DMChangeParticipant DMChangeKind = "participant"
 )
 
@@ -259,6 +336,12 @@ func (k DMChangeKind) Valid() bool {
 // DMConversationV1 is one conversation as one of its participants sees it.
 // The participant pair is the same for both; everything from PeerID down is
 // the reader's own view.
+//
+// The document says nothing about why a send would be refused: there is no
+// "peer available" flag, because a flag that is false only for a disabled or
+// removed account would let a reader tell that apart from a block or a
+// preference behind the one ErrorCodeContactUnavailable. A client learns that
+// the peer cannot be reached by trying, and by that one answer.
 type DMConversationV1 struct {
 	// Schema is the document discriminator; always DMConversationSchemaV1.
 	Schema string `json:"schema"`
@@ -266,20 +349,30 @@ type DMConversationV1 struct {
 	ID int64 `json:"id"`
 	// ParticipantIDs is the two participants, ascending and distinct.
 	ParticipantIDs []int64 `json:"participant_ids"`
-	// CreatedAt is when the conversation was first opened.
-	CreatedAt Timestamp `json:"created_at"`
+	// CreatedAt is when the conversation first became visible to the peer: its
+	// first message (or, with calls, its first invite). It is omitted until
+	// then, and it never records an open. So when Alice opens a conversation
+	// and sends nothing, Bob's own first open of it shows no sign that Alice
+	// opened it first: the same document a new one would have, with no
+	// created_at.
+	CreatedAt *Timestamp `json:"created_at,omitempty"`
 	// PeerID is the participant who is not the reader.
 	PeerID int64 `json:"peer_id"`
 	// PeerName is the peer's current display name as the reader may see it;
-	// omitted when there is none to give.
+	// omitted when there is none to give (a former member, or a name a
+	// hide-members server does not show this reader).
 	PeerName string `json:"peer_name,omitempty"`
-	// PeerAvailable is false when the reader may not send to the peer
-	// because the peer's account is disabled or gone. It is never false
-	// because of the peer's contact preferences, a block or a switch: a send
-	// then fails with ErrorCodeContactUnavailable instead.
-	PeerAvailable bool `json:"peer_available"`
 	// State is where the conversation sits in the reader's list.
 	State DMState `json:"state"`
+	// Revision is the conversation's change counter: it starts at 0 and goes
+	// up by exactly one for each new message, edit and removal in it, the
+	// same for both participants, and for nothing else (not a read mark, an
+	// archive, a block or a switch). It is per conversation, so it counts
+	// nothing about anyone else's conversations. It is how a client that was
+	// offline finds what it missed, including an edit or a removal that
+	// leaves a message id unchanged (see DMSnapshotV1 and
+	// ListDMChangesResponseV1).
+	Revision int64 `json:"revision"`
 	// LastMessageID is the id of the newest message in the conversation; 0
 	// when it has none.
 	LastMessageID int64 `json:"last_message_id"`
@@ -304,8 +397,11 @@ func (c DMConversationV1) Validate() error {
 	if err := validateDMParticipants(c.ParticipantIDs); err != nil {
 		return err
 	}
-	if c.CreatedAt.IsZero() {
-		return errors.New("schema: dm conversation created_at is required")
+	if c.CreatedAt != nil && c.CreatedAt.IsZero() {
+		return errors.New("schema: dm conversation created_at must not be zero")
+	}
+	if c.LastMessageID > 0 && c.CreatedAt == nil {
+		return errors.New("schema: dm conversation with a message must carry created_at")
 	}
 	if c.PeerID != c.ParticipantIDs[0] && c.PeerID != c.ParticipantIDs[1] {
 		return errors.New("schema: dm conversation peer_id must be one of participant_ids")
@@ -313,8 +409,14 @@ func (c DMConversationV1) Validate() error {
 	if !c.State.Valid() {
 		return errors.New("schema: dm conversation state is not one of open, archived, hidden")
 	}
+	if c.Revision < 0 {
+		return errors.New("schema: dm conversation revision must not be negative")
+	}
 	if c.LastMessageID < 0 {
 		return errors.New("schema: dm conversation last_message_id must not be negative")
+	}
+	if c.LastMessageID > 0 && c.Revision == 0 {
+		return errors.New("schema: dm conversation with a message must have a positive revision")
 	}
 	if (c.LastMessageID == 0) != (c.LastMessageAt == nil) {
 		return errors.New("schema: dm conversation last_message_at must be present exactly when last_message_id is")
@@ -347,12 +449,17 @@ func validateDMParticipants(ids []int64) error {
 }
 
 // OpenDMRequestV1 is the body of POST /v1/dms: open the conversation with
-// PeerID, or resume the one that exists. It is idempotent: the answer is
-// 201 with Created set the first time, and 200 with the same conversation
-// every time after, from either participant. Opening tells the peer nothing:
-// the conversation enters the peer's list, and their stream, with its first
-// message. Opening a hidden conversation sets it open again; an archived one
-// stays archived.
+// PeerID, or resume the one that exists. It is idempotent and answers 200
+// with the conversation every time, from either participant, whether or not
+// this request was the first: there is no 201 and no "created" flag, so an
+// open tells its caller nothing about whether the peer opened first. An open
+// tells the peer nothing either: the conversation enters the peer's list, and
+// their stream, with its first message. Opening a hidden conversation sets it
+// open again; an archived one stays archived. An open that would create a
+// conversation is a write (it can be dms_off, rate_limited or
+// contact_unavailable); an open of one that exists is a read and succeeds
+// even when the peer cannot be contacted (see the refusal order in this
+// file's header).
 type OpenDMRequestV1 struct {
 	PeerID int64 `json:"peer_id"`
 }
@@ -369,24 +476,28 @@ func (r OpenDMRequestV1) Validate() error {
 // OpenDMResponseV1 is the answer to POST /v1/dms.
 type OpenDMResponseV1 struct {
 	Conversation DMConversationV1 `json:"conversation"`
-	// Created is true when this request created the conversation.
-	Created bool `json:"created"`
+}
+
+// Validate reports whether the response's conversation is well-formed.
+func (r OpenDMResponseV1) Validate() error {
+	return r.Conversation.Validate()
 }
 
 // ListDMConversationsResponseV1 is the body of GET /v1/dms: one page of the
 // caller's conversations in one DMState (open by default, archived by
 // ?state=archived; hidden ones are never listed). The order is newest
-// activity first: last_message_id descending, then the conversations with
-// no message by id descending. Conversations is never null and holds at most
-// MaxDMConversationsPage.
+// activity first: last_message_at descending, then the conversations with
+// no message by id descending (message ids of different conversations are
+// not comparable, so they never order a list). Conversations is never null
+// and holds at most MaxDMConversationsPage.
 //
 // NextCursor is opaque: the client passes it back as ?cursor= and never
 // reads it. It is present only when there may be more, and is never a
 // function of conversations the caller is not in. A cursor the server did
 // not issue, or that is longer than MaxDMCursorBytes, is invalid_request.
 // A conversation whose activity moves while a client pages may appear twice
-// or be missed; the reconnect snapshot and DMChangedV1 are what keep a
-// client's list current, not the pages.
+// or be missed; the reconnect snapshot, each conversation's Revision and
+// DMChangedV1 are what keep a client's list current, not the pages.
 type ListDMConversationsResponseV1 struct {
 	Conversations []DMConversationV1 `json:"conversations"`
 	NextCursor    string             `json:"next_cursor,omitempty"`
@@ -436,10 +547,10 @@ func validDMToken(s string, max int) bool {
 // Message ids are an id space of their own (design §2.1; ADR-017
 // Consequences): channel message 42 and DM message 42 both exist, and a
 // message is named by its conversation and id together. Ids ascend within
-// one conversation, which is all a history cursor and the snapshot's
-// HighWater need; nothing orders them against channel messages, so the
-// pending feed (ListPendingNotificationsResponseV2) has an opaque cursor of
-// its own.
+// one conversation, which is all a history cursor needs; nothing orders them
+// against channel messages or against another conversation's, so the pending
+// feed (ListPendingNotificationsResponseV2) has an opaque cursor of its own,
+// and what a reconnecting client has missed is found by Revision, not by id.
 //
 // Edit and removal are in v1 (ADR-017 Decision 5), by the author alone and
 // as a channel message's are (message_edit.go, moderation.go): EditedAt marks
@@ -455,6 +566,12 @@ type DMMessageV1 struct {
 	AuthorID int64 `json:"author_id"`
 	// CreatedAt is when the server persisted it (UTC, ms precision).
 	CreatedAt Timestamp `json:"created_at"`
+	// Revision is the conversation's Revision at which this copy of the
+	// message was written: the revision of its send, then of its latest edit,
+	// then of its removal. A copy with a higher Revision replaces one with a
+	// lower, the same message id, so an edit or removal a client slept
+	// through is told apart from a message it already holds.
+	Revision int64 `json:"revision"`
 	// Body is the text; always present, as on a channel message. For a
 	// removed message it is MessageRemovedByAuthorBody.
 	Body string `json:"body"`
@@ -499,6 +616,9 @@ func (m DMMessageV1) Validate() error {
 	if m.CreatedAt.IsZero() {
 		return errors.New("schema: dm message created_at is required")
 	}
+	if m.Revision <= 0 {
+		return errors.New("schema: dm message revision must be positive")
+	}
 	if m.Body == "" {
 		return errors.New("schema: dm message body is required")
 	}
@@ -539,7 +659,8 @@ func (m DMMessageV1) Validate() error {
 // that differs answers ErrorCodeDMNonceConflict. A first send answers 201.
 //
 // The body is bounded as a channel post's is (MaxPostRequestBytes for the
-// whole request).
+// whole request), and, as a channel send's and a DM edit's are, it must not be
+// empty or only white space: the server refuses it with invalid_request.
 type PostDMMessageRequestV1 struct {
 	Body        string  `json:"body"`
 	FileIDs     []int64 `json:"file_ids,omitempty"`
@@ -548,8 +669,8 @@ type PostDMMessageRequestV1 struct {
 
 // Validate reports whether the request is structurally well-formed.
 func (r PostDMMessageRequestV1) Validate() error {
-	if r.Body == "" {
-		return errors.New("schema: dm message body is required")
+	if strings.TrimSpace(r.Body) == "" {
+		return errors.New("schema: dm message body must not be empty")
 	}
 	// A request's empty list is no files; a stored message never carries
 	// one (DMMessageV1 omits the field instead).
@@ -610,7 +731,8 @@ func (r EditDMMessageResponseV1) Validate() error {
 }
 
 // DMMessageEditedV1 is the stream frame for an edit: the edited message, for
-// both participants' sockets. A client updates the copy it holds and does not
+// each participant's socket that has current access (see the delivery rule in
+// this file's header; none while a block holds). A client updates the copy it holds and does not
 // notify, count unread or treat it as a new message.
 type DMMessageEditedV1 struct {
 	// Schema is the frame discriminator; always DMMessageEditedSchemaV1.
@@ -634,7 +756,10 @@ func (f DMMessageEditedV1) Validate() error {
 }
 
 // DMMessageRemovedV1 is the stream frame for an author's removal: the
-// tombstone, for both participants' sockets. A client replaces the copy it
+// tombstone, for each participant's socket that has current access (see the
+// delivery rule in this file's header; none while a block holds, so the author
+// can still remove their own message after a block and the peer is sent
+// nothing). A client replaces the copy it
 // holds (a notification preview, an open view) and notifies no one. Copies a
 // person already received cannot be recalled.
 type DMMessageRemovedV1 struct {
@@ -658,47 +783,136 @@ func (f DMMessageRemovedV1) Validate() error {
 	return nil
 }
 
+// DMOrder is the direction of a history page. The vocabulary is closed and is
+// the channel list's own (?order=asc|desc, messageOrder in the server).
+type DMOrder string
+
+const (
+	// DMOrderAsc: oldest first. It is the default, as for channels.
+	DMOrderAsc DMOrder = "asc"
+	// DMOrderDesc: newest first, for opening a conversation at its end.
+	DMOrderDesc DMOrder = "desc"
+)
+
+// Valid reports whether o is a recognized order.
+func (o DMOrder) Valid() bool {
+	switch o {
+	case DMOrderAsc, DMOrderDesc:
+		return true
+	default:
+		return false
+	}
+}
+
 // ListDMMessagesResponseV1 is the body of GET
-// /v1/dms/{conversation}/messages?before=<id>|after=<id>&limit=<n>. Messages
-// is never null, ascending by id, and holds at most the limit
-// (DefaultDMPageSize, at most MaxDMPageSize).
+// /v1/dms/{conversation}/messages?order=asc|desc&after=<id>|before=<id>&limit=<n>,
+// which follows the channel list's conventions exactly (messageOrder in the
+// server): the default order is asc, oldest first, so a client that pages a
+// DM as it pages a channel starts at the same end; after goes only with asc
+// and before only with desc, any other mix (both cursors included) is
+// invalid_request, and desc with no before is the newest page. Messages is
+// never null, in the order asked (Order echoes it), and holds at most the
+// limit (DefaultDMPageSize, at most MaxDMPageSize).
 //
-// With neither before nor after, the page is the newest messages. With
-// before, the newest messages below it; NextBefore is then the lowest id on
-// the page, present only when older messages may exist. With after, the
-// oldest messages above it, for catching up; NextAfter is the highest id on
-// the page, present only when newer ones may exist. Both at once is
-// invalid_request. A page with neither cursor is the whole story.
+// In asc, NextAfter is the highest id on the page, present only when newer
+// messages may exist; the next request passes it as after. In desc, NextBefore
+// is the lowest id on the page, present only when older ones may exist; the
+// next request passes it as before. A page with neither cursor is the end of
+// the story in its direction. This route returns each message as it is now;
+// to learn what changed in messages already held, use the changes route.
 type ListDMMessagesResponseV1 struct {
+	Order      DMOrder       `json:"order"`
 	Messages   []DMMessageV1 `json:"messages"`
 	NextBefore int64         `json:"next_before,omitempty"`
 	NextAfter  int64         `json:"next_after,omitempty"`
 }
 
-// Validate reports whether the page is well-formed: a list, not null, of at
-// most MaxDMPageSize valid messages of one conversation in strictly
-// ascending id, at most one cursor, and that cursor at the page's edge.
+// Validate reports whether the page is well-formed: a known order, a list,
+// not null, of at most MaxDMPageSize valid messages of one conversation in
+// strictly that order, and only the cursor of that order, at the page's edge.
 func (r ListDMMessagesResponseV1) Validate() error {
+	if !r.Order.Valid() {
+		return errors.New("schema: dm messages order is not one of asc, desc")
+	}
 	if r.Messages == nil {
 		return errors.New("schema: dm messages must be a list, not null")
 	}
 	if len(r.Messages) > MaxDMPageSize {
 		return fmt.Errorf("schema: dm messages must be at most %d", MaxDMPageSize)
 	}
-	if err := validateDMMessageRun(r.Messages, true); err != nil {
+	if err := validateDMMessageRun(r.Messages, r.Order == DMOrderAsc); err != nil {
 		return err
-	}
-	if r.NextBefore != 0 && r.NextAfter != 0 {
-		return errors.New("schema: dm messages carry at most one of next_before and next_after")
 	}
 	if r.NextBefore < 0 || r.NextAfter < 0 {
 		return errors.New("schema: dm messages cursors must not be negative")
 	}
-	if r.NextBefore != 0 && (len(r.Messages) == 0 || r.NextBefore != r.Messages[0].ID) {
+	if r.Order == DMOrderAsc && r.NextBefore != 0 {
+		return errors.New("schema: dm messages in asc order carry next_after, not next_before")
+	}
+	if r.Order == DMOrderDesc && r.NextAfter != 0 {
+		return errors.New("schema: dm messages in desc order carry next_before, not next_after")
+	}
+	if r.NextBefore != 0 && (len(r.Messages) == 0 || r.NextBefore != r.Messages[len(r.Messages)-1].ID) {
 		return errors.New("schema: dm messages next_before must be the lowest id on the page")
 	}
 	if r.NextAfter != 0 && (len(r.Messages) == 0 || r.NextAfter != r.Messages[len(r.Messages)-1].ID) {
 		return errors.New("schema: dm messages next_after must be the highest id on the page")
+	}
+	return nil
+}
+
+// ListDMChangesResponseV1 is the body of GET
+// /v1/dms/{conversation}/changes?after=<revision>&limit=<n>: the messages
+// whose Revision is above after, each once, as it is now (its send, its
+// latest edit or its tombstone), ascending by Revision, at most MaxDMChangesPage
+// (a limit above it is taken as it). A client that holds a conversation at
+// revision R and sees a higher Revision on it (in a snapshot, a list or a
+// frame) passes after=R and applies every message returned, replacing a copy
+// it holds by id whenever the returned one has the higher Revision; that
+// recovers a message sent, edited or removed while it was offline, including
+// in an archived conversation and including an edit or removal that leaves the
+// message id unchanged. NextAfter is the highest Revision on the page,
+// present only when more may exist. The route is a read: a block, a
+// preference or an operator's switch does not refuse it, and it carries the
+// same content the snapshot and history do.
+type ListDMChangesResponseV1 struct {
+	Messages  []DMMessageV1 `json:"messages"`
+	NextAfter int64         `json:"next_after,omitempty"`
+}
+
+// Validate reports whether the page is well-formed: a list, not null, of at
+// most MaxDMChangesPage valid messages of one conversation in strictly
+// ascending Revision, and a cursor that is the last one's Revision.
+func (r ListDMChangesResponseV1) Validate() error {
+	if r.Messages == nil {
+		return errors.New("schema: dm changes must be a list, not null")
+	}
+	if len(r.Messages) > MaxDMChangesPage {
+		return fmt.Errorf("schema: dm changes must be at most %d", MaxDMChangesPage)
+	}
+	ids := make(map[int64]struct{}, len(r.Messages))
+	for i, m := range r.Messages {
+		if err := m.Validate(); err != nil {
+			return fmt.Errorf("schema: dm changes[%d]: %w", i, err)
+		}
+		if i > 0 {
+			if m.ConversationID != r.Messages[0].ConversationID {
+				return fmt.Errorf("schema: dm changes[%d] is of another conversation", i)
+			}
+			if m.Revision <= r.Messages[i-1].Revision {
+				return fmt.Errorf("schema: dm changes[%d] is out of revision order", i)
+			}
+		}
+		if _, dup := ids[m.ID]; dup {
+			return fmt.Errorf("schema: dm changes[%d] repeats a message", i)
+		}
+		ids[m.ID] = struct{}{}
+	}
+	if r.NextAfter < 0 {
+		return errors.New("schema: dm changes next_after must not be negative")
+	}
+	if r.NextAfter != 0 && (len(r.Messages) == 0 || r.NextAfter != r.Messages[len(r.Messages)-1].Revision) {
+		return errors.New("schema: dm changes next_after must be the revision of the page's last message")
 	}
 	return nil
 }
@@ -897,7 +1111,7 @@ type DMPermissionResponseV1 struct {
 // cannot be attached to a DM, nor a DM file to a channel message: each
 // answers its route's not-attachable error and does not say why. A file of
 // a conversation the caller is not in answers
-// ErrorCodeDMConversationNotFound.
+// ErrorCodeDMNotFound.
 type DMFileV1 struct {
 	Schema         string    `json:"schema"`
 	ID             int64     `json:"id"`
@@ -958,24 +1172,41 @@ func (c DMChangedV1) Validate() error {
 
 // DMSnapshotV1 is the reconnect snapshot: the first DM frame on every
 // (re)connect of the per-person events stream, and the body of GET
-// /v1/dms/snapshot. It is the reader's open conversations, newest activity
-// first as the list orders them, at most MaxDMSnapshotConversations; More is
-// true when there are others, which the list route pages.
+// /v1/dms/snapshot. It holds the reader's open and archived conversations
+// (hidden ones return to open with their next message, and then appear), the
+// most recently active first as the list orders them, at most
+// MaxDMSnapshotConversations; More is true when there are others, which the
+// list route pages.
 //
-// HighWater is the highest DM message id the reader may read at the moment
-// the snapshot was taken; 0 when there is none. The stream promises that
-// every DM message with an id at or below it is reflected in the snapshot
-// (as a conversation's LastMessageID or below it), and that every one above
-// it is sent as a DMMessageV1 frame after the snapshot on this connection.
-// So a client replaces its list with the snapshot, fetches history with
-// ?after= for each conversation whose LastMessageID is above what it holds,
-// and then applies frames; nothing falls between the two. A frame at or
-// below HighWater is a duplicate and is ignored.
+// The ordering promise is per conversation, by Revision, not a single
+// high-water id: DM message ids of different conversations are not comparable
+// and nothing orders them globally, and a message id does not change when a
+// message is edited or removed. The server subscribes the connection to DM
+// frames before it reads the snapshot, so for each conversation in it:
+//
+//   - every change (message, edit, removal) at or below that conversation's
+//     Revision is already reflected in the snapshot's copy of it
+//     (LastMessageID, Unread), and
+//   - every change above its Revision is sent as a frame on this connection
+//     after the snapshot, carrying the message with its own Revision.
+//
+// A client holds a Revision per conversation. It replaces its list with the
+// snapshot; for each conversation whose snapshot Revision is above the one it
+// holds, it calls the changes route with after=<held revision> and applies
+// the messages returned (that is what recovers an offline message, edit or
+// removal, in an open or an archived conversation alike); then it applies
+// frames, ignoring a frame whose message Revision is at or below the
+// conversation's Revision it holds. A frame whose Revision is more than one
+// above the held one has a gap before it, and the client calls the changes
+// route as well. A conversation the snapshot does not list (More, or hidden)
+// is read the same way from the list route, whose entries carry Revision.
+//
+// A reader whose credential is an act-as credential gets no snapshot: the
+// route and the stream's DM frames refuse it (ErrorCodeOwnSignInRequired).
 type DMSnapshotV1 struct {
 	Schema        string             `json:"schema"`
 	Conversations []DMConversationV1 `json:"conversations"`
 	More          bool               `json:"more"`
-	HighWater     int64              `json:"high_water"`
 	TakenAt       Timestamp          `json:"taken_at"`
 	// DMsEnabled is whether the reader may start or send direct messages now:
 	// true only when the server's switch and the reader's own are both on. It
@@ -984,8 +1215,8 @@ type DMSnapshotV1 struct {
 	DMsEnabled bool `json:"dms_enabled"`
 }
 
-// Validate reports whether the snapshot is well-formed: open conversations
-// only, none twice, none newer than HighWater.
+// Validate reports whether the snapshot is well-formed: open or archived
+// conversations only, none twice.
 func (s DMSnapshotV1) Validate() error {
 	if s.Schema != DMSnapshotSchemaV1 {
 		return fmt.Errorf("schema: dm snapshot schema must be %q, got %q", DMSnapshotSchemaV1, s.Schema)
@@ -996,9 +1227,6 @@ func (s DMSnapshotV1) Validate() error {
 	if len(s.Conversations) > MaxDMSnapshotConversations {
 		return fmt.Errorf("schema: dm snapshot conversations must be at most %d", MaxDMSnapshotConversations)
 	}
-	if s.HighWater < 0 {
-		return errors.New("schema: dm snapshot high_water must not be negative")
-	}
 	if s.TakenAt.IsZero() {
 		return errors.New("schema: dm snapshot taken_at is required")
 	}
@@ -1007,16 +1235,13 @@ func (s DMSnapshotV1) Validate() error {
 		if err := c.Validate(); err != nil {
 			return fmt.Errorf("schema: dm snapshot conversations[%d]: %w", i, err)
 		}
-		if c.State != DMStateOpen {
-			return fmt.Errorf("schema: dm snapshot conversations[%d] is not open", i)
+		if c.State == DMStateHidden {
+			return fmt.Errorf("schema: dm snapshot conversations[%d] is hidden", i)
 		}
 		if _, dup := seen[c.ID]; dup {
 			return fmt.Errorf("schema: dm snapshot conversations[%d] is listed twice", i)
 		}
 		seen[c.ID] = struct{}{}
-		if c.LastMessageID > s.HighWater {
-			return fmt.Errorf("schema: dm snapshot conversations[%d] has a message above high_water", i)
-		}
 	}
 	return nil
 }

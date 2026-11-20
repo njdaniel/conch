@@ -9,12 +9,11 @@
     "created_at": "2026-11-19T09:00:00.000Z",
     "peer_id": 5,
     "peer_name": "Grace",
-    "peer_available": true,
     "state": "open",
+    "revision": 6,
     "last_message_id": 4310,
     "last_message_at": "2026-11-19T09:14:30.000Z",
     "last_read_id": 4305,
     "unread": 1
-  },
-  "created": false
+  }
 }

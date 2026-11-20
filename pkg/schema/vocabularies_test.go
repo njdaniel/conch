@@ -258,6 +258,7 @@ var validators = map[string]func(string) bool{
 	"DMState":            validOf[DMState](),
 	"DMAcceptPolicy":     validOf[DMAcceptPolicy](),
 	"DMChangeKind":       validOf[DMChangeKind](),
+	"DMOrder":            validOf[DMOrder](),
 	"MessageContextKind": validOf[MessageContextKind](),
 }
 

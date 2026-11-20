@@ -1,0 +1,4 @@
+{
+  "code": "dm_nonce_conflict",
+  "message": "that client nonce was already used for a different message"
+}

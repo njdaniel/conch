@@ -6,6 +6,7 @@
       "conversation_id": 12,
       "author_id": 5,
       "created_at": "2026-11-19T09:14:30.000Z",
+      "revision": 6,
       "body": "Thanks, reading it now."
     },
     {
@@ -14,6 +15,7 @@
       "conversation_id": 12,
       "author_id": 5,
       "created_at": "2026-11-19T09:01:00.000Z",
+      "revision": 1,
       "body": "Got a minute after standup?"
     }
   ],

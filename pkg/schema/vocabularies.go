@@ -237,6 +237,7 @@ var Vocabularies = map[string][]string{
 
 	// Local direct messages (issue #2016, DRAFT pending ADR-017).
 	"DMState":            values(DMStateOpen, DMStateArchived, DMStateHidden),
+	"DMOrder":            values(DMOrderAsc, DMOrderDesc),
 	"DMAcceptPolicy":     values(DMAcceptEveryone, DMAcceptSharedChannel, DMAcceptNobody),
 	"DMChangeKind":       values(DMChangeOpened, DMChangeRead, DMChangeState, DMChangeParticipant),
 	"MessageContextKind": values(MessageContextChannel, MessageContextDirect),

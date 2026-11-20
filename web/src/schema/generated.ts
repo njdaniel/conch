@@ -5209,11 +5209,11 @@ export interface DMConversationV1 {
   schema: typeof dmConversationV1Schema;
   id: number;
   participant_ids: number[];
-  created_at: string;
+  created_at?: string;
   peer_id: number;
   peer_name?: string;
-  peer_available: boolean;
   state: DMState;
+  revision: number;
   last_message_id: number;
   last_message_at?: string;
   last_read_id: number;
@@ -5224,11 +5224,11 @@ export const dmConversationV1 = object<DMConversationV1>({
   schema: vocab<typeof dmConversationV1Schema>({ [dmConversationV1Schema]: true }),
   id: int,
   participant_ids: array(int),
-  created_at: timestamp,
+  created_at: optional(timestamp),
   peer_id: int,
   peer_name: optional(str),
-  peer_available: bool,
   state: dmState,
+  revision: int,
   last_message_id: int,
   last_message_at: optional(timestamp),
   last_read_id: int,
@@ -5247,12 +5247,10 @@ export const openDMRequestV1 = object<OpenDMRequestV1>({
 // schema.OpenDMResponseV1
 export interface OpenDMResponseV1 {
   conversation: DMConversationV1;
-  created: boolean;
 }
 
 export const openDMResponseV1 = object<OpenDMResponseV1>({
   conversation: dmConversationV1,
-  created: bool,
 });
 
 // schema.ListDMConversationsResponseV1
@@ -5275,6 +5273,7 @@ export interface DMMessageV1 {
   conversation_id: number;
   author_id: number;
   created_at: string;
+  revision: number;
   body: string;
   file_ids?: number[];
   edited_at?: string;
@@ -5288,6 +5287,7 @@ export const dmMessageV1 = object<DMMessageV1>({
   conversation_id: int,
   author_id: int,
   created_at: timestamp,
+  revision: int,
   body: str,
   file_ids: optional(array(int)),
   edited_at: optional(timestamp),
@@ -5319,16 +5319,34 @@ export const postDMMessageResponseV1 = object<PostDMMessageResponseV1>({
   replayed: optional(bool),
 });
 
+// schema.DMOrder
+export type DMOrder = 'asc' | 'desc';
+
+export const dmOrder = vocab<DMOrder>({ asc: true, desc: true });
+
 // schema.ListDMMessagesResponseV1
 export interface ListDMMessagesResponseV1 {
+  order: DMOrder;
   messages: DMMessageV1[];
   next_before?: number;
   next_after?: number;
 }
 
 export const listDMMessagesResponseV1 = object<ListDMMessagesResponseV1>({
+  order: dmOrder,
   messages: array(dmMessageV1),
   next_before: optional(int),
+  next_after: optional(int),
+});
+
+// schema.ListDMChangesResponseV1
+export interface ListDMChangesResponseV1 {
+  messages: DMMessageV1[];
+  next_after?: number;
+}
+
+export const listDMChangesResponseV1 = object<ListDMChangesResponseV1>({
+  messages: array(dmMessageV1),
   next_after: optional(int),
 });
 
@@ -5525,7 +5543,6 @@ export interface DMSnapshotV1 {
   schema: typeof dmSnapshotV1Schema;
   conversations: DMConversationV1[];
   more: boolean;
-  high_water: number;
   taken_at: string;
   dms_enabled: boolean;
 }
@@ -5534,7 +5551,6 @@ export const dmSnapshotV1 = object<DMSnapshotV1>({
   schema: vocab<typeof dmSnapshotV1Schema>({ [dmSnapshotV1Schema]: true }),
   conversations: array(dmConversationV1),
   more: bool,
-  high_water: int,
   taken_at: timestamp,
   dms_enabled: bool,
 });

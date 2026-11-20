@@ -1,4 +1,5 @@
 {
+  "order": "asc",
   "messages": [
     {
       "schema": "conch.dm_message.v1",
@@ -6,6 +7,7 @@
       "conversation_id": 12,
       "author_id": 5,
       "created_at": "2026-11-19T09:01:00.000Z",
+      "revision": 1,
       "body": "Got a minute after standup?"
     },
     {
@@ -14,6 +16,7 @@
       "conversation_id": 12,
       "author_id": 3,
       "created_at": "2026-11-19T09:05:12.000Z",
+      "revision": 5,
       "body": "Sure. Here is the draft.",
       "file_ids": [
         41
