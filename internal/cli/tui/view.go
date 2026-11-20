@@ -85,6 +85,8 @@ func (m Model) panes(l layout) string {
 		return m.directoryPanes(l)
 	case modeCommunity:
 		return m.communityPanes(l)
+	case modeDM:
+		return m.dmPanes(l)
 	case modeRun:
 		return paneBox("RUN #"+strconv.FormatInt(m.rd.runID, 10), true, m.runLines(l.width-2, l.contentH), l.width, l.contentH, "")
 	}
@@ -314,6 +316,8 @@ func (m Model) inputRow(width int) string {
 		return row.Render(fitCells(m.runPrompt(width), width))
 	case modeDirectory:
 		return row.Render(m.directoryPrompt(width))
+	case modeDM:
+		return row.Render(m.dmPrompt(width, cursor))
 	}
 	return row.Render("")
 }
@@ -355,6 +359,15 @@ func (m Model) statusHints() []hint {
 		if m.canManageMembers() {
 			hints = slices.Insert(hints, 1, hint{"v", "voice", 1})
 		}
+	case modeDM:
+		switch {
+		case m.dm.opening:
+			hints = []hint{{"enter", "open by ID", 1}, {"esc", "back", 0}}
+		case m.dm.id != 0:
+			hints = []hint{{"enter", "send", 1}, {"ctrl+r", "mark read", 2}, {"pgup", "history", 3}, {"esc", "back", 0}}
+		default:
+			hints = []hint{{"↑/↓", "select", 3}, {"enter", "open", 2}, {"n", "new", 1}, {"a", "archive view", 4}, {"esc", "back", 0}}
+		}
 	default:
 		arrows := hint{"↑/↓", "channels", 3}
 		if m.focus == focusMessages {
@@ -381,6 +394,11 @@ func (m Model) statusHints() []hint {
 func (m Model) statusRow(width int) string {
 	statusKeys := hintLine(m.statusHints(), width-max(16, width/5))
 	status := m.status()
+	if m.mode == modeDM && status != "" {
+		// A refusal takes precedence over keyboard hints in a small window.
+		statusKeys = hintLine(m.statusHints(), max(0, width-cellWidth(status)))
+		return statusStyle.Width(width).Render(fitCells(status+statusKeys, width))
+	}
 	if m.mode == modeChannels && status == archivedChannelNotice && m.channelArchived(m.current()) {
 		status = ""
 	}
@@ -494,7 +512,7 @@ func (m Model) viewTabs() (string, int) {
 		parts = append(parts, statusStyle.Render(name))
 		plain = append(plain, name)
 	}
-	for md, label := range map[mode]string{modeDirectory: "[directory]", modeCommunity: "[community]"} {
+	for md, label := range map[mode]string{modeDirectory: "[directory]", modeCommunity: "[community]", modeDM: "[DMs]"} {
 		if m.mode == md {
 			parts = append(parts, activeStyle.Render(label))
 			plain = append(plain, label)
