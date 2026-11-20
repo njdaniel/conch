@@ -84,6 +84,7 @@ import type { Clock } from '../state/feed';
 import { CameraClient, cameraOff, cameraOn, findCamera, type Camera, type CameraLoss, type CameraProfile, type CameraRoom, type CameraState } from './camera';
 import { afterDisconnect, afterRefusal, afterViewerRefusal, cameraAfter, retryDelay, type DisconnectCause, type Next } from './disconnect';
 import { clampTail, defaultTail, TransmitGate, type GateMode, type GateOptions } from './gate';
+import type { DiagnosticsSource } from './stats';
 import { cameraHolders, occupants, personOf, principalOf, sharers } from './presence';
 import { ReportQueue, type ReportEvent } from './reports';
 import { autoFrameRate, defaultShareQuality, idleShare, qualityLaterNote, resumeLimit, ScreenShare, type ScreenEnd, type SettledQuality, type ShareDirection, type ShareQuality, type ShareRoom, type ShareSample, type ShareState } from './share';
@@ -249,6 +250,8 @@ export interface ShareSink {
 
 // What the client needs of one LiveKit room connection.
 export interface Room extends ShareRoom, CameraRoom {
+  // The dock reads these track-scoped sources only while diagnostics is open.
+  diagnosticsSources?: () => readonly DiagnosticsSource[];
   // Resolves once the room is joined and, when publish is set, the
   // microphone track is published and muted. It rejects if any of that fails
   // (a microphone refused included).
@@ -1324,6 +1327,10 @@ export class VoiceClient {
     }
     const answer = await this.share.changeQuality(quality);
     if (answer === 'later' && this.state.shareQuality === quality) this.set({ why: qualityLaterNote });
+  }
+
+  diagnosticsSources(): readonly DiagnosticsSource[] {
+    return this.room?.diagnosticsSources?.() ?? [];
   }
 
   readShareStats(direction: ShareDirection, principal?: number): Promise<ShareSample | null> {

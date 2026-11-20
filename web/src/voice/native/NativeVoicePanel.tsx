@@ -16,8 +16,9 @@ import type { NativeVoiceView } from '../../platform/desktop/bridge';
 import type { NativeVoice, NativeVoiceError } from '../../platform/types';
 import type { ChannelV0 } from '../../schema/channel';
 import type { Person } from '../../useLiveChannel';
-import { occupants } from '../presence';
-import { Roster } from '../VoicePanel';
+import { occupants, sharers } from '../presence';
+import { nameOf, Roster } from '../VoicePanel';
+import { VoiceDiagnostics } from '../VoiceDiagnostics';
 import { useVoiceNames } from '../useVoiceNames';
 import { usePresence } from './usePresence';
 import { useNativeVoice } from './useNativeVoice';
@@ -359,6 +360,17 @@ export function NativeVoicePanel({
             {needsTalkSetup ? 'Set up the talk key' : 'Talk key'}
           </button>
         )}
+        {joined !== null && !unavailable ? (
+          <VoiceDiagnostics
+            key={joined}
+            desktop
+            client={companionClient}
+            sharing={companion?.state.share.kind === 'sharing'}
+            watched={sharers(presence)
+              .filter(({ principal }) => principal !== viewer && companion?.state.watched.has(principal))
+              .map(({ principal }) => ({ principal, name: nameOf(named, principal, viewer) }))}
+          />
+        ) : null}
       </div>
       {companion === null || unavailable ? null : <NativeStreams companion={companion} presence={presence} viewer={viewer} people={named} joined={joined} live={live} />}
       {setup !== null ? (

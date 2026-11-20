@@ -48,6 +48,7 @@ function fake(over: Partial<VoiceState> = {}, stats: ShareSample | null = null):
     presence: () => undefined,
     attachStream: () => undefined,
     readShareStats: (direction, principal) => { reads.push([direction, principal]); return Promise.resolve(stats); },
+    diagnosticsSources: () => [],
     outOfVoice: () => undefined,
   };
   // The real client starts at the desktop's default, 720p30 (Q-D4-3).

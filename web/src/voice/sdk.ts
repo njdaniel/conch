@@ -128,9 +128,11 @@ import type { Camera, CameraProfile, KeptCamera } from './camera';
 import type { CameraTrack, Microphone, Output, Processing, Room, RoomEvents, ShareSink } from './connection';
 import { personOf, principalOf, publisherOf } from './presence';
 import { LogRing, Redactor } from './redact';
-import { autoFrameRate, defaultShareQuality, provisionalQuality, resolveAuto, settleQuality, type Captured, type KeptScreen, type SettledQuality, type SettledResolution, type ShareDirection, type ShareLimitation, type ShareQuality, type ShareSample } from './share';
+import { autoFrameRate, defaultShareQuality, provisionalQuality, resolveAuto, settleQuality, type Captured, type KeptScreen, type SettledQuality, type SettledResolution, type ShareDirection, type ShareQuality, type ShareSample } from './share';
+import { count, shareLimitation, shareVideo, type DiagnosticsSource, type ShareStats } from './stats';
 
 export { principalOf };
+export type { ShareStats } from './stats';
 
 // One redactor and one ring for the page: the SDK's loggers are global.
 export const redactor = new Redactor();
@@ -603,58 +605,15 @@ export function videoPublishOptions(captured: CapturedVideo, quality: ShareQuali
   };
 }
 
-// The subset of inbound-rtp and outbound-rtp stats the readout uses.
-export interface ShareStats {
-  readonly id?: string;
-  readonly ssrc?: number;
-  readonly type: string;
-  readonly kind?: string;
-  readonly mediaType?: string;
-  readonly frameWidth?: number;
-  readonly frameHeight?: number;
-  readonly framesPerSecond?: number;
-  readonly bytesReceived?: number;
-  readonly bytesSent?: number;
-  readonly timestamp?: number;
-  // outbound-rtp: why the encoder holds the picture back, where the engine
-  // says (Chromium does; Firefox and Safari report fewer reasons).
-  readonly qualityLimitationReason?: string;
-  // inbound-rtp: packets received and lost. remote-inbound-rtp: the sender's
-  // view of loss, as a fraction of the interval.
-  readonly packetsReceived?: number;
-  readonly packetsLost?: number;
-  readonly fractionLost?: number;
-  readonly localId?: string;
-  // outbound-rtp: false when this simulcast layer is not being sent (dynacast
-  // pauses the layers nobody takes).
-  readonly active?: boolean;
-  // outbound-rtp: which simulcast layer: q (lowest), h or f (highest).
-  readonly rid?: string;
-}
-
-const count = (n: number | undefined): n is number => n !== undefined && Number.isFinite(n) && n >= 0;
-
 // shareSample reads the received picture, or the largest sent simulcast layer.
 // publication names the publication the stats come from, so a sample of a
 // replaced publication is never compared with one of the old.
 export function shareSample(stats: Iterable<ShareStats>, direction: ShareDirection, publication?: string, captured?: ShareSample['captured']): ShareSample | null {
-  const wanted = direction === 'received' ? 'inbound-rtp' : 'outbound-rtp';
-  let found: ShareStats | null = null;
   const all = [...stats];
-  // The largest layer with a size, preferring one that is being sent: a layer
-  // dynacast stopped may still hold the size of its last frame.
-  for (const sending of [true, false]) {
-    for (const stat of all) {
-      if (stat.type !== wanted || stat.kind === 'audio' || stat.mediaType === 'audio') continue;
-      if (sending && stat.active === false) continue;
-      if (!known(stat.frameWidth) || !known(stat.frameHeight) || !count(stat.framesPerSecond)) continue;
-      if (found === null || stat.frameWidth * stat.frameHeight > (found.frameWidth ?? 0) * (found.frameHeight ?? 0)) found = stat;
-    }
-    if (found !== null) break;
-  }
-  if (found === null) return null;
+  const found = shareVideo(all, direction, true);
+  if (found === undefined) return null;
   const bytes = direction === 'received' ? found.bytesReceived : found.bytesSent;
-  const limitation = found.active === false ? undefined : limitationOf(found.qualityLimitationReason);
+  const limitation = shareLimitation(found);
   const lost = direction === 'received' ? undefined : sentLoss(all, found);
   const off = direction === 'sent' ? inactiveAbove(all, found) : 'none';
   const capture = direction === 'sent' && captured !== undefined ? capturedOf(captured) : undefined;
@@ -673,12 +632,6 @@ export function shareSample(stats: Iterable<ShareStats>, direction: ShareDirecti
     ...(off === 'above' ? { paused: true } : off === 'unknown' ? { layerOff: true } : {}),
     ...(capture === undefined ? {} : { captured: capture }),
   };
-}
-
-// An engine that names no reason, or a reason this client does not know, says
-// nothing: never a guess.
-function limitationOf(reason: string | undefined): ShareLimitation | undefined {
-  return reason === 'none' || reason === 'cpu' || reason === 'bandwidth' || reason === 'other' ? reason : undefined;
 }
 
 const ridRank: Readonly<Record<string, number>> = { q: 0, h: 1, f: 2 };
@@ -1081,7 +1034,7 @@ class LiveKitAdapter implements Room {
   // the volume of each person not at full volume, by principal (issue #661).
   // held is the element's volumechange listener, which keeps deafen on (the
   // SDK unmutes an element when it starts playback, a tap's or its own).
-  private readonly elements = new Map<string, { readonly el: HTMLMediaElement; readonly principal: number | null; readonly held: () => void }>();
+  private readonly elements = new Map<string, { readonly el: HTMLMediaElement; readonly track: RemoteTrack; readonly principal: number | null; readonly held: () => void }>();
   private readonly volumes = new Map<number, number>();
   private readonly buffer = new Uint8Array(levelWindow);
   // The share this page captured, until it is stopped; and whether this
@@ -1218,7 +1171,7 @@ class LiveKitAdapter implements Room {
         // page's playback, not only the room's: see playbackAllowed.
         el.addEventListener('playing', this.reportPlayback);
         el.addEventListener('pause', this.reportPlayback);
-        this.elements.set(track.sid ?? '', { el, principal, held });
+        this.elements.set(track.sid ?? '', { el, track, principal, held });
         document.body.appendChild(el);
       })
       .on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack, _pub: RemoteTrackPublication, participant?: RemoteParticipant) => {
@@ -1831,6 +1784,23 @@ class LiveKitAdapter implements Room {
       return { ...encoding, maxBitrate: layer.maxBitrate, maxFramerate: layer.maxFramerate, scaleResolutionDownBy: scale };
     });
     await sender.setParameters(parameters);
+  }
+
+  // Track-scoped reports keep each participant's mic and each screen separate.
+  // The companion subscribes to screens only; its call audio lives in the helper.
+  diagnosticsSources(): DiagnosticsSource[] {
+    if (this.closed) return [];
+    const sources: DiagnosticsSource[] = [];
+    for (const { principal, track } of this.elements.values()) {
+      if (principal !== null) sources.push({ kind: 'audio', principal, track });
+    }
+    const screen = this.screen.find((track) => track.source === Track.Source.ScreenShare);
+    if (screen !== undefined) sources.push({ kind: 'sent', track: screen });
+    for (const principal of this.watching) {
+      const track = this.remoteShares.get(principal)?.video;
+      if (track != null) sources.push({ kind: 'received', principal, track, video: this.streamSinks.get(principal)?.video });
+    }
+    return sources;
   }
 
   async readShareStats(direction: ShareDirection, principal?: number): Promise<ShareSample | null> {

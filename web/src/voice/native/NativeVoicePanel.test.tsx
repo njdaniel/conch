@@ -501,6 +501,7 @@ describe('NativeVoicePanel', () => {
         presence: (p) => { presences.push(p); },
         attachStream: () => undefined,
         readShareStats: () => Promise.resolve(null),
+        diagnosticsSources: () => [],
         outOfVoice: () => { outs.push(outs.length + 1); },
       };
       const companion: Companion = { client, state };
@@ -522,6 +523,21 @@ describe('NativeVoicePanel', () => {
       withCompanion(new Fake(running()), null);
       await frame(presence([1, '2026-01-01T00:00:00Z']));
       expect(screen.queryByRole('button', { name: 'Share screen' })).toBeNull();
+    });
+
+    it('shows companion share stats alongside the newer-helper call quality message', async () => {
+      const c = companionOf({ phase: 'connected', channel: 'general', companion: true, share: { kind: 'sharing', audio: false } });
+      const getRTCStatsReport = vi.fn(() => Promise.resolve(new Map([
+        ['out', { type: 'outbound-rtp', kind: 'video', frameWidth: 1280, frameHeight: 720, qualityLimitationReason: 'cpu' }],
+      ])));
+      const sources = vi.spyOn(c.companion.client, 'diagnosticsSources').mockReturnValue([{ kind: 'sent', track: { getRTCStatsReport } }]);
+      withCompanion(new Fake(running()), c.companion);
+      await frame(presence([1, '2026-01-01T00:00:00Z']));
+      expect(sources).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole('button', { name: 'Voice diagnostics' }));
+      expect(screen.getByText('Call quality from the desktop voice needs a newer helper')).toBeTruthy();
+      expect(await screen.findByText(/Your share .* Resolution 1280×720 · Limit cpu/)).toBeTruthy();
+      expect(getRTCStatsReport).toHaveBeenCalledTimes(1);
     });
 
     it('Share starts the companion in the joined channel and leaves mute and deafen alone', async () => {

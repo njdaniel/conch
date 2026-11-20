@@ -1837,7 +1837,14 @@ describe('the watch view', () => {
     const sink = { video: document.createElement('video'), audio: document.createElement('audio') };
     room.attachStream(8, sink);
     state.handlers.get('ts')?.(audio, remotePub('screen_share_audio'), sharer);
-    expect(attached).toEqual(['screen_share VIDEO', 'screen_share_audio AUDIO']);
+    const microphone = remote('microphone', 'audio');
+    state.handlers.get('ts')?.(microphone, remotePub('microphone'), { identity: 'p9' });
+    expect(room.diagnosticsSources?.()).toEqual([
+      { kind: 'audio', principal: 9, track: microphone },
+      { kind: 'received', principal: 8, track: video, video: sink.video },
+    ]);
+    state.handlers.get('tu')?.(microphone);
+    expect(attached).toEqual(['screen_share VIDEO', 'screen_share_audio AUDIO', 'microphone new', 'detach microphone all']);
     expect(document.body.querySelectorAll('audio')).toHaveLength(0);
     expect(told).toEqual([[8, { video: true, audio: false }], [8, { video: true, audio: true }]]);
     state.handlers.get('tu')?.(video);
