@@ -3123,6 +3123,9 @@ label {
 .voice-notes {
   display: flex;
   flex-wrap: wrap;
+  /* Each note keeps its own height: a control beside a note (Voice
+     diagnostics, Talk key) must not stretch it past one line (#2086). */
+  align-items: flex-start;
   gap: 0.15rem var(--s4);
   margin-top: var(--s1);
 }
