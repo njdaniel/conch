@@ -23,7 +23,7 @@ import type { NativeVoice } from '../../platform/types';
 const oneShotWords: Readonly<Record<VoiceOneShotError, string>> = {
   'not-signed-in': 'Sign in first.',
   'not-installed': 'The voice helper is not installed.',
-  untrusted: 'The voice helper is not trusted.',
+  untrusted: 'Conch blocked the voice helper. Reinstall Conch, or relaunch your development build from a folder other users cannot change.',
   busy: 'The voice helper is busy; try again in a moment.',
   invalid: 'That was refused as invalid.',
   'spawn-failed': 'The voice helper could not be started.',

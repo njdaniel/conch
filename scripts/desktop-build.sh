@@ -89,3 +89,6 @@ if [ -n "$writable" ]; then
 fi
 
 echo "desktop-build: OK: desktop/dist/linux-unpacked/"
+if [ -z "$release" ]; then
+    echo "desktop-build: to launch with a named development profile, run ./scripts/desktop-launch-linux-dev.sh PROFILE"
+fi

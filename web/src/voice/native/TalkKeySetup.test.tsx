@@ -158,6 +158,28 @@ describe('TalkKeySetup', () => {
     expect(failedWords({ ok: false, error: 'busy', failed: 'device' })).toMatch(/^The device was not saved\./);
   });
 
+  it('guides recovery from an untrusted helper and keeps the binding available to retry', async () => {
+    const f = await open(fake(undefined, { ok: false, error: 'untrusted', failed: 'device' }));
+    accept();
+    const keyboard = screen.getByRole<HTMLInputElement>('radio', { name: /Keyboard/ });
+    const key = screen.getByRole<HTMLSelectElement>('combobox');
+    const save = screen.getByRole<HTMLButtonElement>('button', { name: 'Save' });
+    fireEvent.click(keyboard);
+    fireEvent.change(key, { target: { value: 'F13' } });
+    fireEvent.click(save);
+
+    expect(await screen.findByText(/relaunch your development build from a folder other users cannot change/)).toBeTruthy();
+    expect(keyboard.checked).toBe(true);
+    expect(key.value).toBe('F13');
+    expect(save.disabled).toBe(false);
+    expect(f.onSaved).not.toHaveBeenCalled();
+
+    f.saveTalkBinding.mockResolvedValueOnce({ ok: true });
+    fireEvent.click(save);
+    expect(await screen.findByText(/Saved: hold F13 to talk/)).toBeTruthy();
+    expect(f.saveTalkBinding.mock.calls).toEqual([[{ deviceId: 'k1', code: 183 }], [{ deviceId: 'k1', code: 183 }]]);
+  });
+
   it('says so when the listing fails', async () => {
     render(<TalkKeySetup source={fake({ ok: false, error: 'not-installed' }).nv} joined={false} onSaved={() => undefined} onClose={() => undefined} />);
     expect(await screen.findByText(/not installed/)).toBeTruthy();
