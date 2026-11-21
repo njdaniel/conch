@@ -166,8 +166,9 @@ export function ActionsMenu({
 // keeps the browser's menu. A row that is itself drawn inside a dialog (the
 // console's Channels section, in the Settings drawer, issue #1021) opts in
 // with `insideDialog`; a press in a text box, a link, an image or the menu is
-// still left alone.
-export function useOpeners(enabled: boolean, open: () => void, options: { readonly insideDialog?: boolean; readonly skip?: string } = {}) {
+// still left alone. The row selector keeps a thread's message events within
+// that message when its list is drawn inside the channel's root row.
+export function useOpeners(enabled: boolean, open: () => void, options: { readonly insideDialog?: boolean; readonly skip?: string; readonly row?: string } = {}) {
   const timer = useRef<number | null>(null);
   const start = useRef<{ readonly x: number; readonly y: number } | null>(null);
   useEffect(() => () => {
@@ -180,18 +181,20 @@ export function useOpeners(enabled: boolean, open: () => void, options: { readon
   };
   const base = options.insideDialog === true ? 'textarea, input, a, img, [role="menu"]' : 'textarea, input, a, img, [role="menu"], [role="dialog"]';
   const skipped = options.skip === undefined ? base : `${base}, ${options.skip}`;
-  const own = (target: EventTarget) => !(target instanceof Element && target.closest(skipped) !== null);
+  const own = (target: EventTarget, current: EventTarget) => !(target instanceof Element && (
+    target.closest(skipped) !== null || (options.row !== undefined && target.closest(options.row) !== current)
+  ));
   if (!enabled) return {};
   return {
-    onContextMenu: (event: { readonly target: EventTarget; preventDefault: () => void }) => {
-      if (!own(event.target)) return;
+    onContextMenu: (event: { readonly target: EventTarget; readonly currentTarget: EventTarget; preventDefault: () => void }) => {
+      if (!own(event.target, event.currentTarget)) return;
       event.preventDefault();
       cancel();
       open();
     },
     onTouchStart: (event: TouchEvent) => {
       const touch = event.touches[0];
-      if (event.touches.length !== 1 || touch === undefined || !own(event.target)) return;
+      if (event.touches.length !== 1 || touch === undefined || !own(event.target, event.currentTarget)) return;
       cancel();
       start.current = { x: touch.clientX, y: touch.clientY };
       timer.current = window.setTimeout(() => {

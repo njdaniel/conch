@@ -2066,8 +2066,8 @@ describe('a long channel', () => {
     await openChat();
     await screen.findByText(`m${String(maxHeld + 100)}`);
     // Counted, not read: lines() copies every row to drop its buttons, and a
-    // role query walks every message's Reply button, both slow at maxHeld rows
-    // in jsdom (issue #842 added the buttons).
+    // role query walks every message's controls, both slow at maxHeld rows
+    // in jsdom.
     const rows = () => screen.getByRole('log', { name: 'Messages' }).querySelectorAll('li[data-message-id]').length;
     for (const held of [maxHeld - pageSize, maxHeld]) {
       const older = screen.queryByText('Load older messages', { selector: 'button' });

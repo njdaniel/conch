@@ -381,7 +381,9 @@ test('with a thread expanded, a density change keeps the main log\'s own row on 
   await signIn(page, world, world.tokens.browser, 'browser-test');
   const mainRow = page.locator(`[role="log"][aria-label="Messages"] > .messages > li[data-message-id="${String(answer.id)}"]`);
   await expect(mainRow).toBeAttached();
-  await page.locator(`[role="log"][aria-label="Messages"] > .messages > li[data-message-id="${String(root.id)}"]`).getByRole('button', { name: /^Reply to / }).click();
+  const rootRow = page.locator(`[role="log"][aria-label="Messages"] > .messages > li[data-message-id="${String(root.id)}"]`);
+  await rootRow.getByRole('button', { name: /^More actions for / }).click();
+  await rootRow.getByRole('menuitem', { name: 'Reply', exact: true }).click();
   const thread = page.getByRole('region', { name: /^Thread around / });
   await expect(thread.getByText(`${tag} answer`, { exact: true })).toBeVisible();
   await expect(page.locator(`[data-message-id="${String(answer.id)}"]`)).toHaveCount(2);

@@ -13,9 +13,23 @@ const reply = (id: number, body = `reply ${String(id)}`): MessageV2 => ({ schema
 const people = new Map([[2, { name: 'ada', kind: 'human' as const }], [3, { name: 'bea', kind: 'human' as const }]]);
 // Controls are named by author and time, never by id (issue #1040).
 const who = `bea's message, ${clock(at)}`;
-const replyName = `Reply to ${who}`;
 const openName = `Open thread for ${who}`;
 const threadName = `Thread around ${who}`;
+const menuName = `More actions for ${who}`;
+
+function messageRow(id: number) {
+  const row = screen.getByRole('log', { name: 'Messages' }).querySelector<HTMLElement>(`.messages > [data-message-id="${String(id)}"]`);
+  if (row === null) throw new Error(`Missing message ${String(id)}`);
+  return within(row);
+}
+
+function openReply() {
+  const row = messageRow(1);
+  const button = row.getByRole('button', { name: menuName });
+  fireEvent.click(button);
+  fireEvent.click(row.getByRole('menuitem', { name: 'Reply' }));
+  return button;
+}
 
 function chat(messages: readonly MessageV2[], pending: readonly PendingSend[] = []): ChannelChat {
   return { byId: new Map(messages.map((message) => [message.id, message])), pending, sentIds: new Set(), history: 'ready', older: 'idle', exhausted: true, trimmed: false, dropped: 0, nextLocalId: 3, edits: new Map(), final: new Set() };
@@ -67,21 +81,24 @@ describe('one-level replies', () => {
     vi.spyOn(api, 'loadThread').mockResolvedValue({ ok: true, value: { messages: [root(audience), reply(2)] } });
     const onReplySend = vi.fn();
     view([root(audience)], [], onReplySend);
-    fireEvent.click(screen.getByRole('button', { name: replyName }));
+    const opener = openReply();
     const thread = await screen.findByRole('region', { name: threadName });
     expect(within(thread).getByText('root')).toBeTruthy();
     expect(within(thread).getByText('reply 2')).toBeTruthy();
     expect(within(thread).getByText('Replying to → net blue; the audience cannot be changed.')).toBeTruthy();
-    expect(within(thread).queryByRole('button', { name: replyName })).toBeNull();
+    expect(within(thread).queryByRole('menuitem', { name: 'Reply' })).toBeNull();
     expect(within(thread).queryByText('To:')).toBeNull();
     const composer = within(thread).getByRole('textbox', { name: 'Reply to bea' });
+    expect(document.activeElement).toBe(composer);
+    fireEvent.click(opener);
+    fireEvent.click(messageRow(1).getByRole('menuitem', { name: /^Reply$/ }));
     expect(document.activeElement).toBe(composer);
     fireEvent.change(composer, { target: { value: 'answer' } });
     fireEvent.keyDown(composer, { key: 'Enter' });
     expect(onReplySend).toHaveBeenCalledWith('answer', 1, audience);
     expect(screen.getByRole('textbox', { name: 'Message #general' })).toHaveProperty('value', 'channel draft');
     fireEvent.click(within(thread).getByRole('button', { name: 'Close thread' }));
-    expect(document.activeElement).toBe(screen.getByRole('button', { name: replyName }));
+    expect(document.activeElement).toBe(opener);
   });
 
   it('deduplicates live replies and pages with next_after', async () => {
@@ -105,7 +122,7 @@ describe('one-level replies', () => {
     const pending: PendingSend = { localId: 2, channelId: 7, authorId: 2, body: 'pending reply', at: 1, status: 'failed', phase: 'failed', attachments: [], reconcileAfter: 0, threadRootId: 1 };
     view([root()], [pending], vi.fn(), 'reconnecting');
     expect(screen.queryByText('pending reply')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: replyName }));
+    openReply();
     const thread = await screen.findByRole('region', { name: threadName });
     expect(within(thread).getByText('pending reply')).toBeTruthy();
     expect(within(thread).getByRole('textbox', { name: 'Reply to bea' })).toHaveProperty('disabled', true);
@@ -117,7 +134,7 @@ describe('one-level replies', () => {
       .mockResolvedValueOnce({ ok: false, failure: 'network' })
       .mockResolvedValueOnce({ ok: true, value: { messages: [root()] } });
     view([root()]);
-    fireEvent.click(screen.getByRole('button', { name: replyName }));
+    openReply();
     await screen.findByRole('alert');
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     await screen.findByRole('textbox', { name: 'Reply to bea' });
@@ -140,7 +157,13 @@ describe('one-level replies', () => {
 
   it('offers a reply only on a root, never on a reply', () => {
     view([root(), reply(2)]);
-    expect(screen.getAllByRole('button', { name: /^Reply to bea's message, / })).toHaveLength(1);
+    const rootButton = messageRow(1).getByRole('button', { name: menuName });
+    expect(screen.queryByRole('button', { name: /^Reply to / })).toBeNull();
+    fireEvent.click(rootButton);
+    expect(messageRow(1).getByRole('menuitem', { name: 'Reply' })).toBeTruthy();
+    fireEvent.click(rootButton);
+    fireEvent.click(messageRow(2).getByRole('button', { name: menuName }));
+    expect(messageRow(2).queryByRole('menuitem', { name: 'Reply' })).toBeNull();
     expect(screen.getByRole('button', { name: openName })).toBeTruthy();
   });
 
@@ -268,7 +291,7 @@ describe('a half-typed reply kept across a reload (issue #1080)', () => {
   it('keeps what is typed, by root, and nothing else', async () => {
     vi.spyOn(api, 'loadThread').mockResolvedValue({ ok: true, value: { messages: [root()] } });
     view([root()], [], vi.fn(), 'open', 7);
-    fireEvent.click(screen.getByRole('button', { name: replyName }));
+    openReply();
     fireEvent.change(await screen.findByRole('textbox', { name: 'Reply to bea' }), { target: { value: 'half typed' } });
     await waitFor(() => { expect(kept()).toEqual({ '7': { '1': 'half typed' } }); });
   });
@@ -290,7 +313,7 @@ describe('a half-typed reply kept across a reload (issue #1080)', () => {
     vi.spyOn(api, 'loadThread').mockResolvedValue({ ok: true, value: { messages: [root(), root2()] } });
     view([root(), root2()], [], vi.fn(), 'open', 7);
     expect(await screen.findByRole('textbox', { name: 'Reply to bea' })).toHaveProperty('value', 'second');
-    fireEvent.click(within(document.querySelector<HTMLElement>('.messages > [data-message-id="1"]') as HTMLElement).getByRole('button', { name: replyName }));
+    openReply();
     await waitFor(() => { expect(screen.getByRole('textbox', { name: 'Reply to bea' })).toHaveProperty('value', 'first'); });
   });
 
@@ -359,7 +382,7 @@ describe('a half-typed reply kept across a reload (issue #1080)', () => {
     vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('refused'); });
     vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('refused'); });
     view([root({ kind: 'net', net_id: 4 })], [], vi.fn(), 'open', 7);
-    fireEvent.click(screen.getByRole('button', { name: replyName }));
+    openReply();
     const box = await screen.findByRole('textbox', { name: 'Reply to bea' });
     fireEvent.change(box, { target: { value: 'still works' } });
     expect(box).toHaveProperty('value', 'still works');
@@ -403,7 +426,7 @@ it('scrubs fetched thread copies and late pages when live tombstones arrive', as
   let finish: (result: Awaited<ReturnType<typeof api.loadThread>>) => void = () => undefined;
   vi.spyOn(api, 'loadThread').mockReturnValue(new Promise((resolve) => { finish = resolve; }));
   view([root()]);
-  fireEvent.click(screen.getByRole('button', { name: replyName }));
+  openReply();
   const thread = await screen.findByRole('region', { name: threadName });
   const body = 'This message was removed by a moderator.';
   await act(async () => {
