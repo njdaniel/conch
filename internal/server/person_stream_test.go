@@ -297,10 +297,10 @@ func TestPersonStreamWhoMayOpen(t *testing.T) {
 		{"another person", personPath, f.bobTok, http.StatusSwitchingProtocols, ""},
 		{"a person, ticket", personPath + "?ticket=" + ticket(f.aliceTok), "", http.StatusSwitchingProtocols, ""},
 		{"an operator is a person too", personPath, f.rootTok, http.StatusSwitchingProtocols, ""},
-		// An agent's credential is never its own making, so guard answers it
-		// before the handler's kind check does.
-		{"an agent", personPath, f.botTok, http.StatusForbidden, schema.ErrorCodeOwnSignInRequired},
-		{"another agent", personPath, f.rivalTok, http.StatusForbidden, schema.ErrorCodeOwnSignInRequired},
+		// The provenance guard refuses a non-human caller first (issue #2098):
+		// 403 forbidden, not own_sign_in_required.
+		{"an agent", personPath, f.botTok, http.StatusForbidden, "forbidden"},
+		{"another agent", personPath, f.rivalTok, http.StatusForbidden, "forbidden"},
 		{"a guest", personPath, g.Token, http.StatusForbidden, schema.ErrorCodeGuestNotAllowed},
 		{"no credential", personPath, "", http.StatusUnauthorized, ""},
 		{"a made-up credential", personPath, "not-a-token", http.StatusUnauthorized, ""},

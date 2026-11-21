@@ -138,6 +138,14 @@ func coreAgentRows() []row {
 		noVoice("GET /v1/voice/occupancy", "reads voice occupancy", get("/v1/voice/occupancy")),
 		noVoice("GET /v1/voice/occupancy/ws", "opens the voice occupancy socket", occupancySock(false)),
 		noVoice("GET /v1/voice/occupancy/ws", "opens the voice occupancy socket with a ticket", occupancySock(true)),
+		// The person stream is a person's own (issue #2098): the provenance
+		// guard refuses a non-human caller first, 403 forbidden, before any
+		// ticket or stream is looked at. (A person whose credential another
+		// made is refused differently, own_sign_in_required: personrows.go.)
+		{route: "GET /v1/events/person/ws", what: "opens a person stream as an agent", want: answer{http.StatusForbidden, "forbidden"},
+			probe: func(*world, subject) probe { return personSock(false) }},
+		{route: "GET /v1/events/person/ws", what: "opens a person stream as an agent with a ticket", want: answer{http.StatusForbidden, "forbidden"},
+			probe: func(*world, subject) probe { return personSock(true) }},
 	}
 }
 
