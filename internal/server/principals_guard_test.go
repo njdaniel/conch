@@ -73,7 +73,12 @@ var principalReads = []principalRead{
 	// directory's rule; the per-person switch is one bit; SetDMAllowed is
 	// the operator's switch, behind manage_members, as SetVoiceAllowed.
 	{"store/dm_policy.go", "dmMayKnowTx", 1, readPredicate},
-	{"store/dm_policy.go", "dmPeerFormerTx", 1, readPredicate},
+	// dmPeerFormerTx: the former-member label of a pair's peer (Decision 11).
+	// Gated by pair membership, not by the directory's rule: an enabled peer
+	// is named whatever knownPrincipalsSQL says (p.disabled_at IS NULL OR
+	// cond), so a pair member reads one bit about a peer they may no longer
+	// know, as the design intends (#2096 review).
+	{"store/dm_policy.go", "dmPeerFormerTx", 1, readGated},
 	{"store/dm_policy.go", "dmPrincipalAllowedTx", 1, readOwnOrInternal},
 	{"store/dm_policy.go", "Store.SetDMAllowed", 2, readOperatorOrMaker},
 	// #1832: a block's target, only when the owner may know it by
