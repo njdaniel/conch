@@ -105,7 +105,7 @@ use conch_voice_control::{
     ConnectionPolicy, GateCommand, KeyEvent, LineCommand, NextStep, Outcome, Ptt, PttInput,
     PttOutput, ShutReason, TalkMode, TransmitReport,
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::echo::EchoCanceller;
@@ -861,6 +861,8 @@ struct Session<T: Transport> {
     owner: Option<Owner>,
     /// Why a managed helper is ending, once it is: the reason its last states give.
     ending: Option<Ending>,
+    /// Whether the owner was lost before shutdown, even if the session was already failing.
+    owner_lost: bool,
     /// Whether the owner has sent `leave`: the room step of an explicit leave keeps its
     /// full limit even if a signal or owner loss was seen first (#1690, #2097).
     leave_asked: bool,
@@ -1079,6 +1081,7 @@ impl<T: Transport> Session<T> {
             exit: None,
             owner: None,
             ending: None,
+            owner_lost: false,
             leave_asked: false,
             key_state: None,
             talk_key: true,
@@ -1966,6 +1969,7 @@ impl<T: Transport> Session<T> {
     /// and the loop ends. A connection that is closing because of something the policy
     /// stops on keeps that reason: the session is failing already.
     fn begin_stopping(&mut self, reason: VoiceControlReason) {
+        self.owner_lost |= reason == VoiceControlReason::OwnerLost;
         if self.ending.is_none() {
             match &self.phase {
                 Phase::Closing(_, ended) if ended.outcome.stops() => {
@@ -2197,9 +2201,9 @@ impl<T: Transport> Session<T> {
     /// A managed helper leaves (`docs/design/tui-voice.md` §8.2, §8.3): the gate is shut and
     /// the microphone and the speakers closed at once, with no release tail; a press that
     /// was open gets its `stopped`, given at most [`REPORT_LIMIT`]; the room is left, given
-    /// at most [`ROOM_LIMIT`], or [`OWNER_LOST_STEP`] once the owner is gone (an end of input
-    /// after an explicit `leave` does not shorten it). The owner's
-    /// commands are answered meanwhile, and its last state is the final one.
+    /// at most [`ROOM_LIMIT`]. Once the owner is gone, a pending join and its subsequent
+    /// room close each get at most [`OWNER_LOST_STEP`]. An explicit `leave` keeps the full
+    /// limits. The owner's commands are answered meanwhile, and its last state is final.
     async fn leave_managed(mut self) -> Result<(), Error> {
         let mut result = self.exit.take().unwrap_or(Ok(()));
         let mut ending = self.ending.unwrap_or(match result {
@@ -2252,9 +2256,9 @@ impl<T: Transport> Session<T> {
         let live = self.live.take();
         let phase = std::mem::replace(&mut self.phase, Phase::Settled);
         crate::managed::set_room_leave_under_way(true);
-        let room_left = Arc::new(AtomicBool::new(false));
-        let room_done = Arc::clone(&room_left);
-        let left = async move {
+        let room_left = AtomicBool::new(false);
+        let joined_during_shutdown = Notify::new();
+        let left = async {
             if let Some(live) = live {
                 abandon_if_late(ROOM_LIMIT, live.room.close()).await;
             }
@@ -2266,12 +2270,13 @@ impl<T: Transport> Session<T> {
                 // the room it joins is left and its track is not abandoned unmuted.
                 Phase::Establishing(attempt) => {
                     if let Ok(Ok(joined)) = tokio::time::timeout(attempt_limit, attempt).await {
+                        joined_during_shutdown.notify_one();
                         abandon_if_late(ROOM_LIMIT, joined.room.close()).await;
                     }
                 }
                 Phase::Ask(_) | Phase::Settled => {}
             }
-            room_done.store(true, Ordering::SeqCst);
+            room_left.store(true, Ordering::SeqCst);
             crate::managed::set_room_leave_under_way(false);
         };
         // What a get_state is answered with meanwhile: on the way out, the gate shut and
@@ -2291,8 +2296,8 @@ impl<T: Transport> Session<T> {
         // Keep the owner-loss cutoff separate so that leave can clear it without restarting
         // the room close. The process still has its owner-loss watchdog.
         let mut leave_asked = self.leave_asked || ending.reason == VoiceControlReason::Left;
-        let mut cutoff = (ending.reason == VoiceControlReason::OwnerLost && !leave_asked)
-            .then(|| Instant::now() + OWNER_LOST_STEP);
+        let mut cutoff =
+            (self.owner_lost && !leave_asked).then(|| Instant::now() + OWNER_LOST_STEP);
         {
             let work = async { tokio::join!(self.reports.flush(REPORT_LIMIT), left) };
             tokio::pin!(work);
@@ -2304,6 +2309,10 @@ impl<T: Transport> Session<T> {
                             log::warn!("the last transmit reports were not delivered before leaving");
                         }
                         break;
+                    }
+                    () = joined_during_shutdown.notified() => {
+                        // The room close gets its own budget once the join has finished.
+                        cutoff = cutoff.map(|_| Instant::now() + OWNER_LOST_STEP);
                     }
                     () = sleep_until(cutoff) => {
                         if room_left.load(Ordering::SeqCst) {
@@ -2434,7 +2443,10 @@ mod tests {
         }
     }
 
-    struct NoRoom(oneshot::Sender<()>);
+    struct NoRoom {
+        close_delay: Duration,
+        closed: oneshot::Sender<()>,
+    }
 
     impl RoomHandle for NoRoom {
         type Track = NoTrack;
@@ -2453,8 +2465,8 @@ mod tests {
         }
 
         async fn close(self) {
-            tokio::time::sleep(Duration::from_millis(1500)).await;
-            let _ = self.0.send(());
+            tokio::time::sleep(self.close_delay).await;
+            let _ = self.closed.send(());
         }
     }
 
@@ -2541,18 +2553,27 @@ mod tests {
         Session::new(settings, conchd, Nowhere, Scrubber::new(), received, out).unwrap()
     }
 
-    #[tokio::test]
-    async fn leave_after_the_events_pipe_ends_lets_the_room_close_finish() {
-        let mut session = session(Box::new(|_| Ok(Box::new(CountingSink::new(&[])?))));
+    fn room_that_closes_after(millis: u64) -> (Established<Nowhere>, oneshot::Receiver<()>) {
         let (closed, room_closed) = oneshot::channel();
-        session.connected(Established {
-            room: NoRoom(closed),
+        let joined = Established {
+            room: NoRoom {
+                close_delay: Duration::from_millis(millis),
+                closed,
+            },
             events: mpsc::unbounded_channel().1,
             mic: None,
             can_publish: false,
             identity: String::new(),
             companion: false,
-        });
+        };
+        (joined, room_closed)
+    }
+
+    #[tokio::test]
+    async fn leave_after_the_events_pipe_ends_lets_the_room_close_finish() {
+        let mut session = session(Box::new(|_| Ok(Box::new(CountingSink::new(&[])?))));
+        let (joined, room_closed) = room_that_closes_after(1500);
+        session.connected(joined);
         let (inputs, received) = mpsc::unbounded_channel();
         session.inputs = received;
         // Closing the events pipe can be noticed before the control reader
@@ -2566,6 +2587,47 @@ mod tests {
 
         session.leave_managed().await.unwrap();
         room_closed.await.expect("the room close was cancelled");
+    }
+
+    #[tokio::test]
+    async fn owner_loss_gives_a_late_join_its_own_room_close_budget() {
+        let mut session = session(Box::new(|_| Ok(Box::new(CountingSink::new(&[])?))));
+        let (joined, room_closed) = room_that_closes_after(500);
+        session.phase = Phase::Establishing(Box::pin(async {
+            tokio::time::sleep(Duration::from_millis(800)).await;
+            Ok(joined)
+        }));
+        let (_inputs, received) = mpsc::unbounded_channel();
+        session.inputs = received;
+        session.on_input(Some(Input::OwnerLost));
+
+        session.leave_managed().await.unwrap();
+        room_closed.await.expect("the room close was cancelled");
+    }
+
+    #[tokio::test]
+    async fn stdin_owner_loss_shortens_room_close_after_an_unauthorized_report() {
+        let mut session = session(Box::new(|_| Ok(Box::new(CountingSink::new(&[])?))));
+        let (joined, room_closed) = room_that_closes_after(1500);
+        session.connected(joined);
+        session.on_answer(Some(Answer::Unauthorized));
+        let (_inputs, received) = mpsc::unbounded_channel();
+        session.inputs = received;
+        // The control reader sends one OwnerLost at EOF. The events pipe stays open.
+        session.on_input(Some(Input::OwnerLost));
+        assert_eq!(
+            session.ending.unwrap().reason,
+            VoiceControlReason::NotSignedIn
+        );
+
+        assert!(matches!(
+            session.leave_managed().await,
+            Err(Error::Stopped { .. })
+        ));
+        assert!(
+            room_closed.await.is_err(),
+            "the room close used the longer budget"
+        );
     }
 
     #[tokio::test]
