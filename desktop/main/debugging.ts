@@ -10,6 +10,7 @@
 // (checked by the smoke test).
 export const REMOTE_DEBUGGING_SWITCHES = ['remote-debugging-port', 'remote-debugging-pipe'] as const;
 
+import type { MainLog } from './diagnostics.ts';
 export const ON_LINE = 'conch-desktop: remote debugging is ON';
 
 export type DebuggingVerdict = 'off' | 'allowed' | 'refused';
@@ -18,7 +19,7 @@ export function debuggingVerdict(
   packaged: boolean,
   hasSwitch: (name: string) => boolean,
   env: Readonly<Record<string, string | undefined>>,
-  log: (line: string) => void,
+  log: MainLog,
 ): DebuggingVerdict {
   if (!packaged || !REMOTE_DEBUGGING_SWITCHES.some(hasSwitch)) return 'off';
   log(ON_LINE);

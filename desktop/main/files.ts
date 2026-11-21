@@ -16,6 +16,7 @@
 //    server's metadata for the dialog's suggestion, the person chooses where,
 //    and that chosen absolute path is the only place anything is written.
 //    The caller (ipc.ts) allows it only right after the person's own input.
+import type { MainLog } from './diagnostics.ts';
 import { fileQuery } from '../../web/src/platform/operations.ts';
 import type { BridgeReply, DownloadReply, SaveOutcome } from '../../web/src/platform/desktop/bridge.ts';
 import { fileV1 } from '../../web/src/schema/file.ts';
@@ -123,7 +124,7 @@ export interface FilesDeps {
   readonly downloadsDir: () => string;
   readonly join: (...parts: string[]) => string;
   readonly isAbsolute: (path: string) => boolean;
-  readonly log: (line: string) => void;
+  readonly log: MainLog;
 }
 
 export class Files {

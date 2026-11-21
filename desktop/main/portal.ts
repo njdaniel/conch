@@ -20,6 +20,7 @@
 // Anything else, a missing gdbus included, is "unavailable": the app never
 // guesses that a capture would go through a picker. Other platforms
 // report unsupported capture without probing for a Linux portal.
+import type { MainLog } from './diagnostics.ts';
 import { existsSync } from 'node:fs';
 import type { CompanionShareUnavailable } from '../../web/src/platform/desktop/bridge.ts';
 
@@ -76,7 +77,7 @@ export interface PortalDeps {
   // when it could not be run at all.
   readonly run: (file: string, args: readonly string[], env: Readonly<Record<string, string>>) => Promise<RunResult | null>;
   readonly executable: (path: string) => boolean;
-  readonly log: (line: string) => void;
+  readonly log: MainLog;
 }
 
 const WORDS: Record<ShareAvailability, string> = {

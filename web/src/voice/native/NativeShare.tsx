@@ -211,9 +211,7 @@ export function ShareNotes({
       ) : null}
       {!windows && !offered && (share.kind === 'idle' ? reason === null : starting) ? <p className="hint">{silentShareBefore}</p> : null}
       {share.kind === 'sharing' ? (
-        <p className="hint voice-supplemental">
-          <ShareReadout client={client} direction="sent" prefix="Sending: " asked={provisionalQuality(quality)} />
-        </p>
+        <ShareReadout client={client} direction="sent" prefix="Sending: " asked={provisionalQuality(quality)} />
       ) : null}
       {share.kind === 'sharing' ? <ShareCaptureWarning stalled={state.shareCaptureStalled} client={client} /> : null}
       {!windows && !offered && live ? <p className="hint">{silentShareWhile}</p> : null}

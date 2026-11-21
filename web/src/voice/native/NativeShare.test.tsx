@@ -1,7 +1,7 @@
 // Share and watch in the desktop strip (issue #1582, D4-05), driven by a fake
 // companion client: each state, each refusal, the notes, the quality choices
 // and the tiles. No room, no portal, no network.
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CompanionGrantError, ShareSoundReason } from '../../platform/desktop/bridge';
 import type { VoicePresenceV2 } from '../../schema/voice';
@@ -48,6 +48,7 @@ function fake(over: Partial<VoiceState> = {}, stats: ShareSample | null = null):
     presence: () => undefined,
     attachStream: () => undefined,
     readShareStats: (direction, principal) => { reads.push([direction, principal]); return Promise.resolve(stats); },
+    diagnosticsSources: () => [],
     outOfVoice: () => undefined,
   };
   // The real client starts at the desktop's default, 720p30 (Q-D4-3).
@@ -330,6 +331,18 @@ describe('the sharer’s readout', () => {
     expect(readout.textContent).toContain('Sending: ');
     expect(readout.textContent).toContain(`${String(q.frameRate)} fps`);
     expect(t.reads).toContainEqual(['sent', undefined]);
+  });
+
+  it('shows the CPU warning in the sharing strip from the companion’s outbound stats', async () => {
+    vi.useFakeTimers();
+    try {
+      const t = fake({ phase: 'connected', companion: true, share: { kind: 'sharing', audio: false } }, { ...sample, fps: 1, limitation: 'cpu' });
+      strip(t.companion);
+      await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
+      expect(screen.getByText(/Your computer is too busy to send smoothly/)).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('reads the companion’s own stats, not a watched stream’s', async () => {

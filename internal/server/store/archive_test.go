@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -61,12 +62,16 @@ func TestMigration41ArchivedAt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, stmt := range []string{
+	for _, stmt := range slices.Concat(dmDropStatements, []string{
 		// Migration 45 (issue #849) first, then 43 (issue #1326), then 42's
 		// columns, then 41's.
-		"DROP TABLE push_registrations",          // migration 49 (issue #1714)
-		"DROP TABLE notification_preferences",    // migration 48 (issue #1713)
-		"ALTER TABLE channels DROP COLUMN topic", // migration 47 (issue #1503)
+		"DROP TABLE account_notices",                      // migration 52 (issue #2042)
+		"ALTER TABLE credentials DROP COLUMN self_made",   // migration 52 (issue #2042)
+		"ALTER TABLE sign_in_links DROP COLUMN self_made", // migration 52
+		"DROP TABLE blocks",                               // migration 51 (issue #1832)
+		"DROP TABLE push_registrations",                   // migration 49 (issue #1714)
+		"DROP TABLE notification_preferences",             // migration 48 (issue #1713)
+		"ALTER TABLE channels DROP COLUMN topic",          // migration 47 (issue #1503)
 		`CREATE TABLE open_channels (channel_id INTEGER PRIMARY KEY REFERENCES channels (id), added_by INTEGER REFERENCES principals (id), added_at INTEGER NOT NULL)`, // migration 46 (issue #998)
 		"DROP TABLE message_removals", // migration 45 (issue #849); its triggers go with it
 		"DROP TABLE channel_bans",     // migration 45 (issue #849)
@@ -77,7 +82,7 @@ func TestMigration41ArchivedAt(t *testing.T) {
 		"ALTER TABLE hooks DROP COLUMN issued_by",       // migration 42 (issue #1024)
 		"ALTER TABLE channels DROP COLUMN archived_at",
 		fmt.Sprintf("PRAGMA user_version = %d", archiveMigration-1),
-	} {
+	}) {
 		if _, err := rewind.Exec(stmt); err != nil {
 			t.Fatalf("rewind %q: %v", stmt, err)
 		}

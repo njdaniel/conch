@@ -297,7 +297,8 @@ func (s *Store) CompleteTOTPLogin(ctx context.Context, in TOTPLogin, now time.Ti
 // is (review F5), so a socket or a ping loop does not keep it alive.
 func insertOperatorSessionTx(ctx context.Context, tx execer, principalID int64, token string, now time.Time) (schema.CredentialV1, error) {
 	exp := now.Add(schema.OperatorSessionAbsoluteSeconds * time.Second)
-	cred, err := insertCredentialTx(ctx, tx, principalID, OperatorSessionLabel, token, now, &exp, 0, principalID)
+	// A password and TOTP sign-in is the operator's own (issue #2042).
+	cred, err := insertCredentialTx(ctx, tx, principalID, OperatorSessionLabel, token, now, &exp, 0, principalID, madeBySelf)
 	if err != nil {
 		return schema.CredentialV1{}, err
 	}
@@ -714,7 +715,11 @@ func (s *Store) RedeemSetupToken(ctx context.Context, tokenHash string, now time
 			return ErrSetupTokenInvalid
 		}
 		exp := now.Add(schema.SetupCredentialLifetimeSeconds * time.Second)
-		cred, err := insertCredentialTx(ctx, tx, principalID, SetupCredentialLabel, token, now, &exp, 0, principalID)
+		// Made by another (issue #2042): the host's administrator made the
+		// token, for an operator who may be someone else. Its setup scope
+		// reaches no DM or call route anyway; the operator's later sign-in
+		// is self-made.
+		cred, err := insertCredentialTx(ctx, tx, principalID, SetupCredentialLabel, token, now, &exp, 0, principalID, madeByAnother)
 		if err != nil {
 			return err
 		}

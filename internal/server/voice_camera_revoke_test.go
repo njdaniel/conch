@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
@@ -23,6 +25,88 @@ import (
 // route answers, and the share and the camera never take each other down at
 // any of the four write sites (S4). The interleavings are forced with the
 // share's seams; nothing sleeps.
+
+// Revoking a session ends an absent holder's camera before the hook answers,
+// even when a sweep still owes the rotation. A refreshed LiveKit token can
+// put the same identity back in the old room until that rotation succeeds.
+func TestVoiceCameraRevokedDuringGapWhenRotationFails(t *testing.T) {
+	for _, failure := range []string{"holder check", "rotation write"} {
+		t.Run(failure, func(t *testing.T) {
+			f, room := newCameraFixture(t)
+			f.at(1_000)
+			f.mustCamera(t, "ann", "")
+			f.camTrack(room, "ann", true, false)
+			f.at(2_000)
+			f.pass(t)
+			other := mustParticipant(t, f, room, "ann2")
+			f.lk.setRoom(room, other)
+			f.at(3_000)
+			f.pass(t)
+			if got := f.cameraHolders(room); !slices.Equal(got, []string{"ann"}) {
+				t.Fatalf("before revocation: holders %q, want ann", got)
+			}
+			var recoverRotation func()
+			if failure == "holder check" {
+				invariant := f.srv.voice.invalid
+				f.srv.voice.invalid = func(context.Context, time.Time) ([]store.VoiceViolation, error) {
+					return nil, errors.New("holder check failed")
+				}
+				recoverRotation = func() { f.srv.voice.invalid = invariant }
+			} else {
+				path, _ := testDBPaths.Load(f.srv)
+				db, err := sql.Open("sqlite", "file:"+path.(string)+"?_pragma=busy_timeout(5000)")
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = db.Close() }()
+				if _, err := db.Exec(`CREATE TRIGGER rotation_fails BEFORE INSERT ON audit_events
+					WHEN NEW.action = 'voice_room_rotated' BEGIN SELECT RAISE(ABORT, 'rotation failed'); END`); err != nil {
+					t.Fatal(err)
+				}
+				recoverRotation = func() {
+					if _, err := db.Exec(`DROP TRIGGER rotation_fails`); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			ctx := context.Background()
+			id := f.credID(t, "ann")
+			if err := f.srv.store.RevokeCredential(ctx, "system", id); err != nil {
+				t.Fatal(err)
+			}
+			f.at(3_100)
+			f.srv.credentialRevoked(ctx, id)
+			if got := f.room(t, f.ops); got != room {
+				t.Fatal("the room rotated despite the forced failure")
+			}
+			if got := f.cameraHolders(room); len(got) != 0 {
+				t.Errorf("holders at hook return = %q, want none", got)
+			}
+			want := []string{"ann started", "system stopped principal=ann reason=access_lost"}
+			if got := f.cameraRows(t); !slices.Equal(got, want) {
+				t.Errorf("rows at hook return %q, want %q", got, want)
+			}
+			f.at(3_200)
+			f.pass(t)
+			f.lk.setRoom(room, other, fakeParticipant{identity: f.identity("ann"), joinedMs: 3_300, camera: true, cameraGranted: true})
+			f.at(3_300)
+			f.pass(t)
+			if got := f.cameraHolders(room); len(got) != 0 || f.camGranted(room, "ann") {
+				t.Errorf("refreshed token kept the camera before retry, holders %q", got)
+			}
+			grants := f.cameraGrants("ann2")
+			if res := f.camera(t, http.MethodPost, "ann2", "ops", ""); res.status != http.StatusConflict || f.cameraGrants("ann2") != grants {
+				t.Errorf("claim in a room awaiting rotation: %d %s, want 409 and no grant", res.status, res.body)
+			}
+			recoverRotation()
+			f.at(5_000)
+			f.sweep(t)
+			if got := f.room(t, f.ops); got == room {
+				t.Error("the sweep did not rotate after recovery")
+			}
+		})
+	}
+}
 
 // doOrderedBody is doOrdered with a request body: the fake's log gets an
 // "http-response" entry at the moment the response begins.

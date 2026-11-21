@@ -49,6 +49,7 @@
 //    screen").
 // Audio is never given: Electron's 'loopback' is Windows-only, and Linux has
 // no share-audio route (§8). A request that asks for audio gets video only.
+import type { MainLog } from './diagnostics.ts';
 import type { DesktopCapturerSource, SourcesOptions } from 'electron';
 
 import type { ShareAvailability } from './portal.ts';
@@ -89,7 +90,7 @@ export const PIPEWIRE_FEATURE = 'WebRTCPipeWireCapturer';
 // value is a comma list whose entries may carry a trial ("Name<Trial") or
 // parameters ("Name:k/v"), or a leading "*" ("*Name"); Chromium lets disable-features win over
 // enable-features, and "-Name" in enable-features also turns a feature off.
-export function captureVerdict(packaged: boolean, switchValue: (name: string) => string, log: (line: string) => void): 'ok' | 'refused' {
+export function captureVerdict(packaged: boolean, switchValue: (name: string) => string, log: MainLog): 'ok' | 'refused' {
   if (!packaged) return 'ok';
   const entries = (name: string): string[] => switchValue(name).split(',').map((e) => e.trim().replace(/[<:].*$/u, '').replace(/^\*+/u, ''));
   const off = entries('disable-features').includes(PIPEWIRE_FEATURE) || entries('enable-features').includes(`-${PIPEWIRE_FEATURE}`);
@@ -139,7 +140,7 @@ export interface DisplayCaptureDeps {
   // The portal's latest answer (Portal.last).
   readonly available: () => ShareAvailability | 'unknown';
   readonly getSources: (options: SourcesOptions) => Promise<readonly CaptureSource[]>;
-  readonly log: (line: string) => void;
+  readonly log: MainLog;
 }
 
 export const CAPTURE_SOURCES: SourcesOptions = { types: ['screen', 'window'] };

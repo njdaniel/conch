@@ -644,6 +644,28 @@ describe('a burst of lines in one chunk (S-5)', () => {
   });
 });
 
+it('treats an invalidated hint and a lost logind owner as unknown lock states', async () => {
+  const r = rig();
+  const child = new FakeChild();
+  const w = new LinuxLifecycle({
+    rules: r.life, powerMonitor: r.power, pid: 1, log: () => undefined,
+    findGdbus: () => Promise.resolve('/fake/gdbus'), run: fakeRun, watch: () => asWatch(child),
+  });
+  const started = w.start();
+  await until(() => child.stdout.listenerCount('data') > 0);
+  child.stdout.emit('data', RECORDED.preamble1 + '\n');
+  await started;
+  expect(r.life.lockObservation).toBe('available');
+  child.stdout.emit('data', `${SESSION}: org.freedesktop.DBus.Properties.PropertiesChanged ('${S}', {}, ['LockedHint'])\n`);
+  expect(r.life.lockObservation).toBe('unavailable');
+  child.stdout.emit('data', lines.unlock + '\n');
+  expect(r.life.lockObservation).toBe('available');
+  child.stdout.emit('data', 'The name org.freedesktop.login1 does not have an owner\n' + lines.unlock + '\n');
+  expect(r.life.lockObservation).toBe('unavailable');
+  expect(child.killed).toBe(true);
+  w.stop();
+});
+
 describe('a logind source that is gone (S-2)', () => {
   it('the monitor dies while locked and the watcher gives up: the lock is released, text stays hidden', async () => {
     const r = rig();

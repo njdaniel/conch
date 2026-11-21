@@ -22,6 +22,7 @@ function fake(initial: NativeVoiceView = v(1)) {
     // Talk-key setup (#1381).
     voiceKeyDevices: vi.fn(() => Promise.resolve({ ok: false, error: 'unsupported' } as const)),
     voiceSaveTalkBinding: vi.fn(() => Promise.resolve({ ok: false, error: 'unsupported' } as const)),
+    reportVoiceDiagnostic: vi.fn(() => Promise.resolve()),
     onVoiceState: vi.fn((l: (view: NativeVoiceView) => void) => {
       listener = l;
       return unsubscribe;

@@ -5,6 +5,7 @@
 - **Date:** 2026-10-29 (proposed), 2026-10-30 (accepted, amended)
 - **Decider:** Nick (Tier-H)
 - **Design:** [docs/design/community-model.md](../design/community-model.md)
+- **Amended 2026-11-19 by [ADR-017](ADR-017-local-direct-messages-and-calls.md)** (Proposed; effective when Nick merges it): "no DMs" leaves the list of what does not move in ADR-000's locked table (line 16). A local 1:1 DM's content boundary is its pair, not channel membership; `hide_members` (Decision 9) still governs new contact. The text below is unchanged.
 - **Amends:**
   - [ADR-003](ADR-003-multi-human-access.md): channel membership stays the boundary for **content** and stops being the boundary for **people**. Every member sees every member of the server.
   - [ADR-008](ADR-008-private-communications-alpha.md) Decision 4 (invites grant named channels, voice and the right to invite; personal invites single-use by permitted testers, open links by operators) and the exit scenario's step 3 ("see nothing of the other groups"): replaced by member links and guest links, and by "see nothing of the other groups' private channels". Decision 5 (separate groups are separate private channels) stands.

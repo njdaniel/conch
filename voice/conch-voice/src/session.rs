@@ -2541,6 +2541,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn set_mute_commands_apply_in_order() {
+        let mut session = session(Box::new(|_| Ok(Box::new(CountingSink::new(&[])?))));
+        session.on_control(Control::SetMute { id: 2, muted: true });
+        assert!(session.ptt.status().muted());
+        session.on_control(Control::SetMute {
+            id: 3,
+            muted: false,
+        });
+        assert!(!session.ptt.status().muted());
+        session.on_control(Control::SetMute { id: 4, muted: true });
+        assert!(session.ptt.status().muted());
+    }
+
+    #[tokio::test]
     async fn a_timeout_before_headers_gets_the_stored_logins_note_when_available() {
         let mut session = session(Box::new(|_| Ok(Box::new(CountingSink::new(&[])?))));
         assert_eq!(

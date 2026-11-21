@@ -22,6 +22,7 @@
 // One Agent per socket: what its connect hook made is that socket's alone.
 // When Node's global dispatcher is not undici's Agent the socket is a plain
 // WebSocket, without either limit, and main says so once in its log.
+import type { MainLog } from '../diagnostics.ts';
 import { isIP, connect as netConnect, type Socket } from 'node:net';
 import { connect as tlsConnect } from 'node:tls';
 
@@ -116,7 +117,7 @@ export function connector(made: (socket: Socket) => void): Connector {
 // above are not available. Node sets its global dispatcher at its first
 // request (in the app, a sign-in always comes before a feed), so one that is
 // missing is looked for again at the next socket.
-export function createNodeConnect(log: (line: string) => void, agent: () => AgentConstructor | null = agentConstructor): Connect {
+export function createNodeConnect(log: MainLog, agent: () => AgentConstructor | null = agentConstructor): Connect {
   let Agent: AgentConstructor | null = null;
   let told = false;
   return (url, headers, on) => {
