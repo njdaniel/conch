@@ -33,15 +33,19 @@ async function open(f = fake(), joined = false) {
   return { ...f, onSaved, onClose };
 }
 const accept = () => { fireEvent.click(screen.getByRole('button', { name: 'I understand' })); };
+const press = (code: string) => { fireEvent.keyDown(window, { code }); };
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe('TalkKeySetup', () => {
-  it('shows the exposure before any device or rule, and lists nothing until accepted', async () => {
-    await open();
+  it('shows the exposure before capture and waits for a key to show device access', async () => {
+    await open(fake({ ok: true, devices: [locked], disclosure }));
     expect(screen.queryByText(/Locked board/)).toBeNull();
     expect(screen.queryByText(/Mouse \(/)).toBeNull();
     accept();
+    expect(screen.getByText(/Press the key/)).toBeTruthy();
+    expect(screen.queryByText(/Locked board/)).toBeNull();
+    press('CapsLock');
     const text = screen.getByText(disclosure[1] ?? '');
     const device = screen.getAllByText('Locked board')[0] as HTMLElement;
     const rule = screen.getByText('KERNEL=="event5", TAG+="uaccess"');
@@ -52,15 +56,30 @@ describe('TalkKeySetup', () => {
   it('renders device names isolated and as text', async () => {
     await open();
     accept();
+    press('CapsLock');
     const bdi = screen.getByText(`Keyboard ${rlo}evil`);
     expect(bdi.tagName).toBe('BDI');
   });
 
-  it('shows the file, rule, reload and revocation steps and copies only on a click; runs nothing', async () => {
-    const copy = vi.spyOn(platform.services, 'copyText').mockResolvedValue();
+  it('keeps device access instructions available when there is one readable match', async () => {
     await open();
     accept();
+    press('CapsLock');
+    expect(screen.queryByRole('radio')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Save' })).toHaveProperty('disabled', false);
+    fireEvent.click(screen.getByText('Other matching devices'));
+    expect(screen.getByRole('button', { name: 'Copy rule' })).toBeTruthy();
+  });
+
+  it('shows the file, rule, reload and revocation steps and copies only on a click; runs nothing', async () => {
+    const copy = vi.spyOn(platform.services, 'copyText').mockResolvedValue();
+    await open(fake({ ok: true, devices: [locked], disclosure }));
+    accept();
+    press('CapsLock');
     expect(copy).not.toHaveBeenCalled();
+    expect(screen.getByText(/Conch needs access to a keyboard/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Save' })).toHaveProperty('disabled', true);
+    fireEvent.click(screen.getByText('Device access instructions'));
     expect(screen.getByText('/etc/udev/rules.d/70-conch.rules')).toBeTruthy();
     expect(screen.getByText('sudo udevadm trigger')).toBeTruthy();
     expect(screen.getByText('Delete that line from the file.')).toBeTruthy();
@@ -74,22 +93,23 @@ describe('TalkKeySetup', () => {
   it('Check again lists afresh', async () => {
     const f = await open();
     accept();
-    fireEvent.click(screen.getAllByRole('button', { name: 'Check again' })[0] as HTMLElement);
+    press('CapsLock');
+    fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
     await waitFor(() => { expect(f.keyDevices).toHaveBeenCalledTimes(2); });
   });
 
-  it('captures only between Set talk key and the key; a keydown outside calls nothing', async () => {
+  it('captures one key after consent, and ignores keydowns outside capture', async () => {
     const f = await open();
+    press('KeyQ');
+    expect(screen.queryByText(/Press the key/)).toBeNull();
     accept();
-    fireEvent.keyDown(window, { code: 'KeyQ' });
     expect(screen.getByText('none chosen')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Set talk key' }));
-    fireEvent.keyDown(window, { code: 'Unidentified' });
+    press('Unidentified');
     expect(screen.getByText(cantUse)).toBeTruthy();
-    fireEvent.keyDown(window, { code: 'CapsLock' });
+    press('CapsLock');
     expect(screen.getByText('Caps Lock', { selector: 'bdi' })).toBeTruthy();
     // Capture has ended: the next key changes nothing.
-    fireEvent.keyDown(window, { code: 'KeyQ' });
+    press('KeyQ');
     expect(screen.getByText('Caps Lock', { selector: 'bdi' })).toBeTruthy();
     expect(f.saveTalkBinding).not.toHaveBeenCalled();
   });
@@ -97,8 +117,17 @@ describe('TalkKeySetup', () => {
   it('Escape cancels the capture', async () => {
     await open();
     accept();
-    fireEvent.click(screen.getByRole('button', { name: 'Set talk key' }));
-    fireEvent.keyDown(window, { code: 'Escape' });
+    press('Escape');
+    expect(screen.getByText('none chosen')).toBeTruthy();
+    expect(screen.queryByText(/Press the key/)).toBeNull();
+  });
+
+  it('Tab leaves automatic capture without consuming navigation or binding a key', async () => {
+    await open();
+    accept();
+    const tab = new KeyboardEvent('keydown', { code: 'Tab', cancelable: true });
+    fireEvent(window, tab);
+    expect(tab.defaultPrevented).toBe(false);
     expect(screen.getByText('none chosen')).toBeTruthy();
     expect(screen.queryByText(/Press the key/)).toBeNull();
   });
@@ -106,31 +135,34 @@ describe('TalkKeySetup', () => {
   it('captures Mouse 4, and the first buttons stay clicks', async () => {
     await open();
     accept();
-    fireEvent.click(screen.getByRole('button', { name: 'Set talk key' }));
     fireEvent.mouseDown(window, { button: 0 });
     expect(screen.getByText(/Press the key/)).toBeTruthy();
     fireEvent.mouseDown(window, { button: 3 });
     expect(screen.getByText('Mouse 4', { selector: 'bdi' })).toBeTruthy();
   });
 
-  it('says a key needs a keyboard and a mouse button a mouse', async () => {
-    await open();
+  it('asks for a matching device only when multiple readable devices match', async () => {
+    const second = { ...kbd, id: 'k3', name: 'Second keyboard' };
+    const f = await open(fake({ ok: true, devices: [kbd, mouse, second], disclosure }));
     accept();
-    fireEvent.click(screen.getByRole('radio', { name: /Mouse/ }));
-    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'Caps Lock' } });
-    expect(screen.getByText(/needs a keyboard device/)).toBeTruthy();
+    press('CapsLock');
+    expect(screen.queryByRole('radio', { name: 'Mouse' })).toBeNull();
     expect(screen.getByRole('button', { name: 'Save' })).toHaveProperty('disabled', true);
-    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'Mouse 4' } });
+    fireEvent.click(screen.getByRole('radio', { name: 'Second keyboard' }));
     expect(screen.getByRole('button', { name: 'Save' })).toHaveProperty('disabled', false);
-    fireEvent.click(screen.getByRole('radio', { name: /Keyboard/ }));
-    expect(screen.getByText(/needs a mouse device/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => { expect(f.saveTalkBinding).toHaveBeenCalledWith({ deviceId: 'k3', code: 58 }); });
+    await screen.findByText(/Saved: hold Caps Lock/);
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'Mouse 4' } });
+    expect(screen.queryByRole('radio')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Save' })).toHaveProperty('disabled', false);
   });
 
   it('saves through voiceSaveTalkBinding and says when it takes effect', async () => {
     const f = await open(fake(undefined, { ok: true }), true);
     accept();
-    fireEvent.click(screen.getByRole('radio', { name: /Keyboard/ }));
-    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'Caps Lock' } });
+    press('CapsLock');
+    expect(screen.queryByRole('radio')).toBeNull();
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Save' })); await Promise.resolve(); });
     await waitFor(() => { expect(f.saveTalkBinding).toHaveBeenCalledWith({ deviceId: 'k1', code: 58 }); });
     expect(await screen.findByText(new RegExp(`hold Caps Lock to talk. ${takeEffect}`))).toBeTruthy();
@@ -140,7 +172,6 @@ describe('TalkKeySetup', () => {
   it('does not mention joining when not joined', async () => {
     await open();
     accept();
-    fireEvent.click(screen.getByRole('radio', { name: /Keyboard/ }));
     fireEvent.change(screen.getByRole('combobox'), { target: { value: 'F13' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     const saved = await screen.findByText(/Saved: hold F13 to talk\./);
@@ -150,7 +181,6 @@ describe('TalkKeySetup', () => {
   it('shows which step failed', async () => {
     const f = await open(fake(undefined, { ok: false, error: 'invalid', failed: 'talk' }));
     accept();
-    fireEvent.click(screen.getByRole('radio', { name: /Keyboard/ }));
     fireEvent.change(screen.getByRole('combobox'), { target: { value: 'F13' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     expect(await screen.findByText(/The key was not saved\./)).toBeTruthy();
@@ -161,15 +191,13 @@ describe('TalkKeySetup', () => {
   it('guides recovery from an untrusted helper and keeps the binding available to retry', async () => {
     const f = await open(fake(undefined, { ok: false, error: 'untrusted', failed: 'device' }));
     accept();
-    const keyboard = screen.getByRole<HTMLInputElement>('radio', { name: /Keyboard/ });
     const key = screen.getByRole<HTMLSelectElement>('combobox');
     const save = screen.getByRole<HTMLButtonElement>('button', { name: 'Save' });
-    fireEvent.click(keyboard);
     fireEvent.change(key, { target: { value: 'F13' } });
     fireEvent.click(save);
 
     expect(await screen.findByText(/relaunch your development build from a folder other users cannot change/)).toBeTruthy();
-    expect(keyboard.checked).toBe(true);
+    expect(screen.getByText(/Keyboard .*evil/)).toBeTruthy();
     expect(key.value).toBe('F13');
     expect(save.disabled).toBe(false);
     expect(f.onSaved).not.toHaveBeenCalled();

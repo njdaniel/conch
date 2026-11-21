@@ -2,10 +2,8 @@
 // dispatches to WindowsTalkKeySetup (#777), with no device grant or path.
 // On Linux, in this
 // order: what a read grant on a keyboard exposes (the person accepts it before
-// any device is listed); the devices and whether each is readable; for one that
-// is not, the exact udev rule to copy and run themselves (the app runs and
-// grants nothing); then the key, captured from the next key or Mouse 4 pressed
-// in this window while capture is on, or picked from a list; then Save.
+// any device is shown); the key or Mouse 4 pressed in this window, or picked
+// from a list; any matching device choice or access instructions; then Save.
 //
 // Capture: listeners exist only between "Set talk/mute key" and the first accepted
 // key, Escape or Cancel. The event's code is turned at once into an evdev
@@ -149,8 +147,14 @@ export function TalkKeySetup({
       setKey(next);
       setRefused(false);
       setCapturing(false);
+      setOutcome(null);
     };
     const onKey = (e: KeyboardEvent) => {
+      // Leave the capture without consuming keyboard navigation.
+      if (e.code === 'Tab' || e.target instanceof HTMLSelectElement) {
+        setCapturing(false);
+        return;
+      }
       e.preventDefault();
       e.stopPropagation();
       if (e.repeat) return;
@@ -179,12 +183,13 @@ export function TalkKeySetup({
   }, [capturing]);
 
   const devices = listing !== null && listing.ok ? listing.devices : [];
-  const device = devices.find((d) => d.id === deviceId && d.readable) ?? null;
-  const mismatch = device !== null && key !== null && device.kind !== key.kind;
-  const ready = device !== null && key !== null && !mismatch && !saving;
+  const matching = devices.filter((d) => d.kind === key?.kind);
+  const readable = matching.filter((d) => d.readable);
+  const device = (readable.length === 1 ? readable[0] : readable.find((d) => d.id === deviceId)) ?? null;
+  const ready = device !== null && key !== null && !saving && !capturing;
 
   const save = () => {
-    if (device === null || key === null || mismatch) return;
+    if (device === null || key === null || !ready) return;
     const call = source.saveTalkBinding;
     setSaving(true);
     setOutcome(null);
@@ -208,6 +213,8 @@ export function TalkKeySetup({
 
   const pick = (value: string) => {
     setRefused(false);
+    setCapturing(false);
+    setOutcome(null);
     if (value === '') {
       setKey(null);
       return;
@@ -237,7 +244,7 @@ export function TalkKeySetup({
             <p key={line}>{line}</p>
           ))}
           {accepted ? null : (
-            <button type="button" className="primary" onClick={() => { setAccepted(true); }}>
+            <button type="button" className="primary" onClick={() => { setAccepted(true); setCapturing(true); }}>
               I understand
             </button>
           )}
@@ -246,28 +253,6 @@ export function TalkKeySetup({
 
       {accepted && listing !== null && listing.ok ? (
         <>
-          <fieldset className="talk-devices">
-            <legend>Device</legend>
-            {binding === 'mute' ? <p className="hint">The talk and mute keys use the same device.</p> : null}
-            {devices.length === 0 ? <p className="hint">No keyboard or mouse was found.</p> : null}
-            {devices.map((d) => (
-              <div key={d.id} className="talk-device">
-                <label>
-                  <input
-                    type="radio"
-                    name="talk-device"
-                    checked={deviceId === d.id}
-                    disabled={!d.readable}
-                    onChange={() => { setDeviceId(d.id); }}
-                  />{' '}
-                  <bdi>{d.name}</bdi> ({d.kind}, {d.readable ? 'readable' : 'not readable'})
-                </label>
-                {d.readable ? null : <Rule device={d} />}
-              </div>
-            ))}
-            <button type="button" onClick={load}>Check again</button>
-          </fieldset>
-
           <div className="talk-binding">
             <p>
               {title}: <strong>{key === null ? 'none chosen' : <bdi>{key.label}</bdi>}</strong>
@@ -278,12 +263,12 @@ export function TalkKeySetup({
                 <button type="button" onClick={() => { setCapturing(false); }}>Cancel</button>
               </>
             ) : (
-              <button type="button" onClick={() => { setRefused(false); setCapturing(true); }}>Set {binding} key</button>
+              <button type="button" disabled={saving} onClick={() => { setRefused(false); setCapturing(true); }}>Set {binding} key</button>
             )}
             {refused ? <p role="status" className="hint">{binding === 'mute' ? "That key can't be used as a mute key." : cantUse}</p> : null}
             <label>
               Or pick one{' '}
-              <select value={key?.label ?? ''} onChange={(e) => { pick(e.target.value); }}>
+              <select value={key?.label ?? ''} disabled={saving} onChange={(e) => { pick(e.target.value); }}>
                 <option value="">Choose a key…</option>
                 {mouseKeys().map((k) => (
                   <option key={k.label} value={k.label}>{k.label}</option>
@@ -293,11 +278,54 @@ export function TalkKeySetup({
                 ))}
               </select>
             </label>
-            {mismatch ? (
-              <p role="status" className="hint">
-                {key.kind === 'mouse' ? `${key.label} needs a mouse device; choose a mouse.` : `${key.label} needs a keyboard device; choose a keyboard.`}
-              </p>
-            ) : null}
+            {key === null || capturing ? null : (
+              <>
+                {binding === 'mute' ? <p className="hint">The talk and mute keys use the same device.</p> : null}
+                {readable.length === 1 && device !== null
+                  ? (
+                    <>
+                      <p className="hint">Using <bdi>{device.name}</bdi>.</p>
+                      {matching.length <= 1 ? null : (
+                        <details>
+                          <summary>Other matching devices</summary>
+                          {matching.filter((d) => !d.readable).map((d) => <Rule key={d.id} device={d} />)}
+                        </details>
+                      )}
+                    </>
+                  )
+                  : (
+                    <fieldset className="talk-devices">
+                      <legend>{key.kind === 'mouse' ? 'Mouse' : 'Keyboard'}</legend>
+                      {readable.length === 0 ? (
+                        <p role="status" className="hint">
+                          Conch needs access to a {key.kind} to use this binding while another app is focused.
+                        </p>
+                      ) : null}
+                      {matching.map((d) => (
+                        <div key={d.id} className="talk-device">
+                          <label>
+                            <input
+                              type="radio"
+                              name="talk-device"
+                              checked={device?.id === d.id}
+                              disabled={!d.readable || saving}
+                              onChange={() => { setDeviceId(d.id); }}
+                            />{' '}
+                            <bdi>{d.name}</bdi>{d.readable ? null : ' (not readable)'}
+                          </label>
+                          {d.readable ? null : (
+                            <details>
+                              <summary>Device access instructions</summary>
+                              <Rule device={d} />
+                            </details>
+                          )}
+                        </div>
+                      ))}
+                    </fieldset>
+                  )}
+                <button type="button" disabled={saving} onClick={load}>Check again</button>
+              </>
+            )}
             <button type="button" className="primary" disabled={!ready} onClick={save}>
               {saving ? 'Saving…' : 'Save'}
             </button>
