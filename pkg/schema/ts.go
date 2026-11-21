@@ -89,6 +89,8 @@ var TSConstants = []TSConstant{
 	{Name: "VOICE_CONTROL_MAX_SERVER_BYTES", Value: VoiceControlMaxServerBytes},
 	{Name: "VOICE_CONTROL_MAX_CHANNEL_BYTES", Value: VoiceControlMaxChannelBytes},
 	{Name: "VOICE_CONTROL_MAX_RETRY_IN_MS", Value: VoiceControlMaxRetryInMS},
+	{Name: "VOICE_CONTROL_V4_MIN_LEVEL_DB", Value: VoiceControlV4MinLevelDB},
+	{Name: "VOICE_CONTROL_V4_MAX_LOSS_BASIS_POINTS", Value: VoiceControlV4MaxLossBasisPoints},
 	{Name: "VOICE_CONTROL_HELLO_TIMEOUT_MS", Value: VoiceControlHelloTimeoutMS},
 	{Name: "VOICE_CONTROL_ACK_TIMEOUT_MS", Value: VoiceControlAckTimeoutMS},
 	{Name: "VOICE_CONTROL_GATE_SHUT_MS", Value: VoiceControlGateShutMS},
@@ -316,6 +318,27 @@ var TSTypes = []TSType{
 	{Value: VoiceControlAckV3{}, Schema: VoiceControlSchemaV3},
 	{Value: VoiceControlStateV3{}, Schema: VoiceControlSchemaV3},
 	{Value: VoiceControlProtocolErrorV3{}, Schema: VoiceControlSchemaV3},
+	// v4 (issues #2039 and #2085): a start that names a channel or a private
+	// call, microphone diagnostics and call quality. Its fixtures are in
+	// testdata/voice-control-v4/.
+	{Value: VoiceControlStartV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlSetMuteV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlSetDeafenV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlGetStateV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlLeaveV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlSetDevicesV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlSetTalkModeV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlSetShareAudioV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlSetShareAudioMuteV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlSetDiagnosticsV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlGetCallQualityV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlAckV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlProcessingV4{}},
+	{Value: VoiceControlStateV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlProtocolErrorV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlLevelsV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlGateEventV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlCallQualityV4{}, Schema: VoiceControlSchemaV4},
 	{Value: VoiceControlPipeAttachedV1{}, Schema: VoiceControlPipeSchemaV1},
 	// The device list `conch-voice devices --json` writes (issue #1378, D3-7
 	// of #771): the desktop owner reads it from a one-shot run. Its fixtures
@@ -826,9 +849,12 @@ var TSVocabularyModes = map[string]TSVocabularyMode{
 	"VoiceDevicesConfig":      TSStrict,
 	"VoiceDevicesPipeWire":    TSStrict,
 
-	// Strict, for the same reason: version 3 of that protocol (issue #1851),
-	// its command kinds and the state of a share's sound.
+	// Strict, for the same reason: the v3 share-audio and v4 diagnostics
+	// vocabularies and their versioned command and event kinds.
 	"VoiceControlCommandKindV3":     TSStrict,
+	"VoiceControlCommandKindV4":     TSStrict,
+	"VoiceControlEventKindV4":       TSStrict,
+	"VoiceControlGateWhyV4":         TSStrict,
 	"VoiceControlShareAudio":        TSStrict,
 	"VoiceControlShareAudioProblem": TSStrict,
 

@@ -1,0 +1,355 @@
+{
+  "description": "A v4 session starts with microphone diagnostics off. The owner enables and then disables the reports. Two polls return a per-participant sample before its ack and an empty sample with only an ack, respectively.",
+  "steps": [
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v1",
+        "kind": "hello",
+        "seq": 1,
+        "versions": [
+          "conch.voice_control.v1",
+          "conch.voice_control.v2",
+          "conch.voice_control.v3",
+          "conch.voice_control.v4"
+        ],
+        "helper_version": "0.3.0 (48000 Hz, 10 ms frames)"
+      }
+    },
+    {
+      "from": "owner",
+      "message": {
+        "schema": "conch.voice_control.v4",
+        "kind": "start",
+        "id": 1,
+        "server": "https://conch.example.org",
+        "call": "k3Jx9dQ0mT7vB2nYw5LcRg",
+        "principal_id": 7,
+        "credential": "stored",
+        "muted": false,
+        "deafened": false
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v4",
+        "kind": "state",
+        "seq": 2,
+        "phase": "starting",
+        "capture": "off",
+        "playback": "off",
+        "transmitting": false,
+        "muted": false,
+        "deafened": false,
+        "blocked": [
+          "not_connected",
+          "no_publish_grant",
+          "no_microphone"
+        ],
+        "talk_mode": "push_to_talk",
+        "ptt": "unknown",
+        "share_audio": "off",
+        "share_audio_muted": false,
+        "share_audio_sources": 0,
+        "processing": {
+          "echo_cancellation": false,
+          "noise_suppression": false
+        }
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v4",
+        "kind": "ack",
+        "seq": 3,
+        "id": 1,
+        "ok": true
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v4",
+        "kind": "state",
+        "seq": 4,
+        "phase": "connecting",
+        "capture": "off",
+        "playback": "on",
+        "transmitting": false,
+        "muted": false,
+        "deafened": false,
+        "blocked": [
+          "not_connected",
+          "no_publish_grant",
+          "no_microphone"
+        ],
+        "talk_mode": "open",
+        "ptt": "ready",
+        "share_audio": "off",
+        "share_audio_muted": false,
+        "share_audio_sources": 0,
+        "processing": {
+          "echo_cancellation": false,
+          "noise_suppression": false
+        }
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v4",
+        "kind": "state",
+        "seq": 5,
+        "phase": "connected",
+        "capture": "on",
+        "playback": "on",
+        "transmitting": false,
+        "muted": false,
+        "deafened": false,
+        "blocked": [],
+        "talk_mode": "open",
+        "ptt": "ready",
+        "share_audio": "off",
+        "share_audio_muted": false,
+        "share_audio_sources": 0,
+        "processing": {
+          "echo_cancellation": true,
+          "noise_suppression": true
+        }
+      }
+    },
+    {
+      "from": "owner",
+      "message": {
+        "schema": "conch.voice_control.v4",
+        "kind": "set_diagnostics",
+        "id": 2,
+        "on": true
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v4",
+        "kind": "ack",
+        "seq": 6,
+        "id": 2,
+        "ok": true
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v4",
+        "kind": "levels",
+        "seq": 7,
+        "level_db": -96,
+        "open_threshold_db": -34,
+        "close_threshold_db": -38,
+        "gate_open": false
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v4",
+        "kind": "gate_event",
+        "seq": 8,
+        "at_ms": 500,
+        "open": true,
+        "why": "sound"
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v4",
+        "kind": "levels",
+        "seq": 9,
+        "level_db": -20,
+        "open_threshold_db": -34,
+        "close_threshold_db": -38,
+        "gate_open": true
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v4",
+        "kind": "gate_event",
+        "seq": 10,
+        "at_ms": 1400,
+        "open": false,
+        "why": "hang_ended"
+      }
+    },
+    {
+      "from": "owner",
+      "message": {
+        "schema": "conch.voice_control.v4",
+        "kind": "set_diagnostics",
+        "id": 3,
+        "on": false
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v4",
+        "kind": "ack",
+        "seq": 11,
+        "id": 3,
+        "ok": true
+      }
+    },
+    {
+      "from": "owner",
+      "message": {
+        "schema": "conch.voice_control.v4",
+        "kind": "get_call_quality",
+        "id": 4
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v4",
+        "kind": "call_quality",
+        "seq": 12,
+        "principal_id": 9,
+        "loss_basis_points": 0,
+        "jitter_us": 3200,
+        "rtt_us": 21800
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v4",
+        "kind": "call_quality",
+        "seq": 13,
+        "principal_id": 11,
+        "loss_basis_points": 10000
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v4",
+        "kind": "call_quality",
+        "seq": 14,
+        "principal_id": 14
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v4",
+        "kind": "ack",
+        "seq": 15,
+        "id": 4,
+        "ok": true
+      }
+    },
+    {
+      "from": "owner",
+      "message": {
+        "schema": "conch.voice_control.v4",
+        "kind": "get_call_quality",
+        "id": 5
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v4",
+        "kind": "ack",
+        "seq": 16,
+        "id": 5,
+        "ok": true
+      }
+    },
+    {
+      "from": "owner",
+      "message": {
+        "schema": "conch.voice_control.v4",
+        "kind": "leave",
+        "id": 6
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v4",
+        "kind": "state",
+        "seq": 17,
+        "phase": "stopping",
+        "reason": "left",
+        "capture": "on",
+        "playback": "on",
+        "transmitting": false,
+        "muted": false,
+        "deafened": false,
+        "blocked": [
+          "not_connected"
+        ],
+        "talk_mode": "open",
+        "ptt": "ready",
+        "share_audio": "off",
+        "share_audio_muted": false,
+        "share_audio_sources": 0,
+        "processing": {
+          "echo_cancellation": false,
+          "noise_suppression": false
+        }
+      }
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v4",
+        "kind": "ack",
+        "seq": 18,
+        "id": 6,
+        "ok": true
+      }
+    },
+    {
+      "from": "owner",
+      "close": "stdin"
+    },
+    {
+      "from": "helper",
+      "message": {
+        "schema": "conch.voice_control.v4",
+        "kind": "state",
+        "seq": 19,
+        "phase": "stopped",
+        "reason": "left",
+        "capture": "off",
+        "playback": "off",
+        "transmitting": false,
+        "muted": false,
+        "deafened": false,
+        "blocked": [
+          "not_connected"
+        ],
+        "talk_mode": "open",
+        "ptt": "ready",
+        "share_audio": "off",
+        "share_audio_muted": false,
+        "share_audio_sources": 0,
+        "processing": {
+          "echo_cancellation": false,
+          "noise_suppression": false
+        }
+      }
+    },
+    {
+      "from": "helper",
+      "exit": 0
+    }
+  ]
+}

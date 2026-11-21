@@ -122,6 +122,13 @@ Every message has `schema` and `kind`. Commands also have `id`; events have `seq
 
 `transcript-join-mute-leave.json` shows a whole session; the other transcripts show one rule each. `TestVoiceControlTranscripts` checks every transcript against rules 2 to 12, and the Rust side checks its real output against the same rules (§13).
 
+In v4, the owner reads the `get_call_quality` ack before sending another
+quality poll. The helper emits all `call_quality` samples for that poll before
+its ack. An empty sample has only the ack. If a poll arrives before the helper
+writes the previous poll's ack, the helper gives the overlapping poll an error
+ack with `invalid` in FIFO order and emits no samples for it. This keeps each
+sample associated with one poll without adding a request ID to the event.
+
 ## 6. State
 
 ### Phases

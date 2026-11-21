@@ -10,6 +10,8 @@
 // tracker are held to its cases, golden commands and transcripts below
 // ("the owner's v3 reader", "v3 commands", "v3 negotiation", "the Tracker in
 // v3"). The owner offers v3 only with the Linux share-sound switch on.
+// The v4 golden fixtures exercise generated validators for the private-call
+// start, microphone diagnostics and call quality.
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -19,35 +21,52 @@ import {
   voiceControlAckV1,
   voiceControlAckV2,
   voiceControlAckV3,
+  voiceControlAckV4,
+  voiceControlCallQualityV4,
+  voiceControlGateEventV4,
+  voiceControlGetCallQualityV4,
   voiceControlGetStateV1,
   voiceControlGetStateV2,
   voiceControlGetStateV3,
+  voiceControlGetStateV4,
   voiceControlHelloV1,
   voiceControlLeaveV1,
   voiceControlLeaveV2,
   voiceControlLeaveV3,
+  voiceControlLeaveV4,
+  voiceControlLevelsV4,
   voiceControlPipeAttachedV1,
   voiceControlProtocolErrorV1,
   voiceControlProtocolErrorV2,
   voiceControlProtocolErrorV3,
+  voiceControlProtocolErrorV4,
   voiceControlSetDeafenV1,
   voiceControlSetDeafenV2,
   voiceControlSetDeafenV3,
+  voiceControlSetDeafenV4,
   voiceControlSetDevicesV2,
   voiceControlSetDevicesV3,
+  voiceControlSetDevicesV4,
+  voiceControlSetDiagnosticsV4,
   voiceControlSetMuteV1,
   voiceControlSetMuteV2,
   voiceControlSetMuteV3,
+  voiceControlSetMuteV4,
   voiceControlSetShareAudioMuteV3,
+  voiceControlSetShareAudioMuteV4,
   voiceControlSetShareAudioV3,
+  voiceControlSetShareAudioV4,
   voiceControlSetTalkModeV2,
   voiceControlSetTalkModeV3,
+  voiceControlSetTalkModeV4,
   voiceControlStartV1,
   voiceControlStartV2,
   voiceControlStartV3,
+  voiceControlStartV4,
   voiceControlStateV1,
   voiceControlStateV2,
   voiceControlStateV3,
+  voiceControlStateV4,
   type VoiceControlHelloV1,
 } from '../../../web/src/schema/generated.ts';
 import type { Validator } from '../../../web/src/schema/validate.ts';
@@ -119,6 +138,26 @@ const validators: Record<string, Record<string, Validator<unknown>>> = {
     'event-state': voiceControlStateV3,
     'event-protocol-error': voiceControlProtocolErrorV3,
   },
+  'voice-control-v4': {
+    'command-start': voiceControlStartV4,
+    'command-set-mute': voiceControlSetMuteV4,
+    'command-set-deafen': voiceControlSetDeafenV4,
+    'command-get-state': voiceControlGetStateV4,
+    'command-leave': voiceControlLeaveV4,
+    'command-set-devices': voiceControlSetDevicesV4,
+    'command-set-talk-mode': voiceControlSetTalkModeV4,
+    'command-set-share-audio': voiceControlSetShareAudioV4,
+    'command-set-share-audio-mute': voiceControlSetShareAudioMuteV4,
+    'command-set-diagnostics': voiceControlSetDiagnosticsV4,
+    'command-get-call-quality': voiceControlGetCallQualityV4,
+    'event-hello': voiceControlHelloV1,
+    'event-ack': voiceControlAckV4,
+    'event-state': voiceControlStateV4,
+    'event-protocol-error': voiceControlProtocolErrorV4,
+    'event-levels': voiceControlLevelsV4,
+    'event-gate-event': voiceControlGateEventV4,
+    'event-call-quality': voiceControlCallQualityV4,
+  },
   'voice-control-pipe': {
     attached: voiceControlPipeAttachedV1,
   },
@@ -175,6 +214,20 @@ describe('golden fixtures match the generated types', () => {
     expect(validatorOf(dir, file)?.({ ...doc, token: 'x' })).toContain('$.token: key is not in the TypeScript type');
   });
 
+  const v4 = cases.filter((c) => c.dir === 'voice-control-v4');
+  it.each(v4)('$dir/$file with an added key is refused', ({ dir, file }) => {
+    const doc = readFixture<object>(`${dir}/${file}`);
+    expect(validatorOf(dir, file)?.({ ...doc, pid: 1234 })).toContain('$.pid: key is not in the TypeScript type');
+  });
+
+  it('v4 state requires both processing flags and refuses extra processing keys', () => {
+    const state = readFixture<object>('voice-control-v4/event-state-connected.json');
+    expect(voiceControlStateV4({ ...state, processing: { echo_cancellation: true } }))
+      .toContain('$.processing.noise_suppression: required key is missing');
+    expect(voiceControlStateV4({ ...state, processing: { echo_cancellation: true, noise_suppression: true, node_id: 1234 } }))
+      .toContain('$.processing.node_id: key is not in the TypeScript type');
+  });
+
   it('a state of one version is not a state of the other', () => {
     const state2 = readFixture<object>('voice-control-v2/event-state-connected.json');
     const state3 = readFixture<object>('voice-control-v3/event-state-share-audio-on.json');
@@ -223,6 +276,32 @@ function casesOf(dir: string, direction: string): (Case & { readonly dir: string
         .map((c) => ({ ...c, dir, file })),
     );
 }
+
+describe.each(['command', 'event'])('the v4 TypeScript %s validators match the Go conformance cases', (direction) => {
+  const cases = casesOf('voice-control-v4', direction);
+
+  it('finds the conformance cases', () => {
+    expect(cases.length).toBeGreaterThan(0);
+  });
+
+  it.each(cases)('$name', (c) => {
+    const doc: unknown = JSON.parse(lineOf(c.dir, c).toString('utf8'));
+    if (typeof doc !== 'object' || doc === null || !('kind' in doc) || typeof doc.kind !== 'string') {
+      throw new Error('expected a message kind in the fixture');
+    }
+    const family = `${direction}-${doc.kind.replaceAll('_', '-')}`;
+    const check = validators[c.dir]?.[family];
+    if (c.want.result === 'accept') {
+      expect(check).toBeDefined();
+      expect(check?.(doc)).toEqual([]);
+    } else if (c.want.result === 'skip' || c.want.code === 'unknown_kind') {
+      expect(check).toBeUndefined();
+    } else {
+      expect(check).toBeDefined();
+      expect(check?.(doc)).not.toEqual([]);
+    }
+  });
+});
 
 describe.each([
   { dir: 'voice-control', parse: parseEventV1, field: 'retry_in_ms' },
