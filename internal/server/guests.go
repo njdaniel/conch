@@ -37,6 +37,7 @@ func (s *Server) guestsEnded(ended []store.EndedGuest) {
 	for _, g := range ended {
 		s.hub.DropPrincipalAll(g.PrincipalID)
 		s.events.dropPrincipalAll(g.PrincipalID)
+		s.person.dropPrincipalAll(g.PrincipalID)
 		s.guestAddrs.forget(g.PrincipalID)
 	}
 	for _, g := range ended {

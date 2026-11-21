@@ -2950,14 +2950,15 @@ async function requestTicket(): Promise<ApiResult<WSTicketV1>> {
 // The page's sockets. The occupancy socket (issue #596) is a voice socket to
 // the diagnostic ring, whose vocabulary has no word of its own for it, but it
 // keeps its own count of tries, so a presence socket's losses are not added
-// to it.
-type SocketName = DiagnosticSocket | 'occupancy';
-const diagnosticOf: Record<SocketName, DiagnosticSocket> = { messages: 'messages', events: 'events', voice: 'voice', occupancy: 'voice' };
+// to it. The person stream (issue #2040) is an events socket to the ring, for
+// the same reason, and counts its own tries.
+type SocketName = DiagnosticSocket | 'occupancy' | 'person';
+const diagnosticOf: Record<SocketName, DiagnosticSocket> = { messages: 'messages', events: 'events', voice: 'voice', occupancy: 'voice', person: 'events' };
 
 // How many times each socket has been tried since it was last open, for the
 // diagnostic ring: 0 while it is open or was never lost.
-const retries: Record<SocketName, number> = { messages: 0, events: 0, voice: 0, occupancy: 0 };
-const lost: Record<SocketName, boolean> = { messages: false, events: false, voice: false, occupancy: false };
+const retries: Record<SocketName, number> = { messages: 0, events: 0, voice: 0, occupancy: 0, person: 0 };
+const lost: Record<SocketName, boolean> = { messages: false, events: false, voice: false, occupancy: false, person: false };
 
 // connect asks for a ticket with the credential and opens the socket that
 // `query` names, with the ticket added. The ticket is single use, so a
@@ -3025,6 +3026,16 @@ async function connect(name: SocketName, id: OperationId, query: Readonly<Record
 // watchdog lives on; without it /v2/ws sends messages and nothing else.
 export const openSocket: OpenSocket = (channel, after, events) =>
   connect('messages', 'messagesSocket', { channel, after: String(after), heartbeat: '1' }, events);
+
+// openPersonSocket opens the per-person stream (issue #2040): the signed-in
+// person's own DM frames, with no channel. It is not the channel events
+// socket and shares nothing with it; the frames are read by
+// state/personStream.ts. The address carries no channel and no session: the
+// server opens it only for a person's own credential, and tells the socket its
+// instance id in its first frame.
+export function openPersonSocket(events: SocketEvents): Promise<ApiResult<FeedSocket>> {
+  return connect('person', 'personSocket', {}, events);
+}
 
 // Reaction consumers share the existing events socket. They do not pass
 // through message notifications, message scrolling, or read-state handling.

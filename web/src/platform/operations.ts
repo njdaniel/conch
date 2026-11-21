@@ -416,6 +416,8 @@ export const operations = {
   wsTicket: op('POST', '/v1/ws-tickets', 'bearer', { response: reply(wsTicketV1), renderer: false, credentials: ['ticket'] }),
   messagesSocket: op('GET', '/v2/ws', 'bearer', { socket: true }),
   eventsSocket: op('GET', '/v1/events/ws', 'bearer', { socket: true }),
+  // The per-person stream (issue #2040): DM frames and rings, no channel.
+  personSocket: op('GET', '/v1/events/person/ws', 'bearer', { socket: true }),
   voiceSocket: op('GET', '/v1/voice/ws', 'bearer', { socket: true }),
   occupancySocket: op('GET', '/v1/voice/occupancy/ws', 'bearer', { socket: true }),
 

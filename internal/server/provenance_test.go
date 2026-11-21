@@ -112,7 +112,9 @@ func requestFor(pattern, token string) *http.Request {
 func answerCode(t *testing.T, rec *httptest.ResponseRecorder) string {
 	t.Helper()
 	var e schema.Error
-	if rec.Code < 400 {
+	// 426 is a socket route asked for a plain GET by a credential that
+	// passed: its answer is text, and it is not a refusal.
+	if rec.Code < 400 || rec.Code == http.StatusUpgradeRequired {
 		return ""
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &e); err != nil {
@@ -181,6 +183,21 @@ func TestSelfMadeCredentialRoutesRefuseOthers(t *testing.T) {
 					t.Errorf("the stand-in answered %d %q to a self-made credential", rec.Code, rec.Body.String())
 				}
 			})
+		}
+	}
+}
+
+// The routes that must be in selfMadeCredentialRoutes, each added by the
+// issue that registers it (#2047's comment: "each adds its routes here in
+// the same change"). A route dropped from the list silently opens a person's
+// DMs to an operator's credential, so each is named here and
+// TestSelfMadeCredentialRoutesRefuseOthers drives it with every token kind.
+func TestSelfMadeCredentialRoutesIncludeRequired(t *testing.T) {
+	for _, pattern := range []string{
+		"GET /v1/events/person/ws", // the per-person stream (#2040)
+	} {
+		if !selfMadeCredentialRoutes[pattern] {
+			t.Errorf("%s is not in selfMadeCredentialRoutes", pattern)
 		}
 	}
 }
