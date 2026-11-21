@@ -4,6 +4,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { VOICE_CONTROL_STOP_KILL_AFTER_MS, type VoiceControlTalkMode } from '../../../web/src/schema/generated.ts';
+import { diagnosticsLogger, LogRing } from '../../main/diagnostics.ts';
 import { DocumentGate } from '../../main/document.ts';
 import { Lifecycle } from '../../main/lifecycle.ts';
 import { trayModel } from '../../main/tray.ts';
@@ -969,13 +970,26 @@ describe('the stamp changes between focus and Join (issue #1600)', () => {
 });
 
 describe('one-shot helper runs after an update (issue #1600)', () => {
+  let ring: LogRing;
   beforeEach(() => {
-    svc = new VoiceService({ locked: () => false, supervisor: fake, oneShot, identity: () => Promise.resolve(id), log: (l) => logs.push(l), updated: () => true });
+    ring = new LogRing();
+    svc = new VoiceService({
+      locked: () => false, supervisor: fake, oneShot, identity: () => Promise.resolve(id),
+      log: diagnosticsLogger(ring, (line) => logs.push(line)), updated: () => true,
+    });
   });
 
-  it('refuses the device list with update-pending and runs nothing', async () => {
-    expect(await svc.devices()).toEqual({ ok: false, error: 'update-pending' });
+  it.each([
+    { calls: 1, samples: 1 },
+    { calls: 7, samples: 3 },
+    { calls: 8, samples: 4 },
+  ])('refuses the device list during an update and samples $samples of $calls calls', async ({ calls, samples }) => {
+    for (let n = 0; n < calls; n++) {
+      expect(await svc.devices()).toEqual({ ok: false, error: 'update-pending' });
+    }
     expect(oneShot.calls).toEqual([]);
+    expect(logs).toHaveLength(calls);
+    expect(ring.lines()).toEqual(logs.slice(0, samples));
   });
 
   it('refuses a device save with update-pending and runs nothing', async () => {

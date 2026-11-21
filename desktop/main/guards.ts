@@ -8,7 +8,7 @@
 // two: HTTP and WebSocket requests to exactly the live grant's LiveKit origin,
 // and one screen capture by the rules of display-capture.ts. WebRTC (ICE,
 // STUN, TURN) and WebTransport are not requests this module sees.
-import { diagnosticSamplesFor, GeometricSampler, type MainLog } from './diagnostics.ts';
+import type { BlockedDiagnosticKey, GeometricSampler, MainLog } from './diagnostics.ts';
 import type { App, Event, Session, WebContents } from 'electron';
 
 import { displayPermission, type DisplayCapture } from './display-capture.ts';
@@ -66,6 +66,7 @@ function describe(url: string): string {
 
 export interface GuardDeps {
   readonly log: MainLog;
+  readonly blockedSamples: GeometricSampler<BlockedDiagnosticKey>;
   // What lets a clipboard write through and a link out (issue #947). Without
   // them (a unit test of the refusals alone) nothing is let through.
   readonly gestures?: Gestures;
@@ -86,7 +87,7 @@ export interface GuardDeps {
 // input. clipboard-read is never given; paste reaches the page as a paste
 // event.
 export function clipboardWriteAllowed(
-  deps: GuardDeps,
+  deps: Pick<GuardDeps, 'owned' | 'gestures'>,
   contents: object | null,
   permission: string,
   details: { readonly isMainFrame?: boolean; readonly requestingUrl?: string },
@@ -156,7 +157,7 @@ export function guardSession(ses: Session, deps: GuardDeps): void {
   // outside this filter and the CSP's connect-src alike.
   // A page can make requests without limit, so the export samples them
   // (1, 2, 4, 8 ...) and the header carries the total across sessions (#2092).
-  const blockedSamples = diagnosticSamplesFor(deps.log)?.blocked ?? new GeometricSampler<'blocked'>();
+  const { blockedSamples } = deps;
   ses.webRequest.onBeforeRequest((details, callback) => {
     if (foreign(details.url) && !livekitAllowed(details.url, deps.liveOrigin?.() ?? null)) {
       if (blockedSamples.sample('blocked')) {

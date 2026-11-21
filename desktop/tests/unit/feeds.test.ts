@@ -26,7 +26,7 @@ import {
 } from '../../main/api/feeds.ts';
 import { agentConstructor, connector, createNodeConnect } from '../../main/api/socket.ts';
 import { Session } from '../../main/api/session.ts';
-import { diagnosticSamplesFor, diagnosticsLogger, LogRing, type MainLog } from '../../main/diagnostics.ts';
+import { diagnosticsLogger, GeometricSampler, LogRing, type FeedDiagnosticKey, type MainLog } from '../../main/diagnostics.ts';
 import { makePki, type Pki } from './support.ts';
 import type { FeedEvent } from '../../shared/bridge-names.ts';
 
@@ -71,7 +71,7 @@ interface Rig {
   readonly timers: { run: () => void; ms: number; cleared: boolean }[];
 }
 
-function rig(limits: { maxQueuedFrames?: number; maxQueuedBytes?: number } = {}, log?: MainLog): Rig {
+function rig(limits: { maxQueuedFrames?: number; maxQueuedBytes?: number } = {}, log?: MainLog, samples = new GeometricSampler<FeedDiagnosticKey>()): Rig {
   const session = new Session();
   session.setOrigin('http://127.0.0.1:8080');
   session.adopt(TOKEN);
@@ -123,6 +123,7 @@ function rig(limits: { maxQueuedFrames?: number; maxQueuedBytes?: number } = {},
       events.push([document, event]);
     },
     log: log ?? ((line) => logs.push(line)),
+    samples,
     setTimer: (run, ms) => {
       const timer = { run, ms, cleared: false };
       timers.push(timer);
@@ -166,6 +167,7 @@ it.each([167, 1_001])('keeps export history through %i feed churn cycles', async
     }),
     deliver: () => undefined,
     log: diagnosticsLogger(ring, (line) => local.push(line)),
+    samples: new GeometricSampler(),
     setTimer: () => ({}),
     clearTimer: () => undefined,
   });
@@ -183,8 +185,10 @@ it.each([167, 1_001])('keeps export history through %i feed churn cycles', async
 it('samples each feed kind independently and keeps counts across activations', () => {
   const ring = new LogRing();
   const log = diagnosticsLogger(ring, () => undefined);
-  const first = rig({}, log);
-  const second = rig({}, log);
+  const samples = new GeometricSampler<FeedDiagnosticKey>();
+  const wrapped: MainLog = (line, options) => { log(line, options); };
+  const first = rig({}, log, samples);
+  const second = rig({}, wrapped, samples);
   for (const [r, id, request] of [
     [first, 1, messages], [first, 2, messages],
     [second, 1, occupancy], [second, 2, messages], [second, 3, messages],
@@ -199,7 +203,7 @@ it('samples each feed kind independently and keeps counts across activations', (
     `conch-desktop: feed ${kind} socket closed; 0 open, 0 closing`,
   ];
   expect(ring.lines()).toEqual([...events('messages'), ...events('messages'), ...events('occupancy'), ...events('messages')]);
-  expect(diagnosticSamplesFor(log)?.feeds.counts()).toEqual([
+  expect(samples.counts()).toEqual([
     ['messages opening', 4], ['messages unsubscribed', 4], ['messages socket closed', 4],
     ['occupancy opening', 1], ['occupancy unsubscribed', 1], ['occupancy socket closed', 1],
   ]);
@@ -356,7 +360,8 @@ describe('frames', () => {
     const log = diagnosticsLogger(ring, (line) => local.push(line));
     const history = 'voice: helper 1 lost: ack-timeout';
     ring.record(history);
-    const r = rig({}, log);
+    const counts = new GeometricSampler<FeedDiagnosticKey>();
+    const r = rig({}, log, counts);
     expect(r.feeds.subscribe(1, 1, messages)).toBe(true);
     expect(r.feeds.subscribe(1, 2, occupancy)).toBe(true);
     const [busy, quiet] = r.sockets;
@@ -373,7 +378,7 @@ describe('frames', () => {
     ]);
     expect(local).toContain(dropped('messages', 100));
     expect(local.filter((line) => line.includes('dropped'))).toHaveLength(samples + Math.floor(frames / 100) + 1);
-    expect(diagnosticSamplesFor(log)?.feeds.counts()).toEqual([
+    expect(counts.counts()).toEqual([
       ['messages opening', 1], ['occupancy opening', 1],
       ['messages invalid frame', frames], ['occupancy invalid frame', 1],
     ]);
@@ -759,6 +764,7 @@ describe('Node’s WebSocket, as main opens it', () => {
       connect: createNodeConnect(() => undefined),
       deliver: () => undefined,
       log: (line) => logs.push(line),
+      samples: new GeometricSampler(),
       // The deadline, shortened for the test.
       setTimer: (run, ms) => {
         expect(ms).toBe(CLOSE_DEADLINE_MS);

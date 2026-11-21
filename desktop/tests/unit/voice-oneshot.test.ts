@@ -375,9 +375,16 @@ describe('devices()', () => {
     expect(log.length).toBeLessThan(400);
   });
 
-  it('says not-installed with no helper, and runs nothing', async () => {
-    expect(await oneshot.devices(s.config)).toEqual({ ok: false, error: 'not-installed' });
+  it.each([
+    { calls: 1, samples: 1 },
+    { calls: 7, samples: 3 },
+    { calls: 8, samples: 4 },
+  ])('runs nothing with no helper and samples $samples of $calls calls', async ({ calls, samples }) => {
+    for (let n = 0; n < calls; n++) {
+      expect(await oneshot.devices(s.config)).toEqual({ ok: false, error: 'not-installed' });
+    }
     expect(spawned).toEqual([]);
+    expect(ring.lines()).toEqual(Array<string>(samples).fill('voice: devices: not-installed'));
   });
 
   it('says untrusted for a helper others can write, a link, and a helper outside the resources, and runs nothing', async () => {

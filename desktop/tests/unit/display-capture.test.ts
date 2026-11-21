@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { CAPTURE_SOURCES, captureVerdict, CRASH_GRACE_MS, DisplayCapture, displayPermission, type CaptureFrame, type CaptureSource } from '../../main/display-capture.ts';
 import { Gestures } from '../../main/gestures.ts';
+import { GeometricSampler } from '../../main/diagnostics.ts';
 import { guardSession } from '../../main/guards.ts';
 import { ShareAllowance, SHARE_ARM_MS } from '../../main/share-allowance.ts';
 import { GDBUS_PATHS, PORTAL_ARGS, Portal, sourceTypes, underWayland, type Env, type PortalDeps } from '../../main/portal.ts';
@@ -507,7 +508,7 @@ describe('guardSession with display capture', () => {
   function wired() {
     const w = world();
     const ses = new FakeSession();
-    guardSession(ses as unknown as Session, { log: () => undefined, capture: w.capture, owned: () => w.win });
+    guardSession(ses as unknown as Session, { log: () => undefined, blockedSamples: new GeometricSampler(), capture: w.capture, owned: () => w.win });
     const here = { isMainFrame: true, requestingUrl: 'conch-app://ui/' };
     const permission = (contents: unknown, name: string, details: unknown): boolean => {
       const cb = vi.fn();

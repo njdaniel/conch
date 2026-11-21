@@ -239,6 +239,7 @@ interface Handlers {
   readonly diagnostics: DiagnosticsApi;
   readonly refusals: number;
   readonly refusalSamples: GeometricSampler<Refusal>;
+  readonly rendererSamples: GeometricSampler<VoiceDiagnostic>;
   readonly companion: CompanionApi;
   readonly reportVoiceDiagnostic: (diagnostic: VoiceDiagnostic) => void;
   // Absent (the switch off): a share-sound function never reaches its run.
@@ -776,7 +777,7 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
   // read it unasked; the click that opens it is the person's input.
   diagnosticsPreview: {
     limit: 30, maxBytes: 0, parse: none, gesture: true,
-    run: ({ diagnostics, refusals, refusalSamples }) => diagnostics.preview(refusals, refusalSamples.counts()),
+    run: ({ diagnostics, refusals, refusalSamples, rendererSamples }) => diagnostics.preview(refusals, refusalSamples.counts(), rendererSamples.counts()),
   },
   diagnosticsSave: {
     limit: 10,
@@ -932,11 +933,12 @@ export class Ipc {
   readonly #limits = new Map<InvokedFunction, RateLimit>(INVOKED_FUNCTIONS.map((name) => [name, new RateLimit(SPECS[name].limit)]));
   readonly #supportLimit = new RateLimit(120);
   readonly #refusalSamples = new GeometricSampler<Refusal>();
+  readonly #rendererSamples = new GeometricSampler<VoiceDiagnostic>();
   #refusals = 0;
 
   constructor(deps: IpcDeps) {
     this.#deps = deps;
-    this.#reportVoiceDiagnostic = voiceDiagnosticLog(deps.log, deps.now);
+    this.#reportVoiceDiagnostic = voiceDiagnosticLog(deps.log, deps.now, this.#rendererSamples);
   }
 
   // How many invocations have been refused since start.
@@ -1003,6 +1005,7 @@ export class Ipc {
         diagnostics: this.#deps.diagnostics ?? NO_DIAGNOSTICS,
         refusals: this.#refusals,
         refusalSamples: this.#refusalSamples,
+        rendererSamples: this.#rendererSamples,
         companion: this.#deps.companion ?? NO_COMPANION,
         reportVoiceDiagnostic: this.#reportVoiceDiagnostic,
         shareSound: this.#deps.shareSound ?? null,
