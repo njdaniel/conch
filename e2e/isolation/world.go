@@ -77,7 +77,9 @@ type group struct {
 	sessionID int64
 	runID     int64
 	interID   int64
-	approval  int64
+	// dmID is a conversation of A's: ann opened it with abe (issue #2019).
+	dmID     int64
+	approval int64
 	// agentSession is the group agent's own session (B only).
 	agentSession int64
 	reportID     int64
@@ -348,6 +350,16 @@ func (w *world) buildGroups() error {
 	w.a.memberLinkID, w.a.memberLinkCode = link.Invite.ID, link.Code
 	w.marks.secret("A's member link code", link.Code)
 	w.marks.id("invite", "ann's member link", link.Invite.ID)
+
+	// ann opens a conversation with abe: A's, by an id of a space of its own.
+	// It is empty and private to ann, so B's prober can name its id and must
+	// be told what it is told of one that never existed (dmrows.go).
+	var dm schema.OpenDMResponseV1
+	if err := ann.api.call(http.MethodPost, "/v1/dms", schema.OpenDMRequestV1{PeerID: w.a.people[1].id}, &dm); err != nil {
+		return fmt.Errorf("ann opens a conversation with abe: %w", err)
+	}
+	w.a.dmID = dm.Conversation.ID
+	w.marks.id("conversation", "A's conversation", dm.Conversation.ID)
 	return nil
 }
 

@@ -92,19 +92,46 @@ const (
 //
 // Opening records the caller's view, reopens it if hidden, and preserves an
 // archive. The peer's visibility stays governed by dmVisibleCond.
-func (s *Store) OpenDM(ctx context.Context, caller, peer int64, now time.Time) (conv DMConversation, err error) {
-	err = s.withImmediateTx(ctx, func(tx execer) error {
+func (s *Store) OpenDM(ctx context.Context, caller, peer int64, now time.Time) (DMConversation, error) {
+	return s.openDM(ctx, caller, peer, nil, func() time.Time { return now }, nil)
+}
+
+// OpenDMFromCredential checks the request's credential under the write lock.
+func (s *Store) OpenDMFromCredential(ctx context.Context, caller, credential, peer int64, clock func() time.Time, limitNew func(time.Time) error) (DMConversation, error) {
+	return s.openDM(ctx, caller, peer, &credential, clock, limitNew)
+}
+
+func (s *Store) openDM(ctx context.Context, caller, peer int64, credential *int64, clock func() time.Time, limitNew func(time.Time) error) (DMConversation, error) {
+	return s.withDMWrite(ctx, caller, credential, clock, func(tx execer, now time.Time) (DMConversation, error) {
+		return openDMTx(ctx, tx, caller, peer, now, limitNew)
+	})
+}
+
+func (s *Store) withDMWrite(ctx context.Context, caller int64, credential *int64, clock func() time.Time, write func(execer, time.Time) (DMConversation, error)) (DMConversation, error) {
+	var out DMConversation
+	err := s.withImmediateTx(ctx, func(tx execer) error {
+		now := clock()
+		if credential != nil {
+			actor := PrivateCallActor{PrincipalID: caller, CredentialID: *credential}
+			live, err := privateCallRequestLive(ctx, tx, actor, now)
+			if err != nil {
+				return err
+			}
+			if !live {
+				return ErrDMNoStanding
+			}
+		}
 		var err error
-		conv, err = openDMTx(ctx, tx, caller, peer, now)
+		out, err = write(tx, now)
 		return err
 	})
 	if err != nil {
 		return DMConversation{}, err
 	}
-	return conv, nil
+	return out, nil
 }
 
-func openDMTx(ctx context.Context, tx execer, caller, peer int64, now time.Time) (DMConversation, error) {
+func openDMTx(ctx context.Context, tx execer, caller, peer int64, now time.Time, limitNew func(time.Time) error) (DMConversation, error) {
 	if ok, err := dmViewerStandsTx(ctx, tx, caller); err != nil {
 		return DMConversation{}, err
 	} else if !ok {
@@ -119,6 +146,11 @@ func openDMTx(ctx context.Context, tx execer, caller, peer int64, now time.Time)
 	if id == 0 {
 		if err := dmWriteGateTx(ctx, tx, caller); err != nil {
 			return DMConversation{}, err
+		}
+		if limitNew != nil {
+			if err := limitNew(now); err != nil {
+				return DMConversation{}, err
+			}
 		}
 	}
 	if caller == peer {
@@ -217,25 +249,27 @@ func setDMStateTx(ctx context.Context, tx execer, viewer, convID int64, state sc
 // ErrDMNotFound when viewer may not see the conversation. Reading is not
 // contact: it needs no eligibility.
 func (s *Store) SetDMState(ctx context.Context, viewer, convID int64, state schema.DMState, now time.Time) (DMConversation, error) {
+	return s.setDMState(ctx, viewer, convID, nil, state, func() time.Time { return now })
+}
+
+// SetDMStateFromCredential checks the request's credential under the write lock.
+func (s *Store) SetDMStateFromCredential(ctx context.Context, viewer, credential, convID int64, state schema.DMState, clock func() time.Time) (DMConversation, error) {
+	return s.setDMState(ctx, viewer, convID, &credential, state, clock)
+}
+
+func (s *Store) setDMState(ctx context.Context, viewer, convID int64, credential *int64, state schema.DMState, clock func() time.Time) (DMConversation, error) {
 	if !state.Valid() {
 		return DMConversation{}, fmt.Errorf("store: set conversation state: %q is not a state", state)
 	}
-	var out DMConversation
-	err := s.withImmediateTx(ctx, func(tx execer) error {
+	return s.withDMWrite(ctx, viewer, credential, clock, func(tx execer, now time.Time) (DMConversation, error) {
 		if _, err := dmViewTx(ctx, tx, viewer, convID); err != nil {
-			return err
+			return DMConversation{}, err
 		}
 		if err := setDMStateTx(ctx, tx, viewer, convID, state, now); err != nil {
-			return err
+			return DMConversation{}, err
 		}
-		var err error
-		out, err = dmConversationTx(ctx, tx, viewer, convID)
-		return err
+		return dmConversationTx(ctx, tx, viewer, convID)
 	})
-	if err != nil {
-		return DMConversation{}, err
-	}
-	return out, nil
 }
 
 // DMPost is a message to send. The caller has checked that Body is not too
