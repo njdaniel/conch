@@ -32,6 +32,7 @@ import {
   onReauthRequired,
   onSignedOutElsewhere,
   openSocket,
+  openVoiceSocket,
   postMessage,
   previewInvite,
   reauth,
@@ -129,6 +130,33 @@ describe('openSocket', () => {
     const result = await openSocket('ops', 0, { onOpen: () => undefined, onFrame: () => undefined, onClose: () => undefined });
     expect(result).toEqual({ ok: false, failure: 'network' });
     expect(JSON.stringify(result)).not.toContain('conch_wst_T');
+  });
+});
+
+describe('openVoiceSocket', () => {
+  it.each(['v2', 'v3'] as const)('opens presence %s after checking server support', async (version) => {
+    await signedInFrom(window.localStorage, memberToken);
+    const schema = `conch.voice_presence.${version}`;
+    const calls = serve((call) => {
+      if (call.path === '/v1/ws-tickets') {
+        return json({ ticket: 'conch_wst_T', expires_at: '2026-10-14T10:00:00Z' }, 201);
+      }
+      if (version === 'v2') return json({ code: 'invalid_request', message: 'unsupported voice presence schema' }, 400);
+      return json({ schema, channel_id: 1, configured: false, available: false, rooms: [] });
+    });
+
+    let opened: URL | undefined;
+    vi.stubGlobal('WebSocket', vi.fn(function (url: string) {
+      opened = new URL(url);
+      return { close: vi.fn() };
+    }));
+    const result = await openVoiceSocket('red team', { onOpen: vi.fn(), onFrame: vi.fn(), onClose: vi.fn() });
+    expect(result.ok).toBe(true);
+    expect(calls.map(({ path }) => path)).toEqual([
+      '/v1/channels/red%20team/voice?schema=conch.voice_presence.v3',
+      '/v1/ws-tickets',
+    ]);
+    expect(opened?.searchParams.get('schema')).toBe(schema);
   });
 });
 

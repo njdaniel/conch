@@ -456,8 +456,10 @@ const sourceAsk = { width: 3840, height: 2160, frameRate: 60 } as const;
 // capture shows how large the screen is; it is then settled by its rule
 // (settleQuality) and the settled quality caps the capture and the encodings.
 function shareAsk(quality: ShareQuality): { readonly width: number; readonly height: number; readonly frameRate: number } {
+  if (quality.resolution === '480p') return { width: 854, height: 480, frameRate: quality.frameRate };
   if (quality.resolution === '720p') return { width: 1280, height: 720, frameRate: quality.frameRate };
   if (quality.resolution === '1080p') return { width: 1920, height: 1080, frameRate: quality.frameRate };
+  if (quality.resolution === '1440p') return { width: 2560, height: 1440, frameRate: quality.frameRate };
   if (quality.resolution === 'auto') return { ...sourceAsk, frameRate: autoFrameRate };
   return { ...sourceAsk, frameRate: quality.frameRate };
 }

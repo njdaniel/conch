@@ -540,9 +540,10 @@ func TestVoicePresenceSchemaParam(t *testing.T) {
 		{"absent", "ann", "/v1/channels/ops/voice", 200, schema.VoicePresenceSchemaV1},
 		{"v1 by name", "ann", "/v1/channels/ops/voice?schema=conch.voice_presence.v1", 200, schema.VoicePresenceSchemaV1},
 		{"v2", "ann", "/v1/channels/ops/voice?schema=conch.voice_presence.v2", 200, schema.VoicePresenceSchemaV2},
+		{"v3", "ann", "/v1/channels/ops/voice?schema=conch.voice_presence.v3", 200, schema.VoicePresenceSchemaV3},
 		{"bogus", "ann", "/v1/channels/ops/voice?schema=bogus", 400, ""},
 		{"empty", "ann", "/v1/channels/ops/voice?schema=", 400, ""},
-		{"a future version", "ann", "/v1/channels/ops/voice?schema=conch.voice_presence.v3", 400, ""},
+		{"a future version", "ann", "/v1/channels/ops/voice?schema=conch.voice_presence.v4", 400, ""},
 		{"repeated", "ann", "/v1/channels/ops/voice?schema=conch.voice_presence.v2&schema=conch.voice_presence.v2", 400, ""},
 		{"bogus before the channel: unknown channel", "ann", "/v1/channels/nosuch/voice?schema=bogus", 400, ""},
 		{"bogus before the channel: a non-member", "bob", "/v1/channels/ops/voice?schema=bogus", 400, ""},
@@ -633,6 +634,65 @@ func (f *presenceFixture) mustClaimQuality(t *testing.T, who, body string) {
 	if res := f.claimShareBody(t, who, body); res.status != http.StatusOK {
 		t.Fatalf("%s claims with %s: %d %s", who, body, res.status, res.body)
 	}
+}
+
+func TestVoiceShareV3PreservesOlderReaders(t *testing.T) {
+	f, _ := newShareFixture(t)
+	f.at(1_000)
+	const claim = "/v1/channels/ops/voice/share"
+	const query = "?schema=" + schema.VoicePresenceSchemaV3
+	first := `{"quality":{"resolution":"480p","frame_rate":15}}`
+	if res := f.claimShareBody(t, "ann", first); res.status != http.StatusBadRequest {
+		t.Fatalf("legacy claim accepted a new resolution: %d %s", res.status, res.body)
+	}
+	malformed := `{"quality":{"resolution":"480p","frame_rate":15,"extra":true}}`
+	if res := f.callREST(t, http.MethodPost, claim+query, f.tokens["ann"], malformed); res.status != http.StatusBadRequest {
+		t.Fatalf("v3 claim accepted an unknown field: %d %s", res.status, res.body)
+	}
+	var original schema.Timestamp
+	for i, resolution := range []schema.VoiceShareResolutionV3{schema.VoiceShareV3Resolution480p, schema.VoiceShareV3Resolution1440p} {
+		f.at(1_000 + i*1_000)
+		body := fmt.Sprintf(`{"quality":{"resolution":%q,"frame_rate":15}}`, resolution)
+		res := f.callREST(t, http.MethodPost, claim+query, f.tokens["ann"], body)
+		if res.status != http.StatusOK {
+			t.Fatalf("v3 claim %s: %d %s", resolution, res.status, res.body)
+		}
+		var share schema.VoiceShareV3
+		strict(t, res.body, &share)
+		if err := share.Validate(); err != nil || share.Quality.Resolution != resolution {
+			t.Fatalf("v3 claim: %+v, %v", share, err)
+		}
+		if i == 0 {
+			original = share.StartedAt
+		} else if share.StartedAt != original {
+			t.Fatal("changing quality replaced the active share")
+		}
+		if got := f.sharers(f.presenceV2(t, "ann2")); !slices.Equal(got, []string{"ann@source/15"}) {
+			t.Fatalf("legacy quality labels: %v", got)
+		}
+		if got := f.v1Sharers(t, "ann2"); !slices.Equal(got, []string{"ann"}) {
+			t.Fatalf("v1 sharers: %v", got)
+		}
+	}
+	base := wsTestServer(t, f.srv)
+	conn, _, err := dialVoice(t, base, "ops&schema="+schema.VoicePresenceSchemaV3, f.tokens["ann2"])
+	if err != nil {
+		t.Fatalf("dial v3: %v", err)
+	}
+	var doc schema.VoicePresenceV3
+	strict(t, readRawPresence(t, conn), &doc)
+	if err := doc.Validate(); err != nil {
+		t.Fatalf("v3 snapshot: %v", err)
+	}
+	for _, room := range doc.Rooms {
+		for _, participant := range room.Participants {
+			if participant.PrincipalID == f.ids["ann"] && participant.ShareQuality != nil &&
+				participant.ShareQuality.Resolution == schema.VoiceShareV3Resolution1440p {
+				return
+			}
+		}
+	}
+	t.Fatal("v3 reader did not see the current 1440p share")
 }
 
 // TestVoicePresenceSocketSchema: the socket honours ?schema= as the GET route

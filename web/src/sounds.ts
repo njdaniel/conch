@@ -2,7 +2,7 @@
 // changes the voice client's audio routing. Skipped sounds are never queued.
 import { useSyncExternalStore } from 'react';
 import { platform } from './platform';
-import type { VoicePresenceV2 } from './schema/voice';
+import type { VoicePresence } from './schema/voice';
 
 export const soundNames = { message: 'Message sound', join: 'Call join sound', leave: 'Call leave sound', share: 'Share start sound' };
 export type Sound = keyof typeof soundNames;
@@ -65,7 +65,7 @@ export function useSoundPreferences(): SoundPreferences {
 export let soundAudience: { me: number; allows: (channel: number) => boolean } | null = null;
 export function setSoundAudience(value: typeof soundAudience): void { soundAudience = value; }
 
-export function voiceSounds(before: VoicePresenceV2 | null, after: VoicePresenceV2, me: number, play: (sound: Sound) => void): void {
+export function voiceSounds(before: VoicePresence | null, after: VoicePresence, me: number, play: (sound: Sound) => void): void {
   if (before === null) return;
   const oldRoom = before.rooms.find((r) => r.audience === undefined);
   const room = after.rooms.find((r) => r.audience === undefined);

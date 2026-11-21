@@ -15,7 +15,7 @@ import { Glyph } from '../../Icons';
 import type { NativeVoiceView } from '../../platform/desktop/bridge';
 import type { NativeVoice, NativeVoiceError } from '../../platform/types';
 import type { ChannelV0 } from '../../schema/channel';
-import type { VoicePresenceV2 } from '../../schema/voice';
+import type { VoicePresence } from '../../schema/voice';
 import type { Person } from '../../useLiveChannel';
 import { useChannelJoin } from '../channelJoin';
 import { occupants, sharers } from '../presence';
@@ -227,7 +227,7 @@ export function NativeVoicePanel({
   const archived = isArchived(viewed);
   const canStart = signedIn && voiceAllowed && reachable && !session && !archived && view.status !== 'unavailable' && view.status !== 'stopping';
   const joining = useRef(false);
-  const join = (current: VoicePresenceV2) => {
+  const join = (current: VoicePresence) => {
     if (!canStart || actions === undefined || channel === null || joining.current) return;
     if (!current.available || !current.configured || (viewed !== undefined && current.channel_id !== viewed.id)) return;
     if (otherDevice(occupants(current).find((o) => o.principal === viewer)) && warned !== channel) {

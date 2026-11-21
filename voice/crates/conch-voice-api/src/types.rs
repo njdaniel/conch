@@ -1478,6 +1478,19 @@ mod tests {
             "voice-share-v2.json",
             "the share claim's answer is the sharer's; conch-voice never shares a screen",
         ),
+        // Expanded quality (issue #1661): the helper still negotiates v2 presence.
+        (
+            "voice-presence-v3.json",
+            "the helper requests v2 presence and receives a compatible quality label",
+        ),
+        (
+            "voice-share-request-v2.json",
+            "the share claim's body is the sharer's; conch-voice never shares a screen",
+        ),
+        (
+            "voice-share-v3.json",
+            "the share claim's answer is the sharer's; conch-voice never shares a screen",
+        ),
         // Voice occupancy (issue #596): how many are in each channel's voice, and who
         // (issue #1103), for a channel list. The voice client joins one channel it is
         // told and shows no list.

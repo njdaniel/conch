@@ -47,6 +47,9 @@ func TestVoiceGoldenFixtures(t *testing.T) {
 		{name: "share request, a declared quality", file: "voice-share-request-v1.json", new: func() any { return new(VoiceShareRequestV1) }},
 		{name: "share request, nothing declared", file: "voice-share-request-v1-empty.json", new: func() any { return new(VoiceShareRequestV1) }},
 		{name: "share claim v2, echoing the declared quality", file: "voice-share-v2.json", new: func() any { return new(VoiceShareV2) }},
+		{name: "presence v3, 480p and 1440p shares", file: "voice-presence-v3.json", new: func() any { return new(VoicePresenceV3) }},
+		{name: "share request v2, 480p quality", file: "voice-share-request-v2.json", new: func() any { return new(VoiceShareRequestV2) }},
+		{name: "share claim v3, 480p quality", file: "voice-share-v3.json", new: func() any { return new(VoiceShareV3) }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

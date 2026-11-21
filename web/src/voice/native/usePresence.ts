@@ -6,7 +6,7 @@
 import { useEffect, useRef, useState } from 'react';
 import * as api from '../../api';
 import { soundAudience, sounds, voiceSounds } from '../../sounds';
-import type { VoicePresenceV2 } from '../../schema/voice';
+import type { VoicePresence } from '../../schema/voice';
 import { Feed, type FeedStatus } from '../../state/feed';
 import { parsePresence } from '../presence';
 import type { Snapshot } from '../useVoice';
@@ -55,8 +55,8 @@ export function usePresence({
     let live = true;
     let first = true;
     let closeReason = '';
-    let previous: VoicePresenceV2 | null = null;
-    const show = (presence: VoicePresenceV2) => {
+    let previous: VoicePresence | null = null;
+    const show = (presence: VoicePresence) => {
       const audience = soundAudience;
       if (joinedRef.current === channel && audience?.allows(presence.channel_id)) {
         voiceSounds(previous, presence, audience.me, (sound) => { sounds.play(sound); });
@@ -80,7 +80,7 @@ export function usePresence({
           },
         }),
       onFrame: (data) => {
-        const presence: VoicePresenceV2 | null = parsePresence(data);
+        const presence: VoicePresence | null = parsePresence(data);
         if (presence === null || !live) return;
         show(presence);
       },

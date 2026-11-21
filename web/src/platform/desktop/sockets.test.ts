@@ -90,6 +90,7 @@ describe('the desktop feed request', () => {
     ['messagesSocket', { channel: 'general', after: '41', heartbeat: '1' }, { kind: 'messages', channel: 'general', after: 41 }],
     ['eventsSocket', { channel: 'general', session: '9' }, { kind: 'events', channel: 'general', session: 9 }],
     ['voiceSocket', { channel: 'general' }, { kind: 'voice', channel: 'general' }],
+    ['voiceSocket', { channel: 'general', schema: 'conch.voice_presence.v3' }, { kind: 'voice', channel: 'general', schema: 'conch.voice_presence.v3' }],
     ['occupancySocket', {}, { kind: 'occupancy' }],
     ['wsTicket', {}, null],
     ['listMessages', { channel: 'general' }, null],

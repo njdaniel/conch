@@ -206,6 +206,7 @@ export interface FeedRequest {
   readonly channel?: string;
   readonly session?: number;
   readonly after?: number;
+  readonly schema?: 'conch.voice_presence.v3';
 }
 
 // onClose's code is the server's close code, or 1008 when the sign-in the

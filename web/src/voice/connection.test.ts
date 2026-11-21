@@ -1494,6 +1494,37 @@ const presenceWith = (sharing: number | null): VoicePresenceV2 => ({
   ],
 });
 
+it('keeps an extended share choice across v2 and v3 feeds and saves only explicit changes', async () => {
+  const quality: ShareQuality = { resolution: '1440p', frameRate: 15 };
+  const keepShareQuality = vi.fn<(quality: ShareQuality) => void>();
+  const client = new VoiceClient({
+    clock: new FakeClock(),
+    random: () => 0.5,
+    createSession: () => Promise.resolve(okSession()),
+    report: () => Promise.resolve('ok'),
+    newRoom: () => new StubRoom(),
+    claimShare: () => Promise.resolve(claim),
+    stopShare: () => Promise.resolve(),
+    shareQuality: quality,
+    keepShareQuality,
+  });
+  const v2 = presenceWith(null);
+  const v3 = { ...v2, schema: 'conch.voice_presence.v3' as const };
+  expect(client.snapshot().shareQuality).toEqual({ resolution: '1080p', frameRate: 15 });
+  client.presence(v3);
+  expect(client.snapshot().shareQuality).toEqual(quality);
+  client.presence(v2);
+  expect(client.snapshot().shareQuality).toEqual({ resolution: '1080p', frameRate: 15 });
+  client.presence(v3);
+  expect(client.snapshot().shareQuality).toEqual(quality);
+  expect(keepShareQuality).not.toHaveBeenCalled();
+
+  const chosen = { resolution: '480p', frameRate: 15 } as const;
+  await client.setShareQuality(chosen);
+  expect(keepShareQuality).toHaveBeenCalledExactlyOnceWith(chosen);
+  client.dispose();
+});
+
 describe('watch only', () => {
   it('connects without publishing the microphone, takes no press, and publishes it when asked', async () => {
     const t = setup();
