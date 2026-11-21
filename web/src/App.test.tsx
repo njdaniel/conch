@@ -18,7 +18,7 @@ const channels = {
   ],
 };
 
-type Handler = (auth: string | null) => Response | Promise<Response>;
+type Handler = (auth: string | null, init?: RequestInit) => Response | Promise<Response>;
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 
 // server stands in for conchd: whoami and channels, each answering by token.
@@ -27,7 +27,7 @@ function serve(routes: Record<string, Handler>) {
     const path = typeof input === 'string' ? input : input instanceof URL ? input.pathname : input.url;
     const headers = new Headers(init?.headers);
     const handler = routes[path];
-    return Promise.resolve(handler ? handler(headers.get('Authorization')) : json({}, 404));
+    return Promise.resolve(handler ? handler(headers.get('Authorization'), init) : json({}, 404));
   });
   vi.stubGlobal('fetch', fetchMock);
   return fetchMock;
@@ -906,6 +906,68 @@ describe('lobby', () => {
     const account = screen.getByRole('region', { name: 'Account' });
     expect(within(account).getByRole('heading', { name: 'Who can administer' })).toBeDefined();
     expect(within(account).getByText(line)).toBeDefined();
+  });
+});
+
+describe('inviting from a channel', () => {
+  const rows = [
+    { id: 1, name: 'general', created_at, visibility: 'public', default: true },
+    { id: 2, name: 'ops', created_at, visibility: 'public' },
+    { id: 3, name: 'dev', created_at, visibility: 'private', manages: true },
+    { id: 4, name: 'design', created_at, visibility: 'private' },
+  ];
+  const memberInvite = {
+    id: 7,
+    kind: 'member',
+    created_by: member.id,
+    created_by_name: member.name,
+    created_at,
+    uses: 0,
+    joiners: 0,
+    credential_lifetime_seconds: 7776000,
+  };
+  const scope = "This is a server member invite. New members start in the server's default channels.";
+
+  async function openFrom(name: string) {
+    const fetchMock = serve({
+      ...asMember,
+      '/v1/whoami': () => json({ ...member, may_invite: true }),
+      '/v1/channels': () => json({ channels: rows }),
+      '/v2/invites': (_auth, init) => init?.method === 'POST'
+        ? json({ invite: memberInvite, code: `conch_inv_${'N'.repeat(43)}` }, 201)
+        : json({ invites: [] }),
+    });
+    render(<App origin={origin} />);
+    signIn();
+    fireEvent.click(await screen.findByRole('button', { name: `Actions for ${name}` }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Invite people' }));
+    return { panel: within(screen.getByRole('region', { name: 'Invites' })), fetchMock };
+  }
+
+  it.each([
+    ['general', '#general is currently a default channel.'],
+    ['ops', 'After they join the server, they can find #ops under Browse channels and join it there.'],
+    ['dev', 'After they join the server, open #dev and use Add by name in the Members panel.'],
+    ['design', 'After they join the server, ask a channel manager or operator to add them to #design.'],
+  ])('explains access from #%s and creates a server member link', async (name, step) => {
+    const { panel, fetchMock } = await openFrom(name);
+    expect(panel.getByText(scope)).toBeDefined();
+    expect(panel.getByText(step)).toBeDefined();
+
+    fireEvent.click(panel.getByRole('button', { name: 'Make link' }));
+    await panel.findByRole('button', { name: 'Copy link' });
+    expect(panel.getByText(step)).toBeDefined();
+    const posts = fetchMock.mock.calls.filter(([path, init]) => path === '/v2/invites' && init?.method === 'POST');
+    expect(posts.map(([, init]) => init?.body)).toEqual([JSON.stringify({ kind: 'member' })]);
+  });
+
+  it('opens the generic panel after closing a channel invite', async () => {
+    const { panel } = await openFrom('dev');
+    expect(panel.getByText(scope)).toBeDefined();
+    fireEvent.keyDown(panel.getByRole('button', { name: 'Make link' }), { key: 'Escape' });
+    fireEvent.click(panel.getByRole('button', { name: 'Invite someone' }));
+    expect(panel.queryByText(scope)).toBeNull();
+    expect(panel.getByRole('button', { name: 'Make link' })).toBeDefined();
   });
 });
 

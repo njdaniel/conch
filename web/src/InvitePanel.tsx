@@ -11,7 +11,7 @@
 // holder of manage_members also gets "Disable joiners" on a link; a member does
 // not (design O2). Every refusal is said in the page's own words by its code:
 // the server's message is never shown.
-import { useCallback, useContext, useEffect, useRef, useState, type SyntheticEvent } from 'react';
+import { useCallback, useContext, useEffect, useId, useRef, useState, type SyntheticEvent } from 'react';
 import * as api from './api';
 import { DESKTOP_UNAVAILABLE, desktopUnavailableLine } from './appLimit';
 import { canDo } from './admin/permissions';
@@ -21,6 +21,7 @@ import { waitWords } from './Invite';
 import { JoiningSettings } from './joiningSettings';
 import { platform } from './platform';
 import { inviteLink } from './route';
+import type { ChannelV0 } from './schema/channel';
 import type { CreateInviteRequestV2 } from './schema/invite';
 import type { InviteJoinerV1, InviteV2 } from './schema/permission';
 import type { WhoAmIResponseV1 } from './schema/principal';
@@ -120,6 +121,17 @@ type Joiners =
 // A question before disabling joiners: how many, from the dry run.
 type Asking = { readonly id: number; readonly count: number };
 
+function channelInviteStep(channel: ChannelV0, mayManageChannels: boolean): string | undefined {
+  if (channel.visibility === 'private') {
+    return channel.manages === true || mayManageChannels
+      ? `After they join the server, open #${channel.name} and use Add by name in the Members panel.`
+      : `After they join the server, ask a channel manager or operator to add them to #${channel.name}.`;
+  }
+  if (channel.default === true) return `#${channel.name} is currently a default channel.`;
+  if (channel.visibility === 'public') return `After they join the server, they can find #${channel.name} under Browse channels and join it there.`;
+  return undefined;
+}
+
 export function InvitePanel({
   origin,
   me,
@@ -128,16 +140,17 @@ export function InvitePanel({
 }: {
   readonly origin: string;
   readonly me: WhoAmIResponseV1;
-  // Opens the panel from outside (issue #1135: a channel's ⋯ menu, "Invite
-  // people"). A member link names no channel, so none is passed. `n` counts
-  // the asks, so asking twice opens it twice.
-  readonly request?: { readonly n: number } | undefined;
+  // Opens the panel from outside. The channel is context for the explanation.
+  // `n` counts the asks, so asking twice opens it twice.
+  readonly request?: { readonly n: number; readonly channel?: ChannelV0 | undefined } | undefined;
   readonly onUnauthorized: () => void;
 }) {
   // GET /v1/invites/settings is role-gated (accessOperator), so reading the
   // pause stays by role; lifting it (PUT) needs manage_members: holdsMembers.
   const operator = me.role === 'operator';
   const [open, setOpen] = useState(false);
+  const [closedAsk, setClosedAsk] = useState(0);
+  const scopeId = useId();
   const toggle = useRef<HTMLButtonElement>(null);
   const [lifetime, setLifetime] = useState(defaultLabel);
   const [capped, setCapped] = useState(false);
@@ -251,6 +264,7 @@ export function InvitePanel({
   const generation = useRef(0);
   const [focusAsk, setFocusAsk] = useState(0);
   const asked = request?.n ?? 0;
+  const channel = open && asked !== closedAsk ? request?.channel : undefined;
   useEffect(() => {
     if (asked === 0) return;
     setOpen(true);
@@ -262,7 +276,7 @@ export function InvitePanel({
     setLink(null);
     setCopied('no');
     setProblem(null);
-    setFocusAsk(asked);
+    setFocusAsk((n) => n + 1);
   }, [asked]);
   useEffect(() => {
     if (focusAsk > 0) body.current?.querySelector<HTMLElement>('input, button')?.focus();
@@ -274,6 +288,9 @@ export function InvitePanel({
   }, [open]);
 
   const who = latest ?? me;
+  const mayManageChannels = canDo(me, 'manage_channels') && canDo(who, 'manage_channels');
+  const nextStep = channel === undefined ? undefined : channelInviteStep(channel, mayManageChannels);
+  const scopeDescription = channel === undefined ? undefined : scopeId;
   // Absent for an operator, who has no allowance.
   const remaining = who.invites_remaining;
   const cappedUses = Number(cap);
@@ -391,6 +408,7 @@ export function InvitePanel({
   // Focus goes into the panel when the toggle opens it (a count, as `asked`).
   const closePanel = () => {
     setOpen(false);
+    setClosedAsk(asked);
     toggle.current?.focus();
   };
 
@@ -403,8 +421,11 @@ export function InvitePanel({
         aria-expanded={open}
         aria-controls="invites-body"
         onClick={() => {
-          setOpen(!open);
-          if (!open) setFocusAsk((n) => n + 1);
+          if (open) closePanel();
+          else {
+            setOpen(true);
+            setFocusAsk((n) => n + 1);
+          }
         }}
         onKeyDown={(event) => {
           if (event.key !== 'Escape' || event.defaultPrevented || !open) return;
@@ -443,8 +464,14 @@ export function InvitePanel({
                 ) : null}
               </div>
             ) : null}
+            {channel === undefined ? null : (
+              <div id={scopeId}>
+                <p className="hint">This is a server member invite. New members start in the server&apos;s default channels.</p>
+                {nextStep === undefined ? null : <p className="hint">{nextStep}</p>}
+              </div>
+            )}
             {link === null ? null : (
-              <div className="invite-link" role="group" aria-label="New invite link">
+              <div className="invite-link" role="group" aria-label="New invite link" aria-describedby={scopeDescription}>
                 <p>
                   <strong>Anyone with this link can join</strong>, until it expires, is used up or you close it. It is shown only now: copy
                   it and send it to the people you are inviting.
@@ -483,7 +510,7 @@ export function InvitePanel({
               </div>
             )}
             <form className="invite-form" onSubmit={create}>
-              <p className="hint">A link lands the people who use it in the server&apos;s default channels.</p>
+              {channel === undefined ? <p className="hint">A link lands the people who use it in the server&apos;s default channels.</p> : null}
               <label>
                 Expires after{' '}
                 <select
@@ -527,7 +554,7 @@ export function InvitePanel({
                 ) : null}
               </div>
               {remaining === undefined ? null : <p className="hint">{remaining === 1 ? '1 link left' : `${String(remaining)} links left`}</p>}
-              <button ref={makeButton} type="submit" disabled={!canCreate} aria-busy={busy}>
+              <button ref={makeButton} type="submit" disabled={!canCreate} aria-busy={busy} aria-describedby={scopeDescription}>
                 {busy ? 'Making the link…' : 'Make link'}
               </button>
               <p role="alert" className="notice">
