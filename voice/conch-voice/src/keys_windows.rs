@@ -496,6 +496,12 @@ impl Pump {
             outs.extend(self.binder.mark_lost(stalled_problem()));
         }
         outs.extend(self.binder.on_event(event));
+        let held = self.binder.any_down();
+        // Arm the watchdog before the session can see a press. Keep it armed until
+        // any release or loss that clears the held state has been sent.
+        if held {
+            self.beat.set_held(true);
+        }
         for out in outs {
             alive &= match out {
                 Out::Key(key) => self.reporter.key(key),
@@ -503,7 +509,9 @@ impl Pump {
                 Out::Lost(problem) => self.reporter.not_ready(problem),
             };
         }
-        self.beat.set_held(self.binder.any_down());
+        if !held {
+            self.beat.set_held(false);
+        }
         // A tick or an unbound key still ends the thread once the session has gone: nothing
         // else would, and winit allows one event loop in the process.
         if alive && !self.reporter.closed() {
@@ -966,6 +974,8 @@ mod raw_input {
 
 #[cfg(test)]
 mod tests {
+    use std::task::{Context, Wake, Waker};
+
     use conch_voice_control::{GateCommand, Ptt, PttInput, PttOutput, ShutReason};
 
     use super::*;
@@ -1359,6 +1369,67 @@ mod tests {
         drop(received);
         assert!(!reporter.ready(), "the loop has gone: nobody to tell");
         assert!(reporter.closed());
+    }
+
+    #[test]
+    fn the_watchdog_shuts_the_gate_if_the_pump_stalls_while_sending_a_press() {
+        struct CheckStall {
+            beat: Arc<Heartbeat>,
+            reporter: Arc<Reporter>,
+            limit: Duration,
+        }
+
+        impl Wake for CheckStall {
+            fn wake(self: Arc<Self>) {
+                self.reporter
+                    .not_ready_if(stalled_problem(), || self.beat.stalled(at(400), self.limit));
+            }
+        }
+
+        let limit = at(250);
+        let (mut pump, beat, reporter, mut received) = pump_with(limit);
+        Sink::started(&mut pump);
+        assert_eq!(
+            drain(&mut received),
+            vec![Input::KeyDevice(DeviceState::Ready)]
+        );
+        pump.handle(at(0), key(TALK, false));
+
+        // The send wakes the receiver after queuing the press, before returning to the
+        // pump. Check the watchdog at a synthetic later time while the pump is still there.
+        let waker = Waker::from(Arc::new(CheckStall {
+            beat,
+            reporter,
+            limit,
+        }));
+        assert!(
+            received
+                .poll_recv(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+        pump.handle(at(10), key(TALK, true));
+
+        let got = drain(&mut received);
+        let [
+            Input::Key(press),
+            Input::KeyDevice(state @ DeviceState::Lost(_)),
+        ] = got.as_slice()
+        else {
+            panic!("expected a press followed by watchdog loss, got {got:?}");
+        };
+        assert_eq!(
+            state.problem().map(|problem| problem.code()),
+            Some("read_failed")
+        );
+        let mut ptt = live_machine();
+        assert!(opens(&ptt.handle(at(10), PttInput::Key(*press))));
+        let shut = ptt.handle(at(400), PttInput::KeyDevice(state.is_ready()));
+        assert!(
+            shut.contains(&PttOutput::Gate(GateCommand::ForceShut(
+                ShutReason::KeyDeviceLost
+            ))),
+            "{shut:?}"
+        );
     }
 
     #[test]

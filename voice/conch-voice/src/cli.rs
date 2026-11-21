@@ -1901,8 +1901,6 @@ mod tests {
                 device: PathBuf::from("/dev/input/by-id/usb-Example-event-kbd")
             }
         );
-        #[cfg(windows)]
-        assert!(command().find_subcommand("keys").is_none());
         for bad in [
             &["keys"][..],
             &["keys", "one", "two"],
@@ -2093,6 +2091,7 @@ mod tests {
         assert!(help.contains("audio.talk_mode"), "{help}");
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn the_help_of_keys_says_what_it_shows_and_that_it_wants_a_terminal() {
         let help = command()
@@ -2103,6 +2102,12 @@ mod tests {
         assert!(help.contains("EVERY key pressed"), "{help}");
         assert!(help.contains("writes only to a terminal"), "{help}");
         assert!(help.contains("it refuses"), "{help}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_does_not_expose_the_keys_command() {
+        assert!(command().find_subcommand("keys").is_none());
     }
 
     fn config(text: &str) -> Config {
