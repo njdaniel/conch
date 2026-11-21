@@ -21,13 +21,6 @@ func newPrivateCallFixture(t *testing.T, s *Store) *privateCallFixture {
 	t.Helper()
 	ctx := context.Background()
 	f := &privateCallFixture{t: t, s: s, now: time.Now().UTC().Truncate(time.Millisecond)}
-	// The block migration comes from #1832, which is outside this test base.
-	if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS blocks (
-		owner_id INTEGER NOT NULL REFERENCES principals(id),
-		blocked_id INTEGER NOT NULL REFERENCES principals(id),
-		created_at INTEGER NOT NULL, PRIMARY KEY (owner_id, blocked_id)) WITHOUT ROWID`); err != nil {
-		t.Fatal(err)
-	}
 	for i, person := range []*PrivateCallActor{&f.a, &f.b, &f.b2, &f.c} {
 		if person == &f.b2 {
 			person.PrincipalID = f.b.PrincipalID
@@ -43,11 +36,25 @@ func newPrivateCallFixture(t *testing.T, s *Store) *privateCallFixture {
 			t.Fatal(err)
 		}
 		person.CredentialID = cred.ID
-	}
-	for i, person := range []PrivateCallActor{f.a, f.c} {
-		if _, err := s.db.ExecContext(ctx, `INSERT INTO private_call_pairs (conversation_id, lo, hi) VALUES (?, ?, ?)`,
-			i+1, min(person.PrincipalID, f.b.PrincipalID), max(person.PrincipalID, f.b.PrincipalID)); err != nil {
+		// CreateCredential("system", ...) records a credential made by
+		// another; these stand in for sign-ins the people made themselves.
+		if _, err := s.db.ExecContext(ctx, "UPDATE credentials SET self_made = 1 WHERE id = ?", cred.ID); err != nil {
 			t.Fatal(err)
+		}
+	}
+	// Conversations 1 (a and b) and 2 (c and b) are the DM store's own, each
+	// opened by both people, so each sees it.
+	for i, person := range []PrivateCallActor{f.a, f.c} {
+		lo, hi := min(person.PrincipalID, f.b.PrincipalID), max(person.PrincipalID, f.b.PrincipalID)
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO dm_conversations (id, lo, hi, created_at) VALUES (?, ?, ?, ?)`,
+			i+1, lo, hi, f.now.UnixMilli()); err != nil {
+			t.Fatal(err)
+		}
+		for _, id := range []int64{lo, hi} {
+			if _, err := s.db.ExecContext(ctx, `INSERT INTO dm_viewer_state (principal_id, conversation_id, state, updated_at)
+				VALUES (?, ?, 'open', ?)`, id, i+1, f.now.UnixMilli()); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 	return f

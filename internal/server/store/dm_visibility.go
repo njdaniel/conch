@@ -40,8 +40,10 @@ import (
 // needs to know first and for the row it changed.
 //
 // Whether the viewer may *contact* the other person (blocks, preferences,
-// switches) is not visibility and is not here: it is dmContactTx in dm.go.
-// Reading retained history needs standing and membership only.
+// switches, mutual visibility) is not visibility and is not here: it is
+// dmContactTx in dm_policy.go. Reading retained history needs standing and
+// membership only, so a block, a switch or a pair that stops sharing a
+// channel on a hide_members server leaves what was said readable.
 
 // ErrDMNotFound is every refusal to show a conversation, a message or a file
 // of one: no such conversation, the viewer is not one of its pair, the
@@ -138,6 +140,10 @@ type DMConversation struct {
 	ID     int64
 	Lo, Hi int64
 	PeerID int64
+	// PeerFormer is true when the viewer is shown the peer as a former member,
+	// with no name: the peer is no longer an active identity and the viewer
+	// may no longer know it (dmPeerFormerTx). An enabled peer is never former.
+	PeerFormer bool
 	// CreatedAt is when the conversation first became visible to the peer:
 	// the time of its first message. It is zero until there is one; an open
 	// never sets it, so it tells nothing about who opened first.
@@ -215,6 +221,9 @@ func dmConversationTx(ctx context.Context, q execer, viewer, convID int64) (DMCo
 		return DMConversation{}, fmt.Errorf("store: read conversation %d: %w", convID, err)
 	}
 	if c.Unread, err = dmUnreadTx(ctx, q, convID, viewer, c.LastReadID); err != nil {
+		return DMConversation{}, err
+	}
+	if c.PeerFormer, err = dmPeerFormerTx(ctx, q, viewer, c.PeerID); err != nil {
 		return DMConversation{}, err
 	}
 	return c, nil
@@ -298,6 +307,9 @@ func (s *Store) ListDMConversations(ctx context.Context, viewer int64, state sch
 		}
 		for i := range out {
 			if out[i].Unread, err = dmUnreadTx(ctx, tx, out[i].ID, viewer, out[i].LastReadID); err != nil {
+				return err
+			}
+			if out[i].PeerFormer, err = dmPeerFormerTx(ctx, tx, viewer, out[i].PeerID); err != nil {
 				return err
 			}
 		}

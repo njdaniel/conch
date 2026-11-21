@@ -416,8 +416,12 @@ func TestEveryMessageReadPathIsInTheLeakTest(t *testing.T) {
 		// presence documents, never messages; it has its own leak-table row
 		// in TestChannelContentLeak. The occupancy socket (issue #596)
 		// carries counts, never messages, and names no channel to leak; its
-		// isolation tests are in voice_occupancy_test.go.
-		isRead := strings.HasPrefix(rt.pattern, "GET ") && !reactionReads[rt.pattern] && rt.pattern != "GET /v1/voice/ws" && rt.pattern != "GET /v1/voice/occupancy/ws" && rt.pattern != "GET /v1/events/ws" &&
+		// isolation tests are in voice_occupancy_test.go. The per-person
+		// stream (issue #2040) carries a person's own DM frames, which are
+		// not channel messages and have no channel scope to leak; it can
+		// never carry a channel frame, and its tests are in
+		// person_stream_test.go (TestPersonStreamNeverCarriesAChannelFrame).
+		isRead := strings.HasPrefix(rt.pattern, "GET ") && !reactionReads[rt.pattern] && rt.pattern != "GET /v1/voice/ws" && rt.pattern != "GET /v1/voice/occupancy/ws" && rt.pattern != "GET /v1/events/ws" && rt.pattern != "GET /v1/events/person/ws" &&
 			(strings.Contains(rt.pattern, "/messages") || strings.HasSuffix(rt.pattern, "/ws") || strings.HasSuffix(rt.pattern, "/notifications/pending"))
 		if isRead && !covered[rt.pattern] {
 			t.Errorf("route %q reads messages but is not in scopedReadPaths and TestScopedMessagesExactSets: add a column there", rt.pattern)

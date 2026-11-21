@@ -36,15 +36,24 @@ func privateCallHTTPFixture(t *testing.T) (*authFixture, store.Principal, string
 		t.Fatal(err)
 	}
 	db := privateCallFixtureDB(t, f)
-	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS blocks (
-		owner_id INTEGER NOT NULL REFERENCES principals(id),
-		blocked_id INTEGER NOT NULL REFERENCES principals(id),
-		created_at INTEGER NOT NULL, PRIMARY KEY (owner_id, blocked_id)) WITHOUT ROWID`); err != nil {
+	// The fixture's credentials are minted by "system", which the store
+	// records as made by another. The guard (selfMadeCredentialRoutes) would
+	// refuse them, so they stand in for sign-ins the people made themselves;
+	// TestSelfMadeCredentialRoutesRefuseOthers (provenance_test.go) drives every route here with the other kinds.
+	if _, err := db.ExecContext(ctx, "UPDATE credentials SET self_made = 1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO private_call_pairs (conversation_id, lo, hi) VALUES (42, ?, ?)`,
-		min(f.alice.ID, bob.ID), max(f.alice.ID, bob.ID)); err != nil {
+	// Conversation 42 is the DM store's own, opened by both people.
+	now := time.Now().UnixMilli()
+	if _, err := db.ExecContext(ctx, `INSERT INTO dm_conversations (id, lo, hi, created_at) VALUES (42, ?, ?, ?)`,
+		min(f.alice.ID, bob.ID), max(f.alice.ID, bob.ID), now); err != nil {
 		t.Fatal(err)
+	}
+	for _, id := range []int64{f.alice.ID, bob.ID} {
+		if _, err := db.ExecContext(ctx, `INSERT INTO dm_viewer_state (principal_id, conversation_id, state, updated_at)
+			VALUES (?, 42, 'open', ?)`, id, now); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return f, bob, bobTok, bobSecondTok
 }
@@ -391,6 +400,12 @@ func TestPrivateCallHTTPBlockDuringRingAndHistory(t *testing.T) {
 	now := time.Now()
 	f.srv.now = func() time.Time { return now }
 
+	// Bob has not been shown the conversation: only a ring publishes it to
+	// him (the DM store's visibility rule), so until then it is, to him, the
+	// not-found of a conversation never issued.
+	if _, err := privateCallFixtureDB(t, f).ExecContext(ctx, "DELETE FROM dm_viewer_state WHERE principal_id = ? AND conversation_id = 42", bob.ID); err != nil {
+		t.Fatal(err)
+	}
 	unknown := f.do(t, "GET", "/v1/dms/43/calls", bobTok, "")
 	assertErrorBody(t, unknown, http.StatusNotFound, schema.ErrorCodeDMNotFound)
 	checkUnknown := func() {
@@ -420,6 +435,9 @@ func TestPrivateCallHTTPBlockDuringRingAndHistory(t *testing.T) {
 	}
 	ring := decodePrivateCallResponse(t, f.do(t, "POST", privateCallTestPair,
 		f.aliceTok, `{"action_id":"ring"}`), http.StatusCreated).Call
+	if rec := f.do(t, "GET", privateCallTestPair, bobTok, ""); rec.Code != http.StatusOK {
+		t.Fatalf("after a ring the callee reads the pair's history: %d %s", rec.Code, rec.Body)
+	}
 	setBlock(f.alice.ID, bob.ID)
 	now = ring.RingDeadline.Time()
 	rec := f.do(t, "POST", "/v1/calls/"+ring.ID+"/accept", bobTok, privateCallTestCommand(ring, "late"))

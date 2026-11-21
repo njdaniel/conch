@@ -1175,7 +1175,14 @@ BEGIN SELECT RAISE(ABORT, 'message removals are permanent'); END`,
 	// 53 (dmMigration): local direct messages (issue #2017, ADR-017). The
 	// statements are in dm_migration.go, beside the store code they serve.
 	dmMigration,
-	// 54 (privateCallMigration): private 1:1 calls (issue #2030, ADR-017).
+	// 54 (dmPolicyMigration): who may contact whom by direct message (issue
+	// #2018, ADR-017 Decisions 4 and 9): principals.dm_allowed, the
+	// operator's per-person switch, 1 for every existing row; and
+	// dm_contact_preferences, a person's own preference, empty (everyone).
+	// The server-wide switch is a server_settings row, absent (on). The
+	// statements are in dm_policy.go.
+	dmPolicyMigrationStatements,
+	// 55 (privateCallMigration): private 1:1 calls (issue #2030, ADR-017).
 	// The statements are in private_call.go.
 	privateCallMigration,
 }

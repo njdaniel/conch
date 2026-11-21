@@ -12,21 +12,18 @@ import (
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
-// privateCallMigration is migration 54 (issue #2030, ADR-017), registered
-// in store.go's migrations after the DM store's 53. It keeps participants, endpoint credentials and retry
+// privateCallMigration is migration 55 (issue #2030, ADR-017), registered
+// in store.go's migrations after the DM store's 53 and the contact policy's
+// 54. It keeps participants, endpoint credentials and retry
 // receipts out of channel voice, presence, and audit data. The DDL is
 // idempotent so migration fixtures can replay older schema changes without
-// dropping the private call tables.
+// dropping the private call tables. The pair an attempt belongs to is the DM
+// store's own conversation (dm_conversations, migration 53), so who may see,
+// invite into or read a pair is decided in one place (dm_visibility.go).
 var privateCallMigration = []string{
-	`CREATE TABLE IF NOT EXISTS private_call_pairs (
-		conversation_id INTEGER PRIMARY KEY CHECK (conversation_id > 0),
-		lo INTEGER NOT NULL REFERENCES principals(id),
-		hi INTEGER NOT NULL REFERENCES principals(id),
-		CHECK (lo < hi), UNIQUE (lo, hi)
-	)`,
 	`CREATE TABLE IF NOT EXISTS private_calls (
 		id TEXT PRIMARY KEY,
-		conversation_id INTEGER NOT NULL REFERENCES private_call_pairs(conversation_id),
+		conversation_id INTEGER NOT NULL REFERENCES dm_conversations(id),
 		caller INTEGER NOT NULL REFERENCES principals(id),
 		callee INTEGER NOT NULL REFERENCES principals(id),
 		caller_credential INTEGER NOT NULL REFERENCES credentials(id),
@@ -163,33 +160,29 @@ func privateCallTimestamp(ms int64) *schema.Timestamp {
 	return &t
 }
 
-// This draft pair lookup only supports isolated call fixtures. Production
-// invites must use the DM store's viewer-scoped lookup in the same transaction.
-func privateCallPeer(ctx context.Context, tx execer, conversationID, participant int64) (int64, error) {
-	var peer int64
-	err := tx.QueryRowContext(ctx, `SELECT CASE WHEN lo = ? THEN hi ELSE lo END
-		FROM private_call_pairs WHERE conversation_id = ? AND ? IN (lo, hi)`,
-		participant, conversationID, participant).Scan(&peer)
-	if errors.Is(err, sql.ErrNoRows) {
+// privateCallPairTx is the one lookup of the pair an invite or a history read
+// is about: the conversation as caller may see it (dmViewTx), and its other
+// person as caller may know them (dmMayKnowTx, the directory's rule, which a
+// resume of a conversation is held to as well). A conversation the caller
+// cannot see, a peer the caller may not know and an id never issued are all
+// the same ErrPrivateCallPair, so nothing tells them apart.
+func privateCallPairTx(ctx context.Context, tx execer, caller, conversationID int64) (int64, error) {
+	row, err := dmViewTx(ctx, tx, caller, conversationID)
+	if errors.Is(err, ErrDMNotFound) {
 		return 0, ErrPrivateCallPair
 	}
-	return peer, err
-}
-
-// The block check and the call transition share a write transaction. Until
-// #1832's schema is present, an invite cannot verify either direction.
-// #2018 must replace this with the shared DM policy before wiring real pairs.
-func privateCallContactAllowed(ctx context.Context, tx execer, from, to int64) (bool, error) {
-	var hasBlocks bool
-	err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'blocks')`).Scan(&hasBlocks)
-	if err != nil || !hasBlocks {
-		return false, err
+	if err != nil {
+		return 0, err
 	}
-	var allowed bool
-	err = tx.QueryRowContext(ctx, `SELECT NOT EXISTS (SELECT 1 FROM blocks
-		WHERE (owner_id = ? AND blocked_id = ?) OR (owner_id = ? AND blocked_id = ?))`,
-		from, to, to, from).Scan(&allowed)
-	return allowed, err
+	peer := row.peer(caller)
+	known, err := dmMayKnowTx(ctx, tx, caller, peer)
+	if err != nil {
+		return 0, err
+	}
+	if !known {
+		return 0, ErrPrivateCallPair
+	}
+	return peer, nil
 }
 
 func privateCallVoiceAllowed(ctx context.Context, tx execer, principalID int64) (bool, error) {
@@ -201,19 +194,13 @@ func privateCallVoiceAllowed(ctx context.Context, tx execer, principalID int64) 
 	return principalPermittedTx(ctx, tx, p, schema.PermUseVoice)
 }
 
-const privateCallOwnCredential = `(c.issued_by IS NULL OR c.issued_by = c.principal_id)
-	AND NOT EXISTS (SELECT 1 FROM sign_in_links l
-		WHERE l.principal_id = c.principal_id AND l.credential_id = c.id AND l.created_by <> c.principal_id)`
-
-// PrivateCallOwnSignIn checks credential provenance before a route reads
-// call or conversation data. A NULL issuer without an operator link is own.
-func (s *Store) PrivateCallOwnSignIn(ctx context.Context, actor PrivateCallActor) (bool, error) {
-	var own bool
-	err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM credentials c
-		WHERE c.id = ? AND c.principal_id = ? AND `+privateCallOwnCredential+`)`,
-		actor.CredentialID, actor.PrincipalID).Scan(&own)
-	return own, err
-}
+// privateCallOwnCredential holds for a credentials row aliased c that its
+// principal made for themselves (credentials.self_made, provenance.go: the
+// one record the route guard reads too), so a callee is rung only on a device
+// that can answer: an act-as credential, one redeemed from a link another
+// made and one from before the provenance migration are not endpoints.
+// #nosec G101 -- an SQL fragment, not a credential.
+const privateCallOwnCredential = `c.self_made = 1`
 
 // A zero credential asks whether the callee has any signed-in device of their
 // own. #2031 can additionally require a recipient reachable by the ring stream.

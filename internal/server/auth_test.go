@@ -315,6 +315,11 @@ var routeExpectations = map[string]routeExpectation{
 	// The events socket (issue #269) needs a channel parameter too, so every
 	// caller who passes authentication gets 400 (AuthOff: sessions_require_auth).
 	"GET /v1/events/ws": {classAuth, "/v1/events/ws", "", 400},
+	// The per-person events socket (issue #2040) takes no parameter, so a
+	// person gets as far as the upgrade and is refused there with 426; an
+	// agent gets 403 (own_sign_in_required today, #2098), a guest 403 and
+	// AuthOff 400 before it (special-cased).
+	"GET /v1/events/person/ws": {classAuth, "/v1/events/person/ws", "", 426},
 	// Sessions (issue #265). Chosen to change and audit nothing: an empty
 	// create is a 400 (a client is required), the session routes use an id
 	// that does not exist, and the list reads a channel every fixture caller
@@ -786,6 +791,17 @@ func TestRoleMatrix(t *testing.T) {
 			if rt.pattern == "GET /v1/admin/actions" || rt.pattern == "POST /v1/admin/actions/{approval_id}/run" {
 				agentWant = http.StatusForbidden
 			}
+			// The per-person stream (issue #2040) is a person's own and is in
+			// selfMadeCredentialRoutes: this fixture's credentials are minted
+			// by "system", which the store records as made by another, so the
+			// member (alice) is refused 403 own_sign_in_required before the
+			// upgrade; the owner's bootstrap credential is their own, and
+			// reaches the upgrade check (426). A self-made credential opening it is covered by
+			// TestPersonStreamWhoMayOpen and TestSelfMadeCredentialRoutesRefuseOthers.
+			var personStreamRefused bool
+			if rt.pattern == "GET /v1/events/person/ws" {
+				agentWant, personStreamRefused = http.StatusForbidden, true
+			}
 			// Signing out (issue #439) succeeds for any member and revokes
 			// the credential it was sent with, so it runs on a fixture of its
 			// own and the other routes' callers stay signed in.
@@ -799,6 +815,12 @@ func TestRoleMatrix(t *testing.T) {
 			operatorWant := exp.allowed
 			if isDeviceLinkRoute(rt.pattern) {
 				agentWant, operatorWant = http.StatusForbidden, http.StatusForbidden
+			}
+			// The call routes (issue #2030) are in selfMadeCredentialRoutes
+			// too: this fixture's member credential, minted by "system", is
+			// refused the same way, by the one guard and before any handler.
+			if personStreamRefused || isPrivateCallRoute(rt.pattern) {
+				memberWant = http.StatusForbidden
 			}
 			cases := []struct {
 				who   string
@@ -901,6 +923,9 @@ func TestAuthOffUnchanged(t *testing.T) {
 				}
 				if isDeviceLinkRoute(rt.pattern) {
 					want = http.StatusForbidden // accounts_require_auth: no account to add a device to
+				}
+				if rt.pattern == "GET /v1/events/person/ws" {
+					want = http.StatusBadRequest // dm_require_auth: no person to hold a stream (issue #2040)
 				}
 				rec := f.do(t, routeMethod(rt.pattern), exp.path, "", exp.body)
 				if rec.Code != want {

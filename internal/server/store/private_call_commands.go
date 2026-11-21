@@ -67,6 +67,22 @@ func (cmd privateCallCommand) remember(ctx context.Context, tx execer, result Pr
 
 // InvitePrivateCall serializes both holder checks with creation of the attempt
 // and its retry receipt. The clock is sampled after obtaining the write lock.
+//
+// An invite is new contact (ADR-017 Decision 3), so it consults the DM
+// policy (dm_policy.go) inside this transaction, in the refusal order of
+// schema/dm.go, each refusal storing nothing:
+//
+//  1. the server's switch and the caller's own are on (dmWriteGateTx,
+//     ErrDMsOff), asked before the conversation is looked up;
+//  2. the conversation is visible to the caller and its peer is known to them
+//     (privateCallPairTx, ErrPrivateCallPair: the answer for an id never
+//     issued);
+//  3. the caller's credential is live (ErrPrivateCallPair);
+//  4. a retry of a recorded invite replays its outcome;
+//  5. otherwise the invite goes ahead, and a callee the caller may not
+//     contact (dmContactTx: a block either way, their switch or preference,
+//     visibility, standing) or cannot ring is an attempt in state
+//     unavailable, never an error that says why (Decision 10).
 func (s *Store) InvitePrivateCall(ctx context.Context, conversationID int64, actor PrivateCallActor, req schema.InvitePrivateCallRequestV1, clock func() time.Time) (PrivateCallResult, error) {
 	if err := req.Validate(); err != nil {
 		return PrivateCallResult{}, err
@@ -74,7 +90,10 @@ func (s *Store) InvitePrivateCall(ctx context.Context, conversationID int64, act
 	var out PrivateCallResult
 	err := s.withImmediateTx(ctx, func(tx execer) error {
 		cmd := privateCallCommand{actor, req.ActionID, schema.PrivateCallEventInvite, strconv.FormatInt(conversationID, 10), clock().Truncate(time.Millisecond)}
-		peer, err := privateCallPeer(ctx, tx, conversationID, actor.PrincipalID)
+		if err := dmWriteGateTx(ctx, tx, actor.PrincipalID); err != nil {
+			return err
+		}
+		peer, err := privateCallPairTx(ctx, tx, actor.PrincipalID, conversationID)
 		if err != nil {
 			return err
 		}
@@ -150,11 +169,30 @@ func (cmd privateCallCommand) invite(ctx context.Context, tx execer, conversatio
 		event = schema.PrivateCallEventInvite
 	}
 	c, err := createPrivateCall(ctx, tx, conversationID, cmd.actor, peer, event, cmd.now)
-	return PrivateCallResult{Created: true, PrivateCallResponseV1: schema.PrivateCallResponseV1{Call: c.view(cmd.actor)}}, err
+	if err != nil {
+		return PrivateCallResult{}, err
+	}
+	if available {
+		// Only an invite that rings publishes the conversation to the callee
+		// (schema/private_call.go): an unavailable one leaves their inbox as
+		// it was. A conversation they hid is shown again, as a message does.
+		if _, err := tx.ExecContext(ctx, `INSERT INTO dm_viewer_state (principal_id, conversation_id, state, updated_at)
+			VALUES (?, ?, 'open', ?)
+			ON CONFLICT (principal_id, conversation_id) DO UPDATE SET state = 'open', updated_at = excluded.updated_at
+			WHERE dm_viewer_state.state = 'hidden'`, peer, conversationID, cmd.now.UnixMilli()); err != nil {
+			return PrivateCallResult{}, err
+		}
+	}
+	return PrivateCallResult{Created: true, PrivateCallResponseV1: schema.PrivateCallResponseV1{Call: c.view(cmd.actor)}}, nil
 }
 
 func (cmd privateCallCommand) calleeAvailable(ctx context.Context, tx execer, peer int64) (bool, error) {
-	if allowed, err := privateCallContactAllowed(ctx, tx, cmd.actor.PrincipalID, peer); !allowed || err != nil {
+	// The policy's one answer: a call is new contact (dmContactTx). Its
+	// refusal, whatever the reason, is "cannot be rung", not an error.
+	switch err := dmContactTx(ctx, tx, cmd.actor.PrincipalID, peer, dmActCall); {
+	case errors.Is(err, ErrDMContactUnavailable):
+		return false, nil
+	case err != nil:
 		return false, err
 	}
 	if allowed, err := privateCallVoiceAllowed(ctx, tx, peer); !allowed || err != nil {

@@ -36,16 +36,21 @@ func dmObjectNames(t *testing.T, s *Store) []string {
 
 var wantDMTables = []string{
 	"direct_message_removals", "direct_message_revisions", "direct_messages", "direct_messages_fts",
-	"dm_conversations", "dm_files", "dm_read_marks", "dm_viewer_state",
+	"dm_contact_preferences", "dm_conversations", "dm_files", "dm_read_marks", "dm_viewer_state",
 }
 
-// dmDropStatements undo migration 51, children before parents. The tests
+// dmDropStatements undo migrations 55, 54 and 53, children before parents. The tests
 // that rewind a database to an older version to run a migration on it (the
 // topic, community, issued-by and author-removal ones) run them first, as each
 // later migration's author has added theirs: the rewind must leave no object
 // of a migration the old version has not made.
 var dmDropStatements = []string{
-	"DROP TABLE direct_messages_fts", // migration 53 (issue #2017)
+	"DROP TABLE private_call_actions", // migration 55 (issue #2030)
+	"DROP TABLE private_call_holders",
+	"DROP TABLE private_calls",
+	"DROP TABLE dm_contact_preferences",             // migration 54 (issue #2018)
+	"ALTER TABLE principals DROP COLUMN dm_allowed", // migration 54
+	"DROP TABLE direct_messages_fts",                // migration 53 (issue #2017)
 	"DROP TABLE dm_read_marks",
 	"DROP TABLE dm_files",
 	"DROP TABLE direct_message_removals",
@@ -56,8 +61,8 @@ var dmDropStatements = []string{
 }
 
 // dropDMObjects returns a migrated database to its state before migration 53:
-// the migration only adds tables, so removing them (and the triggers that go
-// with them) and the version is that state.
+// migrations 53, 54 and 55 only add tables and a column, so removing them (and
+// the triggers that go with them) and the version is that state.
 func dropDMObjects(t *testing.T, s *Store, version int) {
 	t.Helper()
 	for _, stmt := range dmDropStatements {
@@ -67,6 +72,24 @@ func dropDMObjects(t *testing.T, s *Store, version int) {
 	}
 	if _, err := s.db.Exec("PRAGMA user_version = " + strconv.Itoa(version)); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestPrivateCallMigrationFollowsThePolicyMigration pins the order the
+// migrations were registered in: the DM store's 53, the contact policy's
+// dmPolicyMigration (54) and the private calls' (55), last.
+func TestPrivateCallMigrationFollowsThePolicyMigration(t *testing.T) {
+	at := func(n int, want []string) {
+		t.Helper()
+		if got := migrations[n-1]; len(got) == 0 || len(want) == 0 || &got[0] != &want[0] {
+			t.Errorf("migration %d is not the one registered for it", n)
+		}
+	}
+	at(dmPolicyMigration-1, dmMigration)
+	at(dmPolicyMigration, dmPolicyMigrationStatements)
+	at(dmPolicyMigration+1, privateCallMigration)
+	if len(migrations) != dmPolicyMigration+1 {
+		t.Errorf("%d migrations; the private calls' is meant to be last, at %d", len(migrations), dmPolicyMigration+1)
 	}
 }
 
@@ -167,7 +190,7 @@ func TestDMMigrationUpgradeReopenAndRestore(t *testing.T) {
 	}
 
 	// Make it a database from before migration 53, the DM store: found by
-	// position, since later migrations (54, the private calls) follow it.
+	// position, since later migrations (54, the contact policy; 55, the private calls) follow it.
 	preDM := -1
 	for i, m := range migrations {
 		if len(m) > 0 && &m[0] == &dmMigration[0] {

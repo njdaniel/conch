@@ -55,7 +55,10 @@ func privateCallStillAllowed(ctx context.Context, tx execer, c privateCall, now 
 			}
 		}
 	}
-	return privateCallContactAllowed(ctx, tx, c.CallerID, c.CalleeID)
+	// Design §4.1's "revoked" row: no block either way, both standing, DMs on
+	// for both and for the server. A preference or a visibility change does
+	// not end a call already rung; it refuses the next invite (dmContactTx).
+	return dmPairReachableTx(ctx, tx, c.CallerID, c.CalleeID)
 }
 
 func privateCallDeadlineEvent(c privateCall, now time.Time) string {

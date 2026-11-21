@@ -49,7 +49,8 @@ var (
 	ErrDMNonceConflict = errors.New("store: direct message client nonce already used for a different message")
 )
 
-// dmAct is what dmContactTx is asked about.
+// dmAct is what dmContactTx (dm_policy.go) is asked about. Every act has the
+// same rules; it names the caller's purpose.
 type dmAct int
 
 const (
@@ -58,43 +59,32 @@ const (
 	dmActOpen dmAct = iota
 	// dmActSend is a send or an edit.
 	dmActSend
+	// dmActCall is a private call invite (ADR-017 Decision 3).
+	dmActCall
 )
-
-// dmContactTx is the single seam of eligibility: whether from may contact to
-// now, for a new conversation or a write. It is called inside the write's
-// transaction, after from has been shown to stand. An open applies this check
-// to every pair the caller cannot already see, including a peer's silent open.
-//
-// Today it checks the one thing the tables decide: to is a human, is enabled
-// and is not a guest. Blocks (#1832), the recipient's contact preference, the
-// operator's and the server's switches and mutual visibility on a
-// hide_members server are #2018's, and go here and nowhere else; so does
-// anything that must read other tables to decide. The answer is one error for
-// every reason, ErrDMContactUnavailable. Act-as credentials are a property of
-// a request, not of the store, and are refused by the routes.
-func dmContactTx(ctx context.Context, tx execer, from, to int64, act dmAct) error {
-	_ = from
-	_ = act
-	ok, err := dmViewerStandsTx(ctx, tx, to)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return ErrDMContactUnavailable
-	}
-	return nil
-}
 
 // OpenDM opens or resumes the conversation between caller and peer and
 // returns the caller's view. An IMMEDIATE transaction ensures simultaneous
 // opens of the same pair return one id and a failed open leaves no changes.
 //
-// The checks, in order, each refusal storing nothing:
+// The checks, in the refusal order of schema/dm.go (design §3.1), each
+// refusal storing nothing:
 //
 //  1. caller stands (ErrDMNoStanding);
-//  2. peer is not caller (ErrDMSelf), exists and has not ended a guest visit
-//     (ErrPrincipalNotFound), and is a human (ErrDMNotHuman);
-//  3. an open of a conversation the caller cannot already see needs
+//  2. unless the caller can already see a conversation with peer (a resume,
+//     which is exempt), the server's switch and the caller's own are on
+//     (dmWriteGateTx, ErrDMsOff). It is asked before peer is looked up, so
+//     it says nothing about peer;
+//  3. peer is not caller (ErrDMSelf);
+//  4. peer is visible to the caller: it exists, is not hidden, has not ended
+//     a guest visit, and the directory's rule lets the caller know it
+//     (knownPrincipalsSQL). Any of these failing is ErrPrincipalNotFound,
+//     the very error of an id never issued, from one statement, so a
+//     hidden principal and a nonexistent one cannot be told apart. It holds
+//     for a resume too: a peer the caller may no longer know is not found
+//     by id, though the conversation still reads by its own id;
+//  5. peer is a human (ErrDMNotHuman);
+//  6. an open of a conversation the caller cannot already see needs
 //     dmContactTx (ErrDMContactUnavailable).
 //
 // Opening records the caller's view, reopens it if hidden, and preserves an
@@ -117,12 +107,28 @@ func openDMTx(ctx context.Context, tx execer, caller, peer int64, now time.Time)
 	} else if !ok {
 		return DMConversation{}, ErrDMNoStanding
 	}
+	// A pair the caller can already see: only the caller's own view decides
+	// whether the write gate applies, so asking tells them nothing new.
+	id, err := dmPairTx(ctx, tx, caller, peer, true)
+	if err != nil {
+		return DMConversation{}, err
+	}
+	if id == 0 {
+		if err := dmWriteGateTx(ctx, tx, caller); err != nil {
+			return DMConversation{}, err
+		}
+	}
 	if caller == peer {
 		return DMConversation{}, ErrDMSelf
 	}
+	seeAll, err := permittedTx(ctx, tx, caller, schema.PermSeeMemberDirectory)
+	if err != nil {
+		return DMConversation{}, err
+	}
+	cond, args, _ := knownPrincipalsSQL(caller, seeAll)
 	var kind string
-	switch err := tx.QueryRowContext(ctx, `SELECT p.kind FROM principals p WHERE p.id = ?
-		AND NOT EXISTS (SELECT 1 FROM guest_visits v WHERE v.principal_id = p.id AND v.state = 'ended')`, peer).Scan(&kind); {
+	switch err := tx.QueryRowContext(ctx, `SELECT p.kind FROM principals p WHERE p.id = ? AND `+dmLivePrincipalCond+` AND (`+cond+`)`, // #nosec G202 -- every fragment is a constant
+		append([]any{peer}, args...)...).Scan(&kind); {
 	case errors.Is(err, sql.ErrNoRows):
 		return DMConversation{}, ErrPrincipalNotFound
 	case err != nil:
@@ -130,10 +136,6 @@ func openDMTx(ctx context.Context, tx execer, caller, peer int64, now time.Time)
 	}
 	if PrincipalKind(kind) != PrincipalHuman {
 		return DMConversation{}, ErrDMNotHuman
-	}
-	id, err := dmPairTx(ctx, tx, caller, peer, true)
-	if err != nil {
-		return DMConversation{}, err
 	}
 	if id == 0 {
 		if err := dmContactTx(ctx, tx, caller, peer, dmActOpen); err != nil {
@@ -246,6 +248,9 @@ type DMPost struct {
 // earlier send instead. One IMMEDIATE transaction, the checks in order, each
 // refusal storing nothing:
 //
+//  0. the server's switch and the author's own are on (dmWriteGateTx,
+//     ErrDMsOff), asked before the conversation is looked up, so a send to
+//     one that does not exist is ErrDMsOff too (schema/dm.go's order);
 //  1. the author may see the conversation (ErrDMNotFound) and the body is
 //     not empty or only white space (ErrDMEmptyBody);
 //  2. the author may contact the peer now (dmContactTx, ErrDMContactUnavailable);
@@ -261,6 +266,9 @@ type DMPost struct {
 func (s *Store) InsertDMMessage(ctx context.Context, post DMPost, now time.Time) (msg DMMessage, replayed bool, err error) {
 	now = now.Truncate(time.Millisecond)
 	err = s.withImmediateTx(ctx, func(tx execer) error {
+		if err := dmWriteGateTx(ctx, tx, post.AuthorID); err != nil {
+			return err
+		}
 		row, err := dmViewTx(ctx, tx, post.AuthorID, post.ConversationID)
 		if err != nil {
 			return err
@@ -344,6 +352,8 @@ type DMMessageEdit struct {
 // message, in one IMMEDIATE transaction and in this order, each refusal
 // storing nothing:
 //
+//  0. the server's switch and the editor's own are on (dmWriteGateTx,
+//     ErrDMsOff), asked before the conversation is looked up;
 //  1. editor may see the conversation (ErrDMNotFound);
 //  2. the message is in it (ErrMessageNotFound), and editor wrote it
 //     (ErrDMNotAuthor);
@@ -363,6 +373,9 @@ type DMMessageEdit struct {
 func (s *Store) EditDMMessage(ctx context.Context, editor, convID, messageID int64, body string, clock func() time.Time) (DMMessageEdit, error) {
 	var out DMMessageEdit
 	err := s.withImmediateTx(ctx, func(tx execer) error {
+		if err := dmWriteGateTx(ctx, tx, editor); err != nil {
+			return err
+		}
 		row, err := dmViewTx(ctx, tx, editor, convID)
 		if err != nil {
 			return err

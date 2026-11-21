@@ -20,24 +20,17 @@ func (s *Server) privateCallActor(w http.ResponseWriter, r *http.Request) (store
 	p, ok := callerFrom(r.Context())
 	credentialID, authenticated := credentialIDFrom(r.Context())
 	if !ok || !authenticated {
-		writeError(w, http.StatusBadRequest, schema.ErrorCodeDMRequireAuth, "private calls require authentication")
+		writeDMRefusal(w, http.StatusBadRequest, schema.ErrorCodeDMRequireAuth)
 		return store.PrivateCallActor{}, false
 	}
 	if p.Kind != store.PrincipalHuman || (p.GuestState != "" && p.GuestState != schema.GuestStateConverted) {
 		writeError(w, http.StatusForbidden, errForbidden.Code, "private calls require a human member")
 		return store.PrivateCallActor{}, false
 	}
-	actor := store.PrivateCallActor{PrincipalID: p.ID, CredentialID: credentialID}
-	own, err := s.store.PrivateCallOwnSignIn(r.Context(), actor)
-	if err != nil {
-		writePrivateCallResult(w, r, store.PrivateCallResult{}, err)
-		return store.PrivateCallActor{}, false
-	}
-	if !own {
-		writeError(w, http.StatusForbidden, schema.ErrorCodeOwnSignInRequired, "sign in with your own account")
-		return store.PrivateCallActor{}, false
-	}
-	return actor, true
+	// An act-as credential (and an agent) never gets here: every call route is
+	// in selfMadeCredentialRoutes (provenance.go), whose one guard refuses it
+	// with 403 own_sign_in_required before this runs.
+	return store.PrivateCallActor{PrincipalID: p.ID, CredentialID: credentialID}, true
 }
 
 func privateCallConversationID(w http.ResponseWriter, r *http.Request) (int64, bool) {
@@ -137,7 +130,9 @@ func (s *Server) handleListPrivateCalls(w http.ResponseWriter, r *http.Request) 
 func writePrivateCallResult(w http.ResponseWriter, r *http.Request, out store.PrivateCallResult, err error) {
 	switch {
 	case errors.Is(err, store.ErrPrivateCallPair):
-		writeError(w, http.StatusNotFound, schema.ErrorCodeDMNotFound, "conversation not found")
+		writeDMRefusal(w, http.StatusNotFound, schema.ErrorCodeDMNotFound)
+	case errors.Is(err, store.ErrDMsOff):
+		writeDMRefusal(w, http.StatusForbidden, schema.ErrorCodeDMsOff)
 	case errors.Is(err, store.ErrPrivateCallNotFound):
 		writeError(w, http.StatusNotFound, schema.ErrorCodeCallNotFound, "call not found")
 	case errors.Is(err, store.ErrPrivateCallActor):
@@ -150,6 +145,13 @@ func writePrivateCallResult(w http.ResponseWriter, r *http.Request, out store.Pr
 	default:
 		writePrivateCallCommand(w, out)
 	}
+}
+
+// writeDMRefusal answers with the one fixed body of a DM refusal code
+// (schema.DMRefusalError), never built from the input.
+func writeDMRefusal(w http.ResponseWriter, status int, code string) {
+	body, _ := schema.DMRefusalError(code)
+	writeError(w, status, body.Code, body.Message)
 }
 
 func writePrivateCallCommand(w http.ResponseWriter, out store.PrivateCallResult) {

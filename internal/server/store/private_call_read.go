@@ -44,20 +44,11 @@ func (s *Store) ListPrivateCalls(ctx context.Context, conversationID int64, acto
 	} else if !live {
 		return out, ErrPrivateCallPair
 	}
-	// Pair membership on its own says nothing about whether this person has
-	// seen this conversation. Until the DM visibility check is wired, only a
-	// call visible to this viewer can establish that they know the pair.
-	var known bool
-	err = tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM private_call_pairs p
-		WHERE p.conversation_id = ?1 AND ?2 IN (p.lo, p.hi) AND EXISTS (
-			SELECT 1 FROM private_calls c WHERE c.conversation_id = p.conversation_id
-			AND (c.caller = ?2 OR (c.callee = ?2 AND c.state <> 'unavailable'))))`,
-		conversationID, actor.PrincipalID).Scan(&known)
-	if err != nil {
+	// History is a read of the pair: the conversation must be visible to
+	// this person and its peer known to them, the same lookup as an invite
+	// (a read needs no contact eligibility, only standing and the pair).
+	if _, err := privateCallPairTx(ctx, tx, actor.PrincipalID, conversationID); err != nil {
 		return out, err
-	}
-	if !known {
-		return out, ErrPrivateCallPair
 	}
 	rows, err := privateCallHistoryRows(ctx, tx, conversationID, actor.PrincipalID, cursor)
 	if err != nil {
