@@ -2,7 +2,7 @@
 // runtime-directory checks, conch/<profile-id>, the sun_path budget, binding
 // a random name with a fresh one on a squat or EACCES, the stale sweep, and
 // the attach. Every test runs in a private scratch directory; nothing here
-// needs a network or a helper.
+// needs a network or a helper. The Unix attach tests also run on macOS.
 import { chmodSync, existsSync, linkSync, mkdirSync, readdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { connect, createServer, type Server, type Socket } from 'node:net';
 import { join } from 'node:path';
@@ -13,8 +13,9 @@ import { EndpointError, listen, profileDir, runtimeDir, sweep, type Listening } 
 import { fixture, readFixture, scratch, until, type Scratch } from './voice-support.ts';
 
 let s: Scratch;
+const describeLinux = describe.skipIf(process.platform !== 'linux');
 beforeEach(() => {
-  s = scratch();
+  s = scratch('/tmp');
 });
 afterEach(() => {
   s.cleanup();
@@ -29,7 +30,7 @@ async function reason(p: Promise<unknown>): Promise<string> {
   }
 }
 
-describe('the runtime directory', () => {
+describeLinux('the runtime directory', () => {
   it('is the verified XDG_RUNTIME_DIR', async () => {
     expect(await runtimeDir({ XDG_RUNTIME_DIR: s.run })).toBe(s.run);
   });
@@ -73,7 +74,7 @@ describe('the runtime directory', () => {
   });
 });
 
-describe('the profile directory', () => {
+describeLinux('the profile directory', () => {
   it('is conch/<profile-id>, each level 0o700', async () => {
     const dir = await profileDir(s.run, 'p1');
     expect(dir).toBe(join(s.run, 'conch', 'p1'));
@@ -92,7 +93,7 @@ describe('the profile directory', () => {
   });
 });
 
-describe('the socket', () => {
+describeLinux('the socket', () => {
   it('is bound under the profile directory with a random name, and its path is unlinked on close', async () => {
     const dir = await profileDir(s.run, 'p1');
     const l = await listen(dir);
@@ -151,7 +152,7 @@ describe('the socket', () => {
   });
 });
 
-describe('the stale sweep', () => {
+describeLinux('the stale sweep', () => {
   it('removes only socket entries of this directory, follows no link and never leaves it', async () => {
     const dir = await profileDir(s.run, 'p1');
     // A stale socket: bound, linked to a second name, and the first closed
@@ -185,7 +186,7 @@ describe('the attach', () => {
   let l: Listening;
   const clients: { socket: Socket; received: number }[] = [];
   beforeEach(async () => {
-    l = await listen(await profileDir(s.run, 'p1'));
+    l = await listen(s.run);
   });
   afterEach(() => {
     l.close();
@@ -275,7 +276,7 @@ describe('the attach', () => {
 
   it('the nonce is in no log line and no error', async () => {
     const logs: string[] = [];
-    const ll = await listen(await profileDir(s.run, 'p2'), { log: (x) => logs.push(x) });
+    const ll = await listen(s.config, { log: (x) => logs.push(x) });
     const c = connect(ll.path);
     c.on('error', () => undefined);
     c.write(attachedLine(other));

@@ -1,5 +1,5 @@
-// MF7 (macos-desktop.md §3): use the Darwin rules with a fake TMPDIR on
-// either Unix host. Only the listener cleanup test needs real Unix sockets.
+// MF7 (macos-desktop.md §3): use the Darwin rules with fake system utilities
+// on either Unix host. Only the listener cleanup test needs real Unix sockets.
 import { chmodSync, existsSync, mkdirSync, readdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { connect } from 'node:net';
 import { dirname, join } from 'node:path';
@@ -16,23 +16,46 @@ const attached = readFixture<{ nonce: string }>('voice-control-pipe/attached.jso
 
 describe('macOS endpoint', () => {
   let s: Scratch;
-  beforeEach(() => { s = scratch(); });
+  beforeEach(() => { s = scratch('/tmp'); });
   afterEach(() => { s.cleanup(); });
 
-  function open(temp: string | undefined, deps: EndpointDeps = {}, profileId = longId) {
-    return listenUnix({ TMPDIR: temp, XDG_RUNTIME_DIR: s.config }, profileId, { ...mac, ...deps });
+  const noAcl = 'drwx------  2 user staff  64 Nov 20 12:00';
+
+  function systemUtilities(temp: string | undefined, list = (dir: string) => `${noAcl} ${dir}\n`) {
+    return vi.fn((file: string, args: string[]) => {
+      if (file === '/usr/bin/getconf') {
+        expect(args).toEqual(['DARWIN_USER_TEMP_DIR']);
+        if (temp === undefined) return Promise.reject(new Error('getconf unavailable'));
+        return Promise.resolve(`${temp}\n`);
+      }
+      expect(file).toBe('/bin/ls');
+      expect(args).toEqual(['-lde', expect.any(String)]);
+      return Promise.resolve().then(() => list(args[1] ?? ''));
+    });
   }
 
-  it('uses <TMPDIR>/conch at 0o700 for a 64-byte profile id', async () => {
+  function open(temp: string | undefined, deps: EndpointDeps = {}, profileId = longId) {
+    return listenUnix({ TMPDIR: s.config, XDG_RUNTIME_DIR: s.config }, profileId, {
+      ...mac, execFile: systemUtilities(temp), ...deps,
+    });
+  }
+
+  it('uses the system temp directory for a 64-byte profile id and ignores TMPDIR', async () => {
     const bind = vi.fn(() => Promise.resolve());
     const parent = join(s.run, 'conch');
     mkdirSync(parent, { mode: 0o500 });
-    const endpoint = await open(`${s.run}/`, { listen: bind });
+    const execFile = systemUtilities(`${s.run}/`);
+    const endpoint = await open(`${s.run}/`, { execFile, listen: bind });
     try {
       expect(dirname(endpoint.path)).toBe(parent);
       expect(endpoint.path).toMatch(/\/e-[\w-]{12}\.sock$/);
       expect(Buffer.byteLength(endpoint.path)).toBeLessThanOrEqual(103);
       expect(bind).toHaveBeenCalledExactlyOnceWith(expect.anything(), endpoint.path);
+      expect(execFile.mock.calls).toEqual([
+        ['/usr/bin/getconf', ['DARWIN_USER_TEMP_DIR']],
+        ['/bin/ls', ['-lde', s.run]],
+        ['/bin/ls', ['-lde', parent]],
+      ]);
       expect(statSync(parent).mode & 0o777).toBe(0o700);
       expect(readdirSync(parent)).toEqual([]);
       expect(readdirSync(s.config)).toEqual([]);
@@ -46,14 +69,14 @@ describe('macOS endpoint', () => {
     ['', 'runtime-dir-unset'],
     ['relative', 'runtime-dir-not-absolute'],
     ['/has\0nul', 'runtime-dir-not-absolute'],
-  ])('refuses an unusable TMPDIR (%j) before bind', async (temp, reason) => {
+  ])('refuses an unusable getconf result (%j) before bind', async (temp, reason) => {
     const bind = vi.fn(() => Promise.resolve());
     await expect(open(temp, { listen: bind })).rejects.toMatchObject({ reason });
     expect(bind).not.toHaveBeenCalled();
     expect(readdirSync(s.config)).toEqual([]);
   });
 
-  it('checks TMPDIR ownership, permissions and file type before creating conch', async () => {
+  it('checks system temp ownership, exact mode and file type before creating conch', async () => {
     const bind = vi.fn(() => Promise.resolve());
     const uid = statSync(s.run).uid;
     const file = join(s.root, 'file');
@@ -66,8 +89,47 @@ describe('macOS endpoint', () => {
     await expect(open(s.run, { listen: bind, uid: uid + 1 })).rejects.toMatchObject({ reason: 'runtime-dir-not-owned' });
     chmodSync(s.run, 0o750);
     await expect(open(s.run, { listen: bind })).rejects.toMatchObject({ reason: 'runtime-dir-not-private' });
+    chmodSync(s.run, 0o500);
+    await expect(open(s.run, { listen: bind })).rejects.toMatchObject({ reason: 'runtime-dir-not-private' });
     expect(bind).not.toHaveBeenCalled();
     expect(readdirSync(s.run)).toEqual([]);
+  });
+
+  it.each([
+    ['temp', 'runtime-dir-not-private'],
+    ['conch', 'profile-dir-unsafe'],
+  ])('refuses an ACL or failed ACL inspection on the %s directory', async (target, reason) => {
+    const bind = vi.fn(() => Promise.resolve());
+    const conch = join(s.run, 'conch');
+    const checkedDir = target === 'temp' ? s.run : conch;
+    const listings = [
+      `drwx------+  2 user staff  64 Nov 20 12:00 ${checkedDir}\n`,
+      `drwx------@  2 user staff  64 Nov 20 12:00 ${checkedDir}\n 0: user:other inherited allow search,file_inherit\n`,
+      '',
+      null,
+    ];
+    for (const listing of listings) {
+      const execFile = systemUtilities(s.run, (dir) => {
+        if (dir !== checkedDir) return `${noAcl} ${dir}\n`;
+        if (listing === null) throw new Error('ls unavailable');
+        return listing;
+      });
+      await expect(open(s.run, { execFile, listen: bind })).rejects.toMatchObject({ reason });
+      expect(execFile).toHaveBeenLastCalledWith('/bin/ls', ['-lde', checkedDir]);
+    }
+    expect(bind).not.toHaveBeenCalled();
+    if (target === 'temp') expect(existsSync(conch)).toBe(false);
+  });
+
+  it('accepts an extended-attributes marker with no ACL lines', async () => {
+    const bind = vi.fn(() => Promise.resolve());
+    const execFile = systemUtilities(s.run, (dir) => `drwx------@  2 user staff  64 Nov 20 12:00 ${dir}\n`);
+    const endpoint = await open(s.run, { execFile, listen: bind });
+    try {
+      expect(bind).toHaveBeenCalledExactlyOnceWith(expect.anything(), endpoint.path);
+    } finally {
+      endpoint.close();
+    }
   });
 
   it('refuses an invalid profile id or an unsafe shared parent', async () => {

@@ -27,6 +27,7 @@
 // case-sensitive CONCH_ filter would let Conch_Token through); and the
 // working directory is the system root, not /.
 import {
+  execFile,
   spawn as nodeSpawn,
   type ChildProcessByStdio,
   type ChildProcessWithoutNullStreams,
@@ -37,6 +38,7 @@ import {
 import { lstat, realpath } from 'node:fs/promises';
 import { dirname, isAbsolute, join, sep } from 'node:path';
 import type { Readable } from 'node:stream';
+import { promisify } from 'node:util';
 
 import {
   VOICE_CONTROL_PIPE_FLAG,
@@ -57,6 +59,13 @@ export function helperName(platform: NodeJS.Platform = process.platform): string
 
 const TOKEN_ENV = 'CONCH_TOKEN';
 const CONFIG_DIR_ENV = 'CONCH_CONFIG_DIR';
+const execFileAsync = promisify(execFile);
+
+export async function runDarwinTempUtility(file: '/usr/bin/getconf' | '/bin/ls', args: string[]): Promise<string> {
+  const { stdout, stderr } = await execFileAsync(file, args, { env: { LC_ALL: 'C' }, timeout: 5000, maxBuffer: 16_384 });
+  if (stderr !== '') throw new Error('voice: runtime directory check failed');
+  return stdout;
+}
 
 // PASSED_THROUGH names the Linux variables the helper may inherit: what it
 // and its libraries need to find the user's home, PipeWire and the locale.
@@ -102,12 +111,16 @@ export class HelperError extends Error {
   }
 }
 
+type AncestorStat = (path: string) => Promise<{ mode: number; uid: number; gid: number; isDirectory(): boolean }>;
+
 export interface FindDeps {
   // The uid the ownership checks compare against (a test stands in for
   // another user).
   readonly uid?: number;
   // The platform whose rules apply; process.platform by default.
   readonly platform?: NodeJS.Platform;
+  // Supplies ancestor metadata in tests without changing filesystem ownership.
+  readonly ancestorStat?: AncestorStat;
 }
 
 function codeOf(err: unknown): string {
@@ -121,13 +134,14 @@ function safeOwner(uid: number, own: number): boolean {
 // findHelper returns the bundled executable to run: <resources>/conch-voice,
 // an absolute path whose real location is inside the resources directory, a
 // regular file (not a link), executable, owned by the user or root and not
-// writable by group or others, in a directory with the same ownership and
-// write rules. A missing file is not-installed; anything else that fails is
+// writable by group or others, in a directory checked by safeAncestors.
+// A missing file is not-installed; anything else that fails is
 // untrusted, and nothing else is tried in its place.
-// scripts/desktop-deb-lifecycle.sh check_helper mirrors these rules; change both.
+// scripts/desktop-deb-lifecycle.sh check_helper mirrors the Linux rules.
 export async function findHelper(resources: string, deps: FindDeps = {}): Promise<string> {
   if (!isAbsolute(resources) || resources.includes('\0')) throw new HelperError('untrusted', 'the resources directory is not an absolute path');
-  if ((deps.platform ?? process.platform) === 'win32') return findHelperWindows(resources);
+  const platform = deps.platform ?? process.platform;
+  if (platform === 'win32') return findHelperWindows(resources);
   const own = deps.uid ?? (typeof process.getuid === 'function' ? process.getuid() : -1);
   const candidate = join(resources, HELPER_NAME);
   let st;
@@ -150,7 +164,7 @@ export async function findHelper(resources: string, deps: FindDeps = {}): Promis
     throw new HelperError('untrusted', 'the voice helper cannot be resolved');
   }
   if (!real.startsWith(realResources + sep)) throw new HelperError('untrusted', "the voice helper is not inside the app's resources");
-  await safeAncestors(dirname(real), own);
+  await safeAncestors(dirname(real), own, platform, deps.ancestorStat ?? lstat);
   return real;
 }
 
@@ -186,7 +200,8 @@ async function findHelperWindows(resources: string): Promise<string> {
 
 // safeAncestors checks every directory from dir up to /: each must be a
 // directory owned by the user or root, and either closed to writes by group
-// and others, or sticky and owned by root. Otherwise another user could
+// and others, sticky and owned by root, or writable only by root and its
+// trusted admin or wheel group on macOS. Otherwise another user could
 // rename a directory on the way and put another tree, or another
 // conch-voice, where the checked one was between the check and the spawn.
 //
@@ -205,20 +220,23 @@ function shown(path: string): string {
   return path.replace(/[^\x20-\x7e]/g, '?');
 }
 
-async function safeAncestors(dir: string, own: number): Promise<void> {
+async function safeAncestors(dir: string, own: number, platform: NodeJS.Platform, stat: AncestorStat): Promise<void> {
   let at = dir;
   for (;;) {
     let st;
     try {
-      st = await lstat(at);
+      st = await stat(at);
     } catch {
       throw new HelperError('untrusted', `${shown(at)} above the voice helper cannot be read`);
     }
     const closed = (st.mode & 0o022) === 0;
     const rootSticky = (st.mode & 0o1000) !== 0 && st.uid === 0;
+    // /Applications can be root:admin 0775. Both groups are trusted only
+    // for root-owned directories on macOS, and only with world writes off.
+    const darwinSystemGroup = platform === 'darwin' && st.uid === 0 && (st.gid === 80 || st.gid === 0) && (st.mode & 0o002) === 0;
     if (!st.isDirectory()) throw new HelperError('untrusted', `${shown(at)} is not a directory`);
     if (!safeOwner(st.uid, own)) throw new HelperError('untrusted', `${shown(at)} is not owned by you or by root`);
-    if (!(closed || rootSticky)) throw new HelperError('untrusted', `${shown(at)} may be changed by other users`, 'folder-writable');
+    if (!(closed || rootSticky || darwinSystemGroup)) throw new HelperError('untrusted', `${shown(at)} may be changed by other users`, 'folder-writable');
     const up = dirname(at);
     if (up === at) return;
     at = up;

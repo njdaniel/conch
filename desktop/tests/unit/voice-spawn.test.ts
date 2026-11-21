@@ -1,6 +1,6 @@
 // Which conch-voice may be run, the environment it gets and how it is
 // spawned (issue #948; linux-desktop.md §4.1, §5.3).
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -79,6 +79,33 @@ describe('the bundled executable', () => {
     expect(await refusal(findHelper(s.resources))).toBe('untrusted');
   });
 
+  it.each([
+    ['darwin', 'root', 80, 0o775, true],
+    ['darwin', 'root', 0, 0o775, true],
+    ['darwin', 'root', 20, 0o775, false],
+    ['darwin', 'user', 80, 0o775, false],
+    ['darwin', 'root', 80, 0o777, false],
+    ['linux', 'root', 80, 0o775, false],
+    ['linux', 'root', 0, 0o775, false],
+  ] as const)('%s checks a %s-owned ancestor with gid %i, mode %i (trusted: %s)', async (platform, owner, gid, mode, trusted) => {
+    const executable = realpathSync(install());
+    const ancestor = realpathSync(s.root);
+    const uid = process.getuid?.() || 501;
+    const found = findHelper(s.resources, {
+      platform,
+      uid,
+      ancestorStat: (dir) => Promise.resolve({
+        ...(dir === ancestor ? { uid: owner === 'root' ? 0 : uid, gid, mode } : { uid: 0, gid: 0, mode: 0o755 }),
+        isDirectory: () => true,
+      }),
+    });
+    if (trusted) {
+      await expect(found).resolves.toBe(executable);
+    } else {
+      await expect(found).rejects.toMatchObject({ reason: 'untrusted', trustCause: 'folder-writable' });
+    }
+  });
+
   it('a sticky directory above it that is not root-owned is refused', async () => {
     install();
     chmodSync(s.root, 0o1777);
@@ -86,7 +113,7 @@ describe('the bundled executable', () => {
   });
 
   it('a root-owned sticky directory above it (/tmp) is accepted', async () => {
-    const tmp = lstatSync('/tmp');
+    const tmp = lstatSync(realpathSync('/tmp'));
     expect(tmp.uid === 0 && (tmp.mode & 0o1002) === 0o1002, '/tmp is root-owned, sticky and world-writable').toBe(true);
     const base = mkdtempSync('/tmp/conch-voice-sticky-');
     try {

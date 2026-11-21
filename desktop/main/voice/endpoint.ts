@@ -3,9 +3,10 @@
 // attach line #893): a verified runtime directory, a Unix socket bound under
 // it, and the attach that binds the one connection to the spawn.
 //
-// On macOS (issue #1743; macos-desktop.md §3.3) the owner verifies TMPDIR
-// and binds in its shared conch directory. Each listener owns its random
-// socket path, so the owner leaves every other entry alone.
+// On macOS (issue #1743; macos-desktop.md §3.3) the owner verifies the
+// system per-user temp directory and binds in its shared conch directory.
+// Each listener owns its random socket path, so the owner leaves every other
+// entry alone.
 //
 // On Windows (issue #1785; windows-desktop.md §3.3–§3.5) the endpoint is a
 // named pipe the owner creates under \\.\pipe\, listenPipe below: no
@@ -37,6 +38,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { VOICE_CONTROL_MAX_LINE_BYTES } from '../../../web/src/schema/generated.ts';
 import { validProfileId } from '../vault/files.ts';
 import { parseAttached } from './protocol.ts';
+import { runDarwinTempUtility } from './spawn.ts';
 
 // Why voice cannot start here. Each is a fixed word for the UI and the log,
 // never a path or a value.
@@ -80,6 +82,8 @@ export interface EndpointDeps {
   readonly platform?: NodeJS.Platform;
   // The uid the checks compare against (a test stands in for another user).
   readonly uid?: number;
+  // Runs a macOS system utility and returns its stdout. Test seam for getconf and ls.
+  readonly execFile?: typeof runDarwinTempUtility;
   // A fresh socket name, without its directory. Test seam for squats.
   readonly name?: () => string;
   // A fresh pipe id (the hex after the pipe prefix). Test seam for squats.
@@ -99,7 +103,7 @@ function codeOf(err: unknown): string {
   return typeof err === 'object' && err !== null && 'code' in err && typeof err.code === 'string' ? err.code : '';
 }
 
-async function lstatOrNull(path: string): Promise<Awaited<ReturnType<typeof lstat>> | null> {
+async function lstatOrNull(path: string) {
   try {
     return await lstat(path);
   } catch (err) {
@@ -112,22 +116,42 @@ async function lstatOrNull(path: string): Promise<Awaited<ReturnType<typeof lsta
 // passes: a directory (not a link to one), owned by this user, closed to
 // group and others.
 function privateDirRefusal(
-  st: Awaited<ReturnType<typeof lstat>>,
+  st: NonNullable<Awaited<ReturnType<typeof lstatOrNull>>>,
   uid: number,
 ): 'runtime-dir-symlink' | 'runtime-dir-not-directory' | 'runtime-dir-not-owned' | 'runtime-dir-not-private' | null {
   if (st.isSymbolicLink()) return 'runtime-dir-symlink';
   if (!st.isDirectory()) return 'runtime-dir-not-directory';
   if (st.uid !== uid) return 'runtime-dir-not-owned';
-  if ((Number(st.mode) & 0o077) !== 0) return 'runtime-dir-not-private';
+  if ((st.mode & 0o077) !== 0) return 'runtime-dir-not-private';
   return null;
 }
 
-// runtimeDir verifies $XDG_RUNTIME_DIR on Linux and $TMPDIR on macOS. Unset,
-// relative, missing, a link, not a directory, another user's, or open to group
-// or others is a refusal, and nothing is created. There is no fallback to /tmp.
+async function darwinTempDir(deps: EndpointDeps): Promise<string> {
+  try {
+    return (await (deps.execFile ?? runDarwinTempUtility)('/usr/bin/getconf', ['DARWIN_USER_TEMP_DIR'])).trimEnd();
+  } catch {
+    throw new EndpointError('runtime-dir-unset');
+  }
+}
+
+async function requireNoDarwinAcl(dir: string, deps: EndpointDeps, reason: EndpointRefusal): Promise<void> {
+  try {
+    const output = await (deps.execFile ?? runDarwinTempUtility)('/bin/ls', ['-lde', dir]);
+    // An ACL can be marked '+' or listed below the mode line when '@' marks
+    // extended attributes. Only a single directory line can pass.
+    const [listing, ...extra] = output.replace(/\n$/, '').split('\n');
+    if (extra.length === 0 && /^d[rwxstST-]{9}@?[ \t]/.test(listing ?? '')) return;
+  } catch {
+    // Failure to inspect the ACL is a refusal too.
+  }
+  throw new EndpointError(reason);
+}
+
+// runtimeDir verifies $XDG_RUNTIME_DIR on Linux and uses the system-provided
+// DARWIN_USER_TEMP_DIR on macOS. A failed check stops startup.
 export async function runtimeDir(env: NodeJS.ProcessEnv, deps: EndpointDeps = {}): Promise<string> {
   const mac = (deps.platform ?? process.platform) === 'darwin';
-  const value = env[mac ? 'TMPDIR' : 'XDG_RUNTIME_DIR'];
+  const value = mac ? await darwinTempDir(deps) : env['XDG_RUNTIME_DIR'];
   if (value === undefined || value === '') throw new EndpointError('runtime-dir-unset');
   if (!isAbsolute(value) || value.includes('\0')) throw new EndpointError('runtime-dir-not-absolute');
   // macOS normally includes a trailing slash. Check the same path join will
@@ -137,6 +161,10 @@ export async function runtimeDir(env: NodeJS.ProcessEnv, deps: EndpointDeps = {}
   if (st === null) throw new EndpointError('runtime-dir-missing');
   const refusal = privateDirRefusal(st, ownUid(deps));
   if (refusal !== null) throw new EndpointError(refusal);
+  if (mac) {
+    if ((st.mode & 0o7777) !== PRIVATE_DIR) throw new EndpointError('runtime-dir-not-private');
+    await requireNoDarwinAcl(dir, deps, 'runtime-dir-not-private');
+  }
   return dir;
 }
 
@@ -144,7 +172,7 @@ export async function runtimeDir(env: NodeJS.ProcessEnv, deps: EndpointDeps = {}
 // runtime directory is checked; a directory of ours that is private but not
 // exactly 0o700 (the helper wants exactly that of the socket's parent) is set
 // to it.
-async function ensurePrivateDir(dir: string, uid: number): Promise<void> {
+async function ensurePrivateDir(dir: string, uid: number, darwin?: EndpointDeps): Promise<void> {
   try {
     await mkdir(dir, { mode: PRIVATE_DIR });
   } catch (err) {
@@ -152,7 +180,8 @@ async function ensurePrivateDir(dir: string, uid: number): Promise<void> {
   }
   const st = await lstatOrNull(dir);
   if (st === null || privateDirRefusal(st, uid) !== null) throw new EndpointError('profile-dir-unsafe');
-  if ((Number(st.mode) & 0o777) !== PRIVATE_DIR) await chmod(dir, PRIVATE_DIR);
+  if (darwin !== undefined) await requireNoDarwinAcl(dir, darwin, 'profile-dir-unsafe');
+  if ((st.mode & (darwin === undefined ? 0o777 : 0o7777)) !== PRIVATE_DIR) await chmod(dir, PRIVATE_DIR);
 }
 
 // profileDir is <runtime>/conch/<profile-id> on Linux and <runtime>/conch
@@ -162,8 +191,11 @@ export async function profileDir(runtime: string, profileId: string, deps: Endpo
   if (!validProfileId(profileId)) throw new EndpointError('profile-id-invalid');
   const uid = ownUid(deps);
   const conch = join(runtime, 'conch');
+  if ((deps.platform ?? process.platform) === 'darwin') {
+    await ensurePrivateDir(conch, uid, deps);
+    return conch;
+  }
   await ensurePrivateDir(conch, uid);
-  if ((deps.platform ?? process.platform) === 'darwin') return conch;
   const dir = join(conch, profileId);
   await ensurePrivateDir(dir, uid);
   return dir;
@@ -260,6 +292,9 @@ export interface Attached {
 // listenUnix verifies the socket's directories at each start. Linux sweeps
 // its per-profile directory. On macOS the directory is shared by all the
 // running instances, so Node's listener close handles only its own socket.
+// macOS supplies the temp path under system-controlled ancestors. Only this
+// user can write the checked temp and conch directories, so another account
+// cannot swap a directory or socket between our checks, bind and cleanup.
 export async function listenUnix(env: NodeJS.ProcessEnv, profileId: string, deps: EndpointDeps = {}): Promise<Listening> {
   const runtime = await runtimeDir(env, deps);
   const dir = await profileDir(runtime, profileId, deps);
