@@ -861,8 +861,8 @@ struct Session<T: Transport> {
     owner: Option<Owner>,
     /// Why a managed helper is ending, once it is: the reason its last states give.
     ending: Option<Ending>,
-    /// Whether the owner has sent `leave`, whatever ended the session first (a signal may
-    /// have): the room step of an explicit leave is not cut by the end of input (#1690).
+    /// Whether the owner has sent `leave`: the room step of an explicit leave keeps its
+    /// full limit even if a signal or owner loss was seen first (#1690, #2097).
     leave_asked: bool,
     /// What the key device's watcher last said, for the owner's `ptt`.
     key_state: Option<DeviceState>,
@@ -2248,12 +2248,7 @@ impl<T: Transport> Session<T> {
             }
         }
 
-        let room_limit = if ending.reason == VoiceControlReason::OwnerLost {
-            OWNER_LOST_STEP
-        } else {
-            ROOM_LIMIT
-        };
-        let attempt_limit = self.timings.attempt_limit.min(room_limit);
+        let attempt_limit = self.timings.attempt_limit.min(ROOM_LIMIT);
         let live = self.live.take();
         let phase = std::mem::replace(&mut self.phase, Phase::Settled);
         crate::managed::set_room_leave_under_way(true);
@@ -2261,17 +2256,17 @@ impl<T: Transport> Session<T> {
         let room_done = Arc::clone(&room_left);
         let left = async move {
             if let Some(live) = live {
-                abandon_if_late(room_limit, live.room.close()).await;
+                abandon_if_late(ROOM_LIMIT, live.room.close()).await;
             }
             match phase {
                 Phase::Closing(closing, _) => {
-                    abandon_if_late(room_limit, closing).await;
+                    abandon_if_late(ROOM_LIMIT, closing).await;
                 }
                 // As for `join`: an attempt under way is given a moment to finish, so that
                 // the room it joins is left and its track is not abandoned unmuted.
                 Phase::Establishing(attempt) => {
                     if let Ok(Ok(joined)) = tokio::time::timeout(attempt_limit, attempt).await {
-                        abandon_if_late(room_limit, joined.room.close()).await;
+                        abandon_if_late(ROOM_LIMIT, joined.room.close()).await;
                     }
                 }
                 Phase::Ask(_) | Phase::Settled => {}
@@ -2292,9 +2287,12 @@ impl<T: Transport> Session<T> {
             let last = self.snapshot_in(VoiceControlPhase::Failed, Some(ending.reason), None);
             owner.finish(&last).await;
         }
-        let mut cutoff: Option<Instant> = None;
-        // An explicit leave, even one that came after a signal, keeps the room step whole.
+        // The events pipe can close before the control reader delivers an explicit leave.
+        // Keep the owner-loss cutoff separate so that leave can clear it without restarting
+        // the room close. The process still has its owner-loss watchdog.
         let mut leave_asked = self.leave_asked || ending.reason == VoiceControlReason::Left;
+        let mut cutoff = (ending.reason == VoiceControlReason::OwnerLost && !leave_asked)
+            .then(|| Instant::now() + OWNER_LOST_STEP);
         {
             let work = async { tokio::join!(self.reports.flush(REPORT_LIMIT), left) };
             tokio::pin!(work);
@@ -2312,15 +2310,19 @@ impl<T: Transport> Session<T> {
                             log::warn!("the owner is gone: leaving without waiting any longer");
                         } else {
                             log::warn!(
-                                "the room leave was abandoned because the owner is gone; \
-                                 the server may keep this participant until it times out"
+                                "the room leave was abandoned after {} ms because the owner is gone; \
+                                 the server may keep this participant until it times out",
+                                OWNER_LOST_STEP.as_millis()
                             );
                         }
                         break;
                     }
                     input = self.inputs.recv(), if self.inputs_open => match input {
                         Some(Input::Control(control)) => {
-                            leave_asked |= matches!(control, Control::Leave { .. });
+                            if matches!(control, Control::Leave { .. }) {
+                                leave_asked = true;
+                                cutoff = None;
+                            }
                             answer_while_stopping(
                             owner.as_mut(),
                             control,
@@ -2333,13 +2335,8 @@ impl<T: Transport> Session<T> {
                             if input.is_none() {
                                 self.inputs_open = false;
                             }
-                            // The tighter bounds of an owner that is gone apply from now,
-                            // except to the room step of an explicit leave: the owner
-                            // asked for it (even after a signal) and closes its end of the pipe at once after,
-                            // so the end of input says nothing against that step, and
-                            // cutting it would drop the LiveKit Leave (#1685). The step
-                            // keeps its own limit, and the process the owner-loss
-                            // watchdog.
+                            // After explicit leave, closing the pipes is part of stopping.
+                            // Cutting the room step could drop the LiveKit Leave (#1685).
                             if !leave_asked {
                                 let sooner = Instant::now() + OWNER_LOST_STEP;
                                 cutoff = Some(cutoff.map_or(sooner, |at| at.min(sooner)));
@@ -2350,6 +2347,7 @@ impl<T: Transport> Session<T> {
                 }
             }
         }
+        crate::managed::set_room_leave_under_way(false);
         // Commands already read are answered before the last state, which nothing follows.
         while let Ok(input) = self.inputs.try_recv() {
             if let Input::Control(control) = input {
@@ -2436,7 +2434,7 @@ mod tests {
         }
     }
 
-    struct NoRoom;
+    struct NoRoom(oneshot::Sender<()>);
 
     impl RoomHandle for NoRoom {
         type Track = NoTrack;
@@ -2454,7 +2452,10 @@ mod tests {
             std::future::pending()
         }
 
-        async fn close(self) {}
+        async fn close(self) {
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            let _ = self.0.send(());
+        }
     }
 
     impl crate::sdk::ShareAudioTrack for NoTrack {
@@ -2538,6 +2539,33 @@ mod tests {
         let (_inputs, received) = mpsc::unbounded_channel();
         let out = Output::new(false, Box::new(std::io::sink()));
         Session::new(settings, conchd, Nowhere, Scrubber::new(), received, out).unwrap()
+    }
+
+    #[tokio::test]
+    async fn leave_after_the_events_pipe_ends_lets_the_room_close_finish() {
+        let mut session = session(Box::new(|_| Ok(Box::new(CountingSink::new(&[])?))));
+        let (closed, room_closed) = oneshot::channel();
+        session.connected(Established {
+            room: NoRoom(closed),
+            events: mpsc::unbounded_channel().1,
+            mic: None,
+            can_publish: false,
+            identity: String::new(),
+            companion: false,
+        });
+        let (inputs, received) = mpsc::unbounded_channel();
+        session.inputs = received;
+        // Closing the events pipe can be noticed before the control reader
+        // handles Leave and EOF, even when the owner wrote Leave first.
+        session.on_input(Some(Input::OwnerLost));
+        inputs
+            .send(Input::Control(Control::Leave { id: 2 }))
+            .unwrap();
+        inputs.send(Input::OwnerLost).unwrap();
+        drop(inputs);
+
+        session.leave_managed().await.unwrap();
+        room_closed.await.expect("the room close was cancelled");
     }
 
     #[tokio::test]
