@@ -4,6 +4,7 @@
 // releases (blur, hidden, pagehide).
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import * as api from '../api';
+import { isArchived } from '../archived';
 import { soundAudience, sounds, voiceSounds } from '../sounds';
 import { pageHiddenOnPhone } from '../phone';
 import { platform } from '../platform';
@@ -12,6 +13,7 @@ import type { SocketCloseReason } from '../schema/generated';
 import type { VoicePresenceV2 } from '../schema/voice';
 import { Feed, type FeedStatus } from '../state/feed';
 import type { Camera } from './camera';
+import { useChannelJoin } from './channelJoin';
 import { openAudio, VoiceClient, type Microphone, type ModeStore, type Output, type ProcessingStore, type VoiceState } from './connection';
 import { defaultTail, snapTail } from './gate';
 import { companionEnv } from './native/companionEnv';
@@ -301,7 +303,7 @@ export interface VoiceControl {
   // Sets the release delay, and keeps it for the tab.
   readonly setReleaseDelay: (ms: number) => void;
   readonly capture: (on: boolean) => void;
-  readonly join: () => void;
+  readonly join: (audio?: AudioContext | null) => void;
   // Joins to watch, without the microphone.
   // beside: the person's own voice is in another client, so watch as the
   // viewer (issue #936).
@@ -688,14 +690,19 @@ export function useVoice({
     if (client.snapshot().phase !== 'idle' && client.snapshot().phase !== 'stopped') return;
     joinedAt.current = channelsNow.current.find((c) => c.name === name)?.id ?? null;
   }, [client]);
-  const join = useCallback(() => {
+  const join = useCallback((audio?: AudioContext | null) => {
     if (channel === null) return;
-    // The meter's audio context is made first, in the click, with nothing
-    // before or between (issue #1794): iOS only runs one made in a gesture.
-    const audio = openAudio();
+    // The meter's audio context is made in the click (issue #1794). A
+    // shortcut waiting for presence supplies the context it already opened.
+    const meterAudio = audio === undefined ? openAudio() : audio;
     note(channel);
-    client.join(channel, { audio });
+    client.join(channel, { audio: meterAudio });
   }, [channel, client, note]);
+  const joinShortcut = useCallback((_presence: VoicePresenceV2, audio: AudioContext | null) => {
+    join(audio);
+  }, [join]);
+  const viewed = channels.find((candidate) => candidate.name === channel);
+  useChannelJoin(viewed, signedIn && voiceAllowed && reachable && window.isSecureContext && joined === null && !isArchived(viewed), snapshot, joinShortcut, openAudio);
   const watchOnly = useCallback((beside = false) => {
     if (channel === null) return;
     note(channel);

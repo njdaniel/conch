@@ -416,7 +416,8 @@ export function VoicePanel({
   const speaking = state.speaking;
   // Only on a live snapshot that says voice is up: not while loading, while
   // the server cannot be reached, or after the socket was closed for good.
-  const canJoin = voice.secure && presence !== null && presence.available;
+  const viewedChannel = channels.find((channel) => channel.name === viewed);
+  const canJoin = voice.secure && presence !== null && presence.available && (viewedChannel === undefined || presence.channel_id === viewedChannel.id);
   const silenced = state.muted || state.deafened;
   // One tile per live stream, beside the camera tiles. An unwatched tile only
   // offers Watch; a watched one owns its player, volume and focus control. The
@@ -629,7 +630,7 @@ export function VoicePanel({
               </>
             ) : (
               <>
-                <button ref={joinButton} type="button" className="primary" onClick={voice.join} disabled={!canJoin}>
+                <button ref={joinButton} type="button" className="primary" onClick={() => { voice.join(); }} disabled={!canJoin}>
                   <Glyph name="headphones" />
                   {/* One flex item, so the words and the channel read as one line of text (F17). */}
                   <span className="btn-text">Join voice {dest}</span>
