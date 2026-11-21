@@ -4,6 +4,7 @@ import type { Session, WebContents } from 'electron';
 import { describe, expect, it, vi } from 'vitest';
 
 import { Gestures } from '../../main/gestures.ts';
+import { GeometricSampler, type BlockedDiagnosticKey } from '../../main/diagnostics.ts';
 import { clipboardWriteAllowed, guardContents, guardSession } from '../../main/guards.ts';
 
 type Request = (c: unknown, p: string, cb: (ok: boolean) => void, d: unknown) => void;
@@ -39,7 +40,7 @@ function setup() {
   gestures.attach(win);
   gestures.attach(stranger);
   const ses = new FakeSession();
-  const deps = { log: () => undefined, gestures, owned: () => win };
+  const deps = { log: () => undefined, blockedSamples: new GeometricSampler<BlockedDiagnosticKey>(), gestures, owned: () => win };
   guardSession(ses as unknown as Session, deps);
   const click = (c: FakeContents) => c.emit('input-event', {}, { type: 'mouseUp' });
   const here = { isMainFrame: true, requestingUrl: 'conch-app://ui/' };
@@ -86,7 +87,7 @@ describe('the clipboard permission', () => {
   });
 
   it('grants nothing when the guard was given no gesture source', () => {
-    expect(clipboardWriteAllowed({ log: () => undefined }, {}, 'clipboard-sanitized-write', { isMainFrame: true, requestingUrl: 'conch-app://ui/' })).toBe(false);
+    expect(clipboardWriteAllowed({}, {}, 'clipboard-sanitized-write', { isMainFrame: true, requestingUrl: 'conch-app://ui/' })).toBe(false);
   });
 });
 

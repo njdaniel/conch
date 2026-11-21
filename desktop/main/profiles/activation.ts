@@ -8,7 +8,7 @@
 // Input: the app's fixed environment and the profile to open with the
 // credential main found for it. Output: an Activation for the switch sequence,
 // and a Live that the one IPC registry reads its current parts from.
-import type { MainLog } from '../diagnostics.ts';
+import { GeometricSampler, type FeedDiagnosticKey, type MainLog } from '../diagnostics.ts';
 import type { BrowserWindow } from 'electron';
 
 import { FEED_EVENTS } from '../../shared/bridge-names.ts';
@@ -22,7 +22,7 @@ import { Session } from '../api/session.ts';
 import { DocumentGate } from '../document.ts';
 import { guardSession, type GuardDeps } from '../guards.ts';
 import type { ContentsLike } from '../ipc.ts';
-import { handle, SCHEME, type Manifest } from '../scheme.ts';
+import { handle, SCHEME, type Manifest, type SchemeDeps } from '../scheme.ts';
 import { createWindow, partitionFor, type WindowMaximized } from '../window.ts';
 import type { HealthResult } from '../compat.ts';
 import type { ActivationSpec, ProbeResult, StoredCheck } from './service.ts';
@@ -39,6 +39,7 @@ export interface ActivationEnv {
   // What the session's guards need: the same ones installGuards gave the web
   // contents, so that a new partition keeps the clipboard and link rules.
   readonly guard: GuardDeps;
+  readonly feedSamples: GeometricSampler<FeedDiagnosticKey>;
   readonly makeFiles: (client: Client, session: Session) => Files;
   readonly now: () => number;
   readonly log: MainLog;
@@ -66,6 +67,13 @@ type Bounds = { x: number; y: number; width: number; height: number };
 
 export function activationFactory(env: ActivationEnv, live: Live): (spec: ActivationSpec) => Promise<Activation> {
   let bounds: Bounds | undefined;
+  // The same installed files back every partition.
+  const scheme: SchemeDeps = {
+    manifest: env.manifest,
+    readFile: (path) => env.readUi(path),
+    log: env.log,
+    samples: new GeometricSampler(),
+  };
   return (spec) => {
     const { profile, token } = spec;
     const identity = new Session();
@@ -87,6 +95,7 @@ export function activationFactory(env: ActivationEnv, live: Live): (spec: Activa
         if (contents !== null && gate.shows(document)) window?.webContents.send(FEED_EVENTS, event);
       },
       log: env.log,
+      samples: env.feedSamples,
     });
     gate.onEnd((current) => {
       feeds.endDocument(current);
@@ -98,7 +107,7 @@ export function activationFactory(env: ActivationEnv, live: Live): (spec: Activa
       prepare: (made) => {
         const ses = made.webContents.session;
         guardSession(ses, env.guard);
-        ses.protocol.handle(SCHEME, (request) => handle(request, { manifest: env.manifest, readFile: (path) => env.readUi(path), log: env.log }));
+        ses.protocol.handle(SCHEME, (request) => handle(request, scheme));
       },
     });
     live.service = service;

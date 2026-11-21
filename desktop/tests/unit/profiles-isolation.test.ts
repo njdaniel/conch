@@ -6,6 +6,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { Client } from '../../main/api/client.ts';
+import { GeometricSampler } from '../../main/diagnostics.ts';
 import { Feeds, type Connect, type SocketHandlers } from '../../main/api/feeds.ts';
 import { Service } from '../../main/api/service.ts';
 import { Session } from '../../main/api/session.ts';
@@ -75,6 +76,7 @@ function harness() {
           if (!window.destroyed && gate.shows(document)) window.received.push(JSON.stringify(event));
         },
         log: () => undefined,
+        samples: new GeometricSampler(),
       });
       gate.onEnd((current) => {
         feeds.endDocument(current);

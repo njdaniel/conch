@@ -59,7 +59,7 @@ import { Autostart } from './autostart.ts';
 import { Notifications } from './notifications.ts';
 import { createSettingsFiles, memorySettingsFiles, SettingsService } from './settings.ts';
 import { WindowMaximized } from './window.ts';
-import { Diagnostics, diagnosticsLogger, LogRing } from './diagnostics.ts';
+import { Diagnostics, DiagnosticSamples, diagnosticsLogger, LogRing } from './diagnostics.ts';
 import { saveChosenFile } from './save-file.ts';
 import { parseManifest, SCHEME, SCHEME_PRIVILEGES } from './scheme.ts';
 import { electronStorage } from './vault/electron-storage.ts';
@@ -78,6 +78,7 @@ export function registerScheme(): void {
 // The diagnostics ring (issue #2084) keeps only main's fixed diagnostic
 // context. Call sites opt in explicitly with fixed diagnostic text.
 const ring = new LogRing();
+const samples = new DiagnosticSamples();
 const log = diagnosticsLogger(ring, (line) => { console.error(line); });
 
 // A vault that stores nothing, for a data root that is not private to this user.
@@ -183,7 +184,7 @@ export async function start(): Promise<void> {
   });
   // One set of guard dependencies, for every web contents and every
   // activation's partition alike.
-  const guard = { log, gestures, owned, links, liveOrigin: () => liveOrigin(), capture };
+  const guard = { log, blockedSamples: samples.blocked, gestures, owned, links, liveOrigin: () => liveOrigin(), capture };
   installGuards(app, guard);
 
   // One instance per data root: the lock comes before anything reads or
@@ -353,7 +354,7 @@ export async function start(): Promise<void> {
   const openActivation = activationFactory(
     {
       packaged: app.isPackaged, appPath, manifest, readUi: (path) => readFile(join(ui, ...path.split('/').slice(1))),
-      connect: createNodeConnect(log), guard, makeFiles, now: Date.now, log,
+      connect: createNodeConnect(log), guard, feedSamples: samples.feeds, makeFiles, now: Date.now, log,
       ...(maximized === undefined ? {} : { maximized }),
     },
     live,
@@ -701,6 +702,7 @@ export async function start(): Promise<void> {
     },
     diagnostics: new Diagnostics({
       ring,
+      samples,
       versions,
       now: () => new Date(),
       chooseSavePath: async (suggested) => {
