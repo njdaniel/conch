@@ -267,6 +267,9 @@ func TestServeReconcilesAndSweepsPrivateCalls(t *testing.T) {
 	f.srv.now = func() time.Time { return time.UnixMilli(now.Load()) }
 	previous := decodePrivateCallResponse(t, f.do(t, "POST", privateCallTestPair,
 		f.aliceTok, `{"action_id":"before-restart"}`), http.StatusCreated).Call
+	if _, err := privateCallFixtureDB(t, f).Exec(`UPDATE private_calls SET deadline = deadline - 1 WHERE id = ?`, previous.ID); err != nil {
+		t.Fatal(err)
+	}
 	now.Store(previous.RingDeadline.Time().UnixMilli())
 
 	ln := &privateCallTestListener{accepting: make(chan struct{}), closed: make(chan struct{})}
@@ -355,6 +358,16 @@ func TestPrivateCallHTTPAuthentication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	general, err := f.srv.store.ChannelByName(ctx, "general")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := newGuest(t, f.srv, "Pat", time.Hour, 2*time.Hour, general.ID)
+	// Mark the guest credential self-made so each request reaches the call
+	// handler and exercises its guest refusal.
+	if _, err := privateCallFixtureDB(t, f).Exec(`UPDATE credentials SET self_made = 1 WHERE principal_id = ?`, g.Principal.ID); err != nil {
+		t.Fatal(err)
+	}
 	call := decodePrivateCallResponse(t, f.do(t, "POST", privateCallTestPair,
 		f.aliceTok, `{"action_id":"invite"}`), http.StatusCreated).Call
 	attempt := "/v1/calls/" + call.ID + "/"
@@ -374,6 +387,8 @@ func TestPrivateCallHTTPAuthentication(t *testing.T) {
 				http.StatusUnauthorized, "unauthenticated")
 			assertErrorBody(t, f.do(t, route.method, route.path, f.botTok, ""),
 				http.StatusForbidden, "forbidden")
+			assertErrorBody(t, f.do(t, route.method, route.path, g.Token, privateCallTestCommand(call, "guest")),
+				http.StatusForbidden, "forbidden")
 			assertErrorBody(t, off.do(t, route.method, route.path, "", ""),
 				http.StatusBadRequest, schema.ErrorCodeDMRequireAuth)
 			for _, token := range []string{issued, redeemed.Token} {
@@ -392,6 +407,62 @@ func TestPrivateCallHTTPAuthentication(t *testing.T) {
 	}
 	decodePrivateCallResponse(t, f.do(t, "POST", attempt+"decline", bobTok,
 		privateCallTestCommand(call, "decline")), http.StatusOK)
+}
+
+func TestPrivateCallHTTPUnavailableIsAbsent(t *testing.T) {
+	f, bob, bobToken, _ := privateCallHTTPFixture(t)
+	if _, err := f.srv.store.SetDMPreferences(context.Background(), bob.ID,
+		schema.DMPreferencesV1{Accept: schema.DMAcceptNobody}, f.srv.now()); err != nil {
+		t.Fatal(err)
+	}
+	call := decodePrivateCallResponse(t, f.do(t, "POST", privateCallTestPair, f.aliceTok,
+		`{"action_id":"unavailable"}`), http.StatusOK).Call
+	if call.State != schema.PrivateCallStateUnavailable {
+		t.Fatalf("invite state = %s, want unavailable", call.State)
+	}
+	for _, token := range []string{f.aliceTok, bobToken} {
+		for _, action := range []string{"accept", "decline", "cancel", "hangup"} {
+			path := "/v1/calls/" + call.ID + "/" + action
+			assertErrorBody(t, f.do(t, "POST", path, token, privateCallTestCommand(call, action)),
+				http.StatusNotFound, schema.ErrorCodeCallNotFound)
+		}
+	}
+}
+
+func TestPrivateCallHTTPRefusedActionsAreRateLimited(t *testing.T) {
+	f, _, bobTok, bobSecondTok := privateCallHTTPFixture(t)
+	now := time.Now()
+	f.srv.now = func() time.Time { return now }
+	call := decodePrivateCallResponse(t, f.do(t, "POST", privateCallTestPair, f.aliceTok,
+		`{"action_id":"invite"}`), http.StatusCreated).Call
+	base := "/v1/calls/" + call.ID + "/"
+	for i := 0; i < 500; i++ {
+		rec := f.do(t, "POST", base+"hangup", bobTok, privateCallTestCommand(call, fmt.Sprintf("refused-%d", i)))
+		if i < privateCallActionBurst {
+			privateCallTestConflict(t, rec, schema.PrivateCallStateRinging)
+			continue
+		}
+		assertErrorBody(t, rec, http.StatusTooManyRequests, schema.ErrorCodeRateLimited)
+		if got := rec.Header().Get("Retry-After"); got != "1" {
+			t.Fatalf("Retry-After = %q, want 1", got)
+		}
+	}
+	var receipts int
+	err := privateCallFixtureDB(t, f).QueryRow(`SELECT COUNT(*) FROM private_call_actions WHERE event <> 'invite'`).Scan(&receipts)
+	if err != nil || receipts != 0 {
+		t.Fatalf("refused action receipts = %d, err = %v", receipts, err)
+	}
+	for _, action := range []string{"accept", "decline", "cancel"} {
+		// The second credential for Bob spends from the same bucket across all routes.
+		assertErrorBody(t, f.do(t, "POST", base+action, bobSecondTok, privateCallTestCommand(call, action)),
+			http.StatusTooManyRequests, schema.ErrorCodeRateLimited)
+	}
+	now = now.Add(privateCallActionRefill)
+	decodePrivateCallResponse(t, f.do(t, "POST", base+"accept", bobSecondTok,
+		privateCallTestCommand(call, "accept")), http.StatusOK)
+	// Alice can act immediately with her own bucket.
+	assertErrorBody(t, f.do(t, "POST", base+"hangup", f.aliceTok, privateCallTestCommand(call, "stale")),
+		http.StatusConflict, schema.ErrorCodeCallStateChanged)
 }
 
 func TestPrivateCallHTTPBlockDuringRingAndHistory(t *testing.T) {

@@ -15,6 +15,13 @@ import (
 
 var privateCallToken = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
+// All four action routes share a per-principal bucket. A burst of 10 and
+// one token per second leave room for retries and bound refused writes.
+const (
+	privateCallActionBurst  = 10
+	privateCallActionRefill = time.Second
+)
+
 func (s *Server) privateCallActor(w http.ResponseWriter, r *http.Request) (store.PrivateCallActor, bool) {
 	w.Header().Set("Cache-Control", "no-store")
 	p, ok := callerFrom(r.Context())
@@ -71,10 +78,14 @@ func (s *Server) handleInvitePrivateCall(w http.ResponseWriter, r *http.Request,
 	writePrivateCallResult(w, r, out, err)
 }
 
-func (s *Server) privateCallAction(event string) http.Handler {
+func (s *Server) privateCallAction(event string, limit *channelWriteLimiter) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		actor, ok := s.privateCallActor(w, r)
 		if !ok {
+			return
+		}
+		if allowed, retry := limit.take(actor.PrincipalID, 0, s.now()); !allowed {
+			writeRateLimited(w, &rateLimitedError{retryAfter: retry})
 			return
 		}
 		id := r.PathValue("call")

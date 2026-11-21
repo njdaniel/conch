@@ -12,53 +12,6 @@ import (
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
-// privateCallMigration is migration 55 (issue #2030, ADR-017), registered
-// in store.go's migrations after the DM store's 53 and the contact policy's
-// 54. It keeps participants, endpoint credentials and retry
-// receipts out of channel voice, presence, and audit data. The DDL is
-// idempotent so migration fixtures can replay older schema changes without
-// dropping the private call tables. The pair an attempt belongs to is the DM
-// store's own conversation (dm_conversations, migration 53), so who may see,
-// invite into or read a pair is decided in one place (dm_visibility.go).
-var privateCallMigration = []string{
-	`CREATE TABLE IF NOT EXISTS private_calls (
-		id TEXT PRIMARY KEY,
-		conversation_id INTEGER NOT NULL REFERENCES dm_conversations(id),
-		caller INTEGER NOT NULL REFERENCES principals(id),
-		callee INTEGER NOT NULL REFERENCES principals(id),
-		caller_credential INTEGER NOT NULL REFERENCES credentials(id),
-		callee_credential INTEGER REFERENCES credentials(id),
-		state TEXT NOT NULL,
-		reason TEXT NOT NULL DEFAULT '',
-		last_event TEXT NOT NULL,
-		revision INTEGER NOT NULL,
-		created_at INTEGER NOT NULL,
-		deadline INTEGER,
-		ended_at INTEGER,
-		caller_absent_since INTEGER,
-		callee_absent_since INTEGER,
-		CHECK (caller <> callee)
-	)`,
-	`CREATE INDEX IF NOT EXISTS private_calls_history ON private_calls (conversation_id, created_at DESC, id DESC)`,
-	`CREATE TABLE IF NOT EXISTS private_call_holders (
-		principal_id INTEGER PRIMARY KEY REFERENCES principals(id),
-		call_id TEXT NOT NULL REFERENCES private_calls(id)
-	)`,
-	`CREATE INDEX IF NOT EXISTS private_call_holders_attempt ON private_call_holders (call_id)`,
-	`CREATE TABLE IF NOT EXISTS private_call_actions (
-		principal_id INTEGER NOT NULL REFERENCES principals(id),
-		action_id TEXT NOT NULL,
-		event TEXT NOT NULL,
-		target TEXT NOT NULL,
-		call_id TEXT REFERENCES private_calls(id),
-		outcome TEXT NOT NULL,
-		glare INTEGER NOT NULL,
-		expires_at INTEGER NOT NULL,
-		PRIMARY KEY (principal_id, action_id)
-	)`,
-	`CREATE INDEX IF NOT EXISTS private_call_actions_expiry ON private_call_actions (expires_at)`,
-}
-
 var (
 	ErrPrivateCallNotFound = errors.New("store: private call not found")
 	ErrPrivateCallPair     = errors.New("store: private call conversation not found")
@@ -186,12 +139,12 @@ func privateCallPairTx(ctx context.Context, tx execer, caller, conversationID in
 }
 
 func privateCallVoiceAllowed(ctx context.Context, tx execer, principalID int64) (bool, error) {
-	p, found, err := queryPrincipal(ctx, tx, principalID)
-	if err != nil || !found || p.Kind != PrincipalHuman || p.DisabledAt != nil ||
-		(p.GuestState != "" && p.GuestState != schema.GuestStateConverted) {
+	p, _, err := queryPrincipal(ctx, tx, principalID)
+	if err != nil {
 		return false, err
 	}
-	return principalPermittedTx(ctx, tx, p, schema.PermUseVoice)
+	d, err := readPermissionDocTx(ctx, tx)
+	return err == nil && p.Kind == PrincipalHuman && principalHolds(p, d, schema.PermUseVoice), err
 }
 
 // privateCallOwnCredential holds for a credentials row aliased c that its

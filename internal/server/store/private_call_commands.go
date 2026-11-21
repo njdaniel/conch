@@ -13,54 +13,46 @@ import (
 type privateCallCommand struct {
 	actor                   PrivateCallActor
 	actionID, event, target string
+	revision                int64
 	now                     time.Time
 }
 
 func (cmd privateCallCommand) receipt(ctx context.Context, tx execer) (PrivateCallResult, bool, error) {
-	var event, target, outcome string
-	var id sql.NullString
+	var event, target, id string
+	var revision int64
 	var glare bool
-	err := tx.QueryRowContext(ctx, `SELECT event, target, call_id, outcome, glare FROM private_call_actions
-		WHERE principal_id = ? AND action_id = ? AND expires_at > ?`,
-		cmd.actor.PrincipalID, cmd.actionID, cmd.now.UnixMilli()).Scan(&event, &target, &id, &outcome, &glare)
+	err := tx.QueryRowContext(ctx, `SELECT event, target, request_revision, call_id, glare FROM private_call_actions
+		WHERE credential_id = ? AND action_id = ? AND expires_at > ?`,
+		cmd.actor.CredentialID, cmd.actionID, cmd.now.UnixMilli()).Scan(&event, &target, &revision, &id, &glare)
 	if errors.Is(err, sql.ErrNoRows) {
 		return PrivateCallResult{}, false, nil
 	}
 	if err != nil {
 		return PrivateCallResult{}, false, err
 	}
-	if event != cmd.event || target != cmd.target {
+	if event != cmd.event || target != cmd.target || revision != cmd.revision {
 		return PrivateCallResult{Code: schema.ErrorCodeCallActionConflict}, true, nil
 	}
-	result := PrivateCallResult{Code: outcome}
-	if id.Valid {
-		call, err := privateCallByID(ctx, tx, id.String)
-		if err != nil {
-			return PrivateCallResult{}, false, err
-		}
-		if _, err := refreshPrivateCall(ctx, tx, &call, cmd.now); err != nil {
-			return PrivateCallResult{}, false, err
-		}
-		result.Call = call.view(cmd.actor)
-		result.Glare = glare && call.State == schema.PrivateCallStateRinging
-		// The receipt is per person. A second credential cannot claim
-		// the first credential's successful accept as its own.
-		if event == schema.PrivateCallEventAccept && call.calleeCredential != 0 &&
-			call.calleeCredential != cmd.actor.CredentialID {
-			result.Code = schema.ErrorCodeCallStateChanged
-		}
+	call, err := privateCallByID(ctx, tx, id)
+	if err != nil {
+		return PrivateCallResult{}, false, err
 	}
-	result.Replayed = result.Code == ""
-	return result, true, nil
+	if _, err := refreshPrivateCall(ctx, tx, &call, cmd.now); err != nil {
+		return PrivateCallResult{}, false, err
+	}
+	return PrivateCallResult{PrivateCallResponseV1: schema.PrivateCallResponseV1{
+		Call: call.view(cmd.actor), Glare: glare && call.State == schema.PrivateCallStateRinging, Replayed: true,
+	}}, true, nil
 }
 
 func (cmd privateCallCommand) remember(ctx context.Context, tx execer, result PrivateCallResult) error {
 	_, err := tx.ExecContext(ctx, `INSERT INTO private_call_actions
-		(principal_id, action_id, event, target, call_id, outcome, glare, expires_at)
-		VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?)
-		ON CONFLICT(principal_id, action_id) DO UPDATE SET event = excluded.event, target = excluded.target,
-			call_id = excluded.call_id, outcome = excluded.outcome, glare = excluded.glare, expires_at = excluded.expires_at`,
-		cmd.actor.PrincipalID, cmd.actionID, cmd.event, cmd.target, result.Call.ID, result.Code, result.Glare,
+		(credential_id, action_id, event, target, request_revision, call_id, glare, expires_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(credential_id, action_id) DO UPDATE SET event = excluded.event, target = excluded.target,
+			request_revision = excluded.request_revision, call_id = excluded.call_id,
+			glare = excluded.glare, expires_at = excluded.expires_at`,
+		cmd.actor.CredentialID, cmd.actionID, cmd.event, cmd.target, cmd.revision, result.Call.ID, result.Glare,
 		cmd.now.Add(schema.PrivateCallActionWindowSeconds*time.Second).UnixMilli())
 	return err
 }
@@ -89,7 +81,8 @@ func (s *Store) InvitePrivateCall(ctx context.Context, conversationID int64, act
 	}
 	var out PrivateCallResult
 	err := s.withImmediateTx(ctx, func(tx execer) error {
-		cmd := privateCallCommand{actor, req.ActionID, schema.PrivateCallEventInvite, strconv.FormatInt(conversationID, 10), clock().Truncate(time.Millisecond)}
+		cmd := privateCallCommand{actor: actor, actionID: req.ActionID, event: schema.PrivateCallEventInvite,
+			target: strconv.FormatInt(conversationID, 10), now: clock().Truncate(time.Millisecond)}
 		if err := dmWriteGateTx(ctx, tx, actor.PrincipalID); err != nil {
 			return err
 		}
@@ -107,7 +100,7 @@ func (s *Store) InvitePrivateCall(ctx context.Context, conversationID int64, act
 			return err
 		}
 		out, err = cmd.invite(ctx, tx, conversationID, peer)
-		if err != nil || out.RetryAfter > 0 {
+		if err != nil || out.Code != "" {
 			return err
 		}
 		return cmd.remember(ctx, tx, out)
@@ -187,22 +180,23 @@ func (cmd privateCallCommand) invite(ctx context.Context, tx execer, conversatio
 }
 
 func (cmd privateCallCommand) calleeAvailable(ctx context.Context, tx execer, peer int64) (bool, error) {
-	// The policy's one answer: a call is new contact (dmContactTx). Its
-	// refusal, whatever the reason, is "cannot be rung", not an error.
-	switch err := dmContactTx(ctx, tx, cmd.actor.PrincipalID, peer, dmActCall); {
-	case errors.Is(err, ErrDMContactUnavailable):
-		return false, nil
-	case err != nil:
+	// Ask every question before combining the answers. The holder lookup
+	// is a read only: the sweeper reconciles the callee's other attempts.
+	contactErr := dmContactTx(ctx, tx, cmd.actor.PrincipalID, peer, dmActCall)
+	if contactErr != nil && !errors.Is(contactErr, ErrDMContactUnavailable) {
+		return false, contactErr
+	}
+	voice, err := privateCallVoiceAllowed(ctx, tx, peer)
+	if err != nil {
 		return false, err
 	}
-	if allowed, err := privateCallVoiceAllowed(ctx, tx, peer); !allowed || err != nil {
+	live, err := privateCallCredentialLive(ctx, tx, PrivateCallActor{PrincipalID: peer}, cmd.now)
+	if err != nil {
 		return false, err
 	}
-	if live, err := privateCallCredentialLive(ctx, tx, PrivateCallActor{PrincipalID: peer}, cmd.now); !live || err != nil {
-		return false, err
-	}
-	current, err := livePrivateCallHeldBy(ctx, tx, peer, cmd.now)
-	return current.ID == "", err
+	var busy bool
+	err = tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM private_call_holders WHERE principal_id = ?)`, peer).Scan(&busy)
+	return contactErr == nil && voice && live && !busy, err
 }
 
 // ActOnPrivateCall applies one caller or callee transition. Policy and timer
@@ -213,7 +207,8 @@ func (s *Store) ActOnPrivateCall(ctx context.Context, id, event string, actor Pr
 	}
 	var out PrivateCallResult
 	err := s.withImmediateTx(ctx, func(tx execer) error {
-		cmd := privateCallCommand{actor, req.ActionID, event, id, clock().Truncate(time.Millisecond)}
+		cmd := privateCallCommand{actor: actor, actionID: req.ActionID, event: event, target: id,
+			revision: req.Revision, now: clock().Truncate(time.Millisecond)}
 		c, err := privateCallByID(ctx, tx, id)
 		if err != nil {
 			return err
@@ -221,7 +216,7 @@ func (s *Store) ActOnPrivateCall(ctx context.Context, id, event string, actor Pr
 		role := c.role(actor.PrincipalID)
 		if live, err := privateCallRequestLive(ctx, tx, actor, cmd.now); err != nil {
 			return err
-		} else if role == "" || !live {
+		} else if role == "" || !live || c.State == schema.PrivateCallStateUnavailable {
 			return ErrPrivateCallNotFound
 		}
 		if !privateCallActionActor(event, role) {
@@ -231,8 +226,8 @@ func (s *Store) ActOnPrivateCall(ctx context.Context, id, event string, actor Pr
 			out = result
 			return err
 		}
-		out, err = cmd.act(ctx, tx, &c, req.Revision)
-		if err != nil {
+		out, err = cmd.act(ctx, tx, &c)
+		if err != nil || out.Code != "" {
 			return err
 		}
 		return cmd.remember(ctx, tx, out)
@@ -249,21 +244,16 @@ func privateCallActionActor(event string, role schema.PrivateCallRole) bool {
 	return false
 }
 
-func (cmd privateCallCommand) act(ctx context.Context, tx execer, c *privateCall, revision int64) (PrivateCallResult, error) {
+func (cmd privateCallCommand) act(ctx context.Context, tx execer, c *privateCall) (PrivateCallResult, error) {
 	var out PrivateCallResult
 	if _, err := refreshPrivateCall(ctx, tx, c, cmd.now); err != nil {
 		return out, err
 	}
 	row, allowed := schema.NextPrivateCall(string(c.State), cmd.event)
-	switch {
-	case c.lastEvent == cmd.event && (cmd.event != schema.PrivateCallEventAccept || c.calleeCredential == cmd.actor.CredentialID):
-		out.Replayed = true
-	case !allowed || c.Revision != revision:
+	if !allowed || c.Revision != cmd.revision {
 		out.Code = schema.ErrorCodeCallStateChanged
-	default:
-		if err := transitionPrivateCall(ctx, tx, c, row, cmd.actor.CredentialID, cmd.now); err != nil {
-			return out, err
-		}
+	} else if err := transitionPrivateCall(ctx, tx, c, row, cmd.actor.CredentialID, cmd.now); err != nil {
+		return out, err
 	}
 	out.Call = c.view(cmd.actor)
 	return out, nil

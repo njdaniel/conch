@@ -113,6 +113,139 @@ func TestPrivateCallInviteConsultsTheDMPolicy(t *testing.T) {
 	}
 }
 
+func TestPrivateCallAvailabilityRunsTheSameStatementsInEveryClass(t *testing.T) {
+	ctx := context.Background()
+	want := -1
+	for _, reason := range []string{"available", "policy", "voice off", "signed out", "act-as only", "busy"} {
+		t.Run(reason, func(t *testing.T) {
+			f := newPrivateCallFixture(t, openTestStore(t))
+			var err error
+			switch reason {
+			case "policy":
+				_, err = f.s.SetDMPreferences(ctx, f.b.PrincipalID, schema.DMPreferencesV1{Accept: schema.DMAcceptNobody}, f.now)
+			case "voice off":
+				_, err = f.s.SetVoiceAllowed(ctx, "system", 0, f.b.PrincipalID, false)
+			case "signed out":
+				_, err = f.s.db.Exec(`UPDATE credentials SET revoked_at = ? WHERE principal_id = ?`, f.now.UnixMilli(), f.b.PrincipalID)
+			case "act-as only":
+				_, err = f.s.db.Exec(`UPDATE credentials SET self_made = 0 WHERE principal_id = ?`, f.b.PrincipalID)
+			case "busy":
+				if call := f.invite(2, f.c, "busy").Call; call.State != schema.PrivateCallStateRinging {
+					t.Fatalf("setup call = %+v", call)
+				}
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := f.s.withImmediateTx(ctx, func(tx execer) error {
+				q := &countingExecer{execer: tx}
+				cmd := privateCallCommand{actor: f.a, now: f.now}
+				available, err := cmd.calleeAvailable(ctx, q, f.b.PrincipalID)
+				if available != (reason == "available") || err != nil {
+					t.Errorf("available = %v, err = %v", available, err)
+				}
+				if want < 0 {
+					want = q.n
+				}
+				if q.n != want {
+					t.Errorf("ran %d statements, eligible callee ran %d", q.n, want)
+				}
+				return err
+			}); err != nil {
+				t.Fatal(err)
+			}
+			wantState := schema.PrivateCallStateUnavailable
+			if reason == "available" {
+				wantState = schema.PrivateCallStateRinging
+			}
+			if call := f.invite(1, f.a, "invite").Call; call.State != wantState {
+				t.Fatalf("invite state = %s, want %s", call.State, wantState)
+			}
+		})
+	}
+}
+
+func TestPrivateCallsRecheckRequestCredential(t *testing.T) {
+	ctx := context.Background()
+	for _, invalid := range []struct {
+		name, update string
+	}{
+		{"revoked", `UPDATE credentials SET revoked_at = created_at WHERE id = ?`},
+		{"act-as", `UPDATE credentials SET self_made = 0 WHERE id = ?`},
+	} {
+		t.Run(invalid.name, func(t *testing.T) {
+			f := newPrivateCallFixture(t, openTestStore(t))
+			earlier := f.invite(1, f.b2, "earlier").Call
+			f.act(earlier, f.b2, schema.PrivateCallEventCancel, "cancel")
+			call := f.invite(1, f.a, "invite").Call
+			// Use an unselected credential for actions and reads so a selected
+			// endpoint's revocation cannot mask a missing request check.
+			if _, err := f.s.db.Exec(invalid.update, f.b2.CredentialID); err != nil {
+				t.Fatal(err)
+			}
+			if out, err := f.s.InvitePrivateCall(ctx, 1, f.b2, schema.InvitePrivateCallRequestV1{ActionID: "earlier"}, f.clock); !errors.Is(err, ErrPrivateCallPair) {
+				t.Errorf("invite replay = %+v, %v; want %v", out, err, ErrPrivateCallPair)
+			}
+			if out, err := f.s.ActOnPrivateCall(ctx, call.ID, schema.PrivateCallEventAccept, f.b2,
+				schema.PrivateCallActionRequestV1{ActionID: "accept", Revision: call.Revision}, f.clock); !errors.Is(err, ErrPrivateCallNotFound) {
+				t.Errorf("action = %+v, %v; want %v", out, err, ErrPrivateCallNotFound)
+			}
+			if out, err := f.s.CurrentPrivateCall(ctx, f.b2, f.clock); !errors.Is(err, ErrPrivateCallNotFound) {
+				t.Errorf("current = %+v, %v; want %v", out, err, ErrPrivateCallNotFound)
+			}
+			if out, err := f.s.ListPrivateCalls(ctx, 1, f.b2, "", f.now); !errors.Is(err, ErrPrivateCallPair) {
+				t.Errorf("history = %+v, %v; want %v", out, err, ErrPrivateCallPair)
+			}
+		})
+	}
+}
+
+func TestPrivateCallRingPreservesArchiveAndReopensHiddenConversation(t *testing.T) {
+	ctx := context.Background()
+	for initial, want := range map[schema.DMState]schema.DMState{
+		schema.DMStateHidden:   schema.DMStateOpen,
+		schema.DMStateArchived: schema.DMStateArchived,
+	} {
+		t.Run(string(initial), func(t *testing.T) {
+			f := newPrivateCallFixture(t, openTestStore(t))
+			if _, err := f.s.SetDMState(ctx, f.b.PrincipalID, 1, initial, f.now); err != nil {
+				t.Fatal(err)
+			}
+			if call := f.invite(1, f.a, "invite").Call; call.State != schema.PrivateCallStateRinging {
+				t.Fatalf("invite = %+v", call)
+			}
+			var state schema.DMState
+			err := f.s.db.QueryRow(`SELECT state FROM dm_viewer_state WHERE principal_id = ? AND conversation_id = 1`, f.b.PrincipalID).Scan(&state)
+			if err != nil || state != want {
+				t.Fatalf("state = %s, err = %v; want %s", state, err, want)
+			}
+		})
+	}
+}
+
+func TestListPrivateCallsExcludesUnavailableAttempts(t *testing.T) {
+	ctx := context.Background()
+	f := newPrivateCallFixture(t, openTestStore(t))
+	ringing := f.invite(1, f.a, "invite").Call
+	declined := f.act(ringing, f.b, schema.PrivateCallEventDecline, "decline").Call
+	if _, err := f.s.SetVoiceAllowed(ctx, "system", 0, f.b.PrincipalID, false); err != nil {
+		t.Fatal(err)
+	}
+	unavailable := f.invite(1, f.a, "unavailable").Call
+	if unavailable.State != schema.PrivateCallStateUnavailable {
+		t.Fatalf("invite = %+v", unavailable)
+	}
+	for _, actor := range []PrivateCallActor{f.a, f.b} {
+		history, err := f.s.ListPrivateCalls(ctx, 1, actor, "", f.now)
+		if err != nil || len(history.Calls) != 1 || history.Calls[0].ID != declined.ID {
+			t.Errorf("history for principal %d = %+v, %v; want only the declined call", actor.PrincipalID, history, err)
+		}
+		if _, err := f.s.ListPrivateCalls(ctx, 1, actor, unavailable.ID, f.now); !errors.Is(err, ErrPrivateCallCursor) {
+			t.Errorf("using unavailable call as cursor: %v, want %v", err, ErrPrivateCallCursor)
+		}
+	}
+}
+
 // A call already ringing ends when the pair stops being reachable (design
 // §4.1's "revoked" row), and a preference change alone does not end it: it
 // refuses the next invite.

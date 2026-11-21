@@ -16,6 +16,8 @@ func (s *Server) routeTable() []route {
 		return route{pattern: pattern, access: a, handler: h}
 	}
 	hf := func(f http.HandlerFunc) http.Handler { return f }
+	callActions := newChannelWriteLimiter(inviteLimit{"private_call_actions", privateCallActionBurst,
+		privateCallActionBurst * privateCallActionRefill})
 	return []route{
 		rt("GET /healthz", accessExempt, hf(s.handleHealth)),
 		rt("GET /v0/ws", accessAuthenticated, hf(s.handleWS)),
@@ -37,10 +39,10 @@ func (s *Server) routeTable() []route {
 		rt("POST /v1/dms/{conversation}/calls", accessAuthenticated, s.privateCallInviteHandler()),
 		rt("GET /v1/dms/{conversation}/calls", accessAuthenticated, hf(s.handleListPrivateCalls)),
 		rt("GET /v1/calls/current", accessAuthenticated, hf(s.handleCurrentPrivateCall)),
-		rt("POST /v1/calls/{call}/accept", accessAuthenticated, s.privateCallAction(schema.PrivateCallEventAccept)),
-		rt("POST /v1/calls/{call}/decline", accessAuthenticated, s.privateCallAction(schema.PrivateCallEventDecline)),
-		rt("POST /v1/calls/{call}/cancel", accessAuthenticated, s.privateCallAction(schema.PrivateCallEventCancel)),
-		rt("POST /v1/calls/{call}/hangup", accessAuthenticated, s.privateCallAction(schema.PrivateCallEventHangup)),
+		rt("POST /v1/calls/{call}/accept", accessAuthenticated, s.privateCallAction(schema.PrivateCallEventAccept, callActions)),
+		rt("POST /v1/calls/{call}/decline", accessAuthenticated, s.privateCallAction(schema.PrivateCallEventDecline, callActions)),
+		rt("POST /v1/calls/{call}/cancel", accessAuthenticated, s.privateCallAction(schema.PrivateCallEventCancel, callActions)),
+		rt("POST /v1/calls/{call}/hangup", accessAuthenticated, s.privateCallAction(schema.PrivateCallEventHangup, callActions)),
 		// Preview as member (issue #1515): the entry read of the one request
 		// header, Conch-Preview-As. It is one of the five previewable routes.
 		rt("GET /v1/preview", accessAuthenticated, hf(s.handlePreview)).asPreviewable(),
