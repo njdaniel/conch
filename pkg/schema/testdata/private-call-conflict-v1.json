@@ -1,0 +1,17 @@
+{
+  "code": "call_state_changed",
+  "message": "the call has changed",
+  "call": {
+    "schema": "conch.private_call.v1",
+    "id": "c4Kq9ZxT2mWb7LpR1vNs3A",
+    "conversation_id": 12,
+    "caller_id": 3,
+    "callee_id": 5,
+    "role": "callee",
+    "state": "accepted",
+    "revision": 2,
+    "created_at": "2026-11-19T10:00:00.000Z",
+    "join_deadline": "2026-11-19T10:00:42.000Z",
+    "selected_here": false
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "schema": "conch.private_call_session.v1",
+  "call_id": "c4Kq9ZxT2mWb7LpR1vNs3A",
+  "revision": 2,
+  "livekit_url": "wss://conch.example.test:7880",
+  "identity": "p3",
+  "room": "call-9f2c41d07be34a6c8a51e0d7b3c94f12",
+  "token": "eyJhbGciOiJIUzI1NiJ9.example.signature",
+  "expires_at": "2026-11-19T10:00:27.000Z"
+}

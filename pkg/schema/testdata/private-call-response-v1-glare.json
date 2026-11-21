@@ -1,0 +1,16 @@
+{
+  "call": {
+    "schema": "conch.private_call.v1",
+    "id": "Xe3Lm0Wq8NtRz5YbHc1uVg",
+    "conversation_id": 12,
+    "caller_id": 5,
+    "callee_id": 3,
+    "role": "callee",
+    "state": "ringing",
+    "revision": 1,
+    "created_at": "2026-11-19T10:00:00.000Z",
+    "ring_deadline": "2026-11-19T10:00:40.000Z",
+    "selected_here": false
+  },
+  "glare": true
+}
