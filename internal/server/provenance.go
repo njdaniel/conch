@@ -35,9 +35,12 @@ import (
 //   - MCP tools bypass guard: /mcp has its own bearer authentication and
 //     never passes through this check. No MCP tool may read or write a
 //     person's DMs or calls.
-//   - An agent can never pass: an agent's credential is made by the
-//     principal who issued it, never by the agent, so it is refused here, and
-//     ADR-017 confirms agents reach no DM or call.
+//   - An agent can never pass: ADR-017 confirms agents reach no DM or call,
+//     and selfMadeCredential refuses a non-human caller first, with 403
+//     forbidden audited agents_use_mcp, as every human-only route does and
+//     as the DM schema's refusal order says (pkg/schema/dm.go; ADR-017
+//     Decision 14). own_sign_in_required is therefore only ever a person's
+//     answer, so in the audit it cleanly signals an act-as attempt.
 //
 // It is empty until the routes exist: #2019, #2021, #2030 and #2040
 // register the DM and call routes and the per-person stream, and each adds
@@ -65,8 +68,11 @@ func (s *Server) requireSelfMadeCredential(next http.Handler) http.Handler {
 // selfMadeCredential reports whether the request's credential was made by
 // its own principal (store.RequestCredential.SelfMade, provenance.go in the
 // store). When it was not, it has written the answer and the caller writes
-// nothing more: 403 own_sign_in_required, audited as a denial, for a
-// credential made by another; 401 when the request has no credential at
+// nothing more. The order of refusals: a non-human caller first, 403
+// forbidden audited as agents_use_mcp (the agent is told nothing about
+// signing in, which is wording for people); then 403
+// own_sign_in_required, audited as a denial, for a person's credential made
+// by another; 401 when the request has no credential at
 // all, which under AuthRequired is a wiring bug and denies; 500 when the
 // store cannot say. A ticket-authenticated socket has its credential's id
 // but not the rest, so the provenance is read from the store by that id.
@@ -84,6 +90,15 @@ func (s *Server) selfMadeCredential(w http.ResponseWriter, r *http.Request) bool
 	caller, ok := callerFrom(ctx)
 	if !ok {
 		writeUnauthenticated(w)
+		return false
+	}
+	if caller.Kind != store.PrincipalHuman {
+		subject := r.Pattern
+		if subject == "" {
+			subject = "<unmatched>"
+		}
+		s.auditAgentDenial(ctx, caller.ID, subject, "", 0, denyAgentOnHumanRoute)
+		writeError(w, http.StatusForbidden, errForbidden.Code, "agents cannot use a person's direct messages or calls")
 		return false
 	}
 	if _, previewed := previewFrom(ctx); previewed {

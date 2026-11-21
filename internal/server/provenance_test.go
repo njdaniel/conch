@@ -127,9 +127,12 @@ func answerCode(t *testing.T, rec *httptest.ResponseRecorder) string {
 // operator's act-as credential, the redemption of a sign-in link an
 // operator made, and a credential from before the provenance migration
 // (issue #2042). A self-made credential is never refused on that ground;
-// what the route then answers is the route's own.
+// what the route then answers is the route's own. An agent is refused first,
+// with 403 forbidden audited agents_use_mcp, never own_sign_in_required
+// (issue #2098); a guest is a person and gets the person's answers.
 func TestSelfMadeCredentialRoutesRefuseOthers(t *testing.T) {
 	f := newProvenanceFixture(t)
+	guest := f.seedGuest(t, "Pat")
 	standIn := f.guardedStandIn(t)
 	patterns := []string{selfMadeStandIn}
 	for p := range selfMadeCredentialRoutes {
@@ -146,17 +149,30 @@ func TestSelfMadeCredentialRoutesRefuseOthers(t *testing.T) {
 			name  string
 			token string
 			self  bool
+			agent bool // refused first, 403 forbidden
 		}{
-			{"own sign-in", f.joinerTok, true},
-			{"owner's own bootstrap", f.rootTok, true},
-			{"act-as credential", f.actAsTok, false},
-			{"someone else's sign-in link", f.linkTok, false},
-			{"migrated credential", f.migratedTok, false},
+			{"own sign-in", f.joinerTok, true, false},
+			{"owner's own bootstrap", f.rootTok, true, false},
+			{"act-as credential", f.actAsTok, false, false},
+			{"someone else's sign-in link", f.linkTok, false, false},
+			{"migrated credential", f.migratedTok, false, false},
+			{"agent (credential made by another)", f.botTok, false, true},
+			{"guest's own visit", guest.Token, true, false},
 		} {
 			t.Run(pattern+"/"+tt.name, func(t *testing.T) {
 				rec := httptest.NewRecorder()
 				serve(rec, requestFor(pattern, tt.token))
 				code := answerCode(t, rec)
+				if tt.agent {
+					if rec.Code != http.StatusForbidden || code != errForbidden.Code {
+						t.Fatalf("agent got %d %s (%s); want 403 forbidden", rec.Code, code, rec.Body.String())
+					}
+					if strings.Contains(rec.Body.String(), "sign in") {
+						t.Errorf("the agent was told to sign in: %s", rec.Body.String())
+					}
+					f.wantAgentDenial(t, f.bot.ID, denyAgentOnHumanRoute)
+					return
+				}
 				refused := rec.Code == http.StatusForbidden && code == schema.ErrorCodeOwnSignInRequired
 				if refused == tt.self {
 					t.Fatalf("answer %d %s (%s); want refused %v", rec.Code, code, rec.Body.String(), !tt.self)
@@ -217,6 +233,8 @@ func TestSelfMadeCredentialCheck(t *testing.T) {
 			withPreview(withRequestCredential(withCaller(ctx, f.joiner), store.RequestCredential{ID: idOf(f.rootTok), SelfMade: true}),
 				previewContext{Actor: f.root, Target: f.joiner}),
 			http.StatusForbidden, schema.ErrorCodeOwnSignInRequired},
+		{"agent, on a ticket", f.srv, withCredentialID(withCaller(ctx, f.bot), idOf(f.botTok)), http.StatusForbidden, errForbidden.Code},
+		{"agent, no credential", f.srv, withCaller(ctx, f.bot), http.StatusForbidden, errForbidden.Code},
 		{"caller and no credential", f.srv, withCaller(ctx, f.joiner), http.StatusUnauthorized, ""},
 		{"no caller", f.srv, ctx, http.StatusUnauthorized, ""},
 		{"authentication off", newTestServer(t), ctx, http.StatusOK, ""},
@@ -260,4 +278,17 @@ func TestSelfMadeCredentialRoutes(t *testing.T) {
 			t.Errorf("%s is in the setup scope", pattern)
 		}
 	}
+}
+
+// wantAgentDenial fails unless the audit log holds an access_denied row for
+// the agent whose detail names reason.
+func (f *provenanceFixture) wantAgentDenial(t *testing.T, agentID int64, reason string) {
+	t.Helper()
+	actor := "principal:" + strconv.FormatInt(agentID, 10)
+	for _, e := range f.audit(t) {
+		if e.Action == "access_denied" && e.Actor == actor && strings.Contains(e.Detail, "reason="+reason) {
+			return
+		}
+	}
+	t.Errorf("no access_denied audit row for %s with reason %s", actor, reason)
 }
