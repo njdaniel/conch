@@ -72,30 +72,40 @@ func (s *Store) ListBlocks(ctx context.Context, ownerID int64) ([]schema.BlockV1
 	return out, nil
 }
 
+// listedPrincipalSQL determines whether the viewer may name a principals row
+// aliased p by id. The row must be live (dmLivePrincipalCond), known to the
+// viewer (knownPrincipalsSQL), and eligible as a member, an enabled agent,
+// or an enabled person the viewer shares a channel with or invited. PutBlock
+// and a new-pair OpenDM share the condition so they refuse the same set of
+// ids. The fragment is built from constants and the returned args fill its
+// placeholders in order.
+func listedPrincipalSQL(viewer int64, seeAll bool) (cond string, args []any) {
+	known, knownArgs, _ := knownPrincipalsSQL(viewer, seeAll)
+	cond = dmLivePrincipalCond + " AND (" + known + ")" +
+		" AND ((" + memberPredicateSQL + ") OR (p.kind = 'agent' AND p.disabled_at IS NULL) OR (p.disabled_at IS NULL AND " + knowsCond("?") + "))"
+	return cond, append(knownArgs, viewer, viewer, viewer)
+}
+
 // PutBlock adds blockedID to ownerID's list and returns the entry, with
 // created=true when the row is new. It is idempotent: a principal already on
 // the list is answered as it is, with its original time, whether or not the
 // list is full. It fails with ErrBlockSelf when the two are the same,
-// ErrNotFound when blockedID is no principal, a hidden one, one the owner
-// may not know (knownPrincipalsSQL, with seeAll the owner's
-// see_member_directory), or one the directory does not list for them: a
-// disabled person or agent, or a guest the owner shares no channel with. It
-// is ListDirectory's rule, so a PUT cannot be used to probe for principals or
-// read their names, and
-// ErrBlockLimit when the list already holds schema.MaxBlocks others. The
-// count and the insert are in one immediate transaction, so two concurrent
-// PUTs cannot pass the limit together.
+// ErrNotFound when blockedID is nonexistent, hidden, an ended guest, unknown
+// to the owner (knownPrincipalsSQL), disabled, or an active guest the owner
+// neither shares a channel with nor invited. OpenDM uses the same lookup rule
+// for a new pair. ErrBlockLimit applies when the list already holds
+// schema.MaxBlocks others. The count and the insert are in one immediate
+// transaction, so two concurrent PUTs cannot pass the limit together.
 func (s *Store) PutBlock(ctx context.Context, ownerID, blockedID int64, seeAll bool, now time.Time) (entry schema.BlockV1, created bool, err error) {
 	if ownerID == blockedID {
 		return schema.BlockV1{}, false, ErrBlockSelf
 	}
 	err = s.withImmediateTx(ctx, func(tx execer) error {
-		cond, args, _ := knownPrincipalsSQL(ownerID, seeAll)
+		cond, args := listedPrincipalSQL(ownerID, seeAll)
 		var one int
 		switch err := tx.QueryRowContext(ctx,
-			"SELECT 1 FROM principals p WHERE p.id = ? AND p.hidden_at IS NULL AND ("+cond+")"+
-				" AND (("+memberPredicateSQL+") OR (p.kind = 'agent' AND p.disabled_at IS NULL) OR (p.disabled_at IS NULL AND "+knowsCond("?")+"))", // #nosec G202 -- every fragment is a constant
-			append(append([]any{blockedID}, args...), ownerID, ownerID, ownerID)...).Scan(&one); {
+			"SELECT 1 FROM principals p WHERE p.id = ? AND "+cond, // #nosec G202 -- every fragment is a constant
+			append([]any{blockedID}, args...)...).Scan(&one); {
 		case errors.Is(err, sql.ErrNoRows):
 			return ErrNotFound
 		case err != nil:

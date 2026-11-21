@@ -80,7 +80,10 @@ const (
 //     the very error of an id never issued, from one statement, so a
 //     hidden principal and a nonexistent one cannot be told apart. It holds
 //     for a resume too: a peer the caller may no longer know is not found
-//     by id, though the conversation still reads by its own id;
+//     by id, though the conversation still reads by its own id. For a new
+//     pair the rule is PutBlock's (listedPrincipalSQL), which also excludes
+//     disabled principals and active guests the caller neither shares a
+//     channel with nor invited;
 //  5. peer is a human (ErrDMNotHuman);
 //  6. an open of a conversation the caller cannot already see needs
 //     dmContactTx (ErrDMContactUnavailable).
@@ -123,9 +126,14 @@ func openDMTx(ctx context.Context, tx execer, caller, peer int64, now time.Time)
 	if err != nil {
 		return DMConversation{}, err
 	}
-	cond, args, _ := knownPrincipalsSQL(caller, seeAll)
+	known, args, _ := knownPrincipalsSQL(caller, seeAll)
+	cond := dmLivePrincipalCond + " AND (" + known + ")"
+	if id == 0 {
+		// A pair the caller cannot see answers probes as PutBlock does.
+		cond, args = listedPrincipalSQL(caller, seeAll)
+	}
 	var kind string
-	switch err := tx.QueryRowContext(ctx, `SELECT p.kind FROM principals p WHERE p.id = ? AND `+dmLivePrincipalCond+` AND (`+cond+`)`, // #nosec G202 -- every fragment is a constant
+	switch err := tx.QueryRowContext(ctx, `SELECT p.kind FROM principals p WHERE p.id = ? AND `+cond, // #nosec G202 -- every fragment is a constant
 		append([]any{peer}, args...)...).Scan(&kind); {
 	case errors.Is(err, sql.ErrNoRows):
 		return DMConversation{}, ErrPrincipalNotFound
