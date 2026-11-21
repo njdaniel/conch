@@ -8,7 +8,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { AdminConsole } from './AdminConsole';
-import { actAsMembersNotEnded, actAsMembersSentence, auditSentence, managersBlock, movedCells, ownersLine, PermissionMatrix } from './admin/PermissionsSection';
+import { actAsMembersNotEnded, actAsMembersPrivate, actAsMembersSentence, auditSentence, managersBlock, movedCells, ownersLine, PermissionMatrix } from './admin/PermissionsSection';
 import type { IssuedByOperatorV1, KnownPermission, Permission, PermissionsResponseV1 } from './schema/permission';
 import type { WhoAmIResponseV1 } from './schema/principal';
 
@@ -230,6 +230,7 @@ describe('the matrix', () => {
     expect(within(region).getAllByRole('columnheader').map((h) => h.textContent)).toEqual(['Permission', 'Members', 'Operators', 'Owners']);
     // The sentences the design fixes.
     expect(region.textContent).toContain(actAsMembersSentence);
+    expect(region.textContent).toContain(actAsMembersPrivate);
     expect(region.textContent).toContain(actAsMembersNotEnded);
     expect(region.textContent).toContain(auditSentence);
     expect(region.textContent).toContain(ownersLine);
@@ -623,6 +624,7 @@ describe('turning Act as members on for operators', () => {
     fireEvent.click(within(region).getByRole('button', { name: 'Save changes' }));
     const ask = within(region).getByRole('group', { name: 'Confirm Act as members' });
     expect(ask.textContent).toContain(`Operators ${actAsMembersSentence}.`);
+    expect(ask.textContent).toContain(actAsMembersPrivate);
     expect(puts(calls)).toHaveLength(0);
     fireEvent.click(within(ask).getByRole('button', { name: 'Cancel' }));
     expect(within(region).queryByRole('group', { name: 'Confirm Act as members' })).toBeNull();

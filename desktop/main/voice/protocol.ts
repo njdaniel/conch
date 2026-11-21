@@ -1151,6 +1151,10 @@ export class LineSplitter {
   private size = 0;
   private skipping = false;
 
+  get pending(): boolean {
+    return this.size !== 0;
+  }
+
   push(chunk: Buffer, out: (line: Buffer | 'too_long') => void): void {
     let start = 0;
     while (start < chunk.length) {

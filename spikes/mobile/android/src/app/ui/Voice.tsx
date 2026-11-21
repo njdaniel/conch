@@ -5,6 +5,7 @@ import { useSyncExternalStore, useEffect, useState } from 'react';
 import { Text, View } from 'react-native';
 import { useTrackVolume } from '@livekit/react-native';
 import type { LocalAudioTrack } from 'livekit-client';
+import { developmentNotice } from '../../logic/development';
 import { client, controller, micStore, principal } from '../services';
 import { useVoiceState } from './useVoiceState';
 import { Button, Note, Screen, colours, styles } from './common';
@@ -183,6 +184,8 @@ export function Voice(props: { channel: string; onBack: () => void }) {
         );
       }) : null}
       {v.route !== '' ? <Text style={styles.small}>{'Audio devices: ' + v.route}</Text> : null}
+      {/* Last, so on a small screen it can't push Leave voice out of reach. */}
+      <Note text={developmentNotice(client.server, 'voice')} kind="warn" />
     </Screen>
   );
 }

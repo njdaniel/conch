@@ -25,6 +25,7 @@
 // a process of the same user could unlink the socket and bind its own, which
 // is out of scope by design (linux-desktop.md §5.2). Authority arrives only
 // on the helper's standard input.
+import type { MainLog } from '../diagnostics.ts';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { chmod, lstat, mkdir, readdir, unlink } from 'node:fs/promises';
 import { createServer, type Server, type Socket } from 'node:net';
@@ -80,7 +81,7 @@ export interface EndpointDeps {
   readonly pipeId?: () => string;
   // Binds the server to path. Test seam for EACCES.
   readonly listen?: (server: Server, path: string) => Promise<void>;
-  readonly log?: (line: string) => void;
+  readonly log?: MainLog;
 }
 
 function ownUid(deps: EndpointDeps): number {
@@ -164,7 +165,7 @@ export async function profileDir(runtime: string, profileId: string, deps: Endpo
 // entries. A socket of a live helper of this profile cannot be there: one
 // helper per profile, and the listener is closed (and its path unlinked) on
 // attach.
-export async function sweep(dir: string, log: (line: string) => void = () => undefined): Promise<number> {
+export async function sweep(dir: string, log: MainLog = () => undefined): Promise<number> {
   const names = await readdir(dir);
   let removed = 0;
   for (const name of names.slice(0, SWEEP_MAX_ENTRIES)) {
@@ -179,7 +180,7 @@ export async function sweep(dir: string, log: (line: string) => void = () => und
       }
     }
   }
-  if (removed > 0) log(`voice: removed ${String(removed)} stale socket(s) from the profile's runtime directory`);
+  if (removed > 0) log(`voice: removed ${String(removed)} stale socket(s) from the profile's runtime directory`, { ring: true });
   return removed;
 }
 

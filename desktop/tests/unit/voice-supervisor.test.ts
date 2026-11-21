@@ -10,6 +10,7 @@ import { join } from 'node:path';
 
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 
+import { diagnosticsLogger, LogRing } from '../../main/diagnostics.ts';
 import { PASSED_THROUGH, defaultSpawn } from '../../main/voice/spawn.ts';
 import { StderrTail, Supervisor, detailFrom, type StartRequest, type Timings, type VoiceState } from '../../main/voice/supervisor.ts';
 import { FAKE_TOKEN, fixture, ownerLines, readFixture, scratch, until, type Scratch } from './voice-support.ts';
@@ -17,11 +18,13 @@ import { FAKE_TOKEN, fixture, ownerLines, readFixture, scratch, until, type Scra
 let s: Scratch;
 let logs: { at: number; line: string }[];
 let states: VoiceState[];
+let ring: LogRing;
 let sup: Supervisor | null;
 
 beforeEach(() => {
   s = scratch();
   logs = [];
+  ring = new LogRing();
   states = [];
   sup = null;
 });
@@ -44,7 +47,7 @@ function supervisor(timings: Partial<Timings> = {}): Supervisor {
   sup = new Supervisor({
     resources: s.resources,
     env: { HOME: s.root, XDG_RUNTIME_DIR: s.run, PATH: process.env['PATH'] ?? '', ...ROGUE },
-    log: (line) => logs.push({ at: Date.now(), line }),
+    log: diagnosticsLogger(ring, (line) => logs.push({ at: Date.now(), line })),
     timings: { helloTimeoutMs: 5000, ackTimeoutMs: 5000, termAfterMs: 300, killAfterMs: 700, ...timings },
   });
   sup.subscribe((st) => states.push(st));
@@ -328,7 +331,7 @@ describe('a process error', () => {
     sup = new Supervisor({
       resources: s.resources,
       env: { HOME: s.root, XDG_RUNTIME_DIR: s.run },
-      log: (line) => logs.push({ at: Date.now(), line }),
+      log: diagnosticsLogger(ring, (line) => logs.push({ at: Date.now(), line })),
       spawn: (command, args, options) => {
         const child = defaultSpawn(command, args, options);
         children.push(child);
@@ -428,6 +431,10 @@ describe('a failure says why (issue #1850)', () => {
       // The stderr tail is logged too, redacted the same way.
       await until(() => logs.filter((l) => l.line.startsWith('voice: helper 1 stderr: ')).length === 2, 5000, 'the stderr tail');
     }
+    const exported = ring.lines();
+    expect(exported).toContain(`voice: helper 1 ${phase}: ${reason}`);
+    expect(exported.join('\n')).not.toContain('could not reach');
+    expect(exported.join('\n')).not.toContain('unrelated line');
     const seen = [JSON.stringify(states), JSON.stringify(logs)].join('\n');
     for (const secret of [FAKE_TOKEN, nonce, JWT, 'eyJhbGci']) expect(seen).not.toContain(secret);
   });

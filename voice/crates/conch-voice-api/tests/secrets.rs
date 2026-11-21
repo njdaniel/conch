@@ -14,17 +14,17 @@ use std::fmt::{Debug, Display};
 use std::time::Duration;
 
 use conch_voice_api::{
-    Audience, AudienceKind, Client, Error, ErrorBody, PresenceEvent, Refusal, Secret,
-    ServerAddress, StreamEnd, Timestamp, VoiceControlAckV1, VoiceControlAckV2, VoiceControlAckV3,
-    VoiceControlCommand, VoiceControlCommandKindV3, VoiceControlErrorCode, VoiceControlHelloV1,
-    VoiceControlPipeAttachedV1, VoiceControlPlayback, VoiceControlProtocolErrorV1,
-    VoiceControlProtocolErrorV2, VoiceControlProtocolErrorV3, VoiceControlRefusal,
-    VoiceControlShareAudio, VoiceControlShareAudioProblem, VoiceControlTalkMode, VoiceDevice,
-    VoiceDevicesConfig, VoiceDevicesPipeWire, VoiceDevicesV1, VoiceParticipant, VoiceParticipantV2,
-    VoicePresenceRoom, VoicePresenceRoomV2, VoicePresenceV1, VoicePresenceV2, VoiceRoomGrant,
-    VoiceSessionResponseV1, VoiceShareAudioScope, VoiceTransmitReportV1, VoiceTransmitState,
-    WhoAmIResponseV1, parse_command, parse_command_v2, parse_command_v3, parse_event,
-    parse_event_v2, parse_event_v3,
+    Audience, AudienceKind, Client, Error, ErrorBody, MuteKeyEventV1, PresenceEvent, Refusal,
+    Secret, ServerAddress, StreamEnd, Timestamp, VoiceControlAckV1, VoiceControlAckV2,
+    VoiceControlAckV3, VoiceControlCommand, VoiceControlCommandKindV3, VoiceControlErrorCode,
+    VoiceControlHelloV1, VoiceControlPipeAttachedV1, VoiceControlPlayback,
+    VoiceControlProtocolErrorV1, VoiceControlProtocolErrorV2, VoiceControlProtocolErrorV3,
+    VoiceControlRefusal, VoiceControlShareAudio, VoiceControlShareAudioProblem,
+    VoiceControlTalkMode, VoiceDevice, VoiceDevicesConfig, VoiceDevicesPipeWire, VoiceDevicesV1,
+    VoiceParticipant, VoiceParticipantV2, VoicePresenceRoom, VoicePresenceRoomV2, VoicePresenceV1,
+    VoicePresenceV2, VoiceRoomGrant, VoiceSessionResponseV1, VoiceShareAudioScope,
+    VoiceTransmitReportV1, VoiceTransmitState, WhoAmIResponseV1, parse_command, parse_command_v2,
+    parse_command_v3, parse_event, parse_event_v2, parse_event_v3,
 };
 use serde_json::json;
 use support::{FAKE_TOKEN, Reply, Request, Step, Stub, client_for, released_port_url};
@@ -248,6 +248,7 @@ async fn every_public_type_can_be_printed_without_showing_a_secret() {
         debug("VoicePresenceV2", &presence_v2()),
         // Names and descriptions are device-supplied; the document holds nothing else.
         debug("VoiceDevicesV1", &devices()),
+        debug("MuteKeyEventV1", &MuteKeyEventV1::PRESS),
         debug("VoiceDevice", &devices().microphones[0]),
         debug("VoiceDevicesPipeWire", &VoiceDevicesPipeWire::Ok),
         debug("VoiceDevicesConfig", &VoiceDevicesConfig::Refused),

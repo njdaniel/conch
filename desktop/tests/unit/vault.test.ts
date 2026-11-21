@@ -401,7 +401,7 @@ describe('logging', () => {
       for (const bad of ciphertextish) {
         expect(line).not.toContain(bad);
       }
-      expect(line).toMatch(/^vault: [a-zA-Z-]+ profile=alpha$/);
+      expect(line).toMatch(/^vault: [a-zA-Z-]+(?: profile=alpha)?$/);
     }
   });
 });

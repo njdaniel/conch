@@ -12,7 +12,8 @@ import (
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
-// privateCallMigration keeps participants, endpoint credentials and retry
+// privateCallMigration is migration 54 (issue #2030, ADR-017), registered
+// in store.go's migrations after the DM store's 53. It keeps participants, endpoint credentials and retry
 // receipts out of channel voice, presence, and audit data. The DDL is
 // idempotent so migration fixtures can replay older schema changes without
 // dropping the private call tables.
@@ -59,16 +60,6 @@ var privateCallMigration = []string{
 		PRIMARY KEY (principal_id, action_id)
 	)`,
 	`CREATE INDEX IF NOT EXISTS private_call_actions_expiry ON private_call_actions (expires_at)`,
-}
-
-// A database opened by the draft records this DDL as version 51. A combined
-// build must reconcile that slot with the base before reusing it.
-func init() {
-	const draftPrivateCallMigration = 51
-	if len(migrations) != draftPrivateCallMigration-1 {
-		panic("store: reconcile draft private call migration 51 with the base migration list")
-	}
-	migrations = append(migrations, privateCallMigration)
 }
 
 var (

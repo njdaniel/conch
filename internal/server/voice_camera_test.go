@@ -428,6 +428,9 @@ func TestVoiceCameraNamedClaim(t *testing.T) {
 		f.lk.drop(room, f.identity("ann"))
 		f.at(1_500)
 		f.pass(t)
+		// A second absence after the handoff grace confirms the holder left.
+		f.at(1_500 + int(voiceCameraHandoffGrace.Milliseconds()))
+		f.pass(t)
 	}
 	accessLost := func(t *testing.T, f *presenceFixture, _ string, _ schema.VoiceCameraV1) {
 		f.setCamera(t, false, schema.PermissionRoleMember)

@@ -107,7 +107,14 @@ for (const [size, options, phone] of sizes) {
     const people = await openMembers(page);
     const community = people.getByRole('list', { name: 'People' });
     await expect(community.getByRole('listitem').filter({ hasText: owner.name })).toBeVisible();
-    await expect(community.getByRole('listitem').filter({ hasText: newcomer.name }).getByText('You')).toBeVisible();
+    const self = community.getByRole('listitem').filter({ hasText: newcomer.name });
+    await expect(self.getByText('You')).toBeVisible();
+    // The profile sits inside the row and shares its single You badge (#2069).
+    await self.getByRole('button', { name: newcomer.name, exact: true }).click();
+    const profile = self.getByRole('dialog', { name: newcomer.name });
+    await expect(profile).toBeVisible();
+    await expect(self.getByText('You')).toBeVisible();
+    await profile.getByRole('button', { name: 'Close' }).click();
     const listed = await ok(world, newcomer.token, 'GET', '/v1/directory/members', serverMembersResponseV1);
     const agent = listed.members.find((m) => m.kind === 'agent');
     expect(agent, 'the fixture community has an agent the directory lists').toBeDefined();

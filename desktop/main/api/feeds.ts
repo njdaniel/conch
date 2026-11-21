@@ -42,6 +42,7 @@
 // frames, and the close of a socket that failed before it opened is told as
 // 1008 when the credential turns out to have ended (one whoami says so), as
 // the browser learns from a ticket refused with 401.
+import { GeometricSampler, type MainLog } from '../diagnostics.ts';
 import { parseEventFrame } from '../../../web/src/agents/frames.ts';
 import type { FeedKind, FeedRequest } from '../../../web/src/platform/desktop/bridge.ts';
 import { operations, type OperationId } from '../../../web/src/platform/operations.ts';
@@ -213,7 +214,7 @@ export interface FeedsDeps {
   // shown; the app drops it otherwise.
   readonly deliver: (document: number, event: FeedEvent) => void;
   // One line; never a URL, a channel, a frame or a credential.
-  readonly log: (line: string) => void;
+  readonly log: MainLog;
   readonly maxQueuedFrames?: number;
   readonly maxQueuedBytes?: number;
   // The clock of the close deadline; the real one by default.
@@ -245,6 +246,9 @@ export class Feeds {
   readonly #deps: FeedsDeps;
   readonly #subscriptions = new Map<string, Subscription>();
   readonly #held = new Set<Held>();
+  // Keep a sample of each lifecycle event in the export during feed churn.
+  // Every lifecycle line still goes to the local log.
+  readonly #lifecycleSamples = new GeometricSampler<'opening' | Ending | 'closed' | 'destroyed' | 'close deadline'>();
   #invalid = 0;
   #behind = 0;
 
@@ -352,7 +356,11 @@ export class Feeds {
         if (live()) this.#closed(sub, CLOSE_ABNORMAL, '');
       });
     }
-    this.#deps.log(`conch-desktop: feed ${sub.kind} opening; ${this.#counts()}`);
+    if (this.#lifecycleSamples.sample('opening')) {
+      this.#deps.log(`conch-desktop: feed ${sub.kind} opening; ${this.#counts()}`, { ring: true });
+    } else {
+      this.#deps.log(`conch-desktop: feed ${sub.kind} opening; ${this.#counts()}`);
+    }
     return true;
   }
 
@@ -389,7 +397,7 @@ export class Feeds {
       // The first, then every hundredth: a server that sends nothing else
       // must not fill the log.
       if (this.#invalid === 1 || this.#invalid % 100 === 0) {
-        this.#deps.log(`conch-desktop: dropped an invalid ${sub.kind} frame; ${String(this.#invalid)} so far`);
+        this.#deps.log(`conch-desktop: dropped an invalid ${sub.kind} frame; ${String(this.#invalid)} so far`, { ring: true });
       }
       return;
     }
@@ -454,7 +462,11 @@ export class Feeds {
     sub.capture.signal.removeEventListener('abort', sub.onAbort);
     this.#subscriptions.delete(sub.key);
     if (held !== null) this.#release(held);
-    this.#deps.log(`conch-desktop: feed ${sub.kind} closed (${why}); ${this.#counts()}`);
+    if (this.#lifecycleSamples.sample(why)) {
+      this.#deps.log(`conch-desktop: feed ${sub.kind} closed (${why}); ${this.#counts()}`, { ring: true });
+    } else {
+      this.#deps.log(`conch-desktop: feed ${sub.kind} closed (${why}); ${this.#counts()}`);
+    }
   }
 
   // release closes a socket that is still held, and destroys it if its server
@@ -471,7 +483,11 @@ export class Feeds {
         this.#gone(held, 'destroyed');
       } else {
         // Nothing to destroy: it stays counted until its close arrives.
-        this.#deps.log(`conch-desktop: a ${held.kind} feed socket did not close within ${String(CLOSE_DEADLINE_MS)} ms and cannot be destroyed; ${this.#counts()}`);
+        if (this.#lifecycleSamples.sample('close deadline')) {
+          this.#deps.log(`conch-desktop: a ${held.kind} feed socket did not close within ${String(CLOSE_DEADLINE_MS)} ms and cannot be destroyed; ${this.#counts()}`, { ring: true });
+        } else {
+          this.#deps.log(`conch-desktop: a ${held.kind} feed socket did not close within ${String(CLOSE_DEADLINE_MS)} ms and cannot be destroyed; ${this.#counts()}`);
+        }
       }
     }, CLOSE_DEADLINE_MS);
   }
@@ -483,7 +499,11 @@ export class Feeds {
     held.timer = null;
     if (held.closing || how === 'destroyed') {
       const what = how === 'destroyed' ? `destroyed: no close within ${String(CLOSE_DEADLINE_MS)} ms` : 'closed';
-      this.#deps.log(`conch-desktop: feed ${held.kind} socket ${what}; ${this.#counts()}`);
+      if (this.#lifecycleSamples.sample(how)) {
+        this.#deps.log(`conch-desktop: feed ${held.kind} socket ${what}; ${this.#counts()}`, { ring: true });
+      } else {
+        this.#deps.log(`conch-desktop: feed ${held.kind} socket ${what}; ${this.#counts()}`);
+      }
     }
   }
 }

@@ -8,6 +8,7 @@ import type {
   DesktopSettingsBridge,
   DesktopShareSoundBridge,
   DesktopUpdateBridge,
+  DesktopDiagnosticsBridge,
   DesktopVoiceBridge,
   NativeVoiceView,
 } from '../../../web/src/platform/desktop/bridge.ts';
@@ -24,6 +25,7 @@ import {
   VOICE_FUNCTIONS,
   SETTINGS_FUNCTIONS,
   UPDATE_FUNCTIONS,
+  DIAGNOSTICS_FUNCTIONS,
   FEED_EVENTS,
   INVITE_EVENTS,
   NOTIFICATION_EVENTS,
@@ -40,7 +42,7 @@ const noListen = (): void => undefined;
 // Checked by the compiler against the interface: a function added to the
 // bridge and not listed here, or listed and not declared, fails tsc.
 const named: Record<
-  keyof ConchDesktopBridge | keyof DesktopVoiceBridge | keyof DesktopInviteBridge | keyof DesktopSettingsBridge | keyof DesktopCompanionBridge | keyof DesktopUpdateBridge | keyof DesktopShareSoundBridge,
+  keyof ConchDesktopBridge | keyof DesktopVoiceBridge | keyof DesktopInviteBridge | keyof DesktopSettingsBridge | keyof DesktopCompanionBridge | keyof DesktopUpdateBridge | keyof DesktopShareSoundBridge | keyof DesktopDiagnosticsBridge,
   true
 > = {
   shareSoundStart: true,
@@ -97,6 +99,7 @@ const named: Record<
   voiceSaveDevice: true,
   voiceKeyDevices: true,
   voiceSaveTalkBinding: true,
+  reportVoiceDiagnostic: true,
   inviteCheck: true,
   inviteAccept: true,
   inviteCancel: true,
@@ -114,6 +117,8 @@ const named: Record<
   updateState: true,
   updateRestart: true,
   onUpdateState: true,
+  diagnosticsPreview: true,
+  diagnosticsSave: true,
 };
 
 describe('the preload', () => {
@@ -124,7 +129,7 @@ describe('the preload', () => {
     expect(name).toBe('conchDesktop');
     expect(Object.isFrozen(api)).toBe(true);
     expect(Reflect.ownKeys(api).sort()).toEqual(Object.keys(named).sort());
-    expect([...BRIDGE_FUNCTIONS, ...PROFILE_FUNCTIONS, ...VOICE_FUNCTIONS, ...INVITE_FUNCTIONS, ...NOTIFY_FUNCTIONS, ...SETTINGS_FUNCTIONS, 'notificationSupported', 'onNotification', 'onVoiceState', 'onInviteArrived', ...COMPANION_FUNCTIONS, 'onCompanion', ...UPDATE_FUNCTIONS, 'onUpdateState', ...SHARE_SOUND_FUNCTIONS].sort()).toEqual(Object.keys(named).sort());
+    expect([...BRIDGE_FUNCTIONS, ...PROFILE_FUNCTIONS, ...VOICE_FUNCTIONS, ...INVITE_FUNCTIONS, ...NOTIFY_FUNCTIONS, ...SETTINGS_FUNCTIONS, 'notificationSupported', 'onNotification', 'onVoiceState', 'onInviteArrived', ...COMPANION_FUNCTIONS, 'onCompanion', ...UPDATE_FUNCTIONS, 'onUpdateState', ...SHARE_SOUND_FUNCTIONS, ...DIAGNOSTICS_FUNCTIONS].sort()).toEqual(Object.keys(named).sort());
     for (const key of Reflect.ownKeys(api)) expect(typeof api[key as string], String(key)).toBe('function');
     for (const forbidden of ['ipcRenderer', 'invoke', 'send', 'on', 'sendSync', 'electron', 'require', 'process']) expect(forbidden in api).toBe(false);
     // It listens on the feed, voice, companion, notification, update and
@@ -153,8 +158,7 @@ describe('the preload', () => {
     expect(invoke).toHaveBeenLastCalledWith('conch:notifyClose', { tag: 't' });
     await bridge.settingsSet({ launchAtLogin: true });
     expect(invoke).toHaveBeenLastCalledWith('conch:settingsSet', { launchAtLogin: true });
-    // 62 before the Linux share sound's four (issue #1854).
-    expect(INVOKED_FUNCTIONS).toHaveLength(67);
+    expect(INVOKED_FUNCTIONS).toHaveLength(70);
   });
 
   it('rejects with a bare "refused" when main refuses, or answers anything but an envelope', async () => {
@@ -354,6 +358,7 @@ describe('the preload’s voice family', () => {
     await bridge.voiceSaveDevice({ key: 'audio.input', value: 'Mic' });
     await bridge.voiceKeyDevices();
     await bridge.voiceSaveTalkBinding({ deviceId: 'abc', code: 275 });
+    await bridge.reportVoiceDiagnostic('encoder-cpu');
     expect(calls).toEqual([
       ['conch:voiceState', []],
       ['conch:voiceJoin', [{ channel: 'general', muted: true, deafened: false }]],
@@ -367,6 +372,7 @@ describe('the preload’s voice family', () => {
       ['conch:voiceSaveDevice', [{ key: 'audio.input', value: 'Mic' }]],
       ['conch:voiceKeyDevices', []],
       ['conch:voiceSaveTalkBinding', [{ deviceId: 'abc', code: 275 }]],
+      ['conch:reportVoiceDiagnostic', ['encoder-cpu']],
     ]);
   });
 

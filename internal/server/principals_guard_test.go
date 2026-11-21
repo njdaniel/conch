@@ -64,6 +64,15 @@ var principalReads = []principalRead{
 	// operator holding manage_channels, or a manager of the channel), and a
 	// manager's ban target, a member of the channel it manages.
 	{"store/bans.go", "Store.ListChannelBans", 1, readOperatorOrMaker},
+	// #2017: a DM's peer, read before any may-know check. No route calls
+	// OpenDM yet (ADR-017's release gate). #2018, pair eligibility and
+	// mutual visibility, gates it, and must make a peer the caller may not
+	// know, or a hidden one, the same ErrPrincipalNotFound as an id never
+	// issued, before any route reaches it.
+	{"store/dm.go", "openDMTx", 1, readGated},
+	// #1832: a block's target, only when the owner may know it by
+	// knownPrincipalsSQL (the directory's rule) and it is not hidden.
+	{"store/blocks.go", "Store.PutBlock", 1, readPredicate},
 	{"store/bans.go", "managerBanTargetTx", 1, readOperatorOrMaker},
 	{"store/audience.go", "Store.ListChannelAuthors", 1, readGated},
 	// #1828: recheck only the removing caller’s kind under the write lock.
@@ -149,6 +158,11 @@ var principalReads = []principalRead{
 	{"store/operator_auth.go", "Store.PendingLoginOf", 1, readOwnOrInternal},
 	{"store/operator_auth.go", "Store.RedeemSetupToken", 1, readOwnOrInternal},
 	{"store/operator_auth.go", "issueSetupTokenTx", 1, readOwnOrInternal},
+	// #2042: the name of the principal who made a link, written into the
+	// notice of the member whose password it set, in the transaction that
+	// sets it; the member reads their own notice, which carries only that
+	// name, and no list of principals.
+	{"store/account_notices.go", "noticePasswordSetByLinkTx", 1, readOwnOrInternal},
 	{"store/passwords.go", "Store.LoginCandidate", 1, readOwnOrInternal},
 	// #1361: migration 44 asks only whether any principal exists.
 	{"store/camera_default.go", "pinCameraOff", 1, readOwnOrInternal},
@@ -182,7 +196,7 @@ var principalReads = []principalRead{
 	{"store/sign_in_links.go", "Store.CreateSignInLink", 1, readOwnOrInternal},
 	{"store/sign_in_links.go", "liveSignInLinkTx", 1, readOwnOrInternal},
 	{"store/sign_in_links.go", "signInLinkCredentialLifetimeTx", 1, readOwnOrInternal},
-	{"store/voice.go", "Store.InvalidVoiceRooms", 1, readOperatorOrMaker},
+	{"store/voice.go", "Store.invalidVoiceRooms", 1, readOperatorOrMaker},
 	{"store/voice_permission.go", "Store.SetVoiceAllowed", 2, readOperatorOrMaker},
 }
 
@@ -192,6 +206,7 @@ var predicateNames = map[string]string{
 	"mayKnowTx":                         "knownPrincipalsSQL",
 	"directoryKnowersTx":                "knowsCond",
 	"Store.DirectoryMembershipAudience": "knowsCondExcept",
+	"Store.PutBlock":                    "knownPrincipalsSQL",
 }
 
 var selectsPrincipals = regexp.MustCompile(`(?i)\b(from|join)\s+principals\b`)

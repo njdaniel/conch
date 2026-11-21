@@ -29,6 +29,7 @@ import type { ReadStateV1 } from './schema/readstate';
 import { SignIn } from './SignIn';
 import { YourSignIns } from './SignIns';
 import { SignInLink } from './SignInLink';
+import { AccountNotices, useAccountNotices } from './AccountNotices';
 import { AddDevice } from './AddDevice';
 import { AdminConsole } from './AdminConsole';
 import { canDo, memberLine } from './admin/permissions';
@@ -67,6 +68,7 @@ import { useChannelRefresh } from './useChannelRefresh';
 import { MembersPanel } from './agents/MembersPanel';
 import { CommunityMembers } from './Members';
 import { useDirectoryChanged } from './useDirectoryChanged';
+import { BlockedPeople, BlocksProvider, useBlocks } from './blocks';
 import { RunDetail } from './agents/RunDetail';
 import { useAgents } from './agents/useAgents';
 import { useNow } from './agents/useNow';
@@ -668,6 +670,8 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     readWho();
     previewSignal();
   }, [readWho, previewSignal]);
+  // The person's block list (issue #1832): a guest keeps none.
+  const blocks = useBlocks(signedIn && principal !== null && principal.kind === 'human' && visit === null);
   const directory = useDirectoryChanged();
   const directorySignal = directory.signal;
   const directoryChanged = useCallback(() => {
@@ -693,6 +697,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     onChannelsChanged: refreshChannels,
     onPermissionsChanged: permissionsChanged,
     onDirectoryChanged: directoryChanged,
+    onBlocksChanged: blocks.signal,
   });
   const manifestReads = useManifestReadControl(signedIn, directory.tick);
   // The server's word that the directory changed (issue #993): the community
@@ -775,6 +780,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     editEvent,
     readStateEvent,
     onOpen,
+    blocked: blocks.blocked,
   });
   // "Notify me when Conch is closed" (issue #1826). Only a person with a full
   // credential: the server refuses a guest and an agent.
@@ -785,6 +791,10 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     policy: notifications.policy,
     muted: notifications.muted,
   });
+
+  // A member's own notices (issue #2042), shown in the lobby's banner and in
+  // Settings from this one state, so dismissing in one clears both.
+  const accountNotices = useAccountNotices(signedIn && principal !== null && principal.kind === 'human' && visit === null, onUnauthorized);
 
   const now = useNow(signedIn);
 
@@ -1762,6 +1772,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
         <ManifestReads.Provider value={manifestReads}>
         <PreviewEntry.Provider value={previewEntry}>
         <ComposerAttachmentProvider value={composerAttachments}>
+        <BlocksProvider value={blocks}>
         <Lobby
           origin={origin}
           name={shownName}
@@ -1778,6 +1789,9 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                   </button>
                 </div>
               )}
+              {/* A member's own notices, such as a password set through a link
+                  someone else made (issue #2042): on a sign-in of their own. */}
+              <AccountNotices state={accountNotices} />
               {visit === null ? null : <GuestVisit guest={visit} insecure={needsHttps(origin)} onConvert={convert} onEnd={endVisit} onForget={forgetVisit} />}
               {missing.length === 0 || destination === null ? null : (
                 <div role="status" className="banner destination">
@@ -1880,6 +1894,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                   void notifications.enableNative();
                 }}
               />
+              {auth.principal.kind === 'human' && visit === null ? <BlockedPeople /> : null}
               {/* A person renames themselves; an agent's name is an operator's to
                   set, and a guest's is its handle (issue #713). */}
               {auth.principal.kind === 'human' && visit === null ? (
@@ -1898,6 +1913,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                       not end after an hour without use. Sign out, and sign in with your name, password and a code.
                     </p>
                   ) : null}
+                  <AccountNotices state={accountNotices} />
                   {/* A server that predates passwords says nothing of them. */}
                   {auth.principal.auth === undefined ? null : (
                     <PasswordSettings who={auth.principal} insecure={needsHttps(origin)} onChanged={refreshWho} onUnauthorized={onUnauthorized} />
@@ -2161,6 +2177,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           onSignOutEverywhere={signOutEverywhere}
           signOutProblem={everywhereFailed}
         />
+        </BlocksProvider>
         </ComposerAttachmentProvider>
         </PreviewEntry.Provider>
         </ManifestReads.Provider>

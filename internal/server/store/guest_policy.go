@@ -975,7 +975,9 @@ func (s *Store) JoinAsAccount(ctx context.Context, name, record string, now time
 		}
 		lifetime := schema.DefaultInviteCredentialLifetimeSeconds * time.Second
 		exp := now.Add(lifetime)
-		cred, err := insertCredentialTx(ctx, tx, pid, AccountCredentialLabel, token, now, &exp, lifetime, issuerOf(actor))
+		// Self-made (issue #2042): the person joins with a password they
+		// chose, and the principal is created here.
+		cred, err := insertCredentialTx(ctx, tx, pid, AccountCredentialLabel, token, now, &exp, lifetime, issuerOf(actor), madeBySelf)
 		if err != nil {
 			return err
 		}

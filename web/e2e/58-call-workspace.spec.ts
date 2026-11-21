@@ -4,6 +4,7 @@
 // same machine supplies fake microphone, camera and screen devices through
 // the pinned LiveKit of voice-world.ts; these are not real-device tests.
 import type { Browser, BrowserContextOptions, Locator, Page } from '@playwright/test';
+import { secretLines, withoutJoinTokenInSocketRefusals, type BrowserLogEntry } from './console-lines';
 import { channelButton, expect, openChannel, showView, test } from './fixtures';
 import { enter, inbound as inboundStats, joinVoice, leave, type Someone } from './people';
 import { dockerAvailable, startVoiceWorld, type Member, type VoiceWorld } from './voice-world';
@@ -172,11 +173,13 @@ test.describe('the persistent call workspace', () => {
     await expect(button).toHaveAttribute('aria-pressed', String(on));
   }
 
-  async function expectClean(p: Person): Promise<void> {
+  async function expectClean(p: Person, renewalLog: readonly BrowserLogEntry[] = []): Promise<void> {
     await p.watch.settled();
-    const said = p.watch.console.join('\n');
-    for (const secret of vw.secrets) expect(said, 'a secret in the console').not.toContain(secret);
-    expect(p.watch.console.filter((line) => line.startsWith('error: ') || line.startsWith('pageerror: ')), 'no console error').toEqual([]);
+    const lines = withoutJoinTokenInSocketRefusals(p.watch.console, renewalLog, vw.livekitOrigin);
+    expect(secretLines(lines, p.watch.browserLog, vw.secrets), 'a secret in the console').toEqual([]);
+    // Only lines whose token the shared matcher removed can skip the error check.
+    const errors = lines.filter((line, i) => line === p.watch.console[i] && /^(error|pageerror): /.test(line));
+    expect(errors, 'no console error').toEqual([]);
     expect(p.watch.console.filter((line) => /Content Security Policy|Refused to|[Pp]ermissions policy/.test(line))).toEqual([]);
     expect(p.watch.policy, 'Permissions-Policy reports').toEqual([]);
     expect(p.watch.failed, 'requests to conchd that failed').toEqual([]);
@@ -389,14 +392,32 @@ test.describe('the persistent call workspace', () => {
       await call(d.page).getByRole('button', { name: 'Compact', exact: true }).click();
       await expect(call(d.page)).toHaveClass(/compact/);
       await expectClean(d);
+
+      // Disabling Dave rotates the room (#516). If signaling drops before
+      // LiveKit's room-deleted message arrives, the SDK can retry the retired
+      // room and Chromium can log its 404. Capture only the surviving pages'
+      // browser log entries from the disable through their fresh joins.
+      const renewing = await Promise.all([a, c].map(async (p) => {
+        await p.watch.settled();
+        return { p, logFrom: p.watch.browserLog.length, tokensBefore: p.watch.conchdTokens.length };
+      }));
       await vw.disable(dave);
+      const renewed = await Promise.all(renewing.map(async ({ p, logFrom, tokensBefore }) => {
+        await expect.poll(() => p.watch.conchdTokens.length, { timeout: 30_000 }).toBeGreaterThan(tokensBefore);
+        await expect(voice(p.page)).toContainText('Connected in #voice-room', { timeout: 30_000 });
+        await p.watch.settled();
+        const log = p.watch.browserLog.slice(logFrom).filter(({ text }) =>
+          text.endsWith("' failed: Error during WebSocket handshake: Unexpected response code: 404"));
+        return { p, log };
+      }));
       await expect(call(d.page)).toHaveCount(0, { timeout: 30_000 });
       await expect(shareView(d.page)).toHaveCount(0);
       await voice(a.page).getByRole('button', { name: 'Stop sharing' }).click();
 
       // 6. Every context stayed free of console, policy, request and secret
       // failures. Dave's check ran before disablement, whose 401s are expected.
-      for (const p of [a, b, c]) await expectClean(p);
+      await expectClean(b);
+      for (const { p, log } of renewed) await expectClean(p, log);
     } finally {
       for (const p of people) await leave(p);
     }
