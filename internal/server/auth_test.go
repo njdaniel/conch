@@ -308,7 +308,8 @@ var routeExpectations = map[string]routeExpectation{
 	"GET /v1/events/ws": {classAuth, "/v1/events/ws", "", 400},
 	// The per-person events socket (issue #2040) takes no parameter, so a
 	// person gets as far as the upgrade and is refused there with 426; an
-	// agent and a guest get 403 and AuthOff 400 before it (special-cased).
+	// agent gets 403 (own_sign_in_required today, #2098), a guest 403 and
+	// AuthOff 400 before it (special-cased).
 	"GET /v1/events/person/ws": {classAuth, "/v1/events/person/ws", "", 426},
 	// Sessions (issue #265). Chosen to change and audit nothing: an empty
 	// create is a 400 (a client is required), the session routes use an id

@@ -58,10 +58,13 @@ import (
 // not have is dropped, not queued for later; a failed check closes the socket
 // (fail closed), and the client reconnects and re-reads.
 //
-// Who may open it: a verified human member's own credential. An agent
-// (403 forbidden), a guest (403 guest_not_allowed) and a caller without
-// proof of their own sign-in (403 own_sign_in_required) are refused before
-// the upgrade.
+// Who may open it: a verified human member's own credential, one the person
+// made for themselves (selfMadeCredentialRoutes, provenance.go). A caller
+// whose credential another made (an operator's act-as credential, an
+// operator-issued token, someone else's sign-in link) and an agent are
+// refused 403 own_sign_in_required by the guard (issue #2098 will move the
+// agent's refusal to 403 forbidden); a guest is refused 403
+// guest_not_allowed. All are refused before the upgrade.
 //
 // Revocation: principalDisabled, authChanged, guestsEnded and
 // credentialRevoked close the sockets at once through dropPrincipalAll and
@@ -370,8 +373,15 @@ func (s *Server) emptyDMSnapshot(_ context.Context, _ int64) (schema.DMSnapshotV
 	}, nil
 }
 
+// personSnapshot is the snapshot a socket opens with. It serves what
+// dmSnapshotSource returns only when dmFrameAccess is installed too: the
+// snapshot lists conversations, and the access hook is what decides, at write
+// time, whether a person may be sent those of a pair (a block), so a source
+// installed without it would show conversations the stream would not deliver.
+// With either hook missing the snapshot is the empty one (ADR-017's release
+// gate: DMs are off until the DM store installs both).
 func (s *Server) personSnapshot(ctx context.Context, principalID int64) (schema.DMSnapshotV1, error) {
-	if s.dmSnapshotSource == nil {
+	if s.dmSnapshotSource == nil || s.dmFrameAccess == nil {
 		return s.emptyDMSnapshot(ctx, principalID)
 	}
 	result, err := s.dmSnapshotSource(ctx, principalID)
@@ -396,8 +406,11 @@ func (s *Server) personSnapshot(ctx context.Context, principalID int64) (schema.
 }
 
 // personStreamCaller is the check before the upgrade: a verified person with
-// a credential. An agent and a guest are refused (403, audited as any refused
-// people-only route is); with authentication off there is no person.
+// a credential. The guard has already refused a credential another made, and
+// with it an agent's (selfMadeCredentialRoutes); this keeps the refusals of a
+// guest and of an agent (403, audited as any refused people-only route is) for
+// a caller that reaches it without the guard, and with authentication off
+// there is no person.
 func (s *Server) personStreamCaller(w http.ResponseWriter, r *http.Request) (store.Principal, int64, bool) {
 	caller, ok := callerFrom(r.Context())
 	if !ok {
@@ -444,7 +457,7 @@ func (s *Server) personStillAllowed(ctx context.Context, principalID, credID int
 	defer cancel()
 	p, err := s.store.PrincipalByID(cctx, principalID)
 	switch {
-	case errors.Is(err, store.ErrPrincipalNotFound):
+	case errors.Is(err, store.ErrNotFound): // what PrincipalByID returns for a principal that is gone
 		return false, schema.SocketCloseRevoked, reasonCredentialInvalid, nil
 	case err != nil:
 		return false, schema.SocketCloseError, "principal check failed", err

@@ -232,7 +232,8 @@ type Server struct {
 	// Nil means emptyDMSnapshot; the DM issues install the real one.
 	dmSnapshotSource dmSnapshotSource
 	// dmFrameAccess decides, per DM frame at write time, whether a person
-	// socket may be sent it (person_stream.go). Nil allows every frame.
+	// socket may be sent it (person_stream.go). Nil denies every frame: the socket drops them, so
+	// DMs reach no one until the DM store installs both hooks.
 	dmFrameAccess dmFrameAccess
 	// eventsBeforeEpochWrite, when set by a test, runs before every frame an
 	// events socket writes that is held to a read-state epoch (a read state

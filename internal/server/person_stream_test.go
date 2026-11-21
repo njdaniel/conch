@@ -47,7 +47,7 @@ func newPersonFixture(t *testing.T) *runFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	for _, p := range []store.Principal{f.root, f.alice, f.bob, f.carol} {
 		if _, err := db.Exec("UPDATE credentials SET self_made = 1 WHERE principal_id = ?", p.ID); err != nil {
 			t.Fatal(err)
@@ -272,6 +272,18 @@ func TestPersonStreamWhoMayOpen(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// A credential an invite redemption made (the store's own path for a
+	// person's sign-in, not the SQL mark newPersonFixture sets) opens it.
+	inv, err := f.srv.store.CreateInvite(ctx, actor, f.root.ID,
+		schema.CreateInviteRequestV1{Kind: schema.InviteKindOpen, Channels: []string{"general"}}, store.InviteOptions{}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined, err := f.srv.store.RedeemInvite(ctx, store.HashInviteCode(inv.Code), "joiner", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	tests := []struct {
 		name   string
 		path   string
@@ -279,6 +291,8 @@ func TestPersonStreamWhoMayOpen(t *testing.T) {
 		status int
 		code   string
 	}{
+		{"an invite-made credential, bearer", personPath, joined.Token, http.StatusSwitchingProtocols, ""},
+		{"an invite-made credential, ticket", personPath + "?ticket=" + ticket(joined.Token), "", http.StatusSwitchingProtocols, ""},
 		{"a person, bearer", personPath, f.aliceTok, http.StatusSwitchingProtocols, ""},
 		{"another person", personPath, f.bobTok, http.StatusSwitchingProtocols, ""},
 		{"a person, ticket", personPath + "?ticket=" + ticket(f.aliceTok), "", http.StatusSwitchingProtocols, ""},
@@ -361,6 +375,8 @@ func TestPersonStreamOpens(t *testing.T) {
 
 	t.Run("the snapshot is the installed source's, for the caller", func(t *testing.T) {
 		var asked []int64
+		f.srv.dmFrameAccess = allowPersonDMFixture // a source is served only with the access hook
+		t.Cleanup(func() { f.srv.dmFrameAccess = nil })
 		f.srv.dmSnapshotSource = func(_ context.Context, id int64) (personDMSnapshot, error) {
 			asked = append(asked, id)
 			s, _ := f.srv.emptyDMSnapshot(context.Background(), id)
@@ -377,7 +393,29 @@ func TestPersonStreamOpens(t *testing.T) {
 		}
 	})
 
+	t.Run("a source installed without the access hook is not served: the snapshot is empty", func(t *testing.T) {
+		// The access hook is what decides, at write time, whether a person may
+		// be sent a conversation's frames; a snapshot listing conversations the
+		// stream would not deliver must not be sent before it is installed.
+		asked := false
+		f.srv.dmFrameAccess = nil
+		f.srv.dmSnapshotSource = func(_ context.Context, id int64) (personDMSnapshot, error) {
+			asked = true
+			doc, err := f.srv.emptyDMSnapshot(context.Background(), id)
+			doc.DMsEnabled = true
+			doc.Conversations = []schema.DMConversationV1{snapshotConv(id, f.alice.ID+f.bob.ID-id, 12, 1, 1)}
+			return personDMSnapshot{doc: doc}, err
+		}
+		t.Cleanup(func() { f.srv.dmSnapshotSource = nil })
+		_, snap := dialPerson(t, base, f.aliceTok).open()
+		if asked || len(snap.Conversations) != 0 || snap.DMsEnabled {
+			t.Errorf("source asked = %v, snapshot = %+v; want the empty snapshot, DMs not available", asked, snap)
+		}
+	})
+
 	t.Run("a source that fails or lies is a 500, not an upgrade", func(t *testing.T) {
+		f.srv.dmFrameAccess = allowPersonDMFixture
+		t.Cleanup(func() { f.srv.dmFrameAccess = nil })
 		for name, src := range map[string]dmSnapshotSource{
 			"error": func(context.Context, int64) (personDMSnapshot, error) {
 				return personDMSnapshot{}, errors.New("boom")
@@ -423,6 +461,7 @@ func TestPersonStreamSnapshotPrivacy(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newPersonFixture(t)
 			row, openers := tt.rows(f)
+			f.srv.dmFrameAccess = allowPersonDMFixture
 			f.srv.dmSnapshotSource = func(ctx context.Context, id int64) (personDMSnapshot, error) {
 				doc, err := f.srv.emptyDMSnapshot(ctx, id)
 				doc.Conversations = []schema.DMConversationV1{row}
@@ -445,6 +484,7 @@ func TestPersonStreamSnapshotPrivacy(t *testing.T) {
 func TestPersonStreamRechecksAfterSnapshotBuild(t *testing.T) {
 	f := newPersonFixture(t)
 	credID := f.credentialID(t, f.aliceTok)
+	f.srv.dmFrameAccess = allowPersonDMFixture // the source is built only with the access hook
 	f.srv.dmSnapshotSource = func(ctx context.Context, id int64) (personDMSnapshot, error) {
 		// Revoke directly in the store, so there's no subscription drop.
 		if err := f.srv.store.RevokeCredential(ctx, "system", credID); err != nil {
@@ -516,15 +556,12 @@ func TestPersonStreamSnapshotOrdering(t *testing.T) {
 
 func TestPersonStreamMissingAccessGateDropsDMs(t *testing.T) {
 	f := newPersonFixture(t)
-	f.srv.dmSnapshotSource = func(ctx context.Context, id int64) (personDMSnapshot, error) {
-		if err := f.srv.person.publish(id, dmMessageDoc(12, 1, 1)); err != nil {
-			return personDMSnapshot{}, err
-		}
-		doc, err := f.srv.emptyDMSnapshot(ctx, id)
-		return personDMSnapshot{doc: doc}, err
-	}
 	c := dialPerson(t, wsTestServer(t, f.srv), f.aliceTok)
 	c.open()
+	// No access hook is installed: the frame, addressed to her, is dropped.
+	if err := f.srv.person.publish(f.alice.ID, dmMessageDoc(12, 1, 1)); err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	if _, raw, err := c.conn.Read(ctx); !errors.Is(err, context.DeadlineExceeded) {
@@ -771,6 +808,22 @@ func TestPersonStreamClosesWhenAccessIsLost(t *testing.T) {
 		}},
 		{"principal disabled behind the server's back, found by the re-check", func(t *testing.T, f *runFixture) {
 			if _, err := f.srv.store.DisablePrincipal(context.Background(), "system", f.bob.ID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"principal gone behind the server's back, found by the re-check", func(t *testing.T, f *runFixture) {
+			// PrincipalByID answers store.ErrNotFound for it; that is a revoked
+			// socket (1008), not a failed check (1011).
+			path, ok := testDBPaths.Load(f.srv)
+			if !ok {
+				t.Fatal("no database path for the test server")
+			}
+			db, err := sql.Open("sqlite", "file:"+path.(string)+"?_pragma=busy_timeout(5000)")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = db.Close() }()
+			if _, err := db.Exec("DELETE FROM principals WHERE id = ?", f.bob.ID); err != nil {
 				t.Fatal(err)
 			}
 		}},

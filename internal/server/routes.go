@@ -26,8 +26,10 @@ func (s *Server) routeTable() []route {
 		// browser opens.
 		{pattern: "GET /v1/events/ws", access: accessAuthenticated, handler: hf(s.handleEventsWS), acceptsTicket: true},
 		// The per-person events stream (issue #2040): DM frames and, later,
-		// rings, scoped to the caller, with no channel. A person's own
-		// credential only; the handler refuses an agent and a guest before
+		// rings, scoped to the caller, with no channel. A credential the person
+		// made for themselves only: the route is in selfMadeCredentialRoutes,
+		// which refuses another's credential and an agent (403
+		// own_sign_in_required), and the handler refuses a guest, all before
 		// the upgrade. It takes a ticket, as the channel socket does.
 		{pattern: "GET /v1/events/person/ws", access: accessAuthenticated, handler: hf(s.handlePersonEventsWS), acceptsTicket: true},
 		rt("POST /v1/ws-tickets", accessAuthenticated, hf(s.handleCreateWSTicket)),
