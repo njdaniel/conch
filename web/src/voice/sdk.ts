@@ -1112,6 +1112,10 @@ class LiveKitAdapter implements Room {
     // connection's.
     redactor.hold(this, token, roomName);
     const room = this.room;
+    // Select dual-PC mode at join, after all pre-connection settings. This
+    // keeps the receive sections out of the companion's publisher BUNDLE,
+    // where the SDK adds VP8 bitrate parameters to the send section alone.
+    if (this.companion) room.options.singlePeerConnection = false;
     room
       .on(RoomEvent.Reconnecting, events.onReconnecting)
       // A signal-only resume (the signal socket lost, the media kept) is the
