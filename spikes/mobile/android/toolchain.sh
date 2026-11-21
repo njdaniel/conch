@@ -45,6 +45,12 @@ if [ "${CONCH_ACCEPT_ANDROID_LICENCES:-}" != 1 ]; then
     exit 1
 fi
 
+# HotSpot treats double quotes in JAVA_TOOL_OPTIONS as delimiters.
+if [[ $CACHE == *'"'* ]]; then
+    echo 'toolchain: CONCH_CACHE must not contain a double quote (").' >&2
+    exit 1
+fi
+
 JDK_DIR="$CACHE/jdk-$JDK_VERSION"
 SDK="$CACHE/android-sdk"
 mkdir -p "$CACHE" "$SDK"
@@ -83,11 +89,14 @@ fi
 export JAVA_HOME="$JDK_DIR"
 export PATH="$JAVA_HOME/bin:$PATH"
 
-run_android_cli() {
+run_android_cli() (
     local operation=$1 attempt=1
     shift
     # The launcher and its bundle use ANDROID_USER_HOME. Java's repo-index
     # temp files use java.io.tmpdir, independently of the launcher's TMPDIR.
+    # These variables can override JAVA_TOOL_OPTIONS. Clear them only for
+    # the launcher so Java uses the installer-owned scratch directory.
+    unset _JAVA_OPTIONS JDK_JAVA_OPTIONS
     # Retry a flaky CLI or SDK download, at most three attempts (#2007).
     until ANDROID_USER_HOME="$CACHE/android-user-home" TMPDIR="$tmp" \
         JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS:+$JAVA_TOOL_OPTIONS }-Djava.io.tmpdir=\"$tmp\"" \
@@ -100,13 +109,12 @@ run_android_cli() {
         sleep $((attempt * 15))
         attempt=$((attempt + 1))
     done
-}
+)
 
 if [ "${1:-}" = --cli-version ]; then
     version_output=$(run_android_cli "Android CLI bootstrap" --version)
-    # The CLI prints its version last, after any bootstrap notices.
-    version=${version_output##*$'\n'}
-    if [[ ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+[a-zA-Z0-9.+-]*$ ]]; then
+    # Bootstrap notices and the update banner can surround the version.
+    if ! version=$(grep -m1 -xE '[0-9]+\.[0-9]+\.[0-9]+[a-zA-Z0-9.+-]*' <<<"$version_output"); then
         printf 'toolchain: could not read the Android CLI version from:\n%s\n' "$version_output" >&2
         exit 1
     fi

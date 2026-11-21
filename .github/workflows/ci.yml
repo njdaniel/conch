@@ -94,7 +94,11 @@ jobs:
             awk -v header="  $1-spike:" '/^  [^ ]/ { job = ($0 == header) } job && NF'
           }
           for spike in ios android; do
-            paths=$(git diff --name-only --no-renames "$base" HEAD -- "spikes/mobile/$spike/")
+            spike_paths=("spikes/mobile/$spike/")
+            if [ "$spike" = android ]; then
+              spike_paths+=(scripts/mobile-android-toolchain-test.sh)
+            fi
+            paths=$(git diff --name-only --no-renames "$base" HEAD -- "${spike_paths[@]}")
             previous=
             if git cat-file -e "$base:$workflow" 2>/dev/null; then
               previous=$(git show "$base:$workflow" | spike_job "$spike")
@@ -1174,62 +1178,8 @@ jobs:
           cache: npm
           cache-dependency-path: spikes/mobile/android/package-lock.json
 
-      - name: test Android CLI temp-file confinement
-        env:
-          CONCH_ACCEPT_ANDROID_LICENCES: '1'
-          CONCH_ANDROID_NO_EMULATOR: '1'
-        run: |
-          probe_root=$(mktemp -d "$TMPDIR/toolchain-test.XXXXXX")
-          trap 'rm -rf "$probe_root"' EXIT
-          export TOOLCHAIN_PROBE_ROOT="$probe_root"
-          fixture_cache="$probe_root/cache with spaces"
-          jdk_version=$(sed -n 's/^JDK_VERSION="\(.*\)"$/\1/p' toolchain.sh)
-          clt_version=$(sed -n 's/^CLT_VERSION="\(.*\)"$/\1/p' toolchain.sh)
-          platform_version=$(sed -n 's/^PLATFORM_TOOLS_VERSION="\(.*\)"$/\1/p' toolchain.sh)
-          launcher_dir="$fixture_cache/android-sdk/cmdline-tools/$clt_version"
-          jdk_bin="$fixture_cache/jdk-$jdk_version/bin"
-          platform_dir="$fixture_cache/android-sdk/platform-tools"
-          mkdir -p "$launcher_dir/bin" "$jdk_bin" "$platform_dir" "$probe_root"/{bin,home,ambient-tmp}
-          ln -s "$(command -v java)" "$jdk_bin/java"
-          ln -s /bin/false "$probe_root/bin/curl"
-          ln -s /bin/true "$probe_root/bin/sleep"
-          printf 'Pkg.Revision=%s\n' "$clt_version" > "$launcher_dir/source.properties"
-          printf 'Pkg.Revision=%s\n' "$platform_version" > "$platform_dir/source.properties"
-          touch "$platform_dir/adb"
-          cat > "$probe_root/RepoIndexTemp.java" <<'JAVA'
-          import java.nio.file.Files;
-          class RepoIndexTemp {
-              public static void main(String[] args) throws Exception {
-                  System.out.println(Files.createTempFile("repo-index-", ".xml"));
-              }
-          }
-          JAVA
-          cat > "$launcher_dir/bin/android" <<'BASH'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          test "$1" = --no-metrics
-          test "$ANDROID_USER_HOME" = "$CONCH_CACHE/android-user-home"
-          case "$TMPDIR" in
-            "$CONCH_CACHE"/dl.*) ;;
-            *) exit 1 ;;
-          esac
-          created=$(java "$TOOLCHAIN_PROBE_ROOT/RepoIndexTemp.java")
-          if [ "$(dirname "$created")" != "$TMPDIR" ]; then
-            echo "toolchain test: Java wrote a repo index outside scratch: $created" >&2
-            exit 1
-          fi
-          test -f "$created"
-          if [ "$3" = --version ]; then
-            printf 'First-run notice\n1.2.3\n'
-          fi
-          BASH
-          chmod +x "$launcher_dir/bin/android" "$platform_dir/adb"
-          export PATH="$probe_root/bin:$PATH" TMPDIR="$probe_root/ambient-tmp"
-          export CONCH_CACHE="$fixture_cache" JAVA_TOOL_OPTIONS="-Djava.io.tmpdir=\"$TMPDIR\""
-          version=$(HOME="$probe_root/home" ./toolchain.sh --cli-version)
-          test "$version" = 1.2.3
-          HOME="$probe_root/home" ./toolchain.sh
-          test -z "$(find "$probe_root" -name 'repo-index-*.xml' -print -quit)"
+      - name: test Android toolchain
+        run: ../../../scripts/mobile-android-toolchain-test.sh
 
       # Restore only the pinned prerequisites before asking the rolling CLI
       # for its version. A fresh CLI home makes the launcher fetch today's CLI.
