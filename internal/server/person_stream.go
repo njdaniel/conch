@@ -183,11 +183,6 @@ func newPersonFrame(doc personDoc) (personFrame, error) {
 
 // personHub is the registry of person-stream sockets.
 type personHub struct {
-	// ownSignIn checks that the credential is the holder's own. Set at
-	// startup when the shared ADR-017 provenance guard is available (#2047).
-	// Without it no person socket may open.
-	ownSignIn func(ctx context.Context, principalID, credentialID int64) (bool, error)
-
 	mu     sync.Mutex
 	subs   map[*personSub]struct{}
 	closed bool
@@ -433,22 +428,12 @@ func (s *Server) personStreamCaller(w http.ResponseWriter, r *http.Request) (sto
 		http.Error(w, "a WebSocket upgrade is required", http.StatusUpgradeRequired)
 		return store.Principal{}, 0, false
 	}
-	check := s.person.ownSignIn
-	if check != nil {
-		ctx, cancel := context.WithTimeout(r.Context(), wsRecheckTimeout)
-		defer cancel()
-		own, err := check(ctx, caller.ID, credID)
-		if err != nil {
-			slog.ErrorContext(ctx, "person stream: credential provenance check failed", "error", err)
-			writeInternalError(w)
-			return store.Principal{}, 0, false
-		}
-		if own {
-			return caller, credID, true
-		}
-	}
-	writeError(w, http.StatusForbidden, schema.ErrorCodeOwnSignInRequired, schema.DMOwnSignInRequiredMessage)
-	return store.Principal{}, 0, false
+	// Provenance (a credential the person made for themselves, not an
+	// operator's act-as credential or sign-in link) is checked by guard before
+	// this handler runs: the route is in selfMadeCredentialRoutes (#2042,
+	// #2047), which answers 403 own_sign_in_required for a ticket as for a
+	// bearer.
+	return caller, credID, true
 }
 
 // personStillAllowed reports whether the principal and the credential are

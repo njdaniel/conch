@@ -774,10 +774,16 @@ func TestRoleMatrix(t *testing.T) {
 			if rt.pattern == "GET /v1/admin/actions" || rt.pattern == "POST /v1/admin/actions/{approval_id}/run" {
 				agentWant = http.StatusForbidden
 			}
-			// The per-person stream (issue #2040) is a person's own: an agent
-			// is refused before the upgrade.
+			// The per-person stream (issue #2040) is a person's own and is in
+			// selfMadeCredentialRoutes: this fixture's credentials are minted
+			// by "system", which the store records as made by another, so the
+			// member (alice) is refused 403 own_sign_in_required before the
+			// upgrade; the owner's bootstrap credential is their own, and
+			// reaches the upgrade check (426). A self-made credential opening it is covered by
+			// TestPersonStreamWhoMayOpen and TestSelfMadeCredentialRoutesRefuseOthers.
+			var personStreamRefused bool
 			if rt.pattern == "GET /v1/events/person/ws" {
-				agentWant = http.StatusForbidden
+				agentWant, personStreamRefused = http.StatusForbidden, true
 			}
 			// Signing out (issue #439) succeeds for any member and revokes
 			// the credential it was sent with, so it runs on a fixture of its
@@ -792,6 +798,9 @@ func TestRoleMatrix(t *testing.T) {
 			operatorWant := exp.allowed
 			if isDeviceLinkRoute(rt.pattern) {
 				agentWant, operatorWant = http.StatusForbidden, http.StatusForbidden
+			}
+			if personStreamRefused {
+				memberWant = http.StatusForbidden
 			}
 			cases := []struct {
 				who   string

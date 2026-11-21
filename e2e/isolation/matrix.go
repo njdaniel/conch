@@ -208,7 +208,7 @@ func id(n int64) string   { return itoa(n) }
 
 // matrixRows is the matrix.
 func matrixRows() []row {
-	return slices.Concat(coreMatrixRows(), reactionMatrixRows(), editMatrixRows(), notificationMatrixRows())
+	return slices.Concat(coreMatrixRows(), reactionMatrixRows(), editMatrixRows(), notificationMatrixRows(), personMatrixRows())
 }
 
 func coreMatrixRows() []row {

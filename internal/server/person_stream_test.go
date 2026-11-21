@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,13 +25,34 @@ import (
 
 const personPath = "/v1/events/person/ws"
 
-// newPersonFixture supplies the provenance boundary until the shared store
-// guard is available. Each test that delivers DM frames installs its own
-// access rule.
+// newPersonFixture is the run fixture; provenance is the real guard's
+// (selfMadeCredentialRoutes), not a stub. Each test that delivers DM frames
+// installs its own access rule.
+//
+// The run fixture mints its credentials as "system", which the store records
+// as made by someone else (credentials.self_made = 0), where a person's real
+// sign-in (an invite redemption, a password) is their own. The fixture marks
+// the human principals' credentials self-made, as their sign-ins would be, so
+// the guard under test judges them as it does in production; the cases that
+// need another's credential mint one after (an operator's act-as credential,
+// a sign-in link's redemption), and those stay 0.
 func newPersonFixture(t *testing.T) *runFixture {
 	t.Helper()
 	f := newRunFixture(t)
-	f.srv.person.ownSignIn = func(context.Context, int64, int64) (bool, error) { return true, nil }
+	path, ok := testDBPaths.Load(f.srv)
+	if !ok {
+		t.Fatal("no database path for the test server")
+	}
+	db, err := sql.Open("sqlite", "file:"+path.(string)+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, p := range []store.Principal{f.root, f.alice, f.bob, f.carol} {
+		if _, err := db.Exec("UPDATE credentials SET self_made = 1 WHERE principal_id = ?", p.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
 	return f
 }
 
@@ -236,7 +258,7 @@ func TestPersonStreamWhoMayOpen(t *testing.T) {
 
 	ctx := context.Background()
 	actor := fmt.Sprintf("principal:%d", f.root.ID)
-	minted, mintedToken, err := f.srv.store.CreateCredential(ctx, actor, f.alice.ID, "operator issued", nil)
+	_, mintedToken, err := f.srv.store.CreateCredential(ctx, actor, f.alice.ID, "operator issued", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,17 +270,6 @@ func TestPersonStreamWhoMayOpen(t *testing.T) {
 	redeemed, err := f.srv.store.RedeemSignInLink(ctx, store.HashSignInLinkCode(link.Code), now)
 	if err != nil {
 		t.Fatal(err)
-	}
-	f.srv.person.ownSignIn = func(_ context.Context, principalID, credID int64) (bool, error) {
-		switch credID {
-		case minted.ID, redeemed.Credential.ID:
-			if principalID != f.alice.ID {
-				t.Errorf("provenance checked principal %d, want %d", principalID, f.alice.ID)
-			}
-			return false, nil
-		default:
-			return true, nil
-		}
 	}
 
 	tests := []struct {
@@ -272,8 +283,10 @@ func TestPersonStreamWhoMayOpen(t *testing.T) {
 		{"another person", personPath, f.bobTok, http.StatusSwitchingProtocols, ""},
 		{"a person, ticket", personPath + "?ticket=" + ticket(f.aliceTok), "", http.StatusSwitchingProtocols, ""},
 		{"an operator is a person too", personPath, f.rootTok, http.StatusSwitchingProtocols, ""},
-		{"an agent", personPath, f.botTok, http.StatusForbidden, "forbidden"},
-		{"another agent", personPath, f.rivalTok, http.StatusForbidden, "forbidden"},
+		// An agent's credential is never its own making, so guard answers it
+		// before the handler's kind check does.
+		{"an agent", personPath, f.botTok, http.StatusForbidden, schema.ErrorCodeOwnSignInRequired},
+		{"another agent", personPath, f.rivalTok, http.StatusForbidden, schema.ErrorCodeOwnSignInRequired},
 		{"a guest", personPath, g.Token, http.StatusForbidden, schema.ErrorCodeGuestNotAllowed},
 		{"no credential", personPath, "", http.StatusUnauthorized, ""},
 		{"a made-up credential", personPath, "not-a-token", http.StatusUnauthorized, ""},
@@ -297,13 +310,6 @@ func TestPersonStreamWhoMayOpen(t *testing.T) {
 			}
 		})
 	}
-
-	t.Run("missing provenance guard refuses every upgrade", func(t *testing.T) {
-		f := newRunFixture(t)
-		if _, status, code := tryDialPerson(t, wsTestServer(t, f.srv), personPath, f.aliceTok); status != http.StatusForbidden || code != schema.ErrorCodeOwnSignInRequired {
-			t.Fatalf("status and code = %d %q, want 403 own_sign_in_required", status, code)
-		}
-	})
 
 	t.Run("a disabled person", func(t *testing.T) {
 		f := newPersonFixture(t)
