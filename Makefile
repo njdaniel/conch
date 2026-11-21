@@ -131,6 +131,7 @@ desktop-check: desktop-node
 	./scripts/desktop-electron-test.sh
 	./scripts/desktop-lint-test.sh
 	./scripts/desktop-voice-helper-test.sh
+	./scripts/test-desktop-launch-linux-dev.sh
 	./scripts/desktop-version-test.sh
 	./scripts/desktop-release-guard-test.sh
 	./scripts/desktop-deb-test.sh
