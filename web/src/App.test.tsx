@@ -166,9 +166,12 @@ describe('sign-in', () => {
     serve(asMember);
     render(<App origin={origin} />);
     expect(screen.getByLabelText('Name').getAttribute('autocomplete')).toBe('username');
+    expect(screen.getByLabelText('Name').getAttribute('name')).toBe('username');
     const password = screen.getByLabelText('Password');
     expect(password.getAttribute('type')).toBe('password');
     expect(password.getAttribute('autocomplete')).toBe('current-password');
+    expect(password.getAttribute('name')).toBe('password');
+    expect(password.closest('form')?.method).toBe('post');
     const field = screen.getByLabelText('Credential');
     expect(field.getAttribute('type')).toBe('password');
     expect(field.getAttribute('autocomplete')).toBe('off');
@@ -176,6 +179,42 @@ describe('sign-in', () => {
     // The one text field is the name: nothing else asks for a username.
     expect(screen.queryAllByRole('textbox')).toHaveLength(1);
     expect(screen.getByRole('button', { name: 'Sign in' }).closest('section')?.getAttribute('aria-labelledby')).toBe('password-heading');
+  });
+
+  it.each([false, true])('clears the submitted password after a refusal or bounded wait (stalled: %s)', async (stalled) => {
+    let answer: (response: Response) => void = () => {
+      throw new Error('sign-in request did not start');
+    };
+    const login = new Promise<Response>((resolve) => {
+      answer = resolve;
+    });
+    const fetchMock = serve({ ...asMember, '/v1/login': () => login });
+    render(<App origin={origin} />);
+    const name = screen.getByLabelText<HTMLInputElement>('Name');
+    const password = screen.getByLabelText<HTMLInputElement>('Password');
+    fireEvent.change(name, { target: { value: member.name } });
+    fireEvent.change(password, { target: { value: 'password-canary' } });
+    const form = password.form;
+    if (form === null) throw new Error('password input has no form');
+    try {
+      if (stalled) vi.useFakeTimers();
+      fireEvent.submit(form);
+      fireEvent.submit(form);
+      expect(new FormData(form).get('password')).toBe('password-canary');
+      expect(fetchMock.mock.calls.filter(([path]) => path === '/v1/login')).toHaveLength(1);
+      if (stalled) {
+        vi.advanceTimersByTime(15_000);
+        expect(password.value).toBe('');
+        expect(within(form).getByRole('button', { name: 'Checking…' })).toBeTruthy();
+      }
+    } finally {
+      if (stalled) vi.useRealTimers();
+    }
+    answer(json({ code: 'auth_failed', message: 'refused' }, 401));
+    expect(await screen.findByText('The name or password is not right.')).toBeTruthy();
+    expect(password.value).toBe('');
+    expect(name.value).toBe(member.name);
+    expect(document.activeElement).toBe(password);
   });
 
   it('signs a member in to the lobby, stores the token to last (issue #439) and keeps it out of the DOM', async () => {
