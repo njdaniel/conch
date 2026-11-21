@@ -66,10 +66,10 @@ var principalReads = []principalRead{
 	{"store/bans.go", "Store.ListChannelBans", 1, readOperatorOrMaker},
 	// #2017, #2018: a DM's peer, only when the caller may know it by
 	// knownPrincipalsSQL and it is not hidden or an ended guest; any other
-	// id is the same ErrPrincipalNotFound as one never issued. #2099: a new
-	// pair also asks listedPrincipalSQL, PutBlock's rule, in a second
-	// statement, so a disabled target is the same 404 on both routes.
-	{"store/dm.go", "openDMTx", 2, readPredicate},
+	// id is the same ErrPrincipalNotFound as one never issued. For a pair
+	// the caller cannot see, the same statement uses PutBlock's predicate
+	// (listedPrincipalSQL), so an unlisted target is a 404 on both routes (#2099).
+	{"store/dm.go", "openDMTx", 1, readPredicate},
 	// #2018: the DM policy. Whether a viewer may know a target and whether a
 	// conversation's peer is shown by name answer a yes or a no by the
 	// directory's rule; the per-person switch is one bit; SetDMAllowed is
@@ -212,15 +212,15 @@ var principalReads = []principalRead{
 }
 
 // predicateNames are the identifiers a readPredicate function must use.
-var predicateNames = map[string]string{
-	"Store.ListDirectory":               "knownPrincipalsSQL",
-	"mayKnowTx":                         "knownPrincipalsSQL",
-	"directoryKnowersTx":                "knowsCond",
-	"Store.DirectoryMembershipAudience": "knowsCondExcept",
-	"Store.PutBlock":                    "listedPrincipalSQL",
-	"openDMTx":                          "knownPrincipalsSQL",
-	"dmMayKnowTx":                       "knownPrincipalsSQL",
-	"dmPeerFormerTx":                    "knownPrincipalsSQL",
+var predicateNames = map[string][]string{
+	"Store.ListDirectory":               {"knownPrincipalsSQL"},
+	"mayKnowTx":                         {"knownPrincipalsSQL"},
+	"directoryKnowersTx":                {"knowsCond"},
+	"Store.DirectoryMembershipAudience": {"knowsCondExcept"},
+	"Store.PutBlock":                    {"listedPrincipalSQL"},
+	"openDMTx":                          {"knownPrincipalsSQL", "listedPrincipalSQL"},
+	"dmMayKnowTx":                       {"knownPrincipalsSQL"},
+	"dmPeerFormerTx":                    {"knownPrincipalsSQL"},
 }
 
 var selectsPrincipals = regexp.MustCompile(`(?i)\b(from|join)\s+principals\b`)
@@ -302,8 +302,16 @@ func TestPrincipalReadsStayBehindTheMayKnowPredicate(t *testing.T) {
 			t.Errorf("%s is listed readPredicate but predicateNames does not say which fragment it must use", e.fn)
 			continue
 		}
-		if !uses[key{e.file, e.fn}][want] {
-			t.Errorf("%s is a reader of the may-know predicate and no longer uses %s", e.fn, want)
+		for _, name := range want {
+			if !uses[key{e.file, e.fn}][name] {
+				t.Errorf("%s is a reader of the may-know predicate and no longer uses %s", e.fn, name)
+			}
+		}
+	}
+	listedUses := uses[key{"store/blocks.go", "listedPrincipalSQL"}]
+	for _, name := range []string{"knownPrincipalsSQL", "knowsCond"} {
+		if !listedUses[name] {
+			t.Errorf("store/blocks.go: listedPrincipalSQL no longer uses %s", name)
 		}
 	}
 }

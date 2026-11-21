@@ -2,9 +2,11 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -102,6 +104,7 @@ func TestOpenDMRules(t *testing.T) {
 		VALUES (?, 'g-1', 'address', 'active', 1, 2, 1000)`, guest.ID); err != nil {
 		t.Fatal(err)
 	}
+	f.shareChannel(t, "shared-with-guest", f.bob, guest)
 	for _, c := range []struct {
 		name         string
 		caller, peer int64
@@ -119,6 +122,7 @@ func TestOpenDMRules(t *testing.T) {
 		{"a disabled peer, new pair", f.alice.ID, f.dave.ID, ErrPrincipalNotFound},
 		{"a guest caller", guest.ID, f.alice.ID, ErrDMNoStanding},
 		{"a guest peer sharing no channel, new pair", f.alice.ID, guest.ID, ErrPrincipalNotFound},
+		{"a guest peer sharing a channel, new pair", f.bob.ID, guest.ID, ErrDMContactUnavailable},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			before := f.auditCount(t)
@@ -185,17 +189,36 @@ func TestOpenDMOpposedConcurrentOpensMakeOneConversation(t *testing.T) {
 	}
 }
 
+type dmPairLookupExecer struct {
+	execer
+	pairLookups int
+}
+
+func (c *dmPairLookupExecer) QueryRowContext(ctx context.Context, q string, args ...any) *sql.Row {
+	if strings.Contains(q, "FROM dm_conversations c WHERE c.lo") {
+		c.pairLookups++
+	}
+	return c.execer.QueryRowContext(ctx, q, args...)
+}
+
 func TestOpenDMUnreachablePeerSilentOpen(t *testing.T) {
 	ctx := context.Background()
 	f := newDMFixture(t)
 	silent := f.open(t, f.alice, f.bob)
 	for _, peer := range []Principal{f.alice, f.carol} {
-		if _, err := f.s.DisablePrincipal(ctx, "system", peer.ID); err != nil {
-			t.Fatal(err)
-		}
-		got, err := f.s.OpenDM(ctx, f.bob.ID, peer.ID, f.tick())
-		if !errors.Is(err, ErrPrincipalNotFound) || got != (DMConversation{}) {
-			t.Errorf("open with %s = %+v, %v; want principal not found (disabled, #2099)", peer.Name, got, err)
+		f.prefer(t, peer, schema.DMAcceptNobody)
+		var got DMConversation
+		err := f.s.withImmediateTx(ctx, func(tx execer) error {
+			c := &dmPairLookupExecer{execer: tx}
+			var err error
+			got, err = openDMTx(ctx, c, f.bob.ID, peer.ID, f.tick())
+			if c.pairLookups != 1 {
+				t.Errorf("open with %s ran %d pair lookups, want only the visible-pair lookup", peer.Name, c.pairLookups)
+			}
+			return err
+		})
+		if !errors.Is(err, ErrDMContactUnavailable) || got != (DMConversation{}) {
+			t.Errorf("open with %s = %+v, %v; want contact unavailable", peer.Name, got, err)
 		}
 	}
 	if _, err := f.s.DMConversationFor(ctx, f.bob.ID, silent.ID); !errors.Is(err, ErrDMNotFound) {

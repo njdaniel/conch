@@ -106,22 +106,22 @@ import (
 //     or it is not visible to this caller, whatever the caller's role. One
 //     answer, one body, including to the peer of an empty open.
 //     404 principal_not_found (existing): on open, the target does not
-//     exist, has ended, or is hidden from the caller; and, for a pair the
-//     caller cannot yet see, the target is disabled (a person or an agent),
-//     the very set PUT /v1/blocks/{id} answers 404 for. One body for all.
+//     exist, is an ended guest, or is hidden or unknown to the caller.
+//     For a pair the caller cannot yet see, this also covers disabled people
+//     or agents and active guests the caller neither shares a channel with
+//     nor invited. PUT /v1/blocks/{id} refuses the same set. One body for all.
 //  7. 400 invalid_request (existing): a malformed request or cursor; a body
 //     that tries a payload, audience or thread (the request types here have
 //     no such fields and are decoded with unknown fields refused); on open,
 //     the target is the caller, or an agent.
 //  8. 403 ErrorCodeContactUnavailable: the target is visible but cannot be
-//     contacted now (disabled once a pair exists, a guest, a block either way,
-//     their preference, their switch, hide-members visibility). One code, one
-//     message; it never says which, and never who blocked whom. It applies to
-//     send, edit, and an open of a pair the caller cannot yet see, except that
-//     a disabled target there is refusal 6's 404 instead, so an id cannot be
-//     marked as disabled. Reads, removals of one's
-//     own messages, and resuming an already visible conversation are allowed
-//     even when the peer cannot be contacted, subject to the checks above.
+//     contacted now. This applies to send, edit, and an open of a pair the
+//     caller cannot yet see when the target lookup succeeds. Eligibility checks
+//     standing (including guest status), a block either way, the target's preference
+//     and switch, and hide-members visibility. One code and message cover all
+//     reasons and never say who blocked whom. Reads, removals of one's own
+//     messages, and resuming an already visible conversation are allowed even
+//     when the peer cannot be contacted, subject to the checks above.
 //
 // DM refusal matrix (design §3.2) for a visible target the caller cannot
 // contact, with the preceding checks satisfied:
@@ -194,14 +194,14 @@ const (
 	// included, and a participant who cannot see the peer's empty open.
 	ErrorCodeDMNotFound = "dm_not_found"
 	// ErrorCodeContactUnavailable: the target is visible to the caller but
-	// cannot be contacted (HTTP 403), on an open of a pair the caller cannot
-	// yet see, on send and on edit: disabled, a block in either
-	// direction (#1832), the target's contact preference, the target's
-	// per-person switch, a guest, or hide-members visibility. The caller
-	// learns only "can't contact", never which, so no refusal announces a
-	// block, a preference, or the existence of a peer's empty open. Reading,
-	// removing one's own messages, and resuming an already visible
-	// conversation are exempt from the contact check.
+	// cannot be contacted (HTTP 403). An open of a pair the caller cannot yet
+	// see can return this for a listed guest, a block in either direction
+	// (#1832), the target's contact preference or per-person switch, or
+	// hide-members visibility. A disabled target can also cause this on send
+	// or edit. The caller learns only "can't contact", so no refusal reveals
+	// the reason or the existence of a peer's empty open. Reading, removing
+	// one's own messages, and resuming an already visible conversation are
+	// exempt from the contact check.
 	ErrorCodeContactUnavailable = "contact_unavailable"
 	// ErrorCodeDMsOff: the caller's own direct messages are switched off by
 	// an operator, or the server-wide switch is off (HTTP 403), on send, edit

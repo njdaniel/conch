@@ -81,9 +81,9 @@ const (
 //     hidden principal and a nonexistent one cannot be told apart. It holds
 //     for a resume too: a peer the caller may no longer know is not found
 //     by id, though the conversation still reads by its own id. For a new
-//     pair the rule is PutBlock's (listedPrincipalSQL), which also leaves out
-//     a disabled person or agent: the same 404 for every id the directory
-//     does not list;
+//     pair the rule is PutBlock's (listedPrincipalSQL), which also excludes
+//     disabled principals and active guests the caller neither shares a
+//     channel with nor invited;
 //  5. peer is a human (ErrDMNotHuman);
 //  6. an open of a conversation the caller cannot already see needs
 //     dmContactTx (ErrDMContactUnavailable).
@@ -126,30 +126,19 @@ func openDMTx(ctx context.Context, tx execer, caller, peer int64, now time.Time)
 	if err != nil {
 		return DMConversation{}, err
 	}
-	cond, args, _ := knownPrincipalsSQL(caller, seeAll)
+	known, args, _ := knownPrincipalsSQL(caller, seeAll)
+	cond := dmLivePrincipalCond + " AND (" + known + ")"
+	if id == 0 {
+		// A pair the caller cannot see answers probes as PutBlock does.
+		cond, args = listedPrincipalSQL(caller, seeAll)
+	}
 	var kind string
-	switch err := tx.QueryRowContext(ctx, `SELECT p.kind FROM principals p WHERE p.id = ? AND `+dmLivePrincipalCond+` AND (`+cond+`)`, // #nosec G202 -- every fragment is a constant
+	switch err := tx.QueryRowContext(ctx, `SELECT p.kind FROM principals p WHERE p.id = ? AND `+cond, // #nosec G202 -- every fragment is a constant
 		append([]any{peer}, args...)...).Scan(&kind); {
 	case errors.Is(err, sql.ErrNoRows):
 		return DMConversation{}, ErrPrincipalNotFound
 	case err != nil:
 		return DMConversation{}, fmt.Errorf("store: read principal %d: %w", peer, err)
-	}
-	if id == 0 {
-		// A new pair answers an id probe as PutBlock does (listedPrincipalSQL):
-		// a disabled person or agent is not found, so the two routes cannot
-		// tell a bare id's disabled from its removed. A pair the caller can
-		// already see skips this: it resumes read-only, and send and edit
-		// answer ErrDMContactUnavailable from dmContactTx.
-		listed, listedArgs := listedPrincipalSQL(caller, seeAll)
-		var one int
-		switch err := tx.QueryRowContext(ctx, `SELECT 1 FROM principals p WHERE p.id = ? AND `+listed, // #nosec G202 -- every fragment is a constant
-			append([]any{peer}, listedArgs...)...).Scan(&one); {
-		case errors.Is(err, sql.ErrNoRows):
-			return DMConversation{}, ErrPrincipalNotFound
-		case err != nil:
-			return DMConversation{}, fmt.Errorf("store: read principal %d: %w", peer, err)
-		}
 	}
 	if PrincipalKind(kind) != PrincipalHuman {
 		return DMConversation{}, ErrDMNotHuman

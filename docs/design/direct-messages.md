@@ -61,7 +61,7 @@ DM files: #2017 and #2023 choose between one more branch in `FileVisibleTo` (`in
 
 | Status, code | When | Says about others |
 |---|---|---|
-| 404 `principal_not_found` | Open: the target does not exist, has ended, or is hidden from the caller | Nothing: one body for all three |
+| 404 `principal_not_found` | Open: the target does not exist, is hidden or unknown to the caller, or is an ended guest. For a pair the caller cannot yet see, this also covers disabled targets and unlisted active guests. | The same body for every case |
 | 404 `dm_not_found` | Any `{id}` route: no such conversation, or the caller is not one of its pair (whatever the caller's role) | Nothing |
 | 404 `call_not_found` | Any `{call}` route: no such attempt, or the caller is neither side | Nothing |
 | 403 `contact_unavailable` | Open, send, edit: the target is visible but cannot be contacted (§3.2) | "Can't contact", never why |
@@ -90,11 +90,12 @@ Rows are the state of the target or the pair; columns are the caller's act. "Rea
 
 | State | Open (new pair) | Open (existing pair) | Send / edit | Remove own | Read | Call invite | Live frames |
 |---|---|---|---|---|---|---|---|
-| Target does not exist, has ended, or is hidden from the caller (`hide_members`) | 404 `principal_not_found` | 404 `principal_not_found` | n/a | n/a | n/a | n/a | n/a |
+| Target does not exist, is an ended guest, or is hidden or unknown to the caller (`hide_members`) | 404 `principal_not_found` | 404 `principal_not_found` | n/a | n/a | n/a | n/a | n/a |
 | Caller not one of the pair (any role, operator included) | n/a | n/a | 404 `dm_not_found` | 404 | 404 | 404 | none |
 | Target is the caller | 400 `invalid_request` | n/a | n/a | n/a | n/a | n/a | n/a |
 | Target is an agent | 400 `invalid_request` (agents are listed as agents, so this says nothing new) | n/a | n/a | n/a | n/a | n/a | n/a |
 | Target disabled (a person, or an agent) | 404 `principal_not_found`, as `PUT /v1/blocks/{id}` answers (one shared fragment, `listedPrincipalSQL`; a disabled agent is not found either, not "agent") | resumes (read only) | 403 `contact_unavailable` | allowed | allowed; former-member label if identity is no longer visible | `unavailable` | none to the disabled side |
+| Target is an active guest | 403 `contact_unavailable` if the caller shares a channel with the guest or invited them. Otherwise 404 `principal_not_found`. | n/a | n/a | n/a | n/a | `unavailable` | n/a |
 | Block in either direction (#1832) | 403 `contact_unavailable` | resumes (read only) | 403 `contact_unavailable` | allowed | allowed | `unavailable`; a ringing or active call ends (§4) | dropped at fan-out |
 | Target's preference `nobody` | 403 `contact_unavailable` | resumes (read only) | 403 `contact_unavailable` | allowed | allowed | `unavailable` | normal |
 | Target's preference `shared_channel` and no channel in common | 403 `contact_unavailable` | resumes (read only) | 403 `contact_unavailable` | allowed | allowed | `unavailable` | normal |
@@ -107,9 +108,9 @@ Rows are the state of the target or the pair; columns are the caller's act. "Rea
 | Caller is an agent | 403 `forbidden`, with the existing agent-denial audit row (route only, no target) | | | | | | none |
 | Caller disabled or credential revoked | 401, as everywhere | | | | | | socket closed |
 
-**The same-404 rule.** A guessed principal id that is hidden, nonexistent, ended, or (for a new pair) disabled, gets byte-identical answers and the same timing class (one indexed lookup) as "principal not found", and the same set `PUT /v1/blocks/{id}` answers 404 for, so the two routes cannot be compared to mark an id as a disabled person or agent (the directory never shows who is disabled). A conversation or call id the caller is not part of answers like one that does not exist. No DM or call route is previewable; a structural test beside `TestPreviewableRoutesAreReads` (`internal/server/preview_guard_test.go:15`) pins it.
+**The same-404 rule.** For a pair the caller cannot yet see, `POST /v1/dms` and `PUT /v1/blocks/{id}` refuse the same targets. These are never-issued ids, hidden or unknown principals, ended guests, disabled people or agents, and active guests the caller neither shares a channel with nor invited. Every class gets a byte-identical `principal_not_found` response and falls in the same timing class within each route, with the same SQL statements and one indexed target lookup. A conversation or call id the caller is not part of answers like one that does not exist. No DM or call route is previewable; a structural test beside `TestPreviewableRoutesAreReads` (`internal/server/preview_guard_test.go:15`) pins it.
 
-**The generic `contact_unavailable` rule.** One code and one message for every eligibility reason. It tells a caller that this person cannot be reached now, which a person can usually see anyway; it never says which of block, preference, switch, disabled or visibility it was, and never who blocked whom.
+**The generic `contact_unavailable` rule.** One code and one message for every eligibility reason. It tells a caller that this person cannot be reached now and never discloses a block, a preference, a switch, a standing or visibility check, or who blocked whom.
 
 **"Resumes (read only)"** means `POST /v1/dms` returns the existing conversation so the caller can read it; a new pair in the same state gets nothing created.
 
