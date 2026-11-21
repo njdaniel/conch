@@ -311,6 +311,13 @@ var routeExpectations = map[string]routeExpectation{
 	// agent gets 403 forbidden, a guest 403 guest_not_allowed and
 	// AuthOff 400 before it (special-cased).
 	"GET /v1/events/person/ws": {classAuth, "/v1/events/person/ws", "", 426},
+	// Local direct messages (issue #2019): the operator's bootstrap credential
+	// is its own, so it reaches the handlers: it opens a conversation with
+	// alice (principal 2) and finds no conversation 1 to read or change.
+	"POST /v1/dms":                     {classAuth, "/v1/dms", `{"peer_id":2}`, 200},
+	"GET /v1/dms":                      {classAuth, "/v1/dms", "", 200},
+	"GET /v1/dms/{conversation}":       {classAuth, "/v1/dms/1", "", 404},
+	"PUT /v1/dms/{conversation}/state": {classAuth, "/v1/dms/1/state", `{"state":"open"}`, 404},
 	// Sessions (issue #265). Chosen to change and audit nothing: an empty
 	// create is a 400 (a client is required), the session routes use an id
 	// that does not exist, and the list reads a channel every fixture caller
@@ -783,7 +790,8 @@ func TestRoleMatrix(t *testing.T) {
 			// reaches the upgrade check (426). A self-made credential opening it is covered by
 			// TestPersonStreamWhoMayOpen and TestSelfMadeCredentialRoutesRefuseOthers.
 			var personStreamRefused bool
-			if rt.pattern == "GET /v1/events/person/ws" {
+			if rt.pattern == "GET /v1/events/person/ws" || strings.HasPrefix(strings.TrimPrefix(strings.TrimPrefix(rt.pattern, "GET "), "POST "), "/v1/dms") || strings.HasPrefix(rt.pattern, "PUT /v1/dms") {
+				// The DM routes (issue #2019) are in selfMadeCredentialRoutes too.
 				agentWant, personStreamRefused = http.StatusForbidden, true
 			}
 			// Signing out (issue #439) succeeds for any member and revokes
@@ -898,8 +906,8 @@ func TestAuthOffUnchanged(t *testing.T) {
 				if isDeviceLinkRoute(rt.pattern) {
 					want = http.StatusForbidden // accounts_require_auth: no account to add a device to
 				}
-				if rt.pattern == "GET /v1/events/person/ws" {
-					want = http.StatusBadRequest // dm_require_auth: no person to hold a stream (issue #2040)
+				if rt.pattern == "GET /v1/events/person/ws" || strings.Contains(rt.pattern, " /v1/dms") {
+					want = http.StatusBadRequest // dm_require_auth: no person to hold a stream or a conversation (issues #2040, #2019)
 				}
 				rec := f.do(t, routeMethod(rt.pattern), exp.path, "", exp.body)
 				if rec.Code != want {

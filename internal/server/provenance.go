@@ -42,8 +42,8 @@ import (
 //     Decision 14). An own_sign_in_required audit row can come from an
 //     act-as credential or a member's pre-migration credential.
 //
-// It fills as the routes exist: the per-person stream (#2040) is here;
-// #2019, #2021 and #2030 register the DM and call routes, and each adds its
+// It fills as the routes exist: the per-person stream (#2040) and the
+// conversation routes (#2019) are here; #2020, #2021 and #2030 register the DM and call routes, and each adds its
 // routes here in the same change. Every route that reads or writes a
 // person's DMs or calls belongs here, sockets included.
 //
@@ -56,6 +56,12 @@ var selfMadeCredentialRoutes = map[string]bool{
 	// caller alone. A ticket-opened socket is judged by its credential's
 	// stored provenance (requestCredentialSelfMade).
 	"GET /v1/events/person/ws": true,
+	// Open, resume, list, read one and set the caller's own state of a
+	// conversation (#2019). Reads are refused too.
+	"POST /v1/dms":                     true,
+	"GET /v1/dms":                      true,
+	"GET /v1/dms/{conversation}":       true,
+	"PUT /v1/dms/{conversation}/state": true,
 }
 
 // requireSelfMadeCredential wraps next so it runs only for a request whose
