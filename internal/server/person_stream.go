@@ -59,12 +59,11 @@ import (
 // (fail closed), and the client reconnects and re-reads.
 //
 // Who may open it: a verified human member's own credential, one the person
-// made for themselves (selfMadeCredentialRoutes, provenance.go). A caller
-// whose credential another made (an operator's act-as credential, an
-// operator-issued token, someone else's sign-in link) and an agent are
-// refused 403 own_sign_in_required by the guard (issue #2098 will move the
-// agent's refusal to 403 forbidden); a guest is refused 403
-// guest_not_allowed. All are refused before the upgrade.
+// made for themselves (selfMadeCredentialRoutes, provenance.go). The guard
+// refuses an agent with 403 forbidden before checking credential provenance.
+// A person using a credential made by someone else is refused with 403
+// own_sign_in_required. The stream also refuses guests with 403
+// guest_not_allowed. These checks precede the upgrade.
 //
 // Revocation: principalDisabled, authChanged, guestsEnded and
 // credentialRevoked close the sockets at once through dropPrincipalAll and
@@ -406,11 +405,10 @@ func (s *Server) personSnapshot(ctx context.Context, principalID int64) (schema.
 }
 
 // personStreamCaller is the check before the upgrade: a verified person with
-// a credential. The guard has already refused a credential another made, and
-// with it an agent's (selfMadeCredentialRoutes); this keeps the refusals of a
-// guest and of an agent (403, audited as any refused people-only route is) for
-// a caller that reaches it without the guard, and with authentication off
-// there is no person.
+// a credential. The guard has already refused agents and checked credential
+// provenance (selfMadeCredentialRoutes). This check refuses guests and also
+// refuses and audits any agent that reaches it without the guard. With
+// authentication off there is no verified person.
 func (s *Server) personStreamCaller(w http.ResponseWriter, r *http.Request) (store.Principal, int64, bool) {
 	caller, ok := callerFrom(r.Context())
 	if !ok {

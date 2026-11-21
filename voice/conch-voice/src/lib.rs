@@ -70,6 +70,7 @@
 //!   Windows over WASAPI through the `wasapi` crate.
 //! - [`session`]: the loop that decides everything, written against the traits in [`sdk`].
 //! - [`managed`]: `conch-voice managed`, the helper `conch`'s TUI starts and drives.
+//! - [`echo_measurement`]: echo levels from a known sweep and synthetic or captured frames.
 //! - [`share_audio`], [`share_capture`] and [`share_eligibility`]: the sound of a v3 owner's
 //!   screen share: its state and track, its captures and mix, and what is left out of them.
 //! - [`livekit`]: those traits over LiveKit's SDK, kept thin.
@@ -92,6 +93,7 @@ pub mod cli;
 pub mod config_cmd;
 pub mod devices;
 pub mod echo;
+pub mod echo_measurement;
 pub mod error;
 pub mod input;
 pub mod keydev;
