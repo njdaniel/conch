@@ -59,6 +59,8 @@ const (
 	dmActOpen dmAct = iota
 	// dmActSend is a send or an edit.
 	dmActSend
+	// dmActCall is a private call invite (ADR-017 Decision 3).
+	dmActCall
 )
 
 // OpenDM opens or resumes the conversation between caller and peer and

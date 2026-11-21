@@ -206,6 +206,14 @@ func TestSelfMadeCredentialRoutesRefuseOthers(t *testing.T) {
 func TestSelfMadeCredentialRoutesIncludeRequired(t *testing.T) {
 	for _, pattern := range []string{
 		"GET /v1/events/person/ws", // the per-person stream (#2040)
+		// The private call routes (#2030).
+		"POST /v1/dms/{conversation}/calls",
+		"GET /v1/dms/{conversation}/calls",
+		"GET /v1/calls/current",
+		"POST /v1/calls/{call}/accept",
+		"POST /v1/calls/{call}/decline",
+		"POST /v1/calls/{call}/cancel",
+		"POST /v1/calls/{call}/hangup",
 	} {
 		if !selfMadeCredentialRoutes[pattern] {
 			t.Errorf("%s is not in selfMadeCredentialRoutes", pattern)

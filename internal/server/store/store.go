@@ -1182,6 +1182,9 @@ BEGIN SELECT RAISE(ABORT, 'message removals are permanent'); END`,
 	// The server-wide switch is a server_settings row, absent (on). The
 	// statements are in dm_policy.go.
 	dmPolicyMigrationStatements,
+	// 55 (privateCallMigration): private 1:1 calls (issue #2030, ADR-017).
+	// The statements are in private_call.go.
+	privateCallMigration,
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction

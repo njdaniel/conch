@@ -548,6 +548,9 @@ func (s *Server) Serve(ctx context.Context) error {
 	if err := ValidatePushConfig(s.cfg.Push); err != nil {
 		return fmt.Errorf("server: %w", err)
 	}
+	if err := s.store.RestartPrivateCalls(ctx, s.now()); err != nil {
+		return fmt.Errorf("server: reconcile private calls: %w", err)
+	}
 	if err := s.Listen(); err != nil {
 		return err
 	}
@@ -582,6 +585,9 @@ func (s *Server) Serve(ctx context.Context) error {
 	// Guest visits: the sweeper ends each at its deadline (access is refused
 	// at the deadline already) and stops with ctx, waited for like the rest.
 	defer s.startGuestSweeper(ctx)()
+
+	// Private calls: enforce invitation, join and reconnect deadlines.
+	defer s.startPrivateCallSweeper(ctx)()
 
 	// Metrics, when configured, on their own listener; stopped with the rest.
 	defer s.serveMetrics(ctx)()

@@ -104,6 +104,12 @@ var principalReads = []principalRead{
 	// #1715: the check before a retry: the registration's credential is live,
 	// which reads its principal's generation. It returns a yes or a no.
 	{"store/push_registrations.go", "Store.PushRegistrationLive", 1, readOwnOrInternal},
+	// #2030: whether a credential's principal is a live, enabled human and not
+	// a guest. It is asked of the caller's own credential and, for an invite,
+	// of the callee's principal as one yes or no folded into "unavailable"
+	// (ADR-017 Decision 10, after the contact policy has passed): it names
+	// nobody and returns no row of principals.
+	{"store/private_call.go", "privateCallCredentialLive", 1, readOwnOrInternal},
 	// #1714: compares credentials' generations with their principal's, to end
 	// the registrations of dead credentials; reads no name and serves no one.
 	{"store/push_registrations.go", "endGenerationDeadPushTx", 1, readOwnOrInternal},
