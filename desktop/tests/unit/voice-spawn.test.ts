@@ -1,11 +1,13 @@
 // Which conch-voice may be run, the environment it gets and how it is
 // spawned (issue #948; linux-desktop.md §4.1, §5.3).
+import { ChildProcess } from 'node:child_process';
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { PassThrough } from 'node:stream';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { HELPER_NAME, HelperError, PASSED_THROUGH, findHelper, helperArgs, helperEnv, spawnOptions } from '../../main/voice/spawn.ts';
+import { HELPER_NAME, HelperError, PASSED_THROUGH, findHelper, helperArgs, helperEnv, runDarwinTempUtility, spawnOptions, type OneShotChild, type OneShotSpawnFn } from '../../main/voice/spawn.ts';
 import { FAKE_TOKEN, scratch, type Scratch } from './voice-support.ts';
 
 let s: Scratch;
@@ -81,7 +83,7 @@ describe('the bundled executable', () => {
 
   it.each([
     ['darwin', 'root', 80, 0o775, true],
-    ['darwin', 'root', 0, 0o775, true],
+    ['darwin', 'root', 0, 0o775, false],
     ['darwin', 'root', 20, 0o775, false],
     ['darwin', 'user', 80, 0o775, false],
     ['darwin', 'root', 80, 0o777, false],
@@ -168,6 +170,23 @@ describe('the environment', () => {
   it('refuses a relative configuration directory and an empty token', () => {
     expect(() => helperEnv({ parent, configDir: 'conf', token: FAKE_TOKEN, nonce })).toThrow(/absolute/);
     expect(() => helperEnv({ parent, configDir: '/c', token: ' ', nonce })).toThrow(/credential/);
+  });
+
+  it.each([
+    ['/usr/bin/getconf', ['DARWIN_USER_TEMP_DIR']],
+    ['/bin/ls', ['-lde', '/var/folders/example/T']],
+  ] as const)('%s gets only LC_ALL=C', async (file, args) => {
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const stdio: OneShotChild['stdio'] = [null, stdout, stderr, null, null];
+    const child = Object.assign(new ChildProcess(), { stdin: null, stdout, stderr, stdio });
+    const spawn = vi.fn<OneShotSpawnFn>(() => child);
+    const result = runDarwinTempUtility(file, [...args], spawn);
+    stdout.end('output\n');
+    child.emit('close', 0, null);
+
+    expect(spawn).toHaveBeenCalledExactlyOnceWith(file, args, { env: { LC_ALL: 'C' }, stdio: ['ignore', 'pipe', 'pipe'], shell: false });
+    await expect(result).resolves.toBe('output\n');
   });
 });
 

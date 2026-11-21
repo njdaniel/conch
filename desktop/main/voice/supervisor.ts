@@ -481,19 +481,27 @@ export class Supervisor {
     }
     const windows = this.platform === 'win32';
     let executable: string;
-    let listening: Listening;
+    let listening: Listening | undefined;
+    const find = { ...this.deps.find, platform: this.platform };
     try {
-      executable = await findHelper(this.deps.resources, { ...this.deps.find, platform: this.platform });
       const deps = { ...this.deps.endpoint, log: this.deps.log, platform: this.platform };
       if (windows) {
+        executable = await findHelper(this.deps.resources, find);
         // A pipe has no directory to verify or sweep; the profile id is still
         // checked, as the Linux endpoint's directory name is.
         if (!validProfileId(req.profileId)) throw new EndpointError('profile-id-invalid');
         listening = await listenPipe(deps);
       } else {
-        listening = await listenUnix(this.deps.env, req.profileId, deps);
+        try {
+          listening = await listenUnix(this.deps.env, req.profileId, deps);
+        } finally {
+          // Check after binding the socket to shrink the check-to-spawn window.
+          // A helper refusal still takes priority if endpoint setup also failed.
+          executable = await findHelper(this.deps.resources, find);
+        }
       }
     } catch (err) {
+      listening?.close();
       return this.unavailable(err);
     }
     // A new nonce for every spawn, never reused (windows-desktop.md §3.4

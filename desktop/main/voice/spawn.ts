@@ -27,7 +27,6 @@
 // case-sensitive CONCH_ filter would let Conch_Token through); and the
 // working directory is the system root, not /.
 import {
-  execFile,
   spawn as nodeSpawn,
   type ChildProcessByStdio,
   type ChildProcessWithoutNullStreams,
@@ -38,7 +37,6 @@ import {
 import { lstat, realpath } from 'node:fs/promises';
 import { dirname, isAbsolute, join, sep } from 'node:path';
 import type { Readable } from 'node:stream';
-import { promisify } from 'node:util';
 
 import {
   VOICE_CONTROL_PIPE_FLAG,
@@ -59,13 +57,6 @@ export function helperName(platform: NodeJS.Platform = process.platform): string
 
 const TOKEN_ENV = 'CONCH_TOKEN';
 const CONFIG_DIR_ENV = 'CONCH_CONFIG_DIR';
-const execFileAsync = promisify(execFile);
-
-export async function runDarwinTempUtility(file: '/usr/bin/getconf' | '/bin/ls', args: string[]): Promise<string> {
-  const { stdout, stderr } = await execFileAsync(file, args, { env: { LC_ALL: 'C' }, timeout: 5000, maxBuffer: 16_384 });
-  if (stderr !== '') throw new Error('voice: runtime directory check failed');
-  return stdout;
-}
 
 // PASSED_THROUGH names the Linux variables the helper may inherit: what it
 // and its libraries need to find the user's home, PipeWire and the locale.
@@ -200,10 +191,14 @@ async function findHelperWindows(resources: string): Promise<string> {
 
 // safeAncestors checks every directory from dir up to /: each must be a
 // directory owned by the user or root, and either closed to writes by group
-// and others, sticky and owned by root, or writable only by root and its
-// trusted admin or wheel group on macOS. Otherwise another user could
+// and others, sticky and owned by root, or writable only by root and the
+// trusted admin group on macOS. Otherwise another user could
 // rename a directory on the way and put another tree, or another
 // conch-voice, where the checked one was between the check and the spawn.
+// macOS admins can replace /Applications/Conch.app wholesale. The helper
+// shares the app's install-directory trust, as on Windows. Only the owner
+// or root can set or inherit ACLs on the helper path, which puts those ACLs
+// outside the threat model.
 //
 // How this differs from internal/cli/voicehelper/find.go's trusted(): that
 // walks the configured path one name at a time, following each link itself
@@ -231,12 +226,12 @@ async function safeAncestors(dir: string, own: number, platform: NodeJS.Platform
     }
     const closed = (st.mode & 0o022) === 0;
     const rootSticky = (st.mode & 0o1000) !== 0 && st.uid === 0;
-    // /Applications can be root:admin 0775. Both groups are trusted only
-    // for root-owned directories on macOS, and only with world writes off.
-    const darwinSystemGroup = platform === 'darwin' && st.uid === 0 && (st.gid === 80 || st.gid === 0) && (st.mode & 0o002) === 0;
+    // /Applications can be root:admin 0775. Allow admin (gid 80) here only
+    // on macOS, for root-owned directories with world writes off.
+    const darwinAdmin = platform === 'darwin' && st.uid === 0 && st.gid === 80 && (st.mode & 0o002) === 0;
     if (!st.isDirectory()) throw new HelperError('untrusted', `${shown(at)} is not a directory`);
     if (!safeOwner(st.uid, own)) throw new HelperError('untrusted', `${shown(at)} is not owned by you or by root`);
-    if (!(closed || rootSticky || darwinSystemGroup)) throw new HelperError('untrusted', `${shown(at)} may be changed by other users`, 'folder-writable');
+    if (!(closed || rootSticky || darwinAdmin)) throw new HelperError('untrusted', `${shown(at)} may be changed by other users`, 'folder-writable');
     const up = dirname(at);
     if (up === at) return;
     at = up;
@@ -358,6 +353,47 @@ export function oneShotSpawnOptions(env: Record<string, string>, platform: NodeJ
 }
 
 export const defaultOneShotSpawn: OneShotSpawnFn = (command, args, options) => nodeSpawn(command, args, options);
+
+export function runDarwinTempUtility(file: '/usr/bin/getconf' | '/bin/ls', args: string[], spawn: OneShotSpawnFn = nodeSpawn): Promise<string> {
+  return new Promise((resolve, reject) => {
+    // Ignoring TMPDIR depends on the exact child environment below. Darwin's
+    // confstr falls back to $TMPDIR when __dirhelper fails. The C locale also
+    // keeps ls output predictable for the ACL check.
+    const child = spawn(file, args, { env: { LC_ALL: 'C' }, stdio: ['ignore', 'pipe', 'pipe'], shell: false });
+    const output: Buffer[] = [];
+    let bytes = 0;
+    let settled = false;
+    const fail = (): void => {
+      settled = true;
+      clearTimeout(timer);
+      reject(new Error('voice: runtime directory check failed'));
+    };
+    const stop = (): void => {
+      if (settled) return;
+      fail();
+      child.kill('SIGKILL');
+    };
+    const timer = setTimeout(stop, 5000);
+    child.stdout.on('data', (chunk: Buffer) => {
+      if (settled) return;
+      bytes += chunk.length;
+      if (bytes > 16_384) stop();
+      else output.push(chunk);
+    });
+    child.stderr.on('data', stop);
+    child.on('error', fail);
+    child.on('close', (code) => {
+      if (settled) return;
+      if (code !== 0) {
+        fail();
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      resolve(Buffer.concat(output, bytes).toString('utf8'));
+    });
+  });
+}
 
 export function spawnHelper(
   spawnFn: SpawnFn,

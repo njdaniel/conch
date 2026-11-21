@@ -135,6 +135,9 @@ async function darwinTempDir(deps: EndpointDeps): Promise<string> {
 }
 
 async function requireNoDarwinAcl(dir: string, deps: EndpointDeps, reason: EndpointRefusal): Promise<void> {
+  // Only the owner or root can set or inherit ACLs on the checked socket
+  // directories. Those principals are outside this threat model. Refusing
+  // every ACL is defence in depth.
   try {
     const output = await (deps.execFile ?? runDarwinTempUtility)('/bin/ls', ['-lde', dir]);
     // An ACL can be marked '+' or listed below the mode line when '@' marks
