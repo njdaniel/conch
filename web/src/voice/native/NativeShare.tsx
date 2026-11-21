@@ -15,12 +15,12 @@ import { useContext, useRef, type ReactNode } from 'react';
 import { DesktopOS } from '../../platform/os';
 import { Glyph } from '../../Icons';
 import type { Person } from '../../useLiveChannel';
-import { companionDefaultQuality, companionQualities, shareQualityRefusedNote } from '../connection';
-import { cautionFor, estimateWords } from '../ShareQualityMenu';
+import { companionDefaultQuality, companionQualities, companionQuality, shareQualityRefusedNote } from '../connection';
+import { cautionFor, estimateWords, resolutionWords } from '../ShareQualityMenu';
 import { qualityLabel, sharers, type Sharer } from '../presence';
 import type { VoicePresenceV2 } from '../../schema/voice';
 import { ShareCaptureWarning, ShareReadout, ShareView } from '../ShareView';
-import { provisionalQuality, qualityLaterNote, type ShareQuality } from '../share';
+import { provisionalQuality, qualityLaterNote } from '../share';
 import { nameOf } from '../VoicePanel';
 import type { Companion } from './useCompanion';
 import type { ShareSoundUi } from './useShareSound';
@@ -30,7 +30,6 @@ import {
   shareDisabledWords,
   shareElsewhereWords,
   shareNote,
-  shareQualityWords,
   shareSoundMuteLabel,
   shareSoundWords,
   shareWithSoundLabel,
@@ -54,6 +53,7 @@ export function shareDisabledReason({ joined, shown, live }: { readonly joined: 
 const shareDescription = 'native-share-why';
 const cautionId = 'native-share-caution';
 const soundWhyId = 'native-share-sound-why';
+const resolutions = [...new Set(companionQualities.map((q) => q.resolution))];
 
 // ShareSoundToggle is the standing choice for the share's sound, shown before
 // the picker and during a share (issue #1854): "Share with sound", on by
@@ -145,10 +145,6 @@ export function ShareButton({ companion, joined, reason }: { readonly companion:
   );
 }
 
-function qualityKey(q: ShareQuality): string {
-  return `${q.resolution}${String(q.frameRate)}`;
-}
-
 // ShareNotes is what the share control says: why it is off, what sound the
 // share will carry (none, from the Linux app, said before the picker opens
 // and in short while sharing), the indicator naming the channel, the
@@ -180,7 +176,14 @@ export function ShareNotes({
   const soundReason = sound?.view.unavailable;
   const soundNote = sound?.note ?? null;
   const note = share.kind === 'idle' ? shareNote(share, state.companionRefusal, state.phase === 'stopped' ? state.why : null, state.companionShareUnavailable) : null;
-  const quality = companionQualities.find((q) => qualityKey(q) === qualityKey(state.shareQuality)) ?? companionDefaultQuality;
+  const quality = companionQuality(state.shareQuality);
+  const rates = companionQualities.filter((q) => q.resolution === quality.resolution);
+  const chooseResolution = (resolution: string) => {
+    const choices = companionQualities.filter((q) => q.resolution === resolution);
+    const next = choices.find((q) => q.frameRate === quality.frameRate)
+      ?? choices.find((q) => q.frameRate === companionDefaultQuality.frameRate);
+    if (next !== undefined) void client.setShareQuality(next);
+  };
   const caution = cautionFor(quality);
   // The picker is open before a share and while one is sharing: never while
   // it is claiming, picking, publishing (the capture and its sender are not
@@ -230,23 +233,37 @@ export function ShareNotes({
         </p>
       )}
       {pickerOpen ? (
-        <label className="share-quality">
-          <span className="label">Share quality</span>
-          <select
-            aria-describedby={caution === null ? undefined : cautionId}
-            value={qualityKey(quality)}
-            onChange={(e) => {
-              const next = companionQualities.find((q) => qualityKey(q) === e.target.value);
-              if (next !== undefined) void client.setShareQuality(next);
-            }}
-          >
-            {companionQualities.map((q) => (
-              <option key={qualityKey(q)} value={qualityKey(q)}>
-                {shareQualityWords(q)} · {estimateWords(q)}
-              </option>
-            ))}
-          </select>
-        </label>
+        <>
+          <label className="share-quality">
+            <span className="label">Resolution</span>
+            <select
+              aria-describedby={caution === null ? undefined : cautionId}
+              value={quality.resolution}
+              onChange={(e) => { chooseResolution(e.target.value); }}
+            >
+              {resolutions.map((resolution) => (
+                <option key={resolution} value={resolution}>
+                  {resolutionWords[resolution]} · {estimateWords({ resolution, frameRate: quality.frameRate })}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="share-quality">
+            <span className="label">Frame rate</span>
+            <select
+              aria-describedby={caution === null ? undefined : cautionId}
+              value={quality.frameRate}
+              onChange={(e) => {
+                const next = rates.find((q) => q.frameRate === Number(e.target.value));
+                if (next !== undefined) void client.setShareQuality(next);
+              }}
+            >
+              {rates.map(({ frameRate }) => (
+                <option key={frameRate} value={frameRate}>{String(frameRate)} fps</option>
+              ))}
+            </select>
+          </label>
+        </>
       ) : null}
       {pickerOpen && caution !== null ? <p id={cautionId} className="hint" role="note">{caution}</p> : null}
       {liveWhy === null ? null : <p role="status" className="hint">{liveWhy}</p>}
