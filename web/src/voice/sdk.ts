@@ -998,7 +998,15 @@ class KeptCam implements KeptCamera {
 export const levelWindow = 512;
 
 class LiveKitAdapter implements Room {
-  private readonly room = new LiveKitRoom(roomOptions);
+  private sdkRoom: LiveKitRoom | undefined;
+
+  private get room(): LiveKitRoom {
+    // The companion's publisher only sends its screen. Use LiveKit's dual-PC
+    // mode to keep receive sections out of its publisher BUNDLE. In single-PC
+    // mode the SDK adds a VP8 bitrate fmtp on the send section, but its
+    // normalizer cannot copy it to receive sections with no VP8 fmtp line.
+    return this.sdkRoom ??= new LiveKitRoom(this.companion ? { ...roomOptions, singlePeerConnection: false } : roomOptions);
+  }
   // Set by close(); every step after an await checks it.
   private closed = false;
   private events: RoomEvents | null = null;

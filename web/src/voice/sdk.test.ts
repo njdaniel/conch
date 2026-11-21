@@ -100,7 +100,7 @@ interface Stub {
   baseline: ReadonlySet<string>;
   // Issue #444: what the room was made and joined with, the share's tracks
   // as captured, and what was published with which options.
-  roomOptions: unknown;
+  roomOptions: RoomOptions | undefined;
   connectOptions: unknown;
   screenOptions: unknown;
   screenTracks: StubScreenTrack[];
@@ -594,7 +594,7 @@ vi.mock('livekit-client', () => {
         return Promise.resolve(undefined);
       },
     };
-    constructor(options: unknown) {
+    constructor(options: RoomOptions) {
       state.roomOptions = options;
       state.room = this;
     }
@@ -716,7 +716,7 @@ vi.mock('livekit-client', () => {
 import { cameraOptions, cameraPublishOptions, captureOptions, grantWait, newLiveKitRoom, principalOf, sdkLog, shareEncodings, wanted, type ShareLayer } from './sdk';
 import type { Room, RoomEvents } from './connection';
 import { CameraClient } from './camera';
-import { Track } from 'livekit-client';
+import { Track, type RoomOptions } from 'livekit-client';
 
 // What the module did to the SDK's loggers when it loaded, before any test.
 const atLoad = { levelCalls: [...state.levelCalls], factoryReplaced: state.logger.methodFactory !== state.stubFactory, calls: [...state.calls] };
@@ -3173,6 +3173,84 @@ describe('the screen companion room (issue #1581)', () => {
     };
     return p;
   };
+
+  // Minimal Chromium VP8 offer. The real SDK chooses the layout and writes
+  // the bitrate fmtp before passing the resulting offer to signaling.
+  interface OfferSection {
+    mid: string;
+    kind: string;
+    direction: RTCRtpTransceiverDirection;
+    sender: { track: MediaStreamTrack | null };
+  }
+
+  class OfferPeerConnection {
+    signalingState: RTCSignalingState = 'stable';
+    private readonly transceivers: OfferSection[] = [];
+
+    addTransceiver(trackOrKind: string | MediaStreamTrack, init: RTCRtpTransceiverInit) {
+      const [kind, track] = typeof trackOrKind === 'string' ? [trackOrKind, null] : [trackOrKind.kind, trackOrKind];
+      const section: OfferSection = {
+        mid: String(this.transceivers.length), kind, direction: init.direction ?? 'sendrecv', sender: { track },
+      };
+      this.transceivers.push(section);
+      return section;
+    }
+
+    getTransceivers() { return this.transceivers; }
+    getSenders() { return []; }
+    createDataChannel() { return { close: () => undefined }; }
+    close() { this.signalingState = 'closed'; }
+    setLocalDescription() { return Promise.resolve(); }
+
+    createOffer(): Promise<RTCSessionDescriptionInit> {
+      const video = this.transceivers.filter((section) => section.kind === 'video');
+      const sdp = [
+        'v=0', 'o=- 0 0 IN IP4 127.0.0.1', 's=-', 't=0 0',
+        `a=group:BUNDLE ${video.map((section) => section.mid).join(' ')}`,
+        ...video.flatMap(({ mid, direction, sender }) => [
+          'm=video 9 UDP/TLS/RTP/SAVPF 96', 'c=IN IP4 0.0.0.0', `a=mid:${mid}`, `a=${direction}`,
+          'a=rtpmap:96 VP8/90000', ...(sender.track === null ? [] : [`a=msid:stream ${sender.track.id}`]),
+        ]), '',
+      ].join('\r\n');
+      return Promise.resolve({ type: 'offer', sdp });
+    }
+  }
+
+  it.each([false, true])('keeps VP8 receive placeholders out of the publisher offer for companion=%s (issue #2055)', async (companion) => {
+    const adapter = newLiveKitRoom();
+    if (companion) adapter.setCompanion?.(true);
+    adapter.setWatches(new Set(), null);
+    await adapter.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+
+    const { Room: RealRoom } = await vi.importActual<typeof import('livekit-client')>('livekit-client');
+    const { engine, options } = new RealRoom(state.roomOptions);
+    vi.stubGlobal('RTCPeerConnection', OfferPeerConnection);
+    // Defer the V1 offer until after the join. Both V1 paths add the same
+    // receive sections. The V0 path skips them entirely.
+    vi.stubGlobal('CompressionStream', undefined);
+    const join = vi.spyOn(engine.client, 'join');
+    join.mockResolvedValue({ subscriberPrimary: true, serverVersion: 'test' } as Awaited<ReturnType<typeof engine.client.join>>);
+    const sendOffer = vi.spyOn(engine.client, 'sendOffer').mockImplementation(() => undefined);
+    try {
+      await engine.join('wss://lk.example', 'tok-abcdef', {
+        autoSubscribe: false, e2eeEnabled: false, maxRetries: 0, websocketTimeout: 0,
+      }, undefined, !options.singlePeerConnection);
+      const publisher = engine.pcManager?.publisher;
+      if (publisher === undefined) throw new Error('LiveKit did not create a publisher transport');
+      publisher.addTransceiver({ id: 'screen', kind: 'video' } as MediaStreamTrack, { direction: 'sendonly' });
+      publisher.setTrackCodecBitrate({ cid: 'screen', codec: 'vp8', maxbr: 6000, isScreenShare: true });
+      await publisher.createAndSendOffer();
+      expect(sendOffer).toHaveBeenCalledTimes(1);
+      const sdp = sendOffer.mock.calls[0]?.[0].sdp ?? '';
+      const video = sdp.split('m=video ').slice(1);
+      expect(video.map((section) => section.match(/^a=fmtp:96 ([^\r\n]+)/m)?.[1])).toEqual(companion
+        ? ['x-google-start-bitrate=5400']
+        : [undefined, undefined, undefined, 'x-google-start-bitrate=5400']);
+    } finally {
+      vi.unstubAllGlobals();
+      await Promise.all([engine.close(), adapter.close()]);
+    }
+  });
 
   it('subscribes to no microphone, however it arrives, and to a watched share alone', async () => {
     const mic = remotePub('microphone', 'audio');
