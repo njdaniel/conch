@@ -11,6 +11,7 @@ package schema
 // constants, its Valid() switch or its …Names() string disagree with the list
 // here, so a value added to Go and not here fails go test.
 var Vocabularies = map[string][]string{
+	"AccountNoticeKind": values(AccountNoticeKindPasswordSetByLink),
 	"ActivityKind": values(
 		ActivityKindRunStarted, ActivityKindCommandStarted, ActivityKindCommandFinished,
 		ActivityKindReplyPosted, ActivityKindApprovalRequested, ActivityKindApprovalResolved,
@@ -242,7 +243,7 @@ var Vocabularies = map[string][]string{
 	),
 	"PushTransport": values(PushTransportWebPush, PushTransportRelay),
 
-	// Local direct messages (issue #2016, DRAFT pending ADR-017).
+	// Local direct messages (issue #2016, ADR-017).
 	"DMState":            values(DMStateOpen, DMStateArchived, DMStateHidden),
 	"DMOrder":            values(DMOrderAsc, DMOrderDesc),
 	"DMAcceptPolicy":     values(DMAcceptEveryone, DMAcceptSharedChannel, DMAcceptNobody),

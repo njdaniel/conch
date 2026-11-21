@@ -207,6 +207,20 @@ func TestMigrationChannelTopic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	for _, stmt := range dmDropStatements { // migration 53 (issue #2017)
+		if _, err := s.db.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Migration 52 (issue #2042): credential provenance and account notices.
+	for _, stmt := range []string{"DROP TABLE account_notices", "ALTER TABLE credentials DROP COLUMN self_made", "ALTER TABLE sign_in_links DROP COLUMN self_made"} {
+		if _, err := s.db.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.db.Exec("DROP TABLE blocks"); err != nil { // migration 51 (issue #1832)
+		t.Fatal(err)
+	}
 	if _, err := s.db.Exec("ALTER TABLE message_removals DROP COLUMN by_author"); err != nil { // migration 50 (#1828)
 		t.Fatal(err)
 	}

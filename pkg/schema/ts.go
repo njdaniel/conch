@@ -127,7 +127,7 @@ var TSConstants = []TSConstant{
 	{Name: "MAX_ADMIN_MAX_PENDING", Value: MaxAdminMaxPending},
 	{Name: "MAX_ADMIN_REASON_CHARS", Value: MaxAdminReasonChars},
 
-	// Local direct messages (issue #2016, DRAFT pending ADR-017): the page
+	// Local direct messages (issue #2016, ADR-017): the page
 	// and nonce bounds a client must not exceed.
 	{Name: "DEFAULT_DM_PAGE_SIZE", Value: DefaultDMPageSize},
 	{Name: "MAX_DM_PAGE_SIZE", Value: MaxDMPageSize},
@@ -338,6 +338,7 @@ var TSTypes = []TSType{
 	// every case of cases.json against this validator.
 	{Value: VoiceDevice{}},
 	{Value: VoiceDevicesV1{}, Schema: VoiceDevicesSchemaV1},
+	{Value: MuteKeyEventV1{}, Schema: MuteKeyEventSchemaV1, Family: "mute-key-event-v1"},
 	// Invites: the way in (ADR-008 §4). The code is in the create response
 	// alone; the new principal is in the redeem response.
 	{Value: PrincipalV0{}, Family: "principal-v0"},
@@ -448,6 +449,9 @@ var TSTypes = []TSType{
 	{Value: RedeemSetupTokenResponseV1{}, Family: "redeem-setup-token-response-v1"},
 	{Value: CreateDeviceLinkRequestV1{}, Family: "create-device-link-request-v1"},
 	{Value: ListOwnSignInLinksResponseV1{}, Family: "list-own-sign-in-links-response-v1"},
+	// Account notices (issue #2042): the member's own, dismissible.
+	{Value: AccountNoticeV1{}, Family: "account-notice-v1"},
+	{Value: ListAccountNoticesResponseV1{}, Family: "list-account-notices-response-v1"},
 
 	// The server's health, which carries its version (the sign-in page shows
 	// it). Not a versioned payload, so it has no fixture family.
@@ -567,7 +571,7 @@ var TSTypes = []TSType{
 	{Value: NotificationSummaryV1{}, Family: "notification-summary-v1", Schema: NotificationSummarySchemaV1},
 	{Value: ListPendingNotificationsResponseV1{}, Family: "list-pending-notifications-response-v1"},
 
-	// Local direct messages (issue #2016, DRAFT pending ADR-017): the
+	// Local direct messages (issue #2016, ADR-017): the
 	// conversation, its messages, read mark, files and preferences, the
 	// per-person stream's frames and snapshot, and version 2 of the pending
 	// feed, whose summaries say whether a message was said in a channel or
@@ -597,6 +601,11 @@ var TSTypes = []TSType{
 	{Value: DMSnapshotV1{}, Family: "dm-snapshot-v1", Schema: DMSnapshotSchemaV1},
 	{Value: NotificationSummaryV2{}, Family: "notification-summary-v2", Schema: NotificationSummarySchemaV2},
 	{Value: ListPendingNotificationsResponseV2{}, Family: "list-pending-notifications-response-v2"},
+	// Personal blocks (issue #1832, docs/design/blocks.md): one entry, the
+	// caller's list, and the events signal that their list changed.
+	{Value: BlockV1{}, Family: "block-v1"},
+	{Value: ListBlocksResponseV1{}, Family: "list-blocks-response-v1"},
+	{Value: BlocksChangedV1{}, Family: "blocks-changed-v1", Schema: BlocksChangedSchemaV1},
 
 	// Private calls (issue #2029, DRAFT pending ADR-017): the attempt, the
 	// invite and action bodies, the answers, the stream's frames and
@@ -711,6 +720,8 @@ var TSVocabularyModes = map[string]TSVocabularyMode{
 	"PermissionPreset":   TSTolerant,
 	"PermissionsWarning": TSTolerant,
 	"IssuedKind":         TSTolerant,
+	// Account notices (account_notice.go): a later kind of notice.
+	"AccountNoticeKind": TSTolerant,
 	// Joining and the community model (guest.go, invite_v2.go, ADR-013):
 	// a later warning, link kind or directory scope.
 	"JoinWarning":    TSTolerant,

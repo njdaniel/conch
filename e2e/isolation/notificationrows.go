@@ -121,6 +121,27 @@ func notificationMatrixRows() []row {
 		{route: "DELETE /v1/push/registrations/{id}", what: "ends A's push registration", pick: aPushReg,
 			want:  answer{http.StatusNotFound, "push_registration_not_found"},
 			probe: func(_ *world, s subject) probe { return del(pushPath(s)) }},
+
+		// Account notices (issue #2042): the caller's own list, and dismissing
+		// one is answered only for her own notice. An id she doesn't hold is
+		// 404 notice_not_found, the same answer as A's would be; a row on A's
+		// actual notice needs a world with one, and comes with #2043.
+		own("GET /v1/notices/mine", "reads her own account notices",
+			func(*world, subject) probe { return get("/v1/notices/mine") }),
+		{route: "DELETE /v1/notices/mine/{id}", what: "dismisses a notice she does not hold",
+			want:  answer{http.StatusNotFound, schema.ErrorCodeNoticeNotFound},
+			probe: func(*world, subject) probe { return del("/v1/notices/mine/987654") }},
+		// Personal blocks (issue #1832). The list is the caller's own; a
+		// block of A's hidden principal is the 404 of an id never issued,
+		// byte for byte (the ghost comparison), so a PUT is no probe; and an
+		// unblock is 204 whoever it names, telling nothing.
+		own("GET /v1/blocks", "reads her own block list",
+			func(*world, subject) probe { return get("/v1/blocks") }),
+		{route: "PUT /v1/blocks/{principal_id}", what: "blocks A's hidden principal", pick: aHidden,
+			want:  answer{http.StatusNotFound, "principal_not_found"},
+			probe: func(_ *world, s subject) probe { return put("/v1/blocks/"+id(s.id), nil) }},
+		own("DELETE /v1/blocks/{principal_id}", "unblocks A's member, whom she never blocked",
+			func(w *world, _ subject) probe { return del("/v1/blocks/" + id(aMember(w).id)) }),
 	}
 }
 

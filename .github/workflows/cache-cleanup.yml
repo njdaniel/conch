@@ -1,0 +1,44 @@
+name: Cache cleanup
+
+# A pull request's Actions caches (ref refs/pull/<n>/merge) can only be
+# restored by that pull request, so once it closes they are dead weight. The
+# Rust voice build caches are 1.6 to 4 GB each, and above the free 10 GB
+# GitHub evicts the least recently used caches, main's included (issue #2015).
+# This deletes a closed pull request's caches. It checks out nothing, runs
+# no code from the pull request, and never fails one.
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  actions: write
+
+jobs:
+  delete-pr-caches:
+    runs-on: ubuntu-latest
+    steps:
+      - name: delete this pull request's caches
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          ref="refs/pull/$PR_NUMBER/merge"
+          if ! ids=$(gh cache list --ref "$ref" --limit 100 --json id --jq '.[].id'); then
+            echo "Could not list caches for $ref (a fork's read-only token?); nothing deleted."
+            exit 0
+          fi
+          if [ -z "$ids" ]; then
+            echo "No caches for $ref."
+            exit 0
+          fi
+          deleted=0
+          for id in $ids; do
+            if gh cache delete "$id" >/dev/null 2>&1; then
+              deleted=$((deleted + 1))
+            else
+              echo "Cache $id was already gone or could not be deleted."
+            fi
+          done
+          echo "Deleted $deleted cache(s) for $ref."

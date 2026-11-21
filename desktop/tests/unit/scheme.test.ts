@@ -155,22 +155,23 @@ describe('handle', () => {
     }
   });
 
-  it('answers 500 and logs one line without the bytes when a hash no longer matches', async () => {
+  it('answers 500 and logs a summary and the local path when a hash no longer matches', async () => {
     const { d, logs } = deps({ '/assets/app-AbC_1-2.js': 'tampered();' });
     const r = await handle({ url: 'conch-app://ui/assets/app-AbC_1-2.js', method: 'GET' }, d);
     expect(r.status).toBe(500);
     expectHeaders(r);
     expect(await r.text()).not.toContain('tampered');
-    expect(logs).toHaveLength(1);
-    expect(logs[0]).toContain('/assets/app-AbC_1-2.js');
-    expect(logs[0]).not.toContain('tampered');
+    expect(logs).toHaveLength(2);
+    expect(logs[0]).toBe('conch-desktop: a file no longer has the hash the manifest lists');
+    expect(logs[1]).toContain('/assets/app-AbC_1-2.js');
+    expect(logs.join('\n')).not.toContain('tampered');
   });
 
   it('answers 500 when a listed file cannot be read', async () => {
     const { d, logs } = deps({ '/favicon-32.png': new Error('ENOENT') });
     const r = await handle({ url: 'conch-app://ui/favicon-32.png', method: 'GET' }, d);
     expect(r.status).toBe(500);
-    expect(logs).toHaveLength(1);
+    expect(logs).toHaveLength(2);
   });
 });
 

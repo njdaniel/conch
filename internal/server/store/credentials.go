@@ -104,15 +104,18 @@ func nullableMillis(t *time.Time) any {
 // the person signing in, or 0 when no principal is (a bootstrap, a link or
 // invite redemption), stored NULL. It is what the credential_created or
 // credential_rotated row's actor says, so the column and the trail agree.
-func insertCredentialTx(ctx context.Context, tx execer, principalID int64, label, token string, now time.Time, expiresAt *time.Time, renew time.Duration, issuedBy int64) (schema.CredentialV1, error) {
+// maker is who made it, for credentials.self_made (issue #2042,
+// provenance.go): madeBySelf only on a path that proves the principal is
+// the one asking, madeByAnother everywhere else.
+func insertCredentialTx(ctx context.Context, tx execer, principalID int64, label, token string, now time.Time, expiresAt *time.Time, renew time.Duration, issuedBy int64, maker credentialMaker) (schema.CredentialV1, error) {
 	var renewMs any
 	if renew > 0 {
 		renewMs = renew.Milliseconds()
 	}
 	res, err := tx.ExecContext(ctx,
-		`INSERT INTO credentials (principal_id, label, token_hash, created_at, expires_at, renew_ms, auth_generation, issued_by)
-		 SELECT ?, ?, ?, ?, ?, ?, auth_generation, ? FROM principals WHERE id = ?`,
-		principalID, label, hashCredentialToken(token), now.UnixMilli(), nullableMillis(expiresAt), renewMs, nullableID(issuedBy), principalID)
+		`INSERT INTO credentials (principal_id, label, token_hash, created_at, expires_at, renew_ms, auth_generation, issued_by, self_made)
+		 SELECT ?, ?, ?, ?, ?, ?, auth_generation, ?, ? FROM principals WHERE id = ?`,
+		principalID, label, hashCredentialToken(token), now.UnixMilli(), nullableMillis(expiresAt), renewMs, nullableID(issuedBy), bool(maker), principalID)
 	if err != nil {
 		return schema.CredentialV1{}, fmt.Errorf("store: insert credential: %w", err)
 	}
@@ -208,7 +211,11 @@ func (s *Store) createCredential(ctx context.Context, actor string, principalID 
 		if (Principal{GuestState: schema.GuestState(guest.String)}).guestTarget() {
 			return ErrGuestNotAllowed
 		}
-		c, err := insertCredentialTx(ctx, tx, principalID, label, token, now, exp, renew, issuerOf(actor))
+		// An issued credential is an act-as token (act_as_members), made by
+		// another even when the operator issues it to themselves: the route
+		// cannot tell which credential the caller holds came from where, and
+		// a self-made one is had by signing in (issue #2042).
+		c, err := insertCredentialTx(ctx, tx, principalID, label, token, now, exp, renew, issuerOf(actor), madeByAnother)
 		if err != nil {
 			return err
 		}
@@ -376,7 +383,11 @@ func (s *Store) RotateCredential(ctx context.Context, actor string, credentialID
 		}
 		// The replacement is issued by whoever rotates it, not by the
 		// maker of the one it replaces (issue #1024).
-		c, err := insertCredentialTx(ctx, tx, principalID, label, token, now, exp, time.Duration(renewMs.Int64)*time.Millisecond, issuerOf(actor))
+		// The caller (act_as_members) receives the new token, so it is made
+		// by another whatever the old one was: rotating a person's own
+		// sign-in must not hand an operator a self-made credential (issue
+		// #2042).
+		c, err := insertCredentialTx(ctx, tx, principalID, label, token, now, exp, time.Duration(renewMs.Int64)*time.Millisecond, issuerOf(actor), madeByAnother)
 		if err != nil {
 			return err
 		}

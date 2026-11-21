@@ -2907,6 +2907,19 @@ export const voiceDevicesV1 = object<VoiceDevicesV1>({
   configured_output: optional(str),
 });
 
+// schema.MuteKeyEventV1
+export const muteKeyEventV1Schema = 'conch.mute_key_event.v1';
+
+export interface MuteKeyEventV1 {
+  schema: typeof muteKeyEventV1Schema;
+  press: boolean;
+}
+
+export const muteKeyEventV1 = object<MuteKeyEventV1>({
+  schema: vocab<typeof muteKeyEventV1Schema>({ [muteKeyEventV1Schema]: true }),
+  press: bool,
+});
+
 // schema.PrincipalV0
 export interface PrincipalV0 {
   id: number;
@@ -4076,6 +4089,37 @@ export interface ListOwnSignInLinksResponseV1 {
 
 export const listOwnSignInLinksResponseV1 = object<ListOwnSignInLinksResponseV1>({
   sign_in_links: array(signInLinkV1),
+});
+
+// schema.AccountNoticeKind: closed on the server and client-tolerant, so a value this
+// bundle does not know is kept and shown by its name; KnownAccountNoticeKind is the known ones.
+export type KnownAccountNoticeKind = 'password_set_by_link';
+export type AccountNoticeKind = KnownAccountNoticeKind | (string & {});
+
+export const accountNoticeKind = tolerant<KnownAccountNoticeKind>({ password_set_by_link: true });
+
+// schema.AccountNoticeV1
+export interface AccountNoticeV1 {
+  id: number;
+  kind: AccountNoticeKind;
+  by_name: string;
+  at: string;
+}
+
+export const accountNoticeV1 = object<AccountNoticeV1>({
+  id: int,
+  kind: accountNoticeKind,
+  by_name: str,
+  at: timestamp,
+});
+
+// schema.ListAccountNoticesResponseV1
+export interface ListAccountNoticesResponseV1 {
+  notices: AccountNoticeV1[];
+}
+
+export const listAccountNoticesResponseV1 = object<ListAccountNoticesResponseV1>({
+  notices: array(accountNoticeV1),
 });
 
 // schema.HealthVoice
@@ -5931,6 +5975,43 @@ export const listPendingNotificationsResponseV2 = object<ListPendingNotification
   summaries: array(notificationSummaryV2),
   cursor: optional(str),
   more: bool,
+});
+
+// schema.BlockV1
+export interface BlockV1 {
+  principal_id: number;
+  name: string;
+  kind: PrincipalKind;
+  created_at: string;
+}
+
+export const blockV1 = object<BlockV1>({
+  principal_id: int,
+  name: str,
+  kind: principalKind,
+  created_at: timestamp,
+});
+
+// schema.ListBlocksResponseV1
+export interface ListBlocksResponseV1 {
+  blocks: BlockV1[];
+  limit: number;
+}
+
+export const listBlocksResponseV1 = object<ListBlocksResponseV1>({
+  blocks: array(blockV1),
+  limit: int,
+});
+
+// schema.BlocksChangedV1
+export const blocksChangedV1Schema = 'conch.blocks_changed.v1';
+
+export interface BlocksChangedV1 {
+  schema: typeof blocksChangedV1Schema;
+}
+
+export const blocksChangedV1 = object<BlocksChangedV1>({
+  schema: vocab<typeof blocksChangedV1Schema>({ [blocksChangedV1Schema]: true }),
 });
 
 // schema.PrivateCallRole

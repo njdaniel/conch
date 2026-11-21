@@ -149,7 +149,10 @@ func (s *Store) BootstrapOperatorWith(ctx context.Context, name string, opts Boo
 			return fmt.Errorf("store: bootstrap: count manifests: %w", err)
 		}
 		if !opts.Setup {
-			if res.Credential, err = insertCredentialTx(ctx, tx, id, BootstrapCredentialLabel, token, now, nil, 0, 0); err != nil {
+			// Self-made (issue #2042): only the host's administrator can
+			// bootstrap, and the credential is the owner's, whom no
+			// act_as_members reaches.
+			if res.Credential, err = insertCredentialTx(ctx, tx, id, BootstrapCredentialLabel, token, now, nil, 0, 0, madeBySelf); err != nil {
 				return err
 			}
 		}

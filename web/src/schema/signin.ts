@@ -6,15 +6,20 @@
 // suite's operator makes the others, as `conch admin principal sign-in-link`
 // does, with the create shapes.
 export {
+  accountNoticeV1,
   createSignInLinkResponseV1,
+  listAccountNoticesResponseV1,
   listOwnSignInLinksResponseV1,
   redeemSignInLinkRequestV1,
   redeemSignInLinkResponseV1,
   signInLinkPreviewRequestV1,
   signInLinkPreviewV1,
+  type AccountNoticeKind,
+  type AccountNoticeV1,
   type CreateDeviceLinkRequestV1,
   type CreateSignInLinkRequestV1,
   type CreateSignInLinkResponseV1,
+  type ListAccountNoticesResponseV1,
   type ListOwnSignInLinksResponseV1,
   type RedeemSignInLinkRequestV1,
   type RedeemSignInLinkResponseV1,

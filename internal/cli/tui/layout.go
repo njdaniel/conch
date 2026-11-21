@@ -84,6 +84,14 @@ func (m Model) layout() layout {
 		}
 		l.rightW = width - l.leftW - l.peopleW - 1
 	}
+	if m.mode == modeDM {
+		// Each pane needs room for a full principal ID and an unread count.
+		l.leftW, l.rightW = width, width
+		if width >= fullWidth {
+			l.leftW = minWidth
+			l.rightW = width - l.leftW - 1
+		}
+	}
 	// The members line and the voice strip, when there are those, take a row
 	// each from the panes rather than adding one to the screen, and each is
 	// one row however many people there are, so the layout does not move as

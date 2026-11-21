@@ -82,7 +82,7 @@ for (const [size, options, phone] of sizes) {
     const press = async (target: Locator) => (phone ? target.tap() : target.click());
 
     await press(more);
-    await expect(row.getByRole('menuitem')).toHaveText(['Remove from voice', 'Ban from channel', 'Remove from channel', 'Make manager', 'Stop deciding approvals']);
+    await expect(row.getByRole('menuitem')).toHaveText(['Remove from voice', 'Ban from channel', 'Remove from channel', 'Make manager', 'Stop deciding approvals', 'Block…']);
     await expectFits(page, `${size}: a row's menu open`);
     await press(row.getByRole('menuitem', { name: 'Make manager' }));
     await expect(row.getByText('Manager', { exact: true })).toBeVisible();
@@ -165,15 +165,21 @@ test('P1094 a right-click on a row with actions opens its menu and is claimed; e
   expect(await rightClick(page, page.getByRole('heading', { name: channel }))).toBe(false);
   await expect(page.getByRole('menu')).toHaveCount(0);
 
-  // A plain member sees rows with no actions at all: the native menu stays.
+  // A plain member's own row has no actions (the native menu stays); another's has Block alone.
   const member = (await meet({ viewport: { width: 1440, height: 900 } })).page;
   await signIn(member, world, plain.token, plainName);
   await channelButton(member, channel).click();
   const own = memberRow(member, plainName);
   await expect(own).toBeVisible();
-  await expect(panel(member).getByRole('button', { name: /^Actions for / })).toHaveCount(0);
+  // The member's own row has no actions; another's has only the personal Block
+  // (no moderation, role or manager item), so a right-click there is claimed.
+  await expect(own.getByRole('button', { name: /^Actions for / })).toHaveCount(0);
+  const theirs = memberRow(member, name);
+  await expect(theirs.getByRole('button', { name: `Actions for ${name}` })).toBeVisible();
   await watchContextMenus(member);
   expect(await rightClick(member, own.locator('.ag-name'))).toBe(false);
-  expect(await rightClick(member, memberRow(member, name).locator('.ag-name'))).toBe(false);
+  expect(await rightClick(member, theirs.locator('.ag-name'))).toBe(true);
+  await expect(theirs.getByRole('menuitem')).toHaveText(['Block…']);
+  await member.keyboard.press('Escape');
   await expect(member.getByRole('menu')).toHaveCount(0);
 });

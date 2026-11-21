@@ -644,6 +644,26 @@ func TestMemberPasswords(t *testing.T) {
 	}
 	e.mustRun(t, "", reset+"\n", "login", "--password", "--name", "bob")
 
+	// The reset link was made by another principal, so bob is told, on his
+	// own sign-in, and dismisses it (issue #2042).
+	noticeList, _ := e.mustRun(t, "", "", "notices")
+	noticeFields := strings.Fields(noticeList)
+	if len(noticeFields) < 2 || !strings.Contains(noticeList, "your password was set through a link made by ") || !strings.Contains(noticeList, "(conch notices dismiss "+noticeFields[0]+")") {
+		t.Fatalf("notices after a reset by another = %q", noticeList)
+	}
+	if jsonList, _ := e.mustRun(t, "", "", "notices", "--json"); !strings.Contains(jsonList, `"kind":"password_set_by_link"`) {
+		t.Errorf("notices --json = %q", jsonList)
+	}
+	if out, _ := e.mustRun(t, "", "", "notices", "dismiss", noticeFields[0]); out != "dismissed notice "+noticeFields[0]+"\n" {
+		t.Errorf("notices dismiss = %q", out)
+	}
+	if list, _ := e.mustRun(t, "", "", "notices"); list != "" {
+		t.Errorf("notices after dismissing = %q", list)
+	}
+	if _, _, err := e.run(t, "", "", "notices", "dismiss", "x"); err == nil {
+		t.Error("notices dismiss with a bad id succeeded")
+	}
+
 	// A member made before passwords, signed in with an operator's credential.
 	legacy, err := e.st.CreatePrincipal(context.Background(), store.PrincipalHuman, "dora")
 	if err != nil {

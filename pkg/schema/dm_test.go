@@ -44,6 +44,7 @@ func TestDMGoldenFixtures(t *testing.T) {
 		{"open-dm-request-v1.json", func() dmValidator { return new(OpenDMRequestV1) }},
 		{"open-dm-response-v1.json", func() dmValidator { return new(OpenDMResponseV1) }},
 		{"open-dm-response-v1-resumed.json", func() dmValidator { return new(OpenDMResponseV1) }},
+		{"open-dm-response-v1-peer-open.json", func() dmValidator { return new(OpenDMResponseV1) }},
 		{"list-dm-conversations-response-v1.json", func() dmValidator { return new(ListDMConversationsResponseV1) }},
 		{"list-dm-conversations-response-v1-empty.json", func() dmValidator { return new(ListDMConversationsResponseV1) }},
 		{"dm-message-v1.json", func() dmValidator { return new(DMMessageV1) }},
@@ -60,8 +61,11 @@ func TestDMGoldenFixtures(t *testing.T) {
 		{"dm-permission-response-v1.json", func() dmValidator { return &dmPermissionRespCheck{} }},
 		{"post-dm-message-request-v1.json", func() dmValidator { return new(PostDMMessageRequestV1) }},
 		{"post-dm-message-request-v1-files.json", func() dmValidator { return new(PostDMMessageRequestV1) }},
-		{"post-dm-message-response-v1.json", func() dmValidator { return &postDMResponseCheck{} }},
-		{"post-dm-message-response-v1-replayed.json", func() dmValidator { return &postDMResponseCheck{} }},
+		{"post-dm-message-request-v1-nonce-conflict.json", func() dmValidator { return new(PostDMMessageRequestV1) }},
+		{"post-dm-message-response-v1.json", func() dmValidator { return new(PostDMMessageResponseV1) }},
+		{"post-dm-message-response-v1-replayed.json", func() dmValidator { return new(PostDMMessageResponseV1) }},
+		{"post-dm-message-response-v1-replayed-edited.json", func() dmValidator { return new(PostDMMessageResponseV1) }},
+		{"post-dm-message-response-v1-replayed-removed.json", func() dmValidator { return new(PostDMMessageResponseV1) }},
 		{"list-dm-messages-response-v1.json", func() dmValidator { return new(ListDMMessagesResponseV1) }},
 		{"list-dm-messages-response-v1-catch-up.json", func() dmValidator { return new(ListDMMessagesResponseV1) }},
 		{"list-dm-messages-response-v1-empty.json", func() dmValidator { return new(ListDMMessagesResponseV1) }},
@@ -99,12 +103,6 @@ type (
 func (dmServerSettingsCheck) Validate() error { return nil }
 func (dmPermissionReqCheck) Validate() error  { return nil }
 func (dmPermissionRespCheck) Validate() error { return nil }
-
-// postDMResponseCheck gives the send response, which promises only what it
-// embeds, a Validate for the fixture test.
-type postDMResponseCheck struct{ PostDMMessageResponseV1 }
-
-func (r postDMResponseCheck) Validate() error { return r.Message.Validate() }
 
 // strictDMDecode decodes body into into with unknown fields refused, as the
 // server does.
@@ -257,12 +255,25 @@ func TestDMValidate(t *testing.T) {
 	msg := func(id int64) DMMessageV1 {
 		return DMMessageV1{Schema: DMMessageSchemaV1, ID: id, ConversationID: 12, AuthorID: 3, CreatedAt: at, Revision: id, Body: "hi"}
 	}
+	empty := func() DMConversationV1 {
+		c := conv()
+		c.CreatedAt, c.LastMessageID, c.LastMessageAt, c.LastReadID, c.Unread, c.Revision = nil, 0, nil, 0, 0, 0
+		return c
+	}
+	sent := msg(40)
+	sent.ClientNonce = "n"
+	edited := sent
+	edited.EditedAt = &later
+	removed := sent
+	removed.Body, removed.Removed = MessageRemovedByAuthorBody, true
 	tests := []struct {
 		name string
 		doc  dmValidator
 		ok   bool
 	}{
 		{"conversation", conv(), true},
+		{"conversation largest safe id", func() DMConversationV1 { c := conv(); c.ID = 1<<53 - 1; return c }(), true},
+		{"conversation unsafe id", func() DMConversationV1 { c := conv(); c.ID = 1 << 53; return c }(), false},
 		{"conversation wrong schema", func() DMConversationV1 { c := conv(); c.Schema = MessageSchemaV2; return c }(), false},
 		{"conversation one participant", func() DMConversationV1 { c := conv(); c.ParticipantIDs = []int64{3}; return c }(), false},
 		{"conversation three participants", func() DMConversationV1 { c := conv(); c.ParticipantIDs = []int64{3, 5, 7}; return c }(), false},
@@ -270,11 +281,10 @@ func TestDMValidate(t *testing.T) {
 		{"conversation pair not canonical", func() DMConversationV1 { c := conv(); c.ParticipantIDs = []int64{5, 3}; return c }(), false},
 		{"conversation peer outside the pair", func() DMConversationV1 { c := conv(); c.PeerID = 9; return c }(), false},
 		{"conversation unknown state", func() DMConversationV1 { c := conv(); c.State = "muted"; return c }(), false},
-		{"conversation empty, no created_at", func() DMConversationV1 {
-			c := conv()
-			c.CreatedAt, c.LastMessageID, c.LastMessageAt, c.LastReadID, c.Unread, c.Revision = nil, 0, nil, 0, 0, 0
-			return c
-		}(), true},
+		{"conversation empty, no created_at", empty(), true},
+		{"conversation first invite without a message", func() DMConversationV1 { c := empty(); c.CreatedAt = &at; return c }(), true},
+		{"conversation without a message but with a revision", func() DMConversationV1 { c := empty(); c.Revision = 1; return c }(), false},
+		{"conversation without a message but unread", func() DMConversationV1 { c := empty(); c.Unread = 1; return c }(), false},
 		{"conversation with a message but no created_at", func() DMConversationV1 { c := conv(); c.CreatedAt = nil; return c }(), false},
 		{"conversation with a message at revision 0", func() DMConversationV1 { c := conv(); c.Revision = 0; return c }(), false},
 		{"conversation negative revision", func() DMConversationV1 { c := conv(); c.Revision = -1; return c }(), false},
@@ -317,6 +327,12 @@ func TestDMValidate(t *testing.T) {
 		{"post whitespace only with a file", PostDMMessageRequestV1{Body: "  ", ClientNonce: "n", FileIDs: []int64{1}}, false},
 		{"post text with spaces around", PostDMMessageRequestV1{Body: " hi ", ClientNonce: "n"}, true},
 		{"post empty file list is none", PostDMMessageRequestV1{Body: "hi", ClientNonce: "n", FileIDs: []int64{}}, true},
+		{"post response", PostDMMessageResponseV1{Message: sent}, true},
+		{"post response without author's nonce", PostDMMessageResponseV1{Message: msg(40)}, false},
+		{"post response edited without replay", PostDMMessageResponseV1{Message: edited}, false},
+		{"post response removed without replay", PostDMMessageResponseV1{Message: removed}, false},
+		{"post response replayed edit", PostDMMessageResponseV1{Message: edited, Replayed: true}, true},
+		{"post response replayed removal", PostDMMessageResponseV1{Message: removed, Replayed: true}, true},
 
 		{"edit", EditDMMessageRequestV1{Body: "hi"}, true},
 		{"edit blank", EditDMMessageRequestV1{Body: "  \n"}, false},
@@ -538,24 +554,47 @@ func TestDMWireRevealsNoPriorOpenOrAccountState(t *testing.T) {
 		if err := json.Unmarshal(raw, &doc); err != nil {
 			continue
 		}
-		for _, key := range []string{"created", "peer_available", "available", "blocked", "blocked_by", "reason"} {
+		for _, key := range []string{"created", "opened_by", "opened_at", "peer_available", "available", "blocked", "blocked_by", "reason"} {
 			if hasKey(doc, key) {
 				t.Errorf("%s carries %q", filepath.Base(file), key)
 			}
 		}
 	}
-	// The empty conversation Alice opened and Bob opens next is one document,
-	// whoever opened it: no created_at, no revision above 0, nothing sent.
-	raw, err := os.ReadFile(filepath.Join("testdata", "dm-conversation-v1-new.json"))
-	if err != nil {
-		t.Fatal(err)
+	// The peer can receive the second response only after their own eligible
+	// open. Both responses carry the same id and no evidence of a prior open.
+	var opener, peer OpenDMResponseV1
+	decodeFixture(t, "open-dm-response-v1.json", &opener)
+	decodeFixture(t, "open-dm-response-v1-peer-open.json", &peer)
+	if opener.Conversation.ID != peer.Conversation.ID {
+		t.Error("both opens must return the same opaque conversation id")
 	}
-	var c DMConversationV1
-	if err := json.Unmarshal(raw, &c); err != nil {
-		t.Fatal(err)
+	for _, c := range []DMConversationV1{opener.Conversation, peer.Conversation} {
+		if c.CreatedAt != nil || c.Revision != 0 || c.LastMessageID != 0 {
+			t.Errorf("an empty open shows %+v", c)
+		}
 	}
-	if c.CreatedAt != nil || c.Revision != 0 || c.LastMessageID != 0 {
-		t.Errorf("an empty conversation shows %+v", c)
+}
+
+func TestDMNonceRetryFixtures(t *testing.T) {
+	var original, conflict PostDMMessageRequestV1
+	decodeFixture(t, "post-dm-message-request-v1-files.json", &original)
+	decodeFixture(t, "post-dm-message-request-v1-nonce-conflict.json", &conflict)
+	if conflict.ClientNonce != original.ClientNonce || conflict.Body == original.Body {
+		t.Fatal("the conflicting retry must reuse the nonce and change the original body")
+	}
+
+	var first, edited, removed PostDMMessageResponseV1
+	decodeFixture(t, "post-dm-message-response-v1.json", &first)
+	decodeFixture(t, "post-dm-message-response-v1-replayed-edited.json", &edited)
+	decodeFixture(t, "post-dm-message-response-v1-replayed-removed.json", &removed)
+	if first.Replayed || edited.Message.EditedAt == nil || !removed.Message.Removed {
+		t.Fatal("expected a first send, an edited replay and a tombstone replay")
+	}
+	for _, r := range []PostDMMessageResponseV1{edited, removed} {
+		if !r.Replayed || r.Message.ID != first.Message.ID || r.Message.ConversationID != first.Message.ConversationID ||
+			r.Message.ClientNonce != original.ClientNonce || r.Message.Revision <= first.Message.Revision {
+			t.Errorf("expected the current copy of the original send, got %+v", r)
+		}
 	}
 }
 

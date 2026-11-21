@@ -56,7 +56,13 @@ test('manager confirms membership removal, ban and own unban; a plain member has
   await signIn(targetPage, world, target.token, target.name); await openChannel(targetPage, channel);
   const beforeRemoval = await post(world, target.token, channel, unique('membership-history'));
   await expect(messageRow(targetPage, beforeRemoval.id)).toContainText(beforeRemoval.body);
-  await expect(panel(plain).getByRole('button', { name: /^Actions for / })).toHaveCount(0);
+  // A plain member holds no moderation: their own row has no actions, and
+  // another's has the personal Block alone.
+  await expect(personRow(plain, member.name)).toBeVisible();
+  await expect(personRow(plain, member.name).getByRole('button', { name: /^Actions for / })).toHaveCount(0);
+  await personRow(plain, target.name).getByRole('button', { name: `Actions for ${target.name}` }).click();
+  await expect(personRow(plain, target.name).getByRole('menuitem')).toHaveText(['Block…']);
+  await plain.keyboard.press('Escape');
   await expect(panel(plain).getByRole('button', { name: 'Channel bans' })).toHaveCount(0);
   expect((await call(world, member.token, 'DELETE', `/v1/channels/${channel}/voice/participants/${String(target.id)}`)).status).toBe(403);
   const row = personRow(mgr, target.name);
