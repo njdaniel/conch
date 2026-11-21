@@ -313,6 +313,11 @@ func TestAuthorRemovalMigrationPreservesOldModeratorTombstone(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Reconstruct the previous schema, including a moderator's own removal.
+	for _, stmt := range dmDropStatements { // migration 53 (issue #2017)
+		if _, err := s.db.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
 	// Migration 52 (issue #2042): credential provenance and account notices.
 	for _, stmt := range []string{"DROP TABLE account_notices", "ALTER TABLE credentials DROP COLUMN self_made", "ALTER TABLE sign_in_links DROP COLUMN self_made"} {
 		if _, err := s.db.Exec(stmt); err != nil {
