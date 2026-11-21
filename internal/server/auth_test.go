@@ -206,6 +206,15 @@ var routeExpectations = map[string]routeExpectation{
 	"GET /v1/ws":     {classAuth, "/v1/ws", "", 400},
 	"GET /v2/ws":     {classAuth, "/v2/ws", "", 400},
 	"GET /v1/whoami": {classAuth, "/v1/whoami", "", 200},
+	// Private calls are credential-bound member routes. The sample
+	// conversation and attempt do not exist in this fixture.
+	"POST /v1/dms/{conversation}/calls": {classAuth, "/v1/dms/42/calls", `{"action_id":"invite"}`, 404},
+	"GET /v1/dms/{conversation}/calls":  {classAuth, "/v1/dms/42/calls", "", 404},
+	"GET /v1/calls/current":             {classAuth, "/v1/calls/current", "", 200},
+	"POST /v1/calls/{call}/accept":      {classAuth, "/v1/calls/abcdefghijklmnopqrstuv/accept", `{"action_id":"accept","revision":1}`, 404},
+	"POST /v1/calls/{call}/decline":     {classAuth, "/v1/calls/abcdefghijklmnopqrstuv/decline", `{"action_id":"decline","revision":1}`, 404},
+	"POST /v1/calls/{call}/cancel":      {classAuth, "/v1/calls/abcdefghijklmnopqrstuv/cancel", `{"action_id":"cancel","revision":1}`, 404},
+	"POST /v1/calls/{call}/hangup":      {classAuth, "/v1/calls/abcdefghijklmnopqrstuv/hangup", `{"action_id":"hangup","revision":1}`, 404},
 	// Preview as member (issue #1515). Without the header it answers 400
 	// "preview target required"; the status is the same with AuthOff.
 	"GET /v1/preview":   {classAuth, "/v1/preview", "", 400},
@@ -683,7 +692,11 @@ func TestRoutesRequireAuth(t *testing.T) {
 		"POST /v1/login/totp": true, "POST /v1/setup/redeem": true}
 
 	for _, rt := range f.srv.routes {
-		exp := routeExpectations[rt.pattern]
+		exp, ok := routeExpectations[rt.pattern]
+		if !ok {
+			t.Errorf("route %q has no request in routeExpectations", rt.pattern)
+			continue
+		}
 		t.Run(rt.pattern, func(t *testing.T) {
 			rec := f.do(t, routeMethod(rt.pattern), exp.path, "", exp.body)
 			if exemptList[rt.pattern] {
@@ -761,6 +774,9 @@ func TestRoleMatrix(t *testing.T) {
 			if strings.HasSuffix(rt.pattern, "/read-state") || strings.Contains(rt.pattern, "/v1/notifications/") || strings.Contains(rt.pattern, "/v1/blocks") || isPushPeopleRoute(rt.pattern) {
 				agentWant = http.StatusForbidden
 			}
+			if isPrivateCallRoute(rt.pattern) {
+				agentWant = http.StatusForbidden
+			}
 			// The moderation routes of reactions (issue #765) administer a
 			// channel: an agent is refused by the class, before any lookup.
 			if exp.class == classManager && isReactionRoute(rt.pattern) {
@@ -808,7 +824,10 @@ func TestRoleMatrix(t *testing.T) {
 			if isDeviceLinkRoute(rt.pattern) {
 				agentWant, operatorWant = http.StatusForbidden, http.StatusForbidden
 			}
-			if personStreamRefused {
+			// The call routes (issue #2030) are in selfMadeCredentialRoutes
+			// too: this fixture's member credential, minted by "system", is
+			// refused the same way, by the one guard and before any handler.
+			if personStreamRefused || isPrivateCallRoute(rt.pattern) {
 				memberWant = http.StatusForbidden
 			}
 			cases := []struct {
@@ -844,6 +863,10 @@ func isMessageEditRoute(pattern string) bool {
 		pattern == "GET /v2/channels/{channel}/messages/{message_id}/revisions"
 }
 
+func isPrivateCallRoute(pattern string) bool {
+	return strings.Contains(pattern, " /v1/calls/") || strings.HasSuffix(pattern, " /v1/dms/{conversation}/calls")
+}
+
 // TestAuthOffUnchanged runs the route table with AuthOff and no credential:
 // the statuses are what the handlers gave before authentication existed, no
 // route reads a credential, and no role check applies.
@@ -875,6 +898,9 @@ func TestAuthOffUnchanged(t *testing.T) {
 				}
 				if isReactionRoute(rt.pattern) {
 					want = http.StatusBadRequest // reactions_require_auth: a reaction belongs to a principal
+				}
+				if isPrivateCallRoute(rt.pattern) {
+					want = http.StatusBadRequest // dm_require_auth: a private call is bound to a credential
 				}
 				if rt.pattern == "POST /v1/ws-tickets" {
 					want = http.StatusBadRequest // tickets_require_auth: a ticket is bound to a credential

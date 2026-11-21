@@ -259,20 +259,6 @@ func dmFillPeerTx(ctx context.Context, q execer, viewer int64, c *DMConversation
 	return nil
 }
 
-// DMPairVisible reports whether viewer can already see a conversation with
-// peer (they opened it or it has a message). It answers only about the
-// viewer's own view, so it says nothing about the peer's side; the open route
-// uses it to tell a resume (exempt from the write gate and the new-conversation
-// bucket) from an open that introduces the pair.
-func (s *Store) DMPairVisible(ctx context.Context, viewer, peer int64) (bool, error) {
-	var id int64
-	err := s.dmReadTx(ctx, func(tx execer) (err error) {
-		id, err = dmPairTx(ctx, tx, viewer, peer, true)
-		return err
-	})
-	return id != 0, err
-}
-
 // DMConversationFor returns conversation convID as viewer sees it, or
 // ErrDMNotFound.
 func (s *Store) DMConversationFor(ctx context.Context, viewer, convID int64) (DMConversation, error) {

@@ -56,8 +56,8 @@ export interface Scratch {
   cleanup(): void;
 }
 
-export function scratch(): Scratch {
-  const root = mkdtempSync(join(scratchBase(), 'conch-voice-'));
+export function scratch(base = scratchBase()): Scratch {
+  const root = mkdtempSync(join(base, 'conch-voice-'));
   const run = join(root, 'run');
   const config = join(root, 'config');
   const resources = join(root, 'resources');

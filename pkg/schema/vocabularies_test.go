@@ -221,8 +221,11 @@ var validators = map[string]func(string) bool{
 	"VoiceCameraEndReason":     validOf[VoiceCameraEndReason](),
 	"VoiceTransmitState":       validOf[VoiceTransmitState](),
 
-	// Version 3 of the voice-helper control protocol (issue #1851).
+	// The versioned share-audio and diagnostics vocabularies.
 	"VoiceControlCommandKindV3":     validOf[VoiceControlCommandKindV3](),
+	"VoiceControlCommandKindV4":     validOf[VoiceControlCommandKindV4](),
+	"VoiceControlEventKindV4":       validOf[VoiceControlEventKindV4](),
+	"VoiceControlGateWhyV4":         validOf[VoiceControlGateWhyV4](),
 	"VoiceControlShareAudio":        validOf[VoiceControlShareAudio](),
 	"VoiceControlShareAudioProblem": validOf[VoiceControlShareAudioProblem](),
 

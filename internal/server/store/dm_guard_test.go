@@ -34,8 +34,8 @@ var dmRowRead = regexp.MustCompile("(?i)" +
 // (dmVisibleCond, dmViewTx) is the only way a conversation, a message, a
 // revision, a removal, an index hit, a file or a read mark is handed to anyone.
 // dm.go writes, and asks dm_visibility.go for what it must know and for the
-// row it changed. dm_migration.go is the schema: its triggers read the tables
-// they guard, and nothing else there reads.
+// row it changed. The migration files hold schema triggers that read the
+// tables they guard.
 func TestOnlyDMVisibilityGoReadsDMRows(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {
@@ -43,7 +43,8 @@ func TestOnlyDMVisibilityGoReadsDMRows(t *testing.T) {
 	}
 	checked := 0
 	for _, name := range files {
-		if strings.HasSuffix(name, "_test.go") || name == "dm_visibility.go" || name == "dm_migration.go" {
+		if strings.HasSuffix(name, "_test.go") || name == "dm_visibility.go" ||
+			name == "dm_migration.go" || name == "private_call_migration.go" {
 			continue
 		}
 		data, err := os.ReadFile(name) // #nosec G304 -- a source file of this package, from the glob above

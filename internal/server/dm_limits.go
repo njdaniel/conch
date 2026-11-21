@@ -1,7 +1,6 @@
 package server
 
 import (
-	"net/http"
 	"strconv"
 	"sync"
 	"time"
@@ -41,13 +40,11 @@ func (l *dmNewLimiter) take(principalID int64, now time.Time) (bool, time.Durati
 // before the server serves.
 func (s *Server) setDMNewLimit(l inviteLimit) { s.dmNewLimits = newDMNewLimiter(l) }
 
-// takeDMNewToken spends one new conversation; when there is none it answers
-// 429 and reports false.
-func (s *Server) takeDMNewToken(w http.ResponseWriter, principalID int64) bool {
-	ok, retry := s.dmNewLimits.take(principalID, s.now())
-	if ok {
-		return true
+// takeDMNewToken spends one new-conversation token or returns the wait time.
+func (s *Server) takeDMNewToken(principalID int64, now time.Time) error {
+	ok, retry := s.dmNewLimits.take(principalID, now)
+	if !ok {
+		return &rateLimitedError{retryAfter: retry}
 	}
-	writeRateLimited(w, &rateLimitedError{retryAfter: retry})
-	return false
+	return nil
 }

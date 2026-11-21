@@ -5,7 +5,7 @@
 // validate.ts. To change one, change the Go type or the table and run
 // `go generate ./pkg/schema`; scripts/schema-ts-check.sh fails while this file
 // differs from what that writes.
-import { array, bool, int, json, object, optional, str, tagged, timestamp, tolerant, vocab } from './validate';
+import { array, bool, int, intBetween, json, object, optional, str, tagged, timestamp, tolerant, vocab } from './validate';
 
 // Constants of pkg/schema the client must agree with the server on.
 export const EMOJI_VERSION = '18.0';
@@ -28,6 +28,8 @@ export const VOICE_CONTROL_MAX_HELPER_VERSION_BYTES = 64;
 export const VOICE_CONTROL_MAX_SERVER_BYTES = 1024;
 export const VOICE_CONTROL_MAX_CHANNEL_BYTES = 400;
 export const VOICE_CONTROL_MAX_RETRY_IN_MS = 600000;
+export const VOICE_CONTROL_V4_MIN_LEVEL_DB = -96;
+export const VOICE_CONTROL_V4_MAX_LOSS_BASIS_POINTS = 10000;
 export const VOICE_CONTROL_HELLO_TIMEOUT_MS = 5000;
 export const VOICE_CONTROL_ACK_TIMEOUT_MS = 5000;
 export const VOICE_CONTROL_GATE_SHUT_MS = 100;
@@ -2527,6 +2529,459 @@ export const voiceControlProtocolErrorV3 = object<VoiceControlProtocolErrorV3>({
   kind: voiceControlEventKind,
   seq: int,
   code: voiceControlErrorCode,
+});
+
+// schema.VoiceControlCommandKindV4
+export type VoiceControlCommandKindV4 =
+  | 'start'
+  | 'set_mute'
+  | 'set_deafen'
+  | 'get_state'
+  | 'leave'
+  | 'set_devices'
+  | 'set_talk_mode'
+  | 'set_share_audio'
+  | 'set_share_audio_mute'
+  | 'set_diagnostics'
+  | 'get_call_quality';
+
+export const voiceControlCommandKindV4 = vocab<VoiceControlCommandKindV4>({
+  start: true,
+  set_mute: true,
+  set_deafen: true,
+  get_state: true,
+  leave: true,
+  set_devices: true,
+  set_talk_mode: true,
+  set_share_audio: true,
+  set_share_audio_mute: true,
+  set_diagnostics: true,
+  get_call_quality: true,
+});
+
+// schema.VoiceControlStartV4
+export const voiceControlStartV4Schema = 'conch.voice_control.v4';
+
+export interface VoiceControlStartV4 {
+  schema: typeof voiceControlStartV4Schema;
+  kind: VoiceControlCommandKindV4;
+  id: number;
+  server: string;
+  channel?: string;
+  call?: string;
+  principal_id: number;
+  credential: VoiceControlCredential;
+  muted: boolean;
+  deafened: boolean;
+}
+
+const voiceControlStartV4Shape = object<VoiceControlStartV4>({
+  schema: vocab<typeof voiceControlStartV4Schema>({ [voiceControlStartV4Schema]: true }),
+  kind: voiceControlCommandKindV4,
+  id: int,
+  server: str,
+  channel: optional(str),
+  call: optional(str),
+  principal_id: intBetween(1),
+  credential: voiceControlCredential,
+  muted: bool,
+  deafened: bool,
+});
+const voiceControlCallIDV4 = /^[A-Za-z0-9_-]{21}[AQgw]$/;
+
+export function voiceControlStartV4(value: unknown, path = '$'): string[] {
+  if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+    if (('channel' in value) === ('call' in value)) {
+      return [path + ': want exactly one of channel and call'];
+    }
+    if ('channel' in value && typeof value.channel === 'string' && (
+      /^\p{White_Space}*$/u.test(value.channel) || /[\p{Cc}\p{Cs}]/u.test(value.channel) ||
+      new TextEncoder().encode(value.channel).length > VOICE_CONTROL_MAX_CHANNEL_BYTES
+    )) {
+      return [path + '.channel: want a valid channel name'];
+    }
+    if ('call' in value && typeof value.call === 'string' && !voiceControlCallIDV4.test(value.call)) {
+      return [path + '.call: want a valid call attempt ID'];
+    }
+    if (!('kind' in value) || value.kind !== 'start') {
+      return [path + '.kind: want start'];
+    }
+  }
+  return voiceControlStartV4Shape(value, path);
+}
+
+// schema.VoiceControlSetMuteV4
+export const voiceControlSetMuteV4Schema = 'conch.voice_control.v4';
+
+export interface VoiceControlSetMuteV4 {
+  schema: typeof voiceControlSetMuteV4Schema;
+  kind: VoiceControlCommandKindV4;
+  id: number;
+  muted: boolean;
+}
+
+export const voiceControlSetMuteV4 = object<VoiceControlSetMuteV4>({
+  schema: vocab<typeof voiceControlSetMuteV4Schema>({ [voiceControlSetMuteV4Schema]: true }),
+  kind: voiceControlCommandKindV4,
+  id: int,
+  muted: bool,
+});
+
+// schema.VoiceControlSetDeafenV4
+export const voiceControlSetDeafenV4Schema = 'conch.voice_control.v4';
+
+export interface VoiceControlSetDeafenV4 {
+  schema: typeof voiceControlSetDeafenV4Schema;
+  kind: VoiceControlCommandKindV4;
+  id: number;
+  deafened: boolean;
+}
+
+export const voiceControlSetDeafenV4 = object<VoiceControlSetDeafenV4>({
+  schema: vocab<typeof voiceControlSetDeafenV4Schema>({ [voiceControlSetDeafenV4Schema]: true }),
+  kind: voiceControlCommandKindV4,
+  id: int,
+  deafened: bool,
+});
+
+// schema.VoiceControlGetStateV4
+export const voiceControlGetStateV4Schema = 'conch.voice_control.v4';
+
+export interface VoiceControlGetStateV4 {
+  schema: typeof voiceControlGetStateV4Schema;
+  kind: VoiceControlCommandKindV4;
+  id: number;
+}
+
+export const voiceControlGetStateV4 = object<VoiceControlGetStateV4>({
+  schema: vocab<typeof voiceControlGetStateV4Schema>({ [voiceControlGetStateV4Schema]: true }),
+  kind: voiceControlCommandKindV4,
+  id: int,
+});
+
+// schema.VoiceControlLeaveV4
+export const voiceControlLeaveV4Schema = 'conch.voice_control.v4';
+
+export interface VoiceControlLeaveV4 {
+  schema: typeof voiceControlLeaveV4Schema;
+  kind: VoiceControlCommandKindV4;
+  id: number;
+}
+
+export const voiceControlLeaveV4 = object<VoiceControlLeaveV4>({
+  schema: vocab<typeof voiceControlLeaveV4Schema>({ [voiceControlLeaveV4Schema]: true }),
+  kind: voiceControlCommandKindV4,
+  id: int,
+});
+
+// schema.VoiceControlSetDevicesV4
+export const voiceControlSetDevicesV4Schema = 'conch.voice_control.v4';
+
+export interface VoiceControlSetDevicesV4 {
+  schema: typeof voiceControlSetDevicesV4Schema;
+  kind: VoiceControlCommandKindV4;
+  id: number;
+  input?: string;
+  output?: string;
+}
+
+export const voiceControlSetDevicesV4 = object<VoiceControlSetDevicesV4>({
+  schema: vocab<typeof voiceControlSetDevicesV4Schema>({ [voiceControlSetDevicesV4Schema]: true }),
+  kind: voiceControlCommandKindV4,
+  id: int,
+  input: optional(str),
+  output: optional(str),
+});
+
+// schema.VoiceControlSetTalkModeV4
+export const voiceControlSetTalkModeV4Schema = 'conch.voice_control.v4';
+
+export interface VoiceControlSetTalkModeV4 {
+  schema: typeof voiceControlSetTalkModeV4Schema;
+  kind: VoiceControlCommandKindV4;
+  id: number;
+  talk_mode: VoiceControlTalkMode;
+}
+
+export const voiceControlSetTalkModeV4 = object<VoiceControlSetTalkModeV4>({
+  schema: vocab<typeof voiceControlSetTalkModeV4Schema>({ [voiceControlSetTalkModeV4Schema]: true }),
+  kind: voiceControlCommandKindV4,
+  id: int,
+  talk_mode: voiceControlTalkMode,
+});
+
+// schema.VoiceControlSetShareAudioV4
+export const voiceControlSetShareAudioV4Schema = 'conch.voice_control.v4';
+
+export interface VoiceControlSetShareAudioV4 {
+  schema: typeof voiceControlSetShareAudioV4Schema;
+  kind: VoiceControlCommandKindV4;
+  id: number;
+  capturing: boolean;
+  scope?: VoiceShareAudioScope;
+  application_name?: string;
+}
+
+export const voiceControlSetShareAudioV4 = object<VoiceControlSetShareAudioV4>({
+  schema: vocab<typeof voiceControlSetShareAudioV4Schema>({ [voiceControlSetShareAudioV4Schema]: true }),
+  kind: voiceControlCommandKindV4,
+  id: int,
+  capturing: bool,
+  scope: optional(voiceShareAudioScope),
+  application_name: optional(str),
+});
+
+// schema.VoiceControlSetShareAudioMuteV4
+export const voiceControlSetShareAudioMuteV4Schema = 'conch.voice_control.v4';
+
+export interface VoiceControlSetShareAudioMuteV4 {
+  schema: typeof voiceControlSetShareAudioMuteV4Schema;
+  kind: VoiceControlCommandKindV4;
+  id: number;
+  muted: boolean;
+}
+
+export const voiceControlSetShareAudioMuteV4 = object<VoiceControlSetShareAudioMuteV4>({
+  schema: vocab<typeof voiceControlSetShareAudioMuteV4Schema>({ [voiceControlSetShareAudioMuteV4Schema]: true }),
+  kind: voiceControlCommandKindV4,
+  id: int,
+  muted: bool,
+});
+
+// schema.VoiceControlSetDiagnosticsV4
+export const voiceControlSetDiagnosticsV4Schema = 'conch.voice_control.v4';
+
+export interface VoiceControlSetDiagnosticsV4 {
+  schema: typeof voiceControlSetDiagnosticsV4Schema;
+  kind: VoiceControlCommandKindV4;
+  id: number;
+  on: boolean;
+}
+
+export const voiceControlSetDiagnosticsV4 = object<VoiceControlSetDiagnosticsV4>({
+  schema: vocab<typeof voiceControlSetDiagnosticsV4Schema>({ [voiceControlSetDiagnosticsV4Schema]: true }),
+  kind: voiceControlCommandKindV4,
+  id: int,
+  on: bool,
+});
+
+// schema.VoiceControlGetCallQualityV4
+export const voiceControlGetCallQualityV4Schema = 'conch.voice_control.v4';
+
+export interface VoiceControlGetCallQualityV4 {
+  schema: typeof voiceControlGetCallQualityV4Schema;
+  kind: VoiceControlCommandKindV4;
+  id: number;
+}
+
+export const voiceControlGetCallQualityV4 = object<VoiceControlGetCallQualityV4>({
+  schema: vocab<typeof voiceControlGetCallQualityV4Schema>({ [voiceControlGetCallQualityV4Schema]: true }),
+  kind: voiceControlCommandKindV4,
+  id: int,
+});
+
+// schema.VoiceControlEventKindV4
+export type VoiceControlEventKindV4 =
+  | 'ack'
+  | 'state'
+  | 'protocol_error'
+  | 'levels'
+  | 'gate_event'
+  | 'call_quality';
+
+export const voiceControlEventKindV4 = vocab<VoiceControlEventKindV4>({
+  ack: true,
+  state: true,
+  protocol_error: true,
+  levels: true,
+  gate_event: true,
+  call_quality: true,
+});
+
+// schema.VoiceControlAckV4
+export const voiceControlAckV4Schema = 'conch.voice_control.v4';
+
+export interface VoiceControlAckV4 {
+  schema: typeof voiceControlAckV4Schema;
+  kind: VoiceControlEventKindV4;
+  seq: number;
+  id: number;
+  ok: boolean;
+  error?: VoiceControlErrorCode;
+}
+
+export const voiceControlAckV4 = object<VoiceControlAckV4>({
+  schema: vocab<typeof voiceControlAckV4Schema>({ [voiceControlAckV4Schema]: true }),
+  kind: voiceControlEventKindV4,
+  seq: int,
+  id: int,
+  ok: bool,
+  error: optional(voiceControlErrorCode),
+});
+
+// schema.VoiceControlProcessingV4
+export interface VoiceControlProcessingV4 {
+  echo_cancellation: boolean;
+  noise_suppression: boolean;
+}
+
+const voiceControlProcessingV4Shape = object<VoiceControlProcessingV4>({
+  echo_cancellation: bool,
+  noise_suppression: bool,
+});
+
+export function voiceControlProcessingV4(value: unknown, path = '$'): string[] {
+  if (typeof value === 'object' && value !== null && !Array.isArray(value) &&
+      'echo_cancellation' in value && typeof value.echo_cancellation === 'boolean' &&
+      'noise_suppression' in value && typeof value.noise_suppression === 'boolean' &&
+      value.echo_cancellation !== value.noise_suppression) {
+    return [path + ': echo_cancellation and noise_suppression must agree'];
+  }
+  return voiceControlProcessingV4Shape(value, path);
+}
+
+// schema.VoiceControlStateV4
+export const voiceControlStateV4Schema = 'conch.voice_control.v4';
+
+export interface VoiceControlStateV4 {
+  schema: typeof voiceControlStateV4Schema;
+  kind: VoiceControlEventKindV4;
+  seq: number;
+  phase: VoiceControlPhase;
+  reason?: VoiceControlReason;
+  retry_in_ms?: number;
+  capture: VoiceControlCapture;
+  playback: VoiceControlPlayback;
+  transmitting: boolean;
+  muted: boolean;
+  deafened: boolean;
+  blocked: VoiceControlBlock[];
+  talk_mode: VoiceControlTalkMode;
+  ptt: VoiceControlPTT;
+  ptt_problem?: VoiceControlPTTProblem;
+  share_audio: VoiceControlShareAudio;
+  share_audio_muted: boolean;
+  share_audio_problem?: VoiceControlShareAudioProblem;
+  share_audio_sources: number;
+  processing: VoiceControlProcessingV4;
+}
+
+export const voiceControlStateV4 = object<VoiceControlStateV4>({
+  schema: vocab<typeof voiceControlStateV4Schema>({ [voiceControlStateV4Schema]: true }),
+  kind: voiceControlEventKindV4,
+  seq: int,
+  phase: voiceControlPhase,
+  reason: optional(voiceControlReason),
+  retry_in_ms: optional(int),
+  capture: voiceControlCapture,
+  playback: voiceControlPlayback,
+  transmitting: bool,
+  muted: bool,
+  deafened: bool,
+  blocked: array(voiceControlBlock),
+  talk_mode: voiceControlTalkMode,
+  ptt: voiceControlPTT,
+  ptt_problem: optional(voiceControlPTTProblem),
+  share_audio: voiceControlShareAudio,
+  share_audio_muted: bool,
+  share_audio_problem: optional(voiceControlShareAudioProblem),
+  share_audio_sources: int,
+  processing: voiceControlProcessingV4,
+});
+
+// schema.VoiceControlProtocolErrorV4
+export const voiceControlProtocolErrorV4Schema = 'conch.voice_control.v4';
+
+export interface VoiceControlProtocolErrorV4 {
+  schema: typeof voiceControlProtocolErrorV4Schema;
+  kind: VoiceControlEventKindV4;
+  seq: number;
+  code: VoiceControlErrorCode;
+}
+
+export const voiceControlProtocolErrorV4 = object<VoiceControlProtocolErrorV4>({
+  schema: vocab<typeof voiceControlProtocolErrorV4Schema>({ [voiceControlProtocolErrorV4Schema]: true }),
+  kind: voiceControlEventKindV4,
+  seq: int,
+  code: voiceControlErrorCode,
+});
+
+// schema.VoiceControlLevelsV4
+export const voiceControlLevelsV4Schema = 'conch.voice_control.v4';
+
+export interface VoiceControlLevelsV4 {
+  schema: typeof voiceControlLevelsV4Schema;
+  kind: VoiceControlEventKindV4;
+  seq: number;
+  level_db: number;
+  open_threshold_db: number;
+  close_threshold_db: number;
+  gate_open: boolean;
+}
+
+export const voiceControlLevelsV4 = object<VoiceControlLevelsV4>({
+  schema: vocab<typeof voiceControlLevelsV4Schema>({ [voiceControlLevelsV4Schema]: true }),
+  kind: voiceControlEventKindV4,
+  seq: int,
+  level_db: intBetween(VOICE_CONTROL_V4_MIN_LEVEL_DB, 0),
+  open_threshold_db: int,
+  close_threshold_db: int,
+  gate_open: bool,
+});
+
+// schema.VoiceControlGateWhyV4
+export type VoiceControlGateWhyV4 = 'sound' | 'hang_ended' | 'mute' | 'lock' | 'limit';
+
+export const voiceControlGateWhyV4 = vocab<VoiceControlGateWhyV4>({
+  sound: true,
+  hang_ended: true,
+  mute: true,
+  lock: true,
+  limit: true,
+});
+
+// schema.VoiceControlGateEventV4
+export const voiceControlGateEventV4Schema = 'conch.voice_control.v4';
+
+export interface VoiceControlGateEventV4 {
+  schema: typeof voiceControlGateEventV4Schema;
+  kind: VoiceControlEventKindV4;
+  seq: number;
+  at_ms: number;
+  open: boolean;
+  why: VoiceControlGateWhyV4;
+}
+
+export const voiceControlGateEventV4 = object<VoiceControlGateEventV4>({
+  schema: vocab<typeof voiceControlGateEventV4Schema>({ [voiceControlGateEventV4Schema]: true }),
+  kind: voiceControlEventKindV4,
+  seq: int,
+  at_ms: intBetween(0, VOICE_CONTROL_MAX_ID),
+  open: bool,
+  why: voiceControlGateWhyV4,
+});
+
+// schema.VoiceControlCallQualityV4
+export const voiceControlCallQualityV4Schema = 'conch.voice_control.v4';
+
+export interface VoiceControlCallQualityV4 {
+  schema: typeof voiceControlCallQualityV4Schema;
+  kind: VoiceControlEventKindV4;
+  seq: number;
+  principal_id: number;
+  loss_basis_points?: number;
+  jitter_us?: number;
+  rtt_us?: number;
+}
+
+export const voiceControlCallQualityV4 = object<VoiceControlCallQualityV4>({
+  schema: vocab<typeof voiceControlCallQualityV4Schema>({ [voiceControlCallQualityV4Schema]: true }),
+  kind: voiceControlEventKindV4,
+  seq: int,
+  principal_id: intBetween(1),
+  loss_basis_points: optional(intBetween(0, VOICE_CONTROL_V4_MAX_LOSS_BASIS_POINTS)),
+  jitter_us: optional(intBetween(0, VOICE_CONTROL_MAX_ID)),
+  rtt_us: optional(intBetween(0, VOICE_CONTROL_MAX_ID)),
 });
 
 // schema.VoiceControlPipeKind

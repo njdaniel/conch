@@ -66,7 +66,9 @@ var principalReads = []principalRead{
 	{"store/bans.go", "Store.ListChannelBans", 1, readOperatorOrMaker},
 	// #2017, #2018: a DM's peer, only when the caller may know it by
 	// knownPrincipalsSQL and it is not hidden or an ended guest; any other
-	// id is the same ErrPrincipalNotFound as one never issued.
+	// id is the same ErrPrincipalNotFound as one never issued. For a pair
+	// the caller cannot see, the same statement uses PutBlock's predicate
+	// (listedPrincipalSQL), so an unlisted target is a 404 on both routes (#2099).
 	{"store/dm.go", "openDMTx", 1, readPredicate},
 	// #2018: the DM policy. Whether a viewer may know a target and whether a
 	// conversation's peer is shown by name answer a yes or a no by the
@@ -86,7 +88,8 @@ var principalReads = []principalRead{
 	{"store/dm_policy.go", "dmPrincipalAllowedTx", 1, readOwnOrInternal},
 	{"store/dm_policy.go", "Store.SetDMAllowed", 2, readOperatorOrMaker},
 	// #1832: a block's target, only when the owner may know it by
-	// knownPrincipalsSQL (the directory's rule) and it is not hidden.
+	// knownPrincipalsSQL (the directory's rule) and it is not hidden; since
+	// #2099 through listedPrincipalSQL, which a new-pair OpenDM shares.
 	{"store/blocks.go", "Store.PutBlock", 1, readPredicate},
 	{"store/bans.go", "managerBanTargetTx", 1, readOperatorOrMaker},
 	{"store/audience.go", "Store.ListChannelAuthors", 1, readGated},
@@ -105,6 +108,12 @@ var principalReads = []principalRead{
 	// #1715: the check before a retry: the registration's credential is live,
 	// which reads its principal's generation. It returns a yes or a no.
 	{"store/push_registrations.go", "Store.PushRegistrationLive", 1, readOwnOrInternal},
+	// #2030: whether a credential's principal is a live, enabled human and not
+	// a guest. It is asked of the caller's own credential and, for an invite,
+	// of the callee's principal as one yes or no folded into "unavailable"
+	// (ADR-017 Decision 10, after the contact policy has passed): it names
+	// nobody and returns no row of principals.
+	{"store/private_call.go", "privateCallCredentialLive", 1, readOwnOrInternal},
 	// #1714: compares credentials' generations with their principal's, to end
 	// the registrations of dead credentials; reads no name and serves no one.
 	{"store/push_registrations.go", "endGenerationDeadPushTx", 1, readOwnOrInternal},
@@ -213,16 +222,16 @@ var principalReads = []principalRead{
 }
 
 // predicateNames are the identifiers a readPredicate function must use.
-var predicateNames = map[string]string{
-	"Store.ListDirectory":               "knownPrincipalsSQL",
-	"mayKnowTx":                         "knownPrincipalsSQL",
-	"directoryKnowersTx":                "knowsCond",
-	"Store.DirectoryMembershipAudience": "knowsCondExcept",
-	"Store.PutBlock":                    "knownPrincipalsSQL",
-	"openDMTx":                          "knownPrincipalsSQL",
-	"dmMayKnowTx":                       "knownPrincipalsSQL",
-	"dmPeerFormerTx":                    "knownPrincipalsSQL",
-	"dmFillPeerTx":                      "knownPrincipalsSQL",
+var predicateNames = map[string][]string{
+	"Store.ListDirectory":               {"knownPrincipalsSQL"},
+	"mayKnowTx":                         {"knownPrincipalsSQL"},
+	"directoryKnowersTx":                {"knowsCond"},
+	"Store.DirectoryMembershipAudience": {"knowsCondExcept"},
+	"Store.PutBlock":                    {"listedPrincipalSQL"},
+	"openDMTx":                          {"knownPrincipalsSQL", "listedPrincipalSQL"},
+	"dmMayKnowTx":                       {"knownPrincipalsSQL"},
+	"dmPeerFormerTx":                    {"knownPrincipalsSQL"},
+	"dmFillPeerTx":                      {"knownPrincipalsSQL"},
 }
 
 var selectsPrincipals = regexp.MustCompile(`(?i)\b(from|join)\s+principals\b`)
@@ -304,8 +313,16 @@ func TestPrincipalReadsStayBehindTheMayKnowPredicate(t *testing.T) {
 			t.Errorf("%s is listed readPredicate but predicateNames does not say which fragment it must use", e.fn)
 			continue
 		}
-		if !uses[key{e.file, e.fn}][want] {
-			t.Errorf("%s is a reader of the may-know predicate and no longer uses %s", e.fn, want)
+		for _, name := range want {
+			if !uses[key{e.file, e.fn}][name] {
+				t.Errorf("%s is a reader of the may-know predicate and no longer uses %s", e.fn, name)
+			}
+		}
+	}
+	listedUses := uses[key{"store/blocks.go", "listedPrincipalSQL"}]
+	for _, name := range []string{"knownPrincipalsSQL", "knowsCond"} {
+		if !listedUses[name] {
+			t.Errorf("store/blocks.go: listedPrincipalSQL no longer uses %s", name)
 		}
 	}
 }

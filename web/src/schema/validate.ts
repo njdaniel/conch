@@ -97,6 +97,16 @@ export const int: Validator<number> = validator((v, path) =>
     : [`${path}: want an integer, got ${typeof v === 'number' ? String(v) : describe(v)}`],
 );
 
+// intBetween narrows the safe integers to an inclusive range.
+/* @__NO_SIDE_EFFECTS__ */
+export function intBetween(min: number, max = Number.MAX_SAFE_INTEGER): Validator<number> {
+  return validator((v, path) =>
+    typeof v === 'number' && Number.isSafeInteger(v) && v >= min && v <= max
+      ? []
+      : [`${path}: want an integer from ${String(min)} to ${String(max)}`],
+  );
+}
+
 export const bool: Validator<boolean> = validator((v, path) =>
   typeof v === 'boolean' ? [] : [`${path}: want a boolean, got ${describe(v)}`],
 );

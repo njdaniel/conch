@@ -2,9 +2,11 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -90,6 +92,40 @@ func (f *dmFixture) auditCount(t *testing.T) int {
 	return n
 }
 
+func TestDMWritesRequireLiveOwnCredential(t *testing.T) {
+	ctx := context.Background()
+	f := newPrivateCallFixture(t, openTestStore(t))
+	caller, credential := f.a.PrincipalID, f.a.CredentialID
+
+	if c, err := f.s.OpenDMFromCredential(ctx, caller, credential, f.b.PrincipalID, f.clock, nil); err != nil || c.ID != 1 {
+		t.Fatalf("open with a live credential = %+v, %v", c, err)
+	}
+	if c, err := f.s.SetDMStateFromCredential(ctx, caller, credential, 1, schema.DMStateArchived, f.clock); err != nil || c.State != schema.DMStateArchived {
+		t.Fatalf("archive with a live credential = %+v, %v", c, err)
+	}
+
+	if err := f.s.RevokeCredential(ctx, "system", credential); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []int64{0, credential, f.b.CredentialID} {
+		if _, err := f.s.OpenDMFromCredential(ctx, caller, id, f.c.PrincipalID, f.clock, func(time.Time) error {
+			t.Error("refused open spent a new-conversation token")
+			return nil
+		}); !errors.Is(err, ErrDMNoStanding) {
+			t.Errorf("open with credential %d: %v, want %v", id, err, ErrDMNoStanding)
+		}
+		if _, err := f.s.SetDMStateFromCredential(ctx, caller, id, 1, schema.DMStateHidden, f.clock); !errors.Is(err, ErrDMNoStanding) {
+			t.Errorf("hide with credential %d: %v, want %v", id, err, ErrDMNoStanding)
+		}
+	}
+	if n := f.count("SELECT COUNT(*) FROM dm_conversations"); n != 2 {
+		t.Errorf("conversation count after refused writes = %d, want 2", n)
+	}
+	if c, err := f.s.DMConversationFor(ctx, caller, 1); err != nil || c.State != schema.DMStateArchived {
+		t.Errorf("conversation after refused writes = %+v, %v", c, err)
+	}
+}
+
 func TestOpenDMRules(t *testing.T) {
 	ctx := context.Background()
 	f := newDMFixture(t)
@@ -102,6 +138,7 @@ func TestOpenDMRules(t *testing.T) {
 		VALUES (?, 'g-1', 'address', 'active', 1, 2, 1000)`, guest.ID); err != nil {
 		t.Fatal(err)
 	}
+	f.shareChannel(t, "shared-with-guest", f.bob, guest)
 	for _, c := range []struct {
 		name         string
 		caller, peer int64
@@ -116,9 +153,10 @@ func TestOpenDMRules(t *testing.T) {
 		{"no peer at all", f.alice.ID, 0, ErrPrincipalNotFound},
 		{"no caller", 0, f.alice.ID, ErrDMNoStanding},
 		{"a disabled caller", f.dave.ID, f.alice.ID, ErrDMNoStanding},
-		{"a disabled peer, new pair", f.alice.ID, f.dave.ID, ErrDMContactUnavailable},
+		{"a disabled peer, new pair", f.alice.ID, f.dave.ID, ErrPrincipalNotFound},
 		{"a guest caller", guest.ID, f.alice.ID, ErrDMNoStanding},
-		{"a guest peer, new pair", f.alice.ID, guest.ID, ErrDMContactUnavailable},
+		{"a guest peer sharing no channel, new pair", f.alice.ID, guest.ID, ErrPrincipalNotFound},
+		{"a guest peer sharing a channel, new pair", f.bob.ID, guest.ID, ErrDMContactUnavailable},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			before := f.auditCount(t)
@@ -185,15 +223,34 @@ func TestOpenDMOpposedConcurrentOpensMakeOneConversation(t *testing.T) {
 	}
 }
 
+type dmPairLookupExecer struct {
+	execer
+	pairLookups int
+}
+
+func (c *dmPairLookupExecer) QueryRowContext(ctx context.Context, q string, args ...any) *sql.Row {
+	if strings.Contains(q, "FROM dm_conversations c WHERE c.lo") {
+		c.pairLookups++
+	}
+	return c.execer.QueryRowContext(ctx, q, args...)
+}
+
 func TestOpenDMUnreachablePeerSilentOpen(t *testing.T) {
 	ctx := context.Background()
 	f := newDMFixture(t)
 	silent := f.open(t, f.alice, f.bob)
 	for _, peer := range []Principal{f.alice, f.carol} {
-		if _, err := f.s.DisablePrincipal(ctx, "system", peer.ID); err != nil {
-			t.Fatal(err)
-		}
-		got, err := f.s.OpenDM(ctx, f.bob.ID, peer.ID, f.tick())
+		f.prefer(t, peer, schema.DMAcceptNobody)
+		var got DMConversation
+		err := f.s.withImmediateTx(ctx, func(tx execer) error {
+			c := &dmPairLookupExecer{execer: tx}
+			var err error
+			got, err = openDMTx(ctx, c, f.bob.ID, peer.ID, f.tick(), nil)
+			if c.pairLookups != 1 {
+				t.Errorf("open with %s ran %d pair lookups, want only the visible-pair lookup", peer.Name, c.pairLookups)
+			}
+			return err
+		})
 		if !errors.Is(err, ErrDMContactUnavailable) || got != (DMConversation{}) {
 			t.Errorf("open with %s = %+v, %v; want contact unavailable", peer.Name, got, err)
 		}
@@ -233,7 +290,7 @@ func TestOpenDMRollbackThenRetry(t *testing.T) {
 	boom := errors.New("boom")
 	// The open succeeds inside a transaction that then fails: nothing stays.
 	err := f.s.withImmediateTx(ctx, func(tx execer) error {
-		c, err := openDMTx(ctx, tx, f.alice.ID, f.bob.ID, f.tick())
+		c, err := openDMTx(ctx, tx, f.alice.ID, f.bob.ID, f.tick(), nil)
 		if err != nil || c.ID == 0 {
 			t.Fatalf("openDMTx = %+v, %v", c, err)
 		}

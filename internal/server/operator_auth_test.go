@@ -583,12 +583,20 @@ var reauthDecisions = map[string]reauthDecision{
 
 	// Every write anyone authenticated may make: in the class only where an
 	// operator's use creates a principal or a link (rule: reauthOperators).
-	"POST /v1/invites":                                                {reauthNone, "retired for everyone: answers 409 invite_kind_retired and makes nothing (issue #1134)"},
-	"POST /v2/invites":                                                {reauthOperators, "an operator's member link makes principals, with no allowance, and may never expire"},
-	"DELETE /v1/invites/{id}":                                         {reauthNone, "closes an invite"},
-	"POST /v1/ws-tickets":                                             {reauthNone, "a one-use socket ticket for the caller's own credential, no principal or link"},
-	"POST /v0/channels/{channel}/messages":                            {reauthNone, "a message"},
-	"POST /v1/channels/{channel}/messages":                            {reauthNone, "a message"},
+	"POST /v1/invites":                     {reauthNone, "retired for everyone: answers 409 invite_kind_retired and makes nothing (issue #1134)"},
+	"POST /v2/invites":                     {reauthOperators, "an operator's member link makes principals, with no allowance, and may never expire"},
+	"DELETE /v1/invites/{id}":              {reauthNone, "closes an invite"},
+	"POST /v1/ws-tickets":                  {reauthNone, "a one-use socket ticket for the caller's own credential, no principal or link"},
+	"POST /v0/channels/{channel}/messages": {reauthNone, "a message"},
+	"POST /v1/channels/{channel}/messages": {reauthNone, "a message"},
+	// #2030: a member's own private call actions. None makes a principal,
+	// credential, link, permit or hook; the media grant is #2032's and is
+	// issued only to the accepting credential.
+	"POST /v1/dms/{conversation}/calls":                               {reauthNone, "a member's own call invitation: no principal, credential, link, permit or hook, no grant"},
+	"POST /v1/calls/{call}/accept":                                    {reauthNone, "the callee's own answer: no principal, credential, link, permit or hook"},
+	"POST /v1/calls/{call}/decline":                                   {reauthNone, "the callee's own refusal"},
+	"POST /v1/calls/{call}/cancel":                                    {reauthNone, "the caller's own cancel"},
+	"POST /v1/calls/{call}/hangup":                                    {reauthNone, "either side ends its own call"},
 	"POST /v2/channels/{channel}/messages":                            {reauthNone, "a message"},
 	"POST /v2/channels/{channel}/files":                               {reauthNone, "a file"},
 	"POST /v1/channels/{channel}/voice/session":                       {reauthNone, "joins voice"},

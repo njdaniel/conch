@@ -210,6 +210,14 @@ func TestSelfMadeCredentialRoutesIncludeRequired(t *testing.T) {
 		"GET /v1/dms",                      // the inbox
 		"GET /v1/dms/{conversation}",       // one conversation
 		"PUT /v1/dms/{conversation}/state", // per-viewer archive, hide, reopen
+		// The private call routes (#2030).
+		"POST /v1/dms/{conversation}/calls",
+		"GET /v1/dms/{conversation}/calls",
+		"GET /v1/calls/current",
+		"POST /v1/calls/{call}/accept",
+		"POST /v1/calls/{call}/decline",
+		"POST /v1/calls/{call}/cancel",
+		"POST /v1/calls/{call}/hangup",
 	} {
 		if !selfMadeCredentialRoutes[pattern] {
 			t.Errorf("%s is not in selfMadeCredentialRoutes", pattern)

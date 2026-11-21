@@ -116,7 +116,8 @@ func (s *Store) OnAuthChanged(fn func([]int64)) { s.authChanged = fn }
 // invites_paused, as an operator's pause is, when they were not paused
 // already) and so is guest joining (audited join_settings_changed
 // joining_paused=false->true, as PutJoinSettings audits it, when it was not
-// paused already); the database is marked restored for StartRestored; and
+// paused already); live private calls fail with reason restore; the database
+// is marked restored for StartRestored; and
 // restore_invalidated is audited with the counts.
 // Either all of it commits or none of it does.
 //
@@ -137,6 +138,9 @@ func (s *Store) InvalidateRestored(ctx context.Context, now time.Time) (RestoreR
 	)
 	err := s.withImmediateTx(ctx, func(tx execer) error {
 		out, runs = RestoreResult{}, nil
+		if err := restorePrivateCallsTx(ctx, tx, now); err != nil {
+			return fmt.Errorf("store: restore: end private calls: %w", err)
+		}
 		guests, err := idsTx(ctx, tx, "SELECT principal_id FROM guest_visits WHERE state = 'active' ORDER BY principal_id")
 		if err != nil {
 			return fmt.Errorf("store: restore: list active guests: %w", err)

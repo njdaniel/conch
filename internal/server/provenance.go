@@ -42,10 +42,9 @@ import (
 //     Decision 14). An own_sign_in_required audit row can come from an
 //     act-as credential or a member's pre-migration credential.
 //
-// It fills as the routes exist: the per-person stream (#2040) and the
-// conversation routes (#2019) are here; #2020, #2021 and #2030 register the DM and call routes, and each adds its
-// routes here in the same change. Every route that reads or writes a
-// person's DMs or calls belongs here, sockets included.
+// The per-person stream (#2040), conversation routes (#2019) and private
+// call routes (#2030) are registered here. Every route that reads or writes
+// a person's DMs or calls belongs here, sockets included.
 //
 // A route that serves both a person's own data and anything else (one
 // socket for channels and DMs, say) cannot be listed whole without
@@ -62,6 +61,18 @@ var selfMadeCredentialRoutes = map[string]bool{
 	"GET /v1/dms":                      true,
 	"GET /v1/dms/{conversation}":       true,
 	"PUT /v1/dms/{conversation}/state": true,
+	// The seven private call routes (#2030, ADR-017 Decision 7): an invite,
+	// the history of a pair, the reconnect snapshot and the four actions.
+	// Their handlers (private_call.go) carry no provenance check of their
+	// own; this guard is the only one. The media-join route (#2032) joins
+	// this list in its own change.
+	"POST /v1/dms/{conversation}/calls": true,
+	"GET /v1/dms/{conversation}/calls":  true,
+	"GET /v1/calls/current":             true,
+	"POST /v1/calls/{call}/accept":      true,
+	"POST /v1/calls/{call}/decline":     true,
+	"POST /v1/calls/{call}/cancel":      true,
+	"POST /v1/calls/{call}/hangup":      true,
 }
 
 // requireSelfMadeCredential wraps next so it runs only for a request whose

@@ -238,6 +238,8 @@ func TestReactionConstants(t *testing.T) {
 		"VOICE_CONTROL_MAX_SERVER_BYTES":         VoiceControlMaxServerBytes,
 		"VOICE_CONTROL_MAX_CHANNEL_BYTES":        VoiceControlMaxChannelBytes,
 		"VOICE_CONTROL_MAX_RETRY_IN_MS":          VoiceControlMaxRetryInMS,
+		"VOICE_CONTROL_V4_MIN_LEVEL_DB":          VoiceControlV4MinLevelDB,
+		"VOICE_CONTROL_V4_MAX_LOSS_BASIS_POINTS": VoiceControlV4MaxLossBasisPoints,
 		"VOICE_CONTROL_HELLO_TIMEOUT_MS":         VoiceControlHelloTimeoutMS,
 		"VOICE_CONTROL_ACK_TIMEOUT_MS":           VoiceControlAckTimeoutMS,
 		"VOICE_CONTROL_GATE_SHUT_MS":             VoiceControlGateShutMS,

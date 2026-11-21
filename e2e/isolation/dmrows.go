@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"slices"
 
 	"github.com/njdaniel/conch/pkg/schema"
@@ -29,8 +28,6 @@ import (
 // comparison), whatever the prober's role. B's inbox never holds it.
 
 // dmNotFound is the refusal for a conversation id the caller is not part of.
-var dmNotFound = answer{http.StatusNotFound, schema.ErrorCodeDMNotFound}
-
 // bobOf is the B member the prober opens a conversation with: the first of
 // B's people who is not the prober. The route check's stand-in world has one
 // person, who is then the stand-in's peer too (no request is sent).

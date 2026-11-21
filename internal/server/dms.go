@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
@@ -174,32 +175,14 @@ func (s *Server) handleOpenDM(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "request body must be {\"peer_id\": <positive integer>}")
 		return
 	}
-	// An open that introduces the pair is a write: the switches (4), then the
-	// bucket (5), both before the peer is looked up. Resuming a conversation
-	// the caller already sees is a read and needs neither.
-	resume, err := s.store.DMPairVisible(ctx, caller.ID, req.PeerID)
-	if err != nil {
-		slog.ErrorContext(ctx, "dms: pair lookup failed", "error", err)
-		writeInternalError(w)
-		return
-	}
-	if !resume {
-		on, err := s.store.DMsEnabledFor(ctx, caller.ID)
-		if err != nil {
-			slog.ErrorContext(ctx, "dms: switch lookup failed", "error", err)
-			writeInternalError(w)
-			return
-		}
-		if !on {
-			writeDMRefusal(w, http.StatusForbidden, schema.ErrorCodeDMsOff)
-			return
-		}
-		if !s.takeDMNewToken(w, caller.ID) {
-			return
-		}
-	}
-	conv, err := s.store.OpenDM(ctx, caller.ID, req.PeerID, s.now())
+	credential, _ := credentialIDFrom(ctx)
+	conv, err := s.store.OpenDMFromCredential(ctx, caller.ID, credential, req.PeerID, s.now, func(now time.Time) error {
+		return s.takeDMNewToken(caller.ID, now)
+	})
+	var limited *rateLimitedError
 	switch {
+	case errors.As(err, &limited):
+		writeRateLimited(w, limited)
 	case errors.Is(err, store.ErrDMsOff):
 		writeDMRefusal(w, http.StatusForbidden, schema.ErrorCodeDMsOff)
 	case errors.Is(err, store.ErrDMSelf), errors.Is(err, store.ErrDMNotHuman):
@@ -312,10 +295,13 @@ func (s *Server) handleSetDMState(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "state must be open, archived or hidden")
 		return
 	}
-	conv, err := s.store.SetDMState(r.Context(), caller.ID, id, req.State, s.now())
+	credential, _ := credentialIDFrom(r.Context())
+	conv, err := s.store.SetDMStateFromCredential(r.Context(), caller.ID, credential, id, req.State, s.now)
 	switch {
 	case errors.Is(err, store.ErrDMNotFound):
 		writeDMRefusal(w, http.StatusNotFound, schema.ErrorCodeDMNotFound)
+	case errors.Is(err, store.ErrDMNoStanding):
+		writeError(w, http.StatusForbidden, errForbidden.Code, "direct messages are for people")
 	case err != nil:
 		slog.ErrorContext(r.Context(), "dms: set state failed", "error", err)
 		writeInternalError(w)

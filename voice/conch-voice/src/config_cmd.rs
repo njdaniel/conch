@@ -1274,6 +1274,73 @@ mod windows_tests {
     }
 
     #[test]
+    fn windows_config_set_round_trips_bindings_and_preserves_comments() {
+        use crate::cli::{Invocation, key_device, parse, read_config};
+        use conch_voice_control::WindowsBinding::{Mouse, Scan};
+
+        let dir = tempfile::tempdir().unwrap();
+        let environment = Environment {
+            conch_config_dir: Some(dir.path().as_os_str().to_owned()),
+            ..Environment::default()
+        };
+        let path = dir.path().join(FILE_NAME);
+        let original = "# my keys\n[keys]\ntalk = \"mouse:4\" # talk\nmute = \"sc:0xE0,0x1D\"\ndeafen = \"mouse:5\"\n";
+        fs::write(&path, original).unwrap();
+
+        let Invocation::ConfigSetKeys { key, value } =
+            parse(["conch-voice", "config", "set", "keys.talk", "sc:0x29"]).unwrap()
+        else {
+            panic!("expected config set keys.talk");
+        };
+        set_keys(&environment, key, &value).unwrap();
+        let edited = original.replace("mouse:4", "sc:0x29");
+        assert_eq!(fs::read_to_string(&path).unwrap(), edited);
+        let (_, bindings) = key_device(&read_config(&path).unwrap(), false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            bindings.talk().and_then(|key| key.windows_binding()),
+            Some(Scan(0x29))
+        );
+        assert_eq!(
+            bindings.mute().and_then(|key| key.windows_binding()),
+            Some(Scan(0xE01D))
+        );
+        assert_eq!(
+            bindings.deafen().and_then(|key| key.windows_binding()),
+            Some(Mouse(5))
+        );
+
+        for (field, key, value, hint) in [
+            (
+                "keys.device",
+                KeysKey::Device,
+                "/dev/input/event3",
+                "Linux setting",
+            ),
+            ("keys.talk", KeysKey::Talk, "KEY_F13", "mouse:4"),
+            ("keys.talk", KeysKey::Talk, "183", "mouse:4"),
+            ("keys.talk", KeysKey::Talk, "sc:0x80", "mouse:4"),
+            ("keys.talk", KeysKey::Talk, "sc:0x54", "mouse:4"),
+        ] {
+            let error = parse(["conch-voice", "config", "set", field, value]).unwrap_err();
+            assert_eq!(error.exit_code(), 2);
+            assert!(error.to_string().contains(hint), "{error}");
+            assert!(!error.to_string().contains(value), "{error}");
+            assert!(set_keys(&environment, key, value).is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap(), edited);
+        }
+        assert!(set_keys(&environment, KeysKey::Mute, "SC:0X29").is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), edited);
+        assert!(matches!(
+            parse(["conch-voice", "config", "unset", "keys.device"]),
+            Ok(Invocation::ConfigUnset {
+                key: KeysKey::Device
+            })
+        ));
+    }
+
+    #[test]
     fn a_reparse_point_or_a_directory_at_the_path_is_refused_and_the_target_untouched() {
         let dir = tempfile::tempdir().unwrap();
         let other = dir.path().join("other.toml");
