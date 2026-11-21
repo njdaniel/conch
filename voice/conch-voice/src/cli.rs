@@ -285,8 +285,8 @@ pub enum Invocation {
     ConfigSetKeys {
         /// The `[keys]` key to save.
         key: KeysKey,
-        /// For the device a path under `/dev/input/`; for a binding a `KEY_*` name or a
-        /// decimal code. Checked, and not to be logged or echoed.
+        /// A Linux device path, name or code, or a Windows scan code or mouse button.
+        /// Checked, and not to be logged or echoed.
         value: String,
     },
     /// Atomically save a Linux mute device and binding for desktop.
@@ -314,7 +314,7 @@ pub enum Invocation {
 /// The keys `config set` takes, as they are spelled on its command line. No other is
 /// written: `server` and `channel` decide where the login goes, and are changed by hand
 /// only; the open microphone's level and hang are changed by hand too. The four `keys.*`
-/// name what is read from an input device, and are checked as the file is checked.
+/// name what is read from an input device, and are checked for this platform.
 pub const CONFIG_SET_KEYS: [&str; 7] = [
     "audio.input",
     "audio.output",
@@ -395,6 +395,9 @@ pub fn command() -> Command {
                 .default_value("warn")
                 .help("off, error, warn, info, debug or trace; the SDK's own records are written at warn and error only, whatever is asked"),
         );
+    #[cfg(windows)]
+    let join =
+        join.after_help("Tap and release the talk key once after starting, then hold it to talk.");
     let managed = Command::new("managed")
         .about("Run voice for conch's TUI, which starts this itself and drives it over private pipes")
         .long_about(
@@ -501,6 +504,7 @@ pub fn command() -> Command {
                 .action(ArgAction::SetTrue)
                 .help("Write the microphones and speakers as one line of JSON (conch.voice_devices.v1) instead; no keyboard is looked at"),
         );
+    #[cfg(not(windows))]
     let keys = Command::new("keys")
         .about("Show the code of EVERY key pressed on a keyboard until Ctrl-C, to find the key to talk with")
         .long_about(
@@ -517,7 +521,9 @@ pub fn command() -> Command {
                 .value_parser(clap::value_parser!(PathBuf))
                 .help("The keyboard's event device, by its path under /dev/input/by-id"),
         );
-    let set = Command::new("set")
+    let set = Command::new("set");
+    #[cfg(not(windows))]
+    let set = set
         .about("Save the microphone, the speakers, the talk mode, the key device or a key binding in voice.toml, keeping the rest of the file as written")
         .long_about(
             "Saves the microphone (audio.input), the speakers (audio.output), the talk mode \
@@ -544,6 +550,29 @@ pub fn command() -> Command {
                 .value_name("VALUE")
                 .help(format!("For a device, its name as `conch-voice devices` lists it, or `default` for {SYSTEM_NAME}'s default; for audio.talk_mode, push_to_talk or open; for keys.device, a path under /dev/input/; for keys.talk, keys.mute and keys.deafen, a KEY_* name or a key code")),
         );
+    #[cfg(windows)]
+    let set = set
+        .about("Save an audio setting or key binding in voice.toml")
+        .long_about(
+            "Saves one setting in voice.toml and keeps the rest of the file as written. \
+             For keys.talk, keys.mute and keys.deafen, use sc:0xNN or sc:0xE0,0xNN \
+             (NN from 01 to 7F), mouse:4 or mouse:5. Windows refuses keys.device. \
+             Prints nothing on success.",
+        )
+        .arg(
+            Arg::new("key")
+                .required(true)
+                .value_name("KEY")
+                .value_parser(CONFIG_SET_KEYS)
+                .hide_possible_values(true)
+                .help("audio.input, audio.output, audio.talk_mode, keys.talk, keys.mute or keys.deafen"),
+        )
+        .arg(
+            Arg::new("value")
+                .required(true)
+                .value_name("VALUE")
+                .help("An audio endpoint from conch-voice devices or default, push_to_talk or open for talk mode, or a Windows key binding such as sc:0x29 or mouse:4"),
+        );
     let unset = Command::new("unset")
         .about("Remove the key device or a key binding from voice.toml")
         .long_about(
@@ -561,17 +590,19 @@ pub fn command() -> Command {
                 .value_parser(CONFIG_UNSET_KEYS)
                 .help("keys.device, keys.talk, keys.mute or keys.deafen"),
         );
-    let set_mute_binding = Command::new("set-mute-binding")
-        .hide(true)
-        .arg(Arg::new("device").required(true))
-        .arg(Arg::new("value").required(true));
     let config = Command::new("config")
         .about("Change voice.toml: the microphone, the speakers, the talk mode, the key device and the key bindings")
         .subcommand_required(true)
         .subcommand(set)
-        .subcommand(unset)
-        .subcommand(set_mute_binding);
-    Command::new("conch-voice")
+        .subcommand(unset);
+    #[cfg(not(windows))]
+    let config = config.subcommand(
+        Command::new("set-mute-binding")
+            .hide(true)
+            .arg(Arg::new("device").required(true))
+            .arg(Arg::new("value").required(true)),
+    );
+    let command = Command::new("conch-voice")
         .about("The Conch voice client: push-to-talk voice for a channel")
         .after_help(format!(
             "Environment:\n  \
@@ -589,8 +620,10 @@ pub fn command() -> Command {
         .arg_required_else_help(true)
         .subcommand(join)
         .subcommand(managed)
-        .subcommand(devices)
-        .subcommand(keys)
+        .subcommand(devices);
+    #[cfg(not(windows))]
+    let command = command.subcommand(keys);
+    command
         .subcommand(Command::new("watch-mute-key").hide(true))
         .subcommand(config)
 }
@@ -646,6 +679,22 @@ fn config_set(matches: &clap::ArgMatches) -> Result<Invocation, clap::Error> {
     };
     if let Some(key) = keys_key(set.get_one::<String>("key").map(String::as_str)) {
         // Refused with a reason that does not repeat the value, as a device name is.
+        #[cfg(windows)]
+        {
+            let value = set.get_one::<String>("value").ok_or_else(|| {
+                command().error(
+                    clap::error::ErrorKind::MissingRequiredArgument,
+                    "expected a value",
+                )
+            })?;
+            key.require_windows(value, "voice.toml")
+                .map_err(|error| command().error(clap::error::ErrorKind::ValueValidation, error))?;
+            return Ok(Invocation::ConfigSetKeys {
+                key,
+                value: value.clone(),
+            });
+        }
+        #[cfg(not(windows))]
         return match set.get_one::<String>("value") {
             Some(value) if key.check(value).is_ok() => Ok(Invocation::ConfigSetKeys {
                 key,
@@ -1840,6 +1889,7 @@ mod tests {
             parse(["conch-voice", "devices", "--json"]).unwrap(),
             Invocation::Devices { json: true }
         );
+        #[cfg(not(windows))]
         assert_eq!(
             parse([
                 "conch-voice",
@@ -1851,6 +1901,8 @@ mod tests {
                 device: PathBuf::from("/dev/input/by-id/usb-Example-event-kbd")
             }
         );
+        #[cfg(windows)]
+        assert!(command().find_subcommand("keys").is_none());
         for bad in [
             &["keys"][..],
             &["keys", "one", "two"],
@@ -1941,6 +1993,7 @@ mod tests {
     /// The talk mode is saved by the same command, so that the TUI can keep the person's
     /// choice; only its two names are taken, and the open microphone's level and hang are
     /// not keys of the command at all.
+    #[cfg(not(windows))]
     #[test]
     fn config_set_and_unset_take_the_key_device_and_bindings_and_refuse_the_rest() {
         for (key, name) in [
