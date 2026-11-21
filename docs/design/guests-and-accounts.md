@@ -415,7 +415,9 @@ Enroll only after proving a code; protect pending and active secrets with authen
 encryption under an operator-managed host key outside the database. Back up that key
 separately through the operator recovery procedure; do not log/export the secret or expose
 it after enrollment. Show setup material only in the enrollment view, not during a share.
-A QR encoder is optional follow-up; manual authenticator setup needs no new QR dependency.
+The web setup page draws the enrollment URI as a QR code (issue #862) with a small encoder in the client
+(byte mode, level M, versions 1 to 10, no new dependency), behind the same reveal and never during a share;
+the typed key stays beside it, and is all that shows if the URI does not fit.
 
 Sensitive operator actions require password+TOTP reauthentication within ten minutes,
 bound to the current session and invalidated by credential/auth changes. **The class is
@@ -488,7 +490,7 @@ Redemption rechecks target and creator, expiry, unused state and auth generation
 Password change/reset, disable, sign-out-everywhere and revocation invalidate open links.
 A stolen old device link cannot defeat a password reset. Show labeled resulting sessions
 and allow revoking them. CLI uses non-echoing stdin for link redemption. Copy/link first;
-QR rendering is a separately reviewed dependency or implementation decision.
+QR rendering for link redemption remains a separately reviewed decision (the TOTP setup QR is decided: issue #862).
 
 ## 7. Storage, schemas and API work
 
