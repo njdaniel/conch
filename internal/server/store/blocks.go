@@ -72,6 +72,23 @@ func (s *Store) ListBlocks(ctx context.Context, ownerID int64) ([]schema.BlockV1
 	return out, nil
 }
 
+// listedPrincipalSQL is the one statement of "viewer may name this principal
+// by id", for a principals row aliased p: not hidden, known to viewer
+// (knownPrincipalsSQL, with seeAll the viewer's see_member_directory), and one
+// the directory lists for them (a member, an active agent, or an active person
+// viewer shares a channel with or invited). A disabled person or agent, or a
+// guest viewer shares no channel with, is outside it. The two surfaces that
+// answer an id probe, PutBlock and a new-pair OpenDM, both build their
+// condition from it, so they answer the same set and cannot drift. The
+// returned args fill its placeholders in order. The fragment is built from
+// constants and never from a request.
+func listedPrincipalSQL(viewer int64, seeAll bool) (cond string, args []any) {
+	known, knownArgs, _ := knownPrincipalsSQL(viewer, seeAll)
+	cond = "p.hidden_at IS NULL AND (" + known + ")" +
+		" AND ((" + memberPredicateSQL + ") OR (p.kind = 'agent' AND p.disabled_at IS NULL) OR (p.disabled_at IS NULL AND " + knowsCond("?") + "))"
+	return cond, append(knownArgs, viewer, viewer, viewer)
+}
+
 // PutBlock adds blockedID to ownerID's list and returns the entry, with
 // created=true when the row is new. It is idempotent: a principal already on
 // the list is answered as it is, with its original time, whether or not the
@@ -90,12 +107,11 @@ func (s *Store) PutBlock(ctx context.Context, ownerID, blockedID int64, seeAll b
 		return schema.BlockV1{}, false, ErrBlockSelf
 	}
 	err = s.withImmediateTx(ctx, func(tx execer) error {
-		cond, args, _ := knownPrincipalsSQL(ownerID, seeAll)
+		cond, args := listedPrincipalSQL(ownerID, seeAll)
 		var one int
 		switch err := tx.QueryRowContext(ctx,
-			"SELECT 1 FROM principals p WHERE p.id = ? AND p.hidden_at IS NULL AND ("+cond+")"+
-				" AND (("+memberPredicateSQL+") OR (p.kind = 'agent' AND p.disabled_at IS NULL) OR (p.disabled_at IS NULL AND "+knowsCond("?")+"))", // #nosec G202 -- every fragment is a constant
-			append(append([]any{blockedID}, args...), ownerID, ownerID, ownerID)...).Scan(&one); {
+			"SELECT 1 FROM principals p WHERE p.id = ? AND "+cond, // #nosec G202 -- every fragment is a constant
+			append([]any{blockedID}, args...)...).Scan(&one); {
 		case errors.Is(err, sql.ErrNoRows):
 			return ErrNotFound
 		case err != nil:

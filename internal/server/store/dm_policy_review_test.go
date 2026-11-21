@@ -23,8 +23,58 @@ func TestDMPolicyDisabledChannelMateIsUnavailable(t *testing.T) {
 	if err := f.trySend(conv, f.alice, "to a disabled channel-mate"); !errors.Is(err, ErrDMContactUnavailable) {
 		t.Errorf("send to a disabled channel-mate: %v", err)
 	}
-	if _, err := f.s.OpenDM(ctx, f.alice.ID, f.carol.ID, f.tick()); !errors.Is(err, ErrDMContactUnavailable) {
+	// A new pair answers as PutBlock does (#2099): not found, not contact.
+	if _, err := f.s.OpenDM(ctx, f.alice.ID, f.carol.ID, f.tick()); !errors.Is(err, ErrPrincipalNotFound) {
 		t.Errorf("open a new pair with a disabled channel-mate: %v", err)
+	}
+	// The existing pair still resumes, read only.
+	if c, err := f.s.OpenDM(ctx, f.alice.ID, f.bob.ID, f.tick()); err != nil || c.ID != conv.ID {
+		t.Errorf("resume with a disabled channel-mate = %+v, %v", c, err)
+	}
+}
+
+// OpenDM on a new pair and PutBlock answer an id probe with the same set
+// (#2099): the review's probe table, side by side.
+func TestDMOpenAndPutBlockAnswerTheSameProbeSet(t *testing.T) {
+	ctx := context.Background()
+	f := newDMFixture(t)
+	if _, err := f.s.db.Exec(`INSERT INTO guest_visits (principal_id, handle, origin, state, started_at, expires_at, idle_ms)
+		VALUES (?, 'g-probe', 'address', 'active', 1, 2, 1000)`, f.carol.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.disable(t, f.dave)
+	hidden, err := f.s.CreatePrincipal(ctx, PrincipalHuman, "probe-gone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.hide(t, hidden)
+	disabledAgent, err := f.s.CreatePrincipal(ctx, PrincipalAgent, "disabled-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.s.DisablePrincipal(ctx, "system", disabledAgent.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name string
+		id   int64
+	}{
+		{"never issued", 987654},
+		{"hidden", hidden.ID},
+		{"disabled human", f.dave.ID},
+		{"disabled agent", disabledAgent.ID},
+		{"active guest, no shared channel", f.carol.ID},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, openErr := f.s.OpenDM(ctx, f.alice.ID, c.id, f.tick())
+			_, _, blockErr := f.s.PutBlock(ctx, f.alice.ID, c.id, true, f.tick())
+			if !errors.Is(openErr, ErrPrincipalNotFound) || openErr.Error() != ErrPrincipalNotFound.Error() {
+				t.Errorf("OpenDM = %v, want principal not found", openErr)
+			}
+			if !errors.Is(blockErr, ErrNotFound) {
+				t.Errorf("PutBlock = %v, want not found", blockErr)
+			}
+		})
 	}
 }
 

@@ -116,9 +116,9 @@ func TestOpenDMRules(t *testing.T) {
 		{"no peer at all", f.alice.ID, 0, ErrPrincipalNotFound},
 		{"no caller", 0, f.alice.ID, ErrDMNoStanding},
 		{"a disabled caller", f.dave.ID, f.alice.ID, ErrDMNoStanding},
-		{"a disabled peer, new pair", f.alice.ID, f.dave.ID, ErrDMContactUnavailable},
+		{"a disabled peer, new pair", f.alice.ID, f.dave.ID, ErrPrincipalNotFound},
 		{"a guest caller", guest.ID, f.alice.ID, ErrDMNoStanding},
-		{"a guest peer, new pair", f.alice.ID, guest.ID, ErrDMContactUnavailable},
+		{"a guest peer sharing no channel, new pair", f.alice.ID, guest.ID, ErrPrincipalNotFound},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			before := f.auditCount(t)
@@ -194,8 +194,8 @@ func TestOpenDMUnreachablePeerSilentOpen(t *testing.T) {
 			t.Fatal(err)
 		}
 		got, err := f.s.OpenDM(ctx, f.bob.ID, peer.ID, f.tick())
-		if !errors.Is(err, ErrDMContactUnavailable) || got != (DMConversation{}) {
-			t.Errorf("open with %s = %+v, %v; want contact unavailable", peer.Name, got, err)
+		if !errors.Is(err, ErrPrincipalNotFound) || got != (DMConversation{}) {
+			t.Errorf("open with %s = %+v, %v; want principal not found (disabled, #2099)", peer.Name, got, err)
 		}
 	}
 	if _, err := f.s.DMConversationFor(ctx, f.bob.ID, silent.ID); !errors.Is(err, ErrDMNotFound) {

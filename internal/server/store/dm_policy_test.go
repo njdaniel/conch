@@ -176,7 +176,9 @@ func TestDMContactPolicy(t *testing.T) {
 			}
 		}, want{ErrDMContactUnavailable, nil, ErrDMContactUnavailable, true, false, true}},
 		{"the target is disabled", func(t *testing.T, f *dmFixture) { f.disable(t, f.bob) },
-			want{ErrDMContactUnavailable, nil, ErrDMContactUnavailable, true, false, false}},
+			// A new pair is not found, as PutBlock answers (#2099); the pair
+			// that exists still resumes, and send and edit stay refused.
+			want{ErrPrincipalNotFound, nil, ErrDMContactUnavailable, true, false, false}},
 		{"the target is disabled on hide_members, no longer sharing a channel", func(t *testing.T, f *dmFixture) {
 			f.hideMembers(t)
 			f.disable(t, f.bob)
@@ -364,7 +366,6 @@ func TestDMContactRefusalNeverSaysWhy(t *testing.T) {
 			f.prefer(t, f.bob, schema.DMAcceptNobody)
 		},
 		"bob is switched off": func(t *testing.T, f *dmFixture) { f.switchOff(t, f.bob) },
-		"bob is disabled":     func(t *testing.T, f *dmFixture) { f.disable(t, f.bob) },
 	}
 	texts := map[string]bool{}
 	for name, setup := range reasons {
@@ -387,6 +388,19 @@ func TestDMContactRefusalNeverSaysWhy(t *testing.T) {
 		setup(t, g)
 		if _, err := g.s.OpenDM(ctx, g.alice.ID, g.bob.ID, g.tick()); !errors.Is(err, ErrDMContactUnavailable) {
 			t.Errorf("%s: open a new pair: %v", name, err)
+		} else {
+			texts[err.Error()] = true
+		}
+	}
+	// A disabled target is a send refusal like the rest, but a new pair is
+	// not found (#2099), so it is outside the texts of the open below.
+	{
+		f := newDMFixture(t)
+		conv := f.openPair(t, f.alice, f.bob)
+		f.send(t, conv, f.alice, "hi")
+		f.disable(t, f.bob)
+		if err := f.trySend(conv, f.alice, "are you there"); !errors.Is(err, ErrDMContactUnavailable) {
+			t.Errorf("bob is disabled: send: %v", err)
 		} else {
 			texts[err.Error()] = true
 		}

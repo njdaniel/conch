@@ -106,16 +106,20 @@ import (
 //     or it is not visible to this caller, whatever the caller's role. One
 //     answer, one body, including to the peer of an empty open.
 //     404 principal_not_found (existing): on open, the target does not
-//     exist, has ended, or is hidden from the caller. One body for all three.
+//     exist, has ended, or is hidden from the caller; and, for a pair the
+//     caller cannot yet see, the target is disabled (a person or an agent),
+//     the very set PUT /v1/blocks/{id} answers 404 for. One body for all.
 //  7. 400 invalid_request (existing): a malformed request or cursor; a body
 //     that tries a payload, audience or thread (the request types here have
 //     no such fields and are decoded with unknown fields refused); on open,
 //     the target is the caller, or an agent.
 //  8. 403 ErrorCodeContactUnavailable: the target is visible but cannot be
-//     contacted now (disabled, a guest, a block either way, their preference,
-//     their switch, hide-members visibility). One code, one message; it never says
-//     which, and never who blocked whom. It applies to send, edit, and an
-//     open of a pair the caller cannot yet see. Reads, removals of one's
+//     contacted now (disabled once a pair exists, a guest, a block either way,
+//     their preference, their switch, hide-members visibility). One code, one
+//     message; it never says which, and never who blocked whom. It applies to
+//     send, edit, and an open of a pair the caller cannot yet see, except that
+//     a disabled target there is refusal 6's 404 instead, so an id cannot be
+//     marked as disabled. Reads, removals of one's
 //     own messages, and resuming an already visible conversation are allowed
 //     even when the peer cannot be contacted, subject to the checks above.
 //

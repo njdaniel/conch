@@ -66,8 +66,10 @@ var principalReads = []principalRead{
 	{"store/bans.go", "Store.ListChannelBans", 1, readOperatorOrMaker},
 	// #2017, #2018: a DM's peer, only when the caller may know it by
 	// knownPrincipalsSQL and it is not hidden or an ended guest; any other
-	// id is the same ErrPrincipalNotFound as one never issued.
-	{"store/dm.go", "openDMTx", 1, readPredicate},
+	// id is the same ErrPrincipalNotFound as one never issued. #2099: a new
+	// pair also asks listedPrincipalSQL, PutBlock's rule, in a second
+	// statement, so a disabled target is the same 404 on both routes.
+	{"store/dm.go", "openDMTx", 2, readPredicate},
 	// #2018: the DM policy. Whether a viewer may know a target and whether a
 	// conversation's peer is shown by name answer a yes or a no by the
 	// directory's rule; the per-person switch is one bit; SetDMAllowed is
@@ -82,7 +84,8 @@ var principalReads = []principalRead{
 	{"store/dm_policy.go", "dmPrincipalAllowedTx", 1, readOwnOrInternal},
 	{"store/dm_policy.go", "Store.SetDMAllowed", 2, readOperatorOrMaker},
 	// #1832: a block's target, only when the owner may know it by
-	// knownPrincipalsSQL (the directory's rule) and it is not hidden.
+	// knownPrincipalsSQL (the directory's rule) and it is not hidden; since
+	// #2099 through listedPrincipalSQL, which a new-pair OpenDM shares.
 	{"store/blocks.go", "Store.PutBlock", 1, readPredicate},
 	{"store/bans.go", "managerBanTargetTx", 1, readOperatorOrMaker},
 	{"store/audience.go", "Store.ListChannelAuthors", 1, readGated},
@@ -214,7 +217,7 @@ var predicateNames = map[string]string{
 	"mayKnowTx":                         "knownPrincipalsSQL",
 	"directoryKnowersTx":                "knowsCond",
 	"Store.DirectoryMembershipAudience": "knowsCondExcept",
-	"Store.PutBlock":                    "knownPrincipalsSQL",
+	"Store.PutBlock":                    "listedPrincipalSQL",
 	"openDMTx":                          "knownPrincipalsSQL",
 	"dmMayKnowTx":                       "knownPrincipalsSQL",
 	"dmPeerFormerTx":                    "knownPrincipalsSQL",

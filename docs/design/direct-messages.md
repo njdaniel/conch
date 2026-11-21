@@ -94,7 +94,7 @@ Rows are the state of the target or the pair; columns are the caller's act. "Rea
 | Caller not one of the pair (any role, operator included) | n/a | n/a | 404 `dm_not_found` | 404 | 404 | 404 | none |
 | Target is the caller | 400 `invalid_request` | n/a | n/a | n/a | n/a | n/a | n/a |
 | Target is an agent | 400 `invalid_request` (agents are listed as agents, so this says nothing new) | n/a | n/a | n/a | n/a | n/a | n/a |
-| Target disabled | 403 `contact_unavailable` | resumes (read only) | 403 `contact_unavailable` | allowed | allowed; former-member label if identity is no longer visible | `unavailable` | none to the disabled side |
+| Target disabled (a person, or an agent) | 404 `principal_not_found`, as `PUT /v1/blocks/{id}` answers (one shared fragment, `listedPrincipalSQL`; a disabled agent is not found either, not "agent") | resumes (read only) | 403 `contact_unavailable` | allowed | allowed; former-member label if identity is no longer visible | `unavailable` | none to the disabled side |
 | Block in either direction (#1832) | 403 `contact_unavailable` | resumes (read only) | 403 `contact_unavailable` | allowed | allowed | `unavailable`; a ringing or active call ends (§4) | dropped at fan-out |
 | Target's preference `nobody` | 403 `contact_unavailable` | resumes (read only) | 403 `contact_unavailable` | allowed | allowed | `unavailable` | normal |
 | Target's preference `shared_channel` and no channel in common | 403 `contact_unavailable` | resumes (read only) | 403 `contact_unavailable` | allowed | allowed | `unavailable` | normal |
@@ -107,7 +107,7 @@ Rows are the state of the target or the pair; columns are the caller's act. "Rea
 | Caller is an agent | 403 `forbidden`, with the existing agent-denial audit row (route only, no target) | | | | | | none |
 | Caller disabled or credential revoked | 401, as everywhere | | | | | | socket closed |
 
-**The same-404 rule.** A guessed principal id that is hidden, nonexistent or ended gets byte-identical answers and the same timing class (one indexed lookup) as "principal not found". A conversation or call id the caller is not part of answers like one that does not exist. No DM or call route is previewable; a structural test beside `TestPreviewableRoutesAreReads` (`internal/server/preview_guard_test.go:15`) pins it.
+**The same-404 rule.** A guessed principal id that is hidden, nonexistent, ended, or (for a new pair) disabled, gets byte-identical answers and the same timing class (one indexed lookup) as "principal not found", and the same set `PUT /v1/blocks/{id}` answers 404 for, so the two routes cannot be compared to mark an id as a disabled person or agent (the directory never shows who is disabled). A conversation or call id the caller is not part of answers like one that does not exist. No DM or call route is previewable; a structural test beside `TestPreviewableRoutesAreReads` (`internal/server/preview_guard_test.go:15`) pins it.
 
 **The generic `contact_unavailable` rule.** One code and one message for every eligibility reason. It tells a caller that this person cannot be reached now, which a person can usually see anyway; it never says which of block, preference, switch, disabled or visibility it was, and never who blocked whom.
 
