@@ -31,6 +31,7 @@ func coreAgentRows() []row {
 		return row{route: route, what: what, pick: pick, probe: p, want: want}
 	}
 	sessionNotFound := answer{http.StatusNotFound, "session_not_found"}
+	const personStream = "GET /v1/events/person/ws"
 	// Agents keep no voice (ADR-004): occupancy is refused them, as presence
 	// is, and the refusal is audited.
 	noVoice := func(route, what string, p probe) row {
@@ -138,6 +139,30 @@ func coreAgentRows() []row {
 		noVoice("GET /v1/voice/occupancy", "reads voice occupancy", get("/v1/voice/occupancy")),
 		noVoice("GET /v1/voice/occupancy/ws", "opens the voice occupancy socket", occupancySock(false)),
 		noVoice("GET /v1/voice/occupancy/ws", "opens the voice occupancy socket with a ticket", occupancySock(true)),
+		// Authentication validates the bearer or redeems the ticket. The
+		// provenance guard then refuses the agent with 403 forbidden before
+		// checking credential provenance or upgrading the socket (issue #2098).
+		{route: personStream, what: "opens a person stream as an agent", want: answer{http.StatusForbidden, "forbidden"}, after: checkAgentPersonStreamDenied(personStream),
+			probe: func(*world, subject) probe { return personSock(false) }},
+		{route: personStream, what: "opens a person stream as an agent with a ticket", want: answer{http.StatusForbidden, "forbidden"}, after: checkAgentPersonStreamDenied(personStream),
+			probe: func(*world, subject) probe { return personSock(true) }},
+	}
+}
+
+// checkAgentPersonStreamDenied checks the audited reason for the refusal.
+func checkAgentPersonStreamDenied(route string) func(w *world, a api) error {
+	return func(w *world, _ api) error {
+		events, err := w.auditRows("access_denied")
+		if err != nil {
+			return err
+		}
+		actor := fmt.Sprintf("principal:%d", w.prober.id)
+		for _, e := range events {
+			if e.Actor == actor && e.Subject == route && slices.Contains(strings.Fields(e.Detail), "reason=agents_use_mcp") {
+				return nil
+			}
+		}
+		return fmt.Errorf("no access_denied of %s for %s with reason=agents_use_mcp in the audit log", actor, route)
 	}
 }
 
