@@ -150,6 +150,7 @@ func aCredential(w *world) subject   { return subject{kind: "credential", id: w.
 func aMessage(w *world) subject      { return subject{kind: "message", id: w.a.root} }
 func aFile(w *world) subject         { return subject{kind: "file", id: w.a.fileID} }
 func aNet(w *world) subject          { return subject{kind: "net", name: w.a.netName, id: w.a.netID} }
+func aConversation(w *world) subject { return subject{kind: "conversation", id: w.a.dmID} }
 func aSession(w *world) subject      { return subject{kind: "session", id: w.a.sessionID} }
 func aRun(w *world) subject          { return subject{kind: "run", id: w.a.runID} }
 func aIntervention(w *world) subject { return subject{kind: "intervention", id: w.a.interID} }
@@ -225,7 +226,7 @@ func id(n int64) string   { return itoa(n) }
 
 // matrixRows is the matrix.
 func matrixRows() []row {
-	return slices.Concat(coreMatrixRows(), reactionMatrixRows(), editMatrixRows(), notificationMatrixRows(), personMatrixRows())
+	return slices.Concat(coreMatrixRows(), reactionMatrixRows(), editMatrixRows(), notificationMatrixRows(), personMatrixRows(), dmMatrixRows())
 }
 
 func coreMatrixRows() []row {

@@ -282,7 +282,13 @@ var idKeys = map[string]string{
 	"session_id": "session", "run_id": "run", "intervention_id": "intervention",
 	"approval_id": "approval", "invite_id": "invite", "report_id": "report", "net_id": "net",
 	"credential_id": "credential", "sign_in_link_id": "sign_in_link",
-	"request_id": "-",
+	// Direct messages (issue #2019): a conversation has an id space of its
+	// own; its pair is two principals. A DM message id is a space of its own
+	// too, so last_message_id is passed over rather than read as a channel
+	// message id (a small DM id would otherwise match one of A's messages).
+	"conversation_id": "conversation", "peer_id": "principal", "participant_ids": "principal",
+	"last_message_id": "-",
+	"request_id":      "-",
 }
 
 // holders are the keys of objects (or lists of objects) whose "id" is of a
@@ -302,6 +308,7 @@ var holders = map[string]string{
 	"net": "net", "nets": "net",
 	"credential": "credential", "credentials": "credential",
 	"sign_in_link": "sign_in_link", "sign_in_links": "sign_in_link",
+	"conversation": "conversation", "conversations": "conversation",
 }
 
 // idKind is the kind of id a number under key, inside an object held by

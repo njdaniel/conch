@@ -178,7 +178,11 @@ func TestSelfMadeCredentialRoutesRefuseOthers(t *testing.T) {
 // TestSelfMadeCredentialRoutesRefuseOthers drives it with every token kind.
 func TestSelfMadeCredentialRoutesIncludeRequired(t *testing.T) {
 	for _, pattern := range []string{
-		"GET /v1/events/person/ws", // the per-person stream (#2040)
+		"GET /v1/events/person/ws",         // the per-person stream (#2040)
+		"POST /v1/dms",                     // open or resume (#2019)
+		"GET /v1/dms",                      // the inbox
+		"GET /v1/dms/{conversation}",       // one conversation
+		"PUT /v1/dms/{conversation}/state", // per-viewer archive, hide, reopen
 	} {
 		if !selfMadeCredentialRoutes[pattern] {
 			t.Errorf("%s is not in selfMadeCredentialRoutes", pattern)
