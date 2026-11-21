@@ -3,6 +3,9 @@
 // windows-desktop.md §3.4, §3.6). Model B: the helper is the person's one
 // voice participant, and main owns it.
 //
+// macOS (issue #1743, macos-desktop.md §3) uses the Unix transport and stop
+// sequence with its own socket directory and helper environment.
+//
 // Windows differs only where the platform does: the events endpoint is a
 // named pipe the owner creates (no runtime directory), the nonce is spent at
 // the attach and not kept, a stray 43-character token-shaped value is
@@ -71,7 +74,7 @@ import {
   type VoiceControlStateV3,
   type VoiceControlTalkMode,
 } from '../../../web/src/schema/generated.ts';
-import { EndpointError, listen, listenPipe, profileDir, runtimeDir, sweep, type AttachFailure, type EndpointDeps, type EndpointRefusal, type Listening } from './endpoint.ts';
+import { EndpointError, listenPipe, listenUnix, type AttachFailure, type EndpointDeps, type EndpointRefusal, type Listening } from './endpoint.ts';
 import { validProfileId } from '../vault/files.ts';
 import {
   LINUX_SHARE_AUDIO_SCOPE,
@@ -181,12 +184,12 @@ export const CONTRACT_TIMINGS: Timings = {
 export interface SupervisorDeps {
   // The app's resources directory, where the bundled conch-voice is.
   readonly resources: string;
-  // main's environment: XDG_RUNTIME_DIR, and the allowlisted names.
+  // Main's environment: the platform's runtime directory and allowlisted names.
   readonly env: NodeJS.ProcessEnv;
   readonly log: MainLog;
   readonly spawn?: SpawnFn;
   // The platform whose rules apply: process.platform by default. A test
-  // stands in for Windows on Linux.
+  // stands in for Windows or macOS on Linux.
   readonly platform?: NodeJS.Platform;
   // Test seams.
   readonly nonce?: () => string;
@@ -478,26 +481,27 @@ export class Supervisor {
     }
     const windows = this.platform === 'win32';
     let executable: string;
-    let dir = '';
+    let listening: Listening | undefined;
+    const find = { ...this.deps.find, platform: this.platform };
     try {
-      executable = await findHelper(this.deps.resources, { ...this.deps.find, platform: this.platform });
+      const deps = { ...this.deps.endpoint, log: this.deps.log, platform: this.platform };
       if (windows) {
+        executable = await findHelper(this.deps.resources, find);
         // A pipe has no directory to verify or sweep; the profile id is still
         // checked, as the Linux endpoint's directory name is.
         if (!validProfileId(req.profileId)) throw new EndpointError('profile-id-invalid');
+        listening = await listenPipe(deps);
       } else {
-        const runtime = await runtimeDir(this.deps.env, this.deps.endpoint);
-        dir = await profileDir(runtime, req.profileId, this.deps.endpoint);
-        await sweep(dir, this.deps.log);
+        try {
+          listening = await listenUnix(this.deps.env, req.profileId, deps);
+        } finally {
+          // Check after binding the socket to shrink the check-to-spawn window.
+          // A helper refusal still takes priority if endpoint setup also failed.
+          executable = await findHelper(this.deps.resources, find);
+        }
       }
     } catch (err) {
-      return this.unavailable(err);
-    }
-    let listening: Listening;
-    try {
-      const deps = { ...this.deps.endpoint, log: this.deps.log };
-      listening = windows ? await listenPipe(deps) : await listen(dir, deps);
-    } catch (err) {
+      listening?.close();
       return this.unavailable(err);
     }
     // A new nonce for every spawn, never reused (windows-desktop.md §3.4
