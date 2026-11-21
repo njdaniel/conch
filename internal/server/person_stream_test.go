@@ -297,9 +297,9 @@ func TestPersonStreamWhoMayOpen(t *testing.T) {
 		{"another person", personPath, f.bobTok, http.StatusSwitchingProtocols, ""},
 		{"a person, ticket", personPath + "?ticket=" + ticket(f.aliceTok), "", http.StatusSwitchingProtocols, ""},
 		{"an operator is a person too", personPath, f.rootTok, http.StatusSwitchingProtocols, ""},
-		// The provenance guard refuses a non-human caller first (issue #2098):
-		// 403 forbidden, not own_sign_in_required.
+		// The provenance guard refuses agents with 403 forbidden (issue #2098).
 		{"an agent", personPath, f.botTok, http.StatusForbidden, "forbidden"},
+		{"an agent, ticket", personPath + "?ticket=" + ticket(f.botTok), "", http.StatusForbidden, "forbidden"},
 		{"another agent", personPath, f.rivalTok, http.StatusForbidden, "forbidden"},
 		{"a guest", personPath, g.Token, http.StatusForbidden, schema.ErrorCodeGuestNotAllowed},
 		{"no credential", personPath, "", http.StatusUnauthorized, ""},

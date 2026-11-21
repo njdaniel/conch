@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -95,7 +96,9 @@ func (f *provenanceFixture) guardedStandIn(t *testing.T) http.Handler {
 	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	})
-	return f.srv.authMiddleware(f.srv.guard(route{pattern: selfMadeStandIn, access: accessAuthenticated, handler: ok}))
+	mux := http.NewServeMux()
+	mux.Handle(selfMadeStandIn, f.srv.guard(route{pattern: selfMadeStandIn, access: accessAuthenticated, handler: ok}))
+	return f.srv.authMiddleware(mux)
 }
 
 var pathParam = regexp.MustCompile(`\{[^}]+\}`)
@@ -162,6 +165,14 @@ func TestSelfMadeCredentialRoutesRefuseOthers(t *testing.T) {
 			{"guest's own visit", guest.Token, true, false},
 		} {
 			t.Run(pattern+"/"+tt.name, func(t *testing.T) {
+				var auditBefore int64
+				if tt.agent {
+					var err error
+					auditBefore, err = f.srv.store.LastAuditID(t.Context())
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
 				rec := httptest.NewRecorder()
 				serve(rec, requestFor(pattern, tt.token))
 				code := answerCode(t, rec)
@@ -172,7 +183,7 @@ func TestSelfMadeCredentialRoutesRefuseOthers(t *testing.T) {
 					if strings.Contains(rec.Body.String(), "sign in") {
 						t.Errorf("the agent was told to sign in: %s", rec.Body.String())
 					}
-					f.wantAgentDenial(t, f.bot.ID, denyAgentOnHumanRoute)
+					f.wantAgentDenial(t, auditBefore, f.bot.ID, pattern, denyAgentOnHumanRoute)
 					return
 				}
 				refused := rec.Code == http.StatusForbidden && code == schema.ErrorCodeOwnSignInRequired
@@ -297,15 +308,21 @@ func TestSelfMadeCredentialRoutes(t *testing.T) {
 	}
 }
 
-// wantAgentDenial fails unless the audit log holds an access_denied row for
-// the agent whose detail names reason.
-func (f *provenanceFixture) wantAgentDenial(t *testing.T, agentID int64, reason string) {
+// wantAgentDenial checks the request wrote exactly one access_denied row,
+// naming the agent, route and reason.
+func (f *provenanceFixture) wantAgentDenial(t *testing.T, afterID, agentID int64, subject, reason string) {
 	t.Helper()
-	actor := "principal:" + strconv.FormatInt(agentID, 10)
-	for _, e := range f.audit(t) {
-		if e.Action == "access_denied" && e.Actor == actor && strings.Contains(e.Detail, "reason="+reason) {
-			return
-		}
+	events, err := f.srv.store.ListAuditEvents(t.Context(), afterID, 1000)
+	if err != nil {
+		t.Fatal(err)
 	}
-	t.Errorf("no access_denied audit row for %s with reason %s", actor, reason)
+	denials := slices.DeleteFunc(events, func(e store.AuditEvent) bool { return e.Action != "access_denied" })
+	if len(denials) != 1 {
+		t.Fatalf("got %d new access_denied rows for %s, want 1: %+v", len(denials), subject, denials)
+	}
+	actor := "principal:" + strconv.FormatInt(agentID, 10)
+	e := denials[0]
+	if e.Actor != actor || e.Subject != subject || !slices.Contains(strings.Fields(e.Detail), "reason="+reason) {
+		t.Errorf("access_denied actor=%q subject=%q detail=%q, want actor=%q subject=%q reason=%q", e.Actor, e.Subject, e.Detail, actor, subject, reason)
+	}
 }

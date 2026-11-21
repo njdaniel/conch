@@ -39,8 +39,8 @@ import (
 //     and selfMadeCredential refuses a non-human caller first, with 403
 //     forbidden audited agents_use_mcp, as every human-only route does and
 //     as the DM schema's refusal order says (pkg/schema/dm.go; ADR-017
-//     Decision 14). own_sign_in_required is therefore only ever a person's
-//     answer, so in the audit it cleanly signals an act-as attempt.
+//     Decision 14). An own_sign_in_required audit row can come from an
+//     act-as credential or a member's pre-migration credential.
 //
 // It fills as the routes exist: the per-person stream (#2040) is here;
 // #2019, #2021 and #2030 register the DM and call routes, and each adds its
