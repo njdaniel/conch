@@ -15,6 +15,7 @@ import { useEffect, useRef, useState, type SyntheticEvent } from 'react';
 import * as api from './api';
 import { CreateAccount, type AccountProblem } from './CreateAccount';
 import { accountRefusal, heldLine, refusalLine } from './Invite';
+import { platform } from './platform';
 import type { JoinInfoV1 } from './schema/guest';
 import type { WhoAmIResponseV1 } from './schema/principal';
 import { ServerVersion } from './ServerVersion';
@@ -24,6 +25,7 @@ import { timeWithSeconds } from './time';
 
 // Said when a join went through but this browser would not keep its sign-in.
 const keepLine = 'You joined, but this browser will not let the page keep your sign-in. Allow this site to keep data, then try again.';
+const passwordFormWaitMs = 15_000;
 
 type Info = { readonly state: 'loading' } | { readonly state: 'ready'; readonly info: JoinInfoV1 } | { readonly state: 'unknown' };
 
@@ -79,6 +81,7 @@ export function SignIn({
   const field = useRef<HTMLInputElement>(null);
   const nameField = useRef<HTMLInputElement>(null);
   const passwordField = useRef<HTMLInputElement>(null);
+  const passwordSubmitted = useRef(false);
   const [info, setInfo] = useState<Info>({ state: 'loading' });
   const [way, setWay] = useState<'account' | null>(null);
   const [busy, setBusy] = useState(false);
@@ -110,6 +113,25 @@ export function SignIn({
     else if (notice !== null) (nameField.current ?? field.current)?.focus();
   }, [notice, line]);
 
+  useEffect(() => {
+    if (!passwordSubmitted.current) return;
+    const input = passwordField.current;
+    if (!checking) {
+      passwordSubmitted.current = false;
+      // Success removes the form. Clear the field when a refusal leaves it open.
+      if (input !== null) input.value = '';
+      return;
+    }
+    if (input === null || platform.name === 'desktop') return;
+    // A stalled request must not leave the submitted password in the form.
+    const timer = window.setTimeout(() => {
+      input.value = '';
+    }, passwordFormWaitMs);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [checking]);
+
   function submit(event: SyntheticEvent) {
     event.preventDefault();
     const input = field.current;
@@ -137,14 +159,17 @@ export function SignIn({
     event.preventDefault();
     const name = nameField.current?.value ?? '';
     const password = passwordField.current;
-    if (password === null || checking) return;
+    if (password === null || checking || passwordSubmitted.current) return;
     const typed = password.value;
-    // The password is emptied at once, as the credential is.
-    password.value = '';
     if (name === '' || typed === '') {
+      password.value = '';
       (name === '' ? nameField.current : password)?.focus();
       return;
     }
+    // The browser's password manager can observe the filled form submission.
+    // Electron uses the desktop's protected session storage instead.
+    if (platform.name === 'desktop') password.value = '';
+    passwordSubmitted.current = true;
     onPassword(name, typed);
   }
 
@@ -246,10 +271,11 @@ export function SignIn({
       {insecure || !passwordLogin ? null : (
         <section aria-labelledby="password-heading">
           <h2 id="password-heading">Sign in</h2>
-          <form onSubmit={signIn}>
+          <form id="password-sign-in" method="post" onSubmit={signIn}>
             <label htmlFor="signin-name">Name</label>
             <input
               id="signin-name"
+              name="username"
               ref={nameField}
               type="text"
               autoComplete="username"
@@ -258,10 +284,15 @@ export function SignIn({
               spellCheck={false}
             />
             <label htmlFor="signin-password">Password</label>
-            <input id="signin-password" ref={passwordField} type="password" autoComplete="current-password" />
+            <input id="signin-password" name="password" ref={passwordField} type="password" autoComplete="current-password" />
             <button type="submit" aria-busy={checking}>
               {checking ? 'Checking…' : 'Sign in'}
             </button>
+            <p className="hint">
+              {platform.name === 'desktop'
+                ? 'You can paste a saved password from your password manager. Conch keeps member sign-ins when protected storage is available. Operator sign-ins last for this window.'
+                : 'Your browser’s password manager can save and fill this sign-in.'}
+            </p>
             <p className="hint">
               Forgot your password? There is no reset here: ask an operator for a link to choose a new one. Without a
               password yet, ask an operator for a sign-in link.
