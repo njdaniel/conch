@@ -29,6 +29,7 @@ import type { ReadStateV1 } from './schema/readstate';
 import { SignIn } from './SignIn';
 import { YourSignIns } from './SignIns';
 import { SignInLink } from './SignInLink';
+import { AccountNotices, useAccountNotices } from './AccountNotices';
 import { AddDevice } from './AddDevice';
 import { AdminConsole } from './AdminConsole';
 import { canDo, memberLine } from './admin/permissions';
@@ -790,6 +791,10 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     policy: notifications.policy,
     muted: notifications.muted,
   });
+
+  // A member's own notices (issue #2042), shown in the lobby's banner and in
+  // Settings from this one state, so dismissing in one clears both.
+  const accountNotices = useAccountNotices(signedIn && principal !== null && principal.kind === 'human' && visit === null, onUnauthorized);
 
   const now = useNow(signedIn);
 
@@ -1784,6 +1789,9 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                   </button>
                 </div>
               )}
+              {/* A member's own notices, such as a password set through a link
+                  someone else made (issue #2042): on a sign-in of their own. */}
+              <AccountNotices state={accountNotices} />
               {visit === null ? null : <GuestVisit guest={visit} insecure={needsHttps(origin)} onConvert={convert} onEnd={endVisit} onForget={forgetVisit} />}
               {missing.length === 0 || destination === null ? null : (
                 <div role="status" className="banner destination">
@@ -1905,6 +1913,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                       not end after an hour without use. Sign out, and sign in with your name, password and a code.
                     </p>
                   ) : null}
+                  <AccountNotices state={accountNotices} />
                   {/* A server that predates passwords says nothing of them. */}
                   {auth.principal.auth === undefined ? null : (
                     <PasswordSettings who={auth.principal} insecure={needsHttps(origin)} onChanged={refreshWho} onUnauthorized={onUnauthorized} />

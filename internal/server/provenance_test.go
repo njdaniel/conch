@@ -1,0 +1,263 @@
+package server
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"regexp"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/njdaniel/conch/internal/server/store"
+	"github.com/njdaniel/conch/pkg/schema"
+)
+
+// selfMadeStandIn is a route that is in selfMadeCredentialRoutes only for
+// these tests: the DM and call routes and the per-person stream (#2019,
+// #2021, #2030, #2040) do not exist yet, and the guard must be shown to
+// work before they do. Each real one, once listed, is driven by the same
+// table.
+const selfMadeStandIn = "GET /v1/test-only/self-made"
+
+// provenanceFixture is the auth fixture with joiner, a member who joined by
+// an invite (a self-made credential, joinerTok), and a token of every other
+// kind for the same member.
+type provenanceFixture struct {
+	*authFixture
+	joiner               store.Principal
+	joinerTok            string // self-made: the person's own invite redemption
+	actAsTok             string // an operator's credential for them (act_as_members)
+	linkTok              string // the redemption of a sign-in link an operator made
+	migratedTok          string // self-made once, made by another since the migration
+	migratedCredentialID int64
+}
+
+func newProvenanceFixture(t *testing.T) *provenanceFixture {
+	t.Helper()
+	ctx := context.Background()
+	f := &provenanceFixture{authFixture: newAuthFixture(t, AuthRequired)}
+	now := time.Now()
+	join := func(name string) (store.Principal, string, int64) {
+		inv, err := f.srv.store.CreateInvite(ctx, "principal:"+strconv.FormatInt(f.root.ID, 10), f.root.ID,
+			schema.CreateInviteRequestV1{Kind: schema.InviteKindOpen, Channels: []string{"general"}}, store.InviteOptions{}, now)
+		if err != nil {
+			t.Fatalf("CreateInvite: %v", err)
+		}
+		r, err := f.srv.store.RedeemInvite(ctx, store.HashInviteCode(inv.Code), name, now)
+		if err != nil {
+			t.Fatalf("RedeemInvite: %v", err)
+		}
+		return r.Principal, r.Token, r.Credential.ID
+	}
+	f.joiner, f.joinerTok, _ = join("joiner")
+	_, tok, err := f.srv.store.CreateCredential(ctx, "principal:"+strconv.FormatInt(f.root.ID, 10), f.joiner.ID, "act as", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.actAsTok = tok
+	link, err := f.srv.store.CreateSignInLink(ctx, "principal:"+strconv.FormatInt(f.root.ID, 10), f.root.ID, f.joiner.ID, schema.CreateSignInLinkRequestV1{}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	redeemed, err := f.srv.store.RedeemSignInLink(ctx, store.HashSignInLinkCode(link.Code), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.linkTok = redeemed.Token
+	// A credential from before the provenance migration is a row the
+	// migration left at 0: the same as a self-made one with its column
+	// cleared, which is what is done here, under the store.
+	_, f.migratedTok, f.migratedCredentialID = join("veteran")
+	path, _ := testDBPaths.Load(f.srv)
+	db, err := sql.Open("sqlite", "file:"+path.(string)+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("UPDATE credentials SET self_made = 0 WHERE id = ?", f.migratedCredentialID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+// guardedStandIn is the stand-in route as guard registers a listed route,
+// behind the authentication middleware: 200 "ok" when it runs.
+func (f *provenanceFixture) guardedStandIn(t *testing.T) http.Handler {
+	t.Helper()
+	selfMadeCredentialRoutes[selfMadeStandIn] = true
+	t.Cleanup(func() { delete(selfMadeCredentialRoutes, selfMadeStandIn) })
+	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	})
+	return f.srv.authMiddleware(f.srv.guard(route{pattern: selfMadeStandIn, access: accessAuthenticated, handler: ok}))
+}
+
+var pathParam = regexp.MustCompile(`\{[^}]+\}`)
+
+// requestFor is a request to pattern's route, every path parameter 1, with
+// token as its bearer.
+func requestFor(pattern, token string) *http.Request {
+	method, path, _ := strings.Cut(pattern, " ")
+	req := httptest.NewRequest(method, pathParam.ReplaceAllString(path, "1"), strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer "+token)
+	return req
+}
+
+func answerCode(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	var e schema.Error
+	if rec.Code < 400 {
+		return ""
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &e); err != nil {
+		t.Fatalf("answer %d %q is not an error: %v", rec.Code, rec.Body.String(), err)
+	}
+	return e.Code
+}
+
+// Every route that is a person's own (their DMs, their calls, their stream:
+// selfMadeCredentialRoutes, with the stand-in until they exist) takes a
+// self-made credential and refuses, with 403 own_sign_in_required, an
+// operator's act-as credential, the redemption of a sign-in link an
+// operator made, and a credential from before the provenance migration
+// (issue #2042). A self-made credential is never refused on that ground;
+// what the route then answers is the route's own.
+func TestSelfMadeCredentialRoutesRefuseOthers(t *testing.T) {
+	f := newProvenanceFixture(t)
+	standIn := f.guardedStandIn(t)
+	patterns := []string{selfMadeStandIn}
+	for p := range selfMadeCredentialRoutes {
+		if p != selfMadeStandIn {
+			patterns = append(patterns, p)
+		}
+	}
+	for _, pattern := range patterns {
+		serve := f.srv.Handler().ServeHTTP
+		if pattern == selfMadeStandIn {
+			serve = standIn.ServeHTTP
+		}
+		for _, tt := range []struct {
+			name  string
+			token string
+			self  bool
+		}{
+			{"own sign-in", f.joinerTok, true},
+			{"owner's own bootstrap", f.rootTok, true},
+			{"act-as credential", f.actAsTok, false},
+			{"someone else's sign-in link", f.linkTok, false},
+			{"migrated credential", f.migratedTok, false},
+		} {
+			t.Run(pattern+"/"+tt.name, func(t *testing.T) {
+				rec := httptest.NewRecorder()
+				serve(rec, requestFor(pattern, tt.token))
+				code := answerCode(t, rec)
+				refused := rec.Code == http.StatusForbidden && code == schema.ErrorCodeOwnSignInRequired
+				if refused == tt.self {
+					t.Fatalf("answer %d %s (%s); want refused %v", rec.Code, code, rec.Body.String(), !tt.self)
+				}
+				if pattern == selfMadeStandIn && tt.self && (rec.Code != http.StatusOK || rec.Body.String() != "ok") {
+					t.Errorf("the stand-in answered %d %q to a self-made credential", rec.Code, rec.Body.String())
+				}
+			})
+		}
+	}
+}
+
+// Routes outside the list are unchanged: every one of the tokens the list
+// refuses still reaches an ordinary route as before.
+func TestSelfMadeCredentialOtherRoutesUnchanged(t *testing.T) {
+	f := newProvenanceFixture(t)
+	for _, tok := range []string{f.joinerTok, f.actAsTok, f.linkTok, f.migratedTok} {
+		for _, pattern := range []string{"GET /v1/whoami", "GET /v1/channels"} {
+			rec := f.do(t, http.MethodGet, strings.TrimPrefix(pattern, "GET "), tok, "")
+			if rec.Code != http.StatusOK {
+				t.Errorf("%s answered %d %s", pattern, rec.Code, rec.Body.String())
+			}
+		}
+	}
+}
+
+// selfMadeCredential on its own: a ticket-authenticated socket carries only
+// the credential's id, and its provenance is read from the store; a
+// previewed request is refused whatever the credential; a request with no
+// credential, or an id the store does not know, is unauthenticated; under
+// AuthOff there are no credentials and nothing is refused.
+func TestSelfMadeCredentialCheck(t *testing.T) {
+	f := newProvenanceFixture(t)
+	ctx := context.Background()
+	idOf := func(token string) int64 {
+		_, cred, err := f.srv.store.ResolveRequestCredential(ctx, token)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cred.ID
+	}
+	ticket := func(token string) context.Context {
+		return withCredentialID(withCaller(ctx, f.joiner), idOf(token))
+	}
+	for _, tt := range []struct {
+		name   string
+		srv    *Server
+		ctx    context.Context
+		status int
+		code   string
+	}{
+		{"ticket for a self-made credential", f.srv, ticket(f.joinerTok), http.StatusOK, ""},
+		{"ticket for an act-as credential", f.srv, ticket(f.actAsTok), http.StatusForbidden, schema.ErrorCodeOwnSignInRequired},
+		{"ticket for someone else's sign-in link", f.srv, ticket(f.linkTok), http.StatusForbidden, schema.ErrorCodeOwnSignInRequired},
+		{"ticket for a migrated credential", f.srv, ticket(f.migratedTok), http.StatusForbidden, schema.ErrorCodeOwnSignInRequired},
+		{"credential the store does not know", f.srv, withCredentialID(withCaller(ctx, f.joiner), 1<<40), http.StatusUnauthorized, ""},
+		{"previewed, on a self-made credential", f.srv,
+			withPreview(withRequestCredential(withCaller(ctx, f.joiner), store.RequestCredential{ID: idOf(f.rootTok), SelfMade: true}),
+				previewContext{Actor: f.root, Target: f.joiner}),
+			http.StatusForbidden, schema.ErrorCodeOwnSignInRequired},
+		{"caller and no credential", f.srv, withCaller(ctx, f.joiner), http.StatusUnauthorized, ""},
+		{"no caller", f.srv, ctx, http.StatusUnauthorized, ""},
+		{"authentication off", newTestServer(t), ctx, http.StatusOK, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ran := false
+			h := tt.srv.requireSelfMadeCredential(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				ran = true
+				w.WriteHeader(http.StatusOK)
+			}))
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil).WithContext(tt.ctx))
+			if rec.Code != tt.status || ran != (tt.status == http.StatusOK) {
+				t.Fatalf("answer %d (ran %v), want %d", rec.Code, ran, tt.status)
+			}
+			if tt.code != "" {
+				if got := answerCode(t, rec); got != tt.code {
+					t.Errorf("code %q, want %q", got, tt.code)
+				}
+			}
+		})
+	}
+}
+
+// Every route in selfMadeCredentialRoutes is registered, authenticated
+// (an exempt route has no credential to judge), not previewable (a preview
+// reads as the member, which these routes exist to prevent) and out of the
+// setup scope.
+func TestSelfMadeCredentialRoutes(t *testing.T) {
+	srv := newTestServerWithConfig(t, Config{AuthMode: AuthRequired})
+	for pattern := range selfMadeCredentialRoutes {
+		rt, ok := srv.routeByPattern[pattern]
+		switch {
+		case !ok:
+			t.Errorf("%s is listed but not registered", pattern)
+		case rt.access == accessExempt:
+			t.Errorf("%s is exempt", pattern)
+		case rt.previewable:
+			t.Errorf("%s is previewable", pattern)
+		case setupScopeRoutes[pattern]:
+			t.Errorf("%s is in the setup scope", pattern)
+		}
+	}
+}

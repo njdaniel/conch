@@ -522,6 +522,9 @@ var routeExpectations = map[string]routeExpectation{
 	"POST /v1/sign-in-links/mine":        {classAuth, "/v1/sign-in-links/mine", `{}`, 403},
 	"GET /v1/sign-in-links/mine":         {classAuth, "/v1/sign-in-links/mine", "", 200},
 	"DELETE /v1/sign-in-links/mine/{id}": {classAuth, "/v1/sign-in-links/mine/9999", "", 404},
+	// Account notices (issue #2042): the caller's own; a credential without notices sees none.
+	"GET /v1/notices/mine":         {classAuth, "/v1/notices/mine", "", 200},
+	"DELETE /v1/notices/mine/{id}": {classAuth, "/v1/notices/mine/9999", "", 404},
 	// Operator sign-in and setup (issue #709) take a code or a token, so
 	// every caller gets the 403 of the password routes before anything is
 	// read: https_required to this fixture's plain HTTP, and

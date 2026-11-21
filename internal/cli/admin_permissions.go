@@ -19,9 +19,9 @@ import (
 
 // permissionDescriptions are the permissions whose effect is worth saying in
 // full wherever the document is shown (ADR-014, design §4). The words are the
-// design's.
+// design's; act_as_members adds what it no longer reaches (issue #2042).
 var permissionDescriptions = map[schema.Permission]string{
-	schema.PermActAsMembers: "can sign in as, and post as, any member who isn't an owner",
+	schema.PermActAsMembers: "can sign in as, and post as, any member who isn't an owner. It does not reach their direct messages or calls directly; a password set or reset through a link someone else made is recorded in the audit log and the member is told",
 	schema.PermReadAuditLog: "sees every member and every private channel's name in the audit trail",
 }
 

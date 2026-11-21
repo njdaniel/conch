@@ -43,6 +43,8 @@ func RunWithStdin(ctx context.Context, args []string, stdin io.Reader, stdout, s
 	switch args[0] {
 	case "remove-message":
 		return runRemoveOwnMessage(ctx, args[1:], stdin, stdout, stderr)
+	case "dm":
+		return runDM(ctx, args[1:], stdout, stderr)
 	case "send":
 		return runSend(ctx, args[1:], stderr)
 	case "tail":
@@ -97,6 +99,8 @@ func RunWithStdin(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		return runDeviceLink(ctx, args[1:], stdin, stdout, stderr)
 	case "whoami":
 		return runWhoAmI(ctx, args[1:], stdout, stderr)
+	case "notices":
+		return runNotices(ctx, args[1:], stdout)
 	case "rename":
 		return runRename(ctx, args[1:], stdout, stderr)
 	case "block":
@@ -123,7 +127,7 @@ Usage:
   conch send [--server <url>] [--author <id>] [--net <name> | --to <id>[,<id>...] | --reply-to <id>] <channel> <text>
   conch remove-message [--server <url>] [--yes] <channel> <message-id>
   conch tail [--server <url>] <channel>
-  conch thread [--server <url>] <channel> <id>
+`+dmUsage+`  conch thread [--server <url>] <channel> <id>
   conch search [--server <url>] [--limit <n>] [--before <id>] <channel> <words...>
   conch react [--server <url>] [--json] [--text] <channel> <message-id> <emoji-or-shortcode>
   conch unreact [--server <url>] [--json] [--text] <channel> <message-id> <emoji-or-shortcode>
@@ -214,6 +218,8 @@ Usage:
   conch device-link create [--server <url>] [--label <label>] [--expires <duration|RFC3339>]
   conch device-link list [--server <url>] [--json]
   conch device-link close [--server <url>] <id>
+  conch notices [--server <url>] [--json]
+  conch notices dismiss [--server <url>] <id>
   conch rename [--server <url>] [--json] <name>
   conch block list|add <principal id>|remove <principal id> [--server <url>] [--json]
   conch report [--server <url>] [--did <text>] [--expected <text>] [--happened <text>] [--often every_time|sometimes|once] [--yes] [--json]
@@ -338,7 +344,9 @@ Scope:
   once for manual entry. password set (--proof: an operator's enrollment
   code), change and reset (an operator's reset link) change passwords;
   device-link create prints a one-use link that signs your account in on
-  another device. admin join and admin guest are the operator's: the joining
+  another device. notices lists what the server tells you about your own
+  account, such as a password set through a link someone else made, and
+  notices dismiss clears one; they show only on a sign-in you made yourself. admin join and admin guest are the operator's: the joining
   policy, the guest list, ending one visit or all (dry run without --yes)
   and a permit that lets one guest create an account.
 

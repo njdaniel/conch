@@ -731,3 +731,71 @@ func runDeviceLinkRead(ctx context.Context, verb string, args []string, stdout i
 	}
 	return nil
 }
+
+// runNotices lists the caller's own account notices (GET /v1/notices/mine,
+// issue #2042), or dismisses one (notices dismiss <id>). A notice says a
+// password was set through a link another principal made; the server shows
+// it only on a sign-in the member made themselves, so an empty list on a
+// sign-in someone else made is not a statement that there are none.
+func runNotices(ctx context.Context, args []string, stdout io.Writer) error {
+	verb := "list"
+	if len(args) > 0 && args[0] == "dismiss" {
+		verb, args = "dismiss", args[1:]
+	}
+	command := "notices"
+	if verb == "dismiss" {
+		command = "notices dismiss"
+	}
+	fs := quietFlags(command)
+	server := fs.String("server", serverEnvOr(), "conchd HTTP URL")
+	asJSON := fs.Bool("json", false, "print the server's document")
+	pos, err := parseQuiet(fs, command, args)
+	if err != nil {
+		return err
+	}
+	client, _, err := NewAuthClient(*server)
+	if err != nil {
+		return err
+	}
+	if verb == "dismiss" {
+		if len(pos) != 1 {
+			return errors.New("cli: notices dismiss: expected <id>")
+		}
+		id, err := strconv.ParseInt(pos[0], 10, 64)
+		if err != nil || id <= 0 {
+			return errors.New("cli: notices dismiss: id must be a positive integer")
+		}
+		if err := client.DismissAccountNotice(ctx, id); err != nil {
+			return olderServer(err, "notices")
+		}
+		if *asJSON {
+			return nil
+		}
+		_, err = fmt.Fprintf(stdout, "dismissed notice %d\n", id)
+		return err
+	}
+	if len(pos) != 0 {
+		return errors.New("cli: notices takes no arguments")
+	}
+	resp, err := client.ListAccountNotices(ctx)
+	if err != nil {
+		return olderServer(err, "notices")
+	}
+	if *asJSON {
+		if resp.Notices == nil {
+			resp.Notices = []schema.AccountNoticeV1{}
+		}
+		return json.NewEncoder(stdout).Encode(resp)
+	}
+	for _, n := range resp.Notices {
+		line := fmt.Sprintf("%d %s", n.ID, safeLine(string(n.Kind)))
+		if n.Kind == schema.AccountNoticeKindPasswordSetByLink {
+			line = fmt.Sprintf("%d your password was set through a link made by %s, at %s (conch notices dismiss %d)",
+				n.ID, safeLine(n.ByName), formatTimestamp(n.At), n.ID)
+		}
+		if _, err := fmt.Fprintln(stdout, line); err != nil {
+			return err
+		}
+	}
+	return nil
+}

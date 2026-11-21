@@ -161,6 +161,7 @@ func validOf[T interface {
 // validators is every vocabulary type with a Valid method. TestVocabularies
 // fails if a type has one and is not listed here.
 var validators = map[string]func(string) bool{
+	"AccountNoticeKind":        validOf[AccountNoticeKind](),
 	"ActivityKind":             validOf[ActivityKind](),
 	"AgentTier":                validOf[AgentTier](),
 	"ApprovalState":            validOf[ApprovalState](),

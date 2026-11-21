@@ -206,11 +206,11 @@ const (
 	// it also answers a send to a nonexistent conversation. It says nothing
 	// about anyone but the caller and the server.
 	ErrorCodeDMsOff = "dms_off"
-	// ErrorCodeOwnSignInRequired: the caller's credential is an act-as
-	// credential (HTTP 403, ADR-017 Decision 7), so every DM route refuses
-	// it, reads included. It says nothing about anyone but the caller; the
-	// person signs in themself.
-	ErrorCodeOwnSignInRequired = "own_sign_in_required"
+	// ErrorCodeOwnSignInRequired (declared in auth.go, issue #2042) is also
+	// a DM refusal: the caller's credential is an act-as credential (HTTP
+	// 403, ADR-017 Decision 7), so every DM route refuses it, reads
+	// included. It says nothing about anyone but the caller; the person
+	// signs in themself.
 	// ErrorCodeDMNonceConflict: a send repeats a client nonce the author used
 	// in this conversation inside DMClientNonceWindowSeconds, with a
 	// different body or ordered file_ids from the original request (HTTP
