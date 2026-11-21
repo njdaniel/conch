@@ -9,7 +9,7 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { EndpointError, SUN_PATH_MAX_BYTES, listen, profileDir, runtimeDir, sweep, type Listening } from '../../main/voice/endpoint.ts';
+import { EndpointError, listen, profileDir, runtimeDir, sweep, type Listening } from '../../main/voice/endpoint.ts';
 import { fixture, readFixture, scratch, until, type Scratch } from './voice-support.ts';
 
 let s: Scratch;
@@ -104,7 +104,7 @@ describe('the socket', () => {
 
   it('a path past 107 bytes is refused before anything listens', async () => {
     let p = s.run;
-    while (Buffer.byteLength(join(p, 'conch', 'p1', 'e-xxxxxxxxxxxx.sock')) <= SUN_PATH_MAX_BYTES) {
+    while (Buffer.byteLength(join(p, 'conch', 'p1', 'e-xxxxxxxxxxxx.sock')) <= 107) {
       p = join(p, 'd'.repeat(10));
       mkdirSync(p, { mode: 0o700 });
     }

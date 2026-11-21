@@ -1,7 +1,7 @@
 // Starting conch-voice from Electron main (issue #948; linux-desktop.md §4.1,
-// §5.3; issue #1785, windows-desktop.md §3.3, §3.7 for Windows): which
-// executable may be run, the environment it gets, and the one way it is
-// spawned.
+// §5.3; issue #1785, windows-desktop.md §3.3, §3.7; issue #1743,
+// macos-desktop.md §3.2): which executable may be run, the environment it
+// gets, and the one way it is spawned.
 //
 // Input: the app's resources directory, main's own environment, the
 // profile's configuration directory, the token, the nonce and the events
@@ -58,11 +58,11 @@ export function helperName(platform: NodeJS.Platform = process.platform): string
 const TOKEN_ENV = 'CONCH_TOKEN';
 const CONFIG_DIR_ENV = 'CONCH_CONFIG_DIR';
 
-// PASSED_THROUGH is every variable of main's environment the helper may see,
-// by exact name: what it and its libraries need to find the user's home,
-// PipeWire and the locale. None carries authority. Everything else, every
-// CONCH_ variable, RUST_LOG, LD_PRELOAD and NODE_OPTIONS included, is absent
-// by construction. The list is confirmed against a real session in #922 LE1.
+// PASSED_THROUGH names the Linux variables the helper may inherit: what it
+// and its libraries need to find the user's home, PipeWire and the locale.
+// None carries authority. All other parent variables, including CONCH_*,
+// RUST_LOG, LD_PRELOAD and NODE_OPTIONS, are absent by construction. The
+// list is confirmed against a real session in #922 LE1.
 export const PASSED_THROUGH: readonly string[] = [
   'HOME',
   'XDG_RUNTIME_DIR',
@@ -73,6 +73,10 @@ export const PASSED_THROUGH: readonly string[] = [
   'LC_CTYPE',
   'LC_MESSAGES',
 ];
+
+// macOS passes the user's home, temporary directory and locale by exact
+// name (macos-desktop.md §3.2). DYLD_* variables are outside this list.
+const PASSED_THROUGH_MACOS: readonly string[] = ['HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE', 'LC_MESSAGES'];
 
 // PASSED_THROUGH_WINDOWS is the same on Windows (windows-desktop.md §3.7),
 // matched without regard to case: what the helper and its libraries need to
@@ -222,7 +226,7 @@ async function safeAncestors(dir: string, own: number): Promise<void> {
 }
 
 export interface HelperEnvInput {
-  // main's own environment, read only for the names in PASSED_THROUGH.
+  // Main's own environment, read only for the platform's allowlisted names.
   readonly parent: NodeJS.ProcessEnv;
   // The profile's configuration directory: device settings never cross
   // accounts.
@@ -256,7 +260,7 @@ function baseEnv(parent: NodeJS.ProcessEnv, configDir: string, platform: NodeJS.
       if (value !== undefined && value !== '' && !value.includes('\0')) env[canonical] = value;
     }
   } else {
-    for (const name of PASSED_THROUGH) {
+    for (const name of platform === 'darwin' ? PASSED_THROUGH_MACOS : PASSED_THROUGH) {
       const value = parent[name];
       if (value !== undefined && value !== '' && !value.includes('\0')) env[name] = value;
     }
@@ -286,9 +290,8 @@ export function helperEnv(input: HelperEnvInput): Record<string, string> {
 }
 
 // helperArgs is the command line: `managed --events-pipe <name>` and the
-// caller's extra helper options. The name is a socket path on Linux and a
-// pipe name on Windows; neither is a secret. None may hold the token or the
-// nonce.
+// caller's extra helper options. The name is a Unix socket path or a Windows
+// pipe name and carries no secret. No argument may hold the token or nonce.
 export function helperArgs(endpointName: string, extra: readonly string[], secrets: readonly string[]): string[] {
   const args = [VOICE_CONTROL_SUBCOMMAND, VOICE_CONTROL_PIPE_FLAG, endpointName, ...extra];
   for (const a of args) {
