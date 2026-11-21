@@ -74,4 +74,10 @@ An emulator run is never device evidence.
     adb reverse tcp:8081 tcp:8081                   # Metro
     adb reverse tcp:<conchd> tcp:<conchd>; adb reverse tcp:<livekit> tcp:<livekit>; adb reverse tcp:<livekit+1> tcp:<livekit+1>
 
+### Away with the camera on (#1972)
+
+    REPRO_PRINCIPAL=<id> ./repro-background-camera.sh 5
+
+With the app signed in on the channel's Voice view and someone else in the room (a second person matters: without one the race below was not seen), each run joins if needed, turns the camera on, presses HOME for 40 s, returns, and watches for 45 s, sampling the person's LiveKit participant SIDs every 3 s and reading LiveKit's log (`docker logs`) for when each connection started and why each ended. The race it checks: on return the SDK restarts its connection, a leave from the server lands mid-restart and the Room reports a disconnect, the app rejoins, and the SDK's restart (which closing does not stop in livekit-client 2.22.3) used to rejoin too and displace it. A run passes only if it saw that set up (the connection from before HOME ended and at least two new ones started; otherwise it says NO-RACE and fails), no sample had two connections at once, no connection started after the one the phone settled on, that one did not end, and the settled samples agree with `conch voice status` and the app's "In voice". On exit, an interrupt included, it turns off the camera and leaves voice if it turned them on. A dropped room is now sealed against rejoining and settles (`src/logic/dropped.ts`, `src/app/engine.ts`) before the next connection is opened.
+
 The debug build allows cleartext, so it sends the password (and a sign-in link's code) over a typed `http://` origin: for the development profile only. The release build refuses cleartext. The app takes the server address typed in at sign-in; the bearer is held in memory only. The SDK needs `LiveKitReactNative.setup` in `MainApplication.onCreate` (native). Audio focus is owned by `ConchVoiceModule.kt`, and the SDK is told not to manage it, so a focus loss reaches the lifecycle.
