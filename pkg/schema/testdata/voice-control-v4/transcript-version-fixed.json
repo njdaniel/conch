@@ -51,7 +51,11 @@
         "ptt": "unknown",
         "share_audio": "off",
         "share_audio_muted": false,
-        "share_audio_sources": 0
+        "share_audio_sources": 0,
+        "processing": {
+          "echo_cancellation": false,
+          "noise_suppression": false
+        }
       }
     },
     {
@@ -85,7 +89,11 @@
         "ptt": "ready",
         "share_audio": "off",
         "share_audio_muted": false,
-        "share_audio_sources": 0
+        "share_audio_sources": 0,
+        "processing": {
+          "echo_cancellation": false,
+          "noise_suppression": false
+        }
       }
     },
     {
@@ -105,7 +113,11 @@
         "ptt": "ready",
         "share_audio": "off",
         "share_audio_muted": false,
-        "share_audio_sources": 0
+        "share_audio_sources": 0,
+        "processing": {
+          "echo_cancellation": true,
+          "noise_suppression": true
+        }
       }
     },
     {
@@ -146,7 +158,11 @@
         "ptt": "ready",
         "share_audio": "off",
         "share_audio_muted": false,
-        "share_audio_sources": 0
+        "share_audio_sources": 0,
+        "processing": {
+          "echo_cancellation": false,
+          "noise_suppression": false
+        }
       }
     },
     {

@@ -1,5 +1,5 @@
 {
-  "description": "Conformance cases for the v4 readers' one change: the start's destination, a channel or a private call attempt, exactly one. The forms and results are those of voice-control/cases.json. Every other rule of v3 stands unchanged in v4; the v3 conformance cases (voice-control-v3/) are run against the v4 readers, rewritten to v4, by TestVoiceControlV4IsV3.",
+  "description": "Conformance cases for the v4 start destination: a channel or a private call attempt, exactly one. The forms and results are those of voice-control/cases.json. TestVoiceControlV4IsV3 also runs the v3 conformance cases through the v4 readers with processing added to state.",
   "cases": [
     {
       "name": "start naming a channel",

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -11,8 +12,8 @@ import (
 	"testing"
 )
 
-// voiceControlV4Dir is the fixture directory of v4 (issue #2039). v4 is v3
-// plus the start's destination; v3's own tests and fixtures are untouched.
+// voiceControlV4Dir is the fixture directory for the v4 start, diagnostics
+// and call quality (issues #2039 and #2085).
 const voiceControlV4Dir = "voice-control-v4"
 
 // voiceControlV4Hello is the hello of a helper that offers v1 to v4: v1, in
@@ -32,7 +33,6 @@ func readVoiceControlV4Fixture(t voiceControlReporter, name string) []byte {
 }
 
 // voiceControlV4Golden is every single-message fixture of v4 and its type.
-// Besides the start, they are v3's, with v4's schema name.
 var voiceControlV4Golden = func() []struct {
 	file  string
 	event bool
@@ -48,7 +48,16 @@ var voiceControlV4Golden = func() []struct {
 	rows := []row{
 		{file: "command-start-channel.json", new: func() any { return new(VoiceControlStartV4) }},
 		{file: "command-start-call.json", new: func() any { return new(VoiceControlStartV4) }},
+		{file: "command-set-diagnostics.json", new: func() any { return new(VoiceControlSetDiagnosticsV4) }},
+		{file: "command-set-diagnostics-off.json", new: func() any { return new(VoiceControlSetDiagnosticsV4) }},
+		{file: "command-get-call-quality.json", new: func() any { return new(VoiceControlGetCallQualityV4) }},
 		{file: voiceControlV4Hello, event: true, v1: true, new: func() any { return new(VoiceControlHelloV1) }},
+		{file: "event-levels.json", event: true, new: func() any { return new(VoiceControlLevelsV4) }},
+		{file: "event-gate-event.json", event: true, new: func() any { return new(VoiceControlGateEventV4) }},
+		{file: "event-gate-event-close.json", event: true, new: func() any { return new(VoiceControlGateEventV4) }},
+		{file: "event-call-quality.json", event: true, new: func() any { return new(VoiceControlCallQualityV4) }},
+		{file: "event-call-quality-partial.json", event: true, new: func() any { return new(VoiceControlCallQualityV4) }},
+		{file: "event-call-quality-no-metrics.json", event: true, new: func() any { return new(VoiceControlCallQualityV4) }},
 	}
 	for _, g := range voiceControlV3Golden {
 		if g.file == "command-start.json" || g.v1 {
@@ -107,6 +116,10 @@ func (c VoiceControlCommandV4) message() VoiceControlMessage {
 		return c.SetShareAudio
 	case c.SetShareAudioMute != nil:
 		return c.SetShareAudioMute
+	case c.SetDiagnostics != nil:
+		return c.SetDiagnostics
+	case c.GetCallQuality != nil:
+		return c.GetCallQuality
 	}
 	return nil
 }
@@ -119,18 +132,30 @@ func (e VoiceControlEventV4) message() VoiceControlMessage {
 		return e.State
 	case e.ProtocolError != nil:
 		return e.ProtocolError
+	case e.Levels != nil:
+		return e.Levels
+	case e.GateEvent != nil:
+		return e.GateEvent
+	case e.CallQuality != nil:
+		return e.CallQuality
 	}
 	return nil
 }
 
-func (e VoiceControlEventV4) kind() VoiceControlEventKind {
+func (e VoiceControlEventV4) kind() VoiceControlEventKindV4 {
 	switch {
 	case e.Ack != nil:
-		return VoiceControlEventAck
+		return VoiceControlEventV4Ack
 	case e.State != nil:
-		return VoiceControlEventState
+		return VoiceControlEventV4State
 	case e.ProtocolError != nil:
-		return VoiceControlEventProtocolError
+		return VoiceControlEventV4ProtocolError
+	case e.Levels != nil:
+		return VoiceControlEventV4Levels
+	case e.GateEvent != nil:
+		return VoiceControlEventV4GateEvent
+	case e.CallQuality != nil:
+		return VoiceControlEventV4CallQuality
 	}
 	return e.Unknown
 }
@@ -182,24 +207,25 @@ func TestVoiceControlV4GoldenFixtures(t *testing.T) {
 	}
 }
 
-// TestVoiceControlV4GoldenFixturesAreV3s pins "everything else carried over
-// unchanged" on the fixtures: every v3 single-message fixture but the start
-// has a v4 twin that is the same bytes with the schema name changed, and the
-// v4 set holds nothing else but the two starts and the hello.
+// TestVoiceControlV4GoldenFixturesAreV3s pins the carried-over wire shapes:
+// v3 states gain processing and every v3 command still has a v4 equivalent.
 func TestVoiceControlV4GoldenFixturesAreV3s(t *testing.T) {
-	twins := 0
 	for _, g := range voiceControlV3Golden {
 		if g.file == "command-start.json" || g.v1 {
 			continue
 		}
-		twins++
 		want := strings.ReplaceAll(string(readVoiceControlV3Fixture(t, g.file)), VoiceControlSchemaV3, VoiceControlSchemaV4)
-		if got := string(readVoiceControlV4Fixture(t, g.file)); got != want {
-			t.Errorf("%s differs from its v3 fixture beyond the schema name", g.file)
+		got := string(readVoiceControlV4Fixture(t, g.file))
+		if strings.HasPrefix(g.file, "event-state-") {
+			prefix, _, found := strings.Cut(got, ",\n  \"processing\": ")
+			if !found {
+				t.Fatalf("%s has no processing field", g.file)
+			}
+			got = prefix + "\n}\n"
 		}
-	}
-	if len(voiceControlV4Golden) != twins+3 {
-		t.Errorf("%d golden fixtures, want the %d twins and the three of v4's own", len(voiceControlV4Golden), twins)
+		if got != want {
+			t.Errorf("%s differs from its v3 fixture beyond the v4 additions", g.file)
+		}
 	}
 	start := strings.ReplaceAll(string(readVoiceControlV3Fixture(t, "command-start.json")), VoiceControlSchemaV3, VoiceControlSchemaV4)
 	if string(readVoiceControlV4Fixture(t, "command-start-channel.json")) != start {
@@ -207,18 +233,24 @@ func TestVoiceControlV4GoldenFixturesAreV3s(t *testing.T) {
 	}
 }
 
+var voiceControlV4CaseFiles = []string{"cases.json", "cases-diagnostics-and-call-quality.json"}
+
 func loadVoiceControlV4Cases(t *testing.T) []voiceControlCase {
 	t.Helper()
-	var doc struct {
-		Cases []voiceControlCase `json:"cases"`
+	var cases []voiceControlCase
+	for _, name := range voiceControlV4CaseFiles {
+		var doc struct {
+			Cases []voiceControlCase `json:"cases"`
+		}
+		if err := json.Unmarshal(readVoiceControlV4Fixture(t, name), &doc); err != nil {
+			t.Fatal(err)
+		}
+		if len(doc.Cases) == 0 {
+			t.Fatalf("%s: no cases", name)
+		}
+		cases = append(cases, doc.Cases...)
 	}
-	if err := json.Unmarshal(readVoiceControlV4Fixture(t, "cases.json"), &doc); err != nil {
-		t.Fatal(err)
-	}
-	if len(doc.Cases) == 0 {
-		t.Fatal("no cases")
-	}
-	return doc.Cases
+	return cases
 }
 
 // checkVoiceControlV4Case holds what a v4 reader made of a line to what a
@@ -267,7 +299,7 @@ func checkVoiceControlV4Case(t *testing.T, c voiceControlCase, line []byte) {
 	}
 }
 
-// TestVoiceControlV4Cases runs the destination cases.
+// TestVoiceControlV4Cases runs the destination, diagnostics and call quality cases.
 func TestVoiceControlV4Cases(t *testing.T) {
 	names := map[string]bool{}
 	for _, c := range loadVoiceControlV4Cases(t) {
@@ -283,7 +315,7 @@ func TestVoiceControlV4Cases(t *testing.T) {
 }
 
 // TestVoiceControlV4IsV3 runs every conformance case of v3 against the v4
-// readers, written under v4's name, with the result the v3 readers gave it.
+// readers under v4's name and with processing added to states.
 // So no rule of v3's was lost or changed on the way, in either direction,
 // without a list of rules kept twice. The cases that are about a line of
 // another version being refused are left out: what a v3 line is to a v4
@@ -296,6 +328,19 @@ func TestVoiceControlV4IsV3(t *testing.T) {
 			continue
 		}
 		line = bytes.ReplaceAll(line, []byte(VoiceControlSchemaV3), []byte(VoiceControlSchemaV4))
+		// Keep malformed framing as is, and preserve the original fields
+		// of well-framed states, including their original number spellings.
+		if fields, err := decodeVoiceControlObject(line); err == nil && c.Direction == "event" {
+			if kind, _ := fieldString(fields, "kind"); kind == "state" {
+				const processing = `,"processing":{"echo_cancellation":false,"noise_suppression":false}`
+				if c.LineFile == "lines/event-at-limit.txt" {
+					// Shorten the ignored padding to keep this case at the limit.
+					line = bytes.Replace(line, bytes.Repeat([]byte("x"), len(processing)), nil, 1)
+				}
+				line = append(bytes.TrimSuffix(bytes.TrimSpace(line), []byte("}")),
+					[]byte(processing+"}")...)
+			}
+		}
 		tried++
 		t.Run(c.Direction+": "+c.Name, func(t *testing.T) {
 			checkVoiceControlV4Case(t, c, line)
@@ -379,7 +424,7 @@ func TestVoiceControlV4Hello(t *testing.T) {
 	}
 }
 
-// TestVoiceControlCommandKindV4 pins the kinds: v3's nine and no others.
+// TestVoiceControlCommandKindV4 pins the carried-over kinds and the v4 additions.
 func TestVoiceControlCommandKindV4(t *testing.T) {
 	for _, k := range []VoiceControlCommandKindV3{
 		VoiceControlCommandV3Start, VoiceControlCommandV3SetMute, VoiceControlCommandV3SetDeafen,
@@ -388,6 +433,11 @@ func TestVoiceControlCommandKindV4(t *testing.T) {
 	} {
 		if !VoiceControlCommandKindV4(k).Valid() {
 			t.Errorf("%q is a kind of v3 and not of v4", k)
+		}
+	}
+	for _, k := range []VoiceControlCommandKindV4{VoiceControlCommandV4SetDiagnostics, VoiceControlCommandV4GetCallQuality} {
+		if !k.Valid() || VoiceControlCommandKindV3(k).Valid() {
+			t.Errorf("%q must be a v4-only command kind", k)
 		}
 	}
 	for _, k := range []VoiceControlCommandKindV4{"", "place_call", "set_volume", "START"} {
@@ -401,12 +451,30 @@ func TestVoiceControlCommandKindV4(t *testing.T) {
 }
 
 // voiceControlV4Transcripts is every transcript of v4 and the version its
-// session is in.
+// session is in, except the diagnostics and quality transcript checked below.
 var voiceControlV4Transcripts = map[string]string{
 	"transcript-negotiation-v4-owner-channel.json": VoiceControlSchemaV4,
 	"transcript-negotiation-v4-owner-call.json":    VoiceControlSchemaV4,
 	"transcript-negotiation-v3-owner.json":         VoiceControlSchemaV3,
+	"transcript-negotiation-v3-helper.json":        VoiceControlSchemaV3,
 	"transcript-version-fixed.json":                VoiceControlSchemaV4,
+}
+
+const voiceControlV4DiagnosticsTranscript = "transcript-diagnostics-and-call-quality.json"
+
+func readVoiceControlV4Transcript(t *testing.T, name string) []voiceControlStep {
+	t.Helper()
+	var doc struct {
+		Description string             `json:"description"`
+		Steps       []voiceControlStep `json:"steps"`
+	}
+	if err := json.Unmarshal(readVoiceControlV4Fixture(t, name), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Description == "" || len(doc.Steps) == 0 {
+		t.Fatal("transcript needs a description and steps")
+	}
+	return doc.Steps
 }
 
 // TestVoiceControlV4Transcripts reads every line of every transcript with the
@@ -416,21 +484,12 @@ var voiceControlV4Transcripts = map[string]string{
 func TestVoiceControlV4Transcripts(t *testing.T) {
 	for name, version := range voiceControlV4Transcripts {
 		t.Run(name, func(t *testing.T) {
-			var doc struct {
-				Description string             `json:"description"`
-				Steps       []voiceControlStep `json:"steps"`
-			}
-			if err := json.Unmarshal(readVoiceControlV4Fixture(t, name), &doc); err != nil {
-				t.Fatal(err)
-			}
-			if doc.Description == "" {
-				t.Error("no description")
-			}
+			steps := readVoiceControlV4Transcript(t, name)
 			callStarts := 0
 			shareRequest := -1
 			versionMismatch := false
-			asV3 := make([]voiceControlStep, len(doc.Steps))
-			for i, s := range doc.Steps {
+			asV3 := make([]voiceControlStep, len(steps))
+			for i, s := range steps {
 				asV3[i] = s
 				isShareOutcome := shareRequest >= 0 && i == shareRequest+1
 				if isShareOutcome && (s.From != "helper" || len(s.Message) == 0) {
@@ -445,15 +504,25 @@ func TestVoiceControlV4Transcripts(t *testing.T) {
 					t.Fatal(err)
 				}
 				schema, _ := fieldString(f, "schema")
+				if version == VoiceControlSchemaV3 {
+					if _, present := f["processing"]; present {
+						t.Errorf("step %d: processing on a v3 line", i)
+					}
+				}
 				switch {
 				case s.From == "helper" && schema == VoiceControlSchemaV1:
-					if _, err := ParseVoiceControlEvent(line); err != nil {
-						t.Errorf("step %d: %v", i, err)
+					ev, err := ParseVoiceControlEvent(line)
+					if err != nil || ev.Hello == nil || i != 0 {
+						t.Fatalf("step %d: want initial hello, got %v", i, err)
+					}
+					if ev.Hello.Offers(VoiceControlSchemaV4) != (name != "transcript-negotiation-v3-helper.json") {
+						t.Errorf("step %d: unexpected versions in hello: %v", i, ev.Hello.Versions)
 					}
 				case s.From == "helper" && schema == version:
 					if version == VoiceControlSchemaV3 {
-						if _, err := ParseVoiceControlEventV3(line); err != nil {
-							t.Fatalf("step %d: %v", i, err)
+						ev, err := ParseVoiceControlEventV3(line)
+						if err != nil || ev.Unknown != "" {
+							t.Fatalf("step %d: want a recognized v3 event, got %q, %v", i, ev.Unknown, err)
 						}
 						break
 					}
@@ -488,7 +557,7 @@ func TestVoiceControlV4Transcripts(t *testing.T) {
 						shareRequest = i
 					}
 				case s.From == "owner" && version == VoiceControlSchemaV4 && schema == VoiceControlSchemaV3:
-					if name != "transcript-version-fixed.json" || i != len(doc.Steps)-4 {
+					if name != "transcript-version-fixed.json" || i != len(steps)-4 {
 						t.Fatalf("step %d: expected the wrong-version command immediately before the failure sequence", i)
 					}
 					_, err := ParseVoiceControlCommandV4(line)
@@ -512,6 +581,7 @@ func TestVoiceControlV4Transcripts(t *testing.T) {
 				}
 				if version == VoiceControlSchemaV4 && schema == VoiceControlSchemaV4 {
 					f["schema"] = json.RawMessage(`"` + VoiceControlSchemaV3 + `"`)
+					delete(f, "processing")
 				}
 				if schema == VoiceControlSchemaV1 {
 					// The hello is carried over as it is.
@@ -537,19 +607,75 @@ func TestVoiceControlV4Transcripts(t *testing.T) {
 			}
 		})
 	}
-	files, err := filepath.Glob(filepath.Join("testdata", voiceControlV4Dir, "transcript-*.json"))
-	if err != nil {
-		t.Fatal(err)
+}
+
+// TestVoiceControlV4DiagnosticsTranscript pins the opt-in diagnostics and
+// the per-participant sample followed by an ack, including the empty sample.
+func TestVoiceControlV4DiagnosticsTranscript(t *testing.T) {
+	steps := readVoiceControlV4Transcript(t, voiceControlV4DiagnosticsTranscript)
+	hello, err := ParseVoiceControlEvent(compactVoiceControlFixture(t, steps[0].Message))
+	if err != nil || hello.Hello == nil || !hello.Hello.Offers(VoiceControlSchemaV4) || steps[0].From != "helper" {
+		t.Fatalf("want the v1 hello offering v4, got %v", err)
 	}
-	if len(files) != len(voiceControlV4Transcripts) {
-		t.Errorf("%d transcripts on disk, %d listed", len(files), len(voiceControlV4Transcripts))
+
+	var observed []string
+	var lastID int64
+	lastSeq := hello.Hello.Seq
+	for i, step := range steps[1:] {
+		if len(step.Message) == 0 {
+			continue
+		}
+		line := compactVoiceControlFixture(t, step.Message)
+		if step.From == "owner" {
+			cmd, err := ParseVoiceControlCommandV4(line)
+			if err != nil || cmd.ID() != lastID+1 {
+				t.Fatalf("step %d: want v4 command %d, got %d, %v", i+1, lastID+1, cmd.ID(), err)
+			}
+			lastID = cmd.ID()
+			switch {
+			case cmd.SetDiagnostics != nil:
+				observed = append(observed, fmt.Sprintf("diagnostics %d %t", lastID, cmd.SetDiagnostics.On))
+			case cmd.GetCallQuality != nil:
+				observed = append(observed, fmt.Sprintf("poll %d", lastID))
+			}
+			continue
+		}
+		ev, err := ParseVoiceControlEventV4(line)
+		if step.From != "helper" || err != nil || ev.Unknown != "" || ev.Seq != lastSeq+1 {
+			t.Fatalf("step %d: want v4 helper event %d, got %s at %d, %v", i+1, lastSeq+1, ev.kind(), ev.Seq, err)
+		}
+		lastSeq = ev.Seq
+		switch {
+		case ev.Levels != nil:
+			observed = append(observed, fmt.Sprintf("levels %t", ev.Levels.GateOpen))
+		case ev.GateEvent != nil:
+			observed = append(observed, fmt.Sprintf("gate %t %s", ev.GateEvent.Open, ev.GateEvent.Why))
+		case ev.CallQuality != nil:
+			observed = append(observed, fmt.Sprintf("quality %d", ev.CallQuality.PrincipalID))
+		case ev.Ack != nil:
+			observed = append(observed, fmt.Sprintf("ack %d %t", ev.Ack.ID, ev.Ack.OK))
+		}
+	}
+	want := []string{
+		"ack 1 true",
+		"diagnostics 2 true", "ack 2 true", "levels false", "gate true sound", "levels true", "gate false hang_ended",
+		"diagnostics 3 false", "ack 3 true",
+		"poll 4", "quality 9", "quality 11", "quality 14", "ack 4 true",
+		"poll 5", "ack 5 true",
+		"ack 6 true",
+	}
+	if !reflect.DeepEqual(observed, want) {
+		t.Errorf("got %q, want %q", observed, want)
 	}
 }
 
 // TestVoiceControlV4FixturesAreAllClaimed: every file under the v4 directory
 // is read by a test.
 func TestVoiceControlV4FixturesAreAllClaimed(t *testing.T) {
-	claimed := map[string]bool{"cases.json": true}
+	claimed := map[string]bool{voiceControlV4DiagnosticsTranscript: true}
+	for _, name := range voiceControlV4CaseFiles {
+		claimed[name] = true
+	}
 	for _, g := range voiceControlV4Golden {
 		claimed[g.file] = true
 	}
@@ -563,7 +689,7 @@ func TestVoiceControlV4FixturesAreAllClaimed(t *testing.T) {
 	}
 }
 
-// voiceControlV4Types is every message type of v4.
+// voiceControlV4Types holds the messages carried over from v3.
 var voiceControlV4Types = []VoiceControlMessage{
 	VoiceControlStartV4{}, VoiceControlSetMuteV4{}, VoiceControlGetStateV4{}, VoiceControlLeaveV4{}, VoiceControlSetDeafenV4{},
 	VoiceControlSetDevicesV4{}, VoiceControlSetTalkModeV4{},
@@ -571,12 +697,9 @@ var voiceControlV4Types = []VoiceControlMessage{
 	VoiceControlAckV4{}, VoiceControlStateV4{}, VoiceControlProtocolErrorV4{},
 }
 
-// TestVoiceControlV4FieldsAreV3sPlusTheDestination: each v4 message has the
-// JSON fields of its v3 twin, by name, type and order, except the start,
-// which has "call" beside "channel" and a channel that may be absent. No field
-// of any v4 message is named like a credential or a room, and no fake secret
-// is in any fixture.
-func TestVoiceControlV4FieldsAreV3sPlusTheDestination(t *testing.T) {
+// TestVoiceControlV4FieldSets pins the legacy and new wire fields by name,
+// type and order. It also checks the field names and fixtures for secrets.
+func TestVoiceControlV4FieldSets(t *testing.T) {
 	v3 := []any{
 		VoiceControlStartV3{}, VoiceControlSetMuteV3{}, VoiceControlGetStateV3{}, VoiceControlLeaveV3{}, VoiceControlSetDeafenV3{},
 		VoiceControlSetDevicesV3{}, VoiceControlSetTalkModeV3{},
@@ -586,13 +709,21 @@ func TestVoiceControlV4FieldsAreV3sPlusTheDestination(t *testing.T) {
 	fields := func(v any) (names []string) {
 		rt := reflect.TypeOf(v)
 		for i := 0; i < rt.NumField(); i++ {
-			typ := strings.ReplaceAll(rt.Field(i).Type.String(), "V3", "V4")
+			typ := strings.TrimPrefix(rt.Field(i).Type.String(), "schema.")
 			names = append(names, rt.Field(i).Tag.Get("json")+" "+typ)
 		}
 		return names
 	}
 	for i, m := range voiceControlV4Types {
 		got, want := fields(m), fields(v3[i])
+		for j, field := range want {
+			switch field {
+			case "kind VoiceControlEventKind":
+				want[j] = "kind VoiceControlEventKindV4"
+			case "kind VoiceControlCommandKindV3":
+				want[j] = "kind VoiceControlCommandKindV4"
+			}
+		}
 		if _, isStart := m.(VoiceControlStartV4); isStart {
 			// channel stays (now optional) and call is new, after it.
 			var withCall []string
@@ -609,8 +740,35 @@ func TestVoiceControlV4FieldsAreV3sPlusTheDestination(t *testing.T) {
 				}
 			}
 		}
+		if _, isState := m.(VoiceControlStateV4); isState {
+			want = append(want, "processing VoiceControlProcessingV4")
+		}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("%T has the fields %v, want %v", m, got, want)
+		}
+	}
+	newShapes := []struct {
+		value any
+		want  []string
+	}{
+		{VoiceControlSetDiagnosticsV4{}, []string{"schema string", "kind VoiceControlCommandKindV4", "id int64", "on bool"}},
+		{VoiceControlGetCallQualityV4{}, []string{"schema string", "kind VoiceControlCommandKindV4", "id int64"}},
+		{VoiceControlProcessingV4{}, []string{"echo_cancellation bool", "noise_suppression bool"}},
+		{VoiceControlLevelsV4{}, []string{
+			"schema string", "kind VoiceControlEventKindV4", "seq int64",
+			"level_db int64", "open_threshold_db int64", "close_threshold_db int64", "gate_open bool",
+		}},
+		{VoiceControlGateEventV4{}, []string{
+			"schema string", "kind VoiceControlEventKindV4", "seq int64", "at_ms int64", "open bool", "why VoiceControlGateWhyV4",
+		}},
+		{VoiceControlCallQualityV4{}, []string{
+			"schema string", "kind VoiceControlEventKindV4", "seq int64", "principal_id int64",
+			"loss_basis_points,omitempty *int64", "jitter_us,omitempty *int64", "rtt_us,omitempty *int64",
+		}},
+	}
+	for _, shape := range newShapes {
+		if got := fields(shape.value); !reflect.DeepEqual(got, shape.want) {
+			t.Errorf("%T has the fields %v, want %v", shape.value, got, shape.want)
 		}
 	}
 	var sensitive struct {
@@ -620,7 +778,14 @@ func TestVoiceControlV4FieldsAreV3sPlusTheDestination(t *testing.T) {
 	if err := json.Unmarshal(readVoiceControlV3Fixture(t, "sensitive.json"), &sensitive); err != nil {
 		t.Fatal(err)
 	}
+	shapes := make([]any, 0, len(voiceControlV4Types)+len(newShapes))
 	for _, m := range voiceControlV4Types {
+		shapes = append(shapes, m)
+	}
+	for _, shape := range newShapes {
+		shapes = append(shapes, shape.value)
+	}
+	for _, m := range shapes {
 		rt := reflect.TypeOf(m)
 		for i := 0; i < rt.NumField(); i++ {
 			name := strings.Split(rt.Field(i).Tag.Get("json"), ",")[0]

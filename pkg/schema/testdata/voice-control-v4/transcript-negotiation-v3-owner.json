@@ -1,5 +1,5 @@
 {
-  "description": "The same helper, offering v1 to v4, with an owner that speaks v3 and not v4: it writes its start in v3 and the whole session is v3, exactly as before v4 existed. A v3 start names a channel and a v3 session has no call.",
+  "description": "The helper offers v1 to v4 and the v3 owner writes its start in v3. The session uses v3 throughout, so neither side sends the v4 diagnostics or call-quality messages and the state carries no processing field.",
   "steps": [
     {
       "from": "helper",

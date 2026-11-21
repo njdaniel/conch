@@ -13,5 +13,9 @@
   "ptt": "ready",
   "share_audio": "on",
   "share_audio_muted": true,
-  "share_audio_sources": 2
+  "share_audio_sources": 2,
+  "processing": {
+    "echo_cancellation": true,
+    "noise_suppression": true
+  }
 }

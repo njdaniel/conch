@@ -14,5 +14,9 @@
   "share_audio": "unavailable",
   "share_audio_muted": false,
   "share_audio_problem": "no_pipewire",
-  "share_audio_sources": 0
+  "share_audio_sources": 0,
+  "processing": {
+    "echo_cancellation": true,
+    "noise_suppression": true
+  }
 }

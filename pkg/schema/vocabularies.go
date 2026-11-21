@@ -108,12 +108,13 @@ var Vocabularies = map[string][]string{
 		VoiceControlCommandV3SetDevices, VoiceControlCommandV3SetTalkMode,
 		VoiceControlCommandV3SetShareAudio, VoiceControlCommandV3SetShareAudioMute,
 	),
-	// v4's, likewise (voice_control_v4.go): v3's nine words, in v4's own type.
+	// v4's, likewise (voice_control_v4.go), with diagnostics and call quality.
 	"VoiceControlCommandKindV4": values(
 		VoiceControlCommandV4Start, VoiceControlCommandV4SetMute, VoiceControlCommandV4SetDeafen,
 		VoiceControlCommandV4GetState, VoiceControlCommandV4Leave,
 		VoiceControlCommandV4SetDevices, VoiceControlCommandV4SetTalkMode,
 		VoiceControlCommandV4SetShareAudio, VoiceControlCommandV4SetShareAudioMute,
+		VoiceControlCommandV4SetDiagnostics, VoiceControlCommandV4GetCallQuality,
 	),
 	"VoiceControlCredential": values(VoiceControlCredentialStored, VoiceControlCredentialEnv),
 	"VoiceControlErrorCode": values(
@@ -123,6 +124,14 @@ var Vocabularies = map[string][]string{
 	),
 	"VoiceControlEventKind": values(
 		VoiceControlEventHello, VoiceControlEventAck, VoiceControlEventState, VoiceControlEventProtocolError,
+	),
+	"VoiceControlEventKindV4": values(
+		VoiceControlEventV4Ack, VoiceControlEventV4State, VoiceControlEventV4ProtocolError,
+		VoiceControlEventV4Levels, VoiceControlEventV4GateEvent, VoiceControlEventV4CallQuality,
+	),
+	"VoiceControlGateWhyV4": values(
+		VoiceControlGateWhyV4Sound, VoiceControlGateWhyV4HangEnded, VoiceControlGateWhyV4Mute,
+		VoiceControlGateWhyV4Lock, VoiceControlGateWhyV4Limit,
 	),
 	"VoiceControlPipeKind": values(VoiceControlPipeKindAttached),
 	"VoiceControlPlayback": values(VoiceControlPlaybackOff, VoiceControlPlaybackOn, VoiceControlPlaybackUnavailable),

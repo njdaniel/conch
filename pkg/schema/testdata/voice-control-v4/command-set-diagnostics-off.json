@@ -1,0 +1,6 @@
+{
+  "schema": "conch.voice_control.v4",
+  "kind": "set_diagnostics",
+  "id": 3,
+  "on": false
+}

@@ -1,6 +1,7 @@
 package schema
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -16,12 +17,9 @@ const VoiceControlV4RoomNamePattern = `^[a-z0-9-]{0,31}-[a-z2-7]{26}$`
 var voiceControlV4RoomName = regexp.MustCompile(VoiceControlV4RoomNamePattern)
 
 // Version 4 of the managed voice-helper control protocol (issue #2039, child
-// of #2013; ADR-017 Decision 13, Nick's decision 12 of 2026-11-19). A v4
-// session is a v3 session that may be about a private call instead of a
-// channel. The desktop renderer never holds the voice grant, and the helper
-// joins only through the server's session route; a private call has no
-// channel, so v3's start, which names one, cannot tell the helper to join a
-// call. v4 changes exactly that one thing:
+// of #2013; ADR-017 Decision 13, Nick's decision 12 of 2026-11-19, and
+// issue #2085). A v4 session extends v3 with a private-call destination,
+// microphone diagnostics and call quality:
 //
 //   - the start names its destination, which is either a channel (the
 //     "channel" field, as in v3) or a private call attempt (the "call"
@@ -29,12 +27,15 @@ var voiceControlV4RoomName = regexp.MustCompile(VoiceControlV4RoomNamePattern)
 //     of PrivateCallV1 (private_call.go): never a room name, a token or a
 //     URL. The helper asks the server for its media grant for that attempt
 //     (POST /v1/calls/{call}/session) with the credential the start names,
-//     and the server answers only the side that attempt selected.
+//     and the server answers only the side that attempt selected. The
+//     desktop renderer never holds the voice grant.
+//   - set_diagnostics enables or disables levels and gate_event reports.
+//     The state also reports which microphone processing is active.
+//   - get_call_quality asks for a sample of per-participant statistics,
+//     delivered as call_quality events followed by the command's ack.
 //
-// Everything else is v3 carried over unchanged: the other six commands, the
-// ack, the state with its four share-audio fields, the protocol error, the
-// framing, the bounds and the rules of every field. A call carries no camera
-// and no screen share, so a call session has no share for a share's sound to
+// v4 carries over the framing, ack, protocol error and share-audio fields
+// of v3. A call carries no camera or screen share, so it has no share for sound to
 // belong to: set_share_audio is answered as it is for a session with no
 // companion, with an ok ack and share_audio unavailable with the problem
 // unsupported (VoiceControlShareAudioProblemUnsupported), never a new word.
@@ -46,32 +47,28 @@ var voiceControlV4RoomName = regexp.MustCompile(VoiceControlV4RoomNamePattern)
 // owner never offers a v4 start to a helper whose hello lacks v4, and the
 // version is fixed for the session by the start's schema: a line of another
 // version in a v4 session is unknown_schema, and a v4 line in a v1, v2 or v3
-// session is too. A channel start is valid in v4 and not in v3 only in that
-// its schema is v4; a call start is valid in v4 alone.
+// session is too. The new commands, events and processing field are used
+// only in a v4 session. A call start is valid in v4 alone.
 //
 // v1, v2 and v3 are published and do not change. The vocabularies v4 shares
-// with them stay as they are: the share-audio words, the events' kinds, the
-// error codes and every vocabulary of the state. Only the command kinds are a
-// vocabulary of their own (VoiceControlCommandKindV4), for the reason v3's
-// are (voice_control_v3.go). v4 lines are read with ParseVoiceControlCommandV4
-// and ParseVoiceControlEventV4, by the framing rules of the others. The golden
-// and conformance fixtures are in testdata/voice-control-v4/.
+// with them stay as they are: the share-audio words, the error codes and
+// every vocabulary of the state. v4 has its own command and event kinds
+// so the older readers keep their published vocabularies. v4 lines are read
+// with ParseVoiceControlCommandV4 and ParseVoiceControlEventV4, by the framing
+// rules of the others. The fixtures are in testdata/voice-control-v4/.
 
 // VoiceControlSchemaV4 is the versioned name every v4 message but the hello
 // carries in its schema field. The hello is always v1 (VoiceControlHelloV1).
 const VoiceControlSchemaV4 = "conch.voice_control.v4"
 
-// VoiceControlCommandKindV4 is what a v4 command asks for. They are v3's nine
-// words, with v3's meaning; v4 adds no kind, only the start's destination. It is listed
-// in full, as each version's kinds are (VoiceControlCommandKind.KnownIn), and
-// is a type of its own so that the published v1 and v2 commands, whose kind
-// is a VoiceControlCommandKind, accept nothing they did not accept before.
+// VoiceControlCommandKindV4 is what a v4 command asks for. It has v3's
+// nine kinds plus the two commands for microphone diagnostics and call quality.
 type VoiceControlCommandKindV4 string
 
 // Voice control command kinds of v4.
 const (
 	// VoiceControlCommandV4Start is the first command and the only one
-	// before it: join this channel on this server as this principal.
+	// before it: join this channel or private call on this server as this principal.
 	VoiceControlCommandV4Start VoiceControlCommandKindV4 = "start"
 	// VoiceControlCommandV4SetMute sets whether the user is muted.
 	VoiceControlCommandV4SetMute VoiceControlCommandKindV4 = "set_mute"
@@ -93,6 +90,10 @@ const (
 	// VoiceControlCommandV4SetShareAudioMute mutes the published share-audio
 	// track, or unmutes it.
 	VoiceControlCommandV4SetShareAudioMute VoiceControlCommandKindV4 = "set_share_audio_mute"
+	// VoiceControlCommandV4SetDiagnostics enables or disables microphone diagnostics.
+	VoiceControlCommandV4SetDiagnostics VoiceControlCommandKindV4 = "set_diagnostics"
+	// VoiceControlCommandV4GetCallQuality requests a sample of call quality.
+	VoiceControlCommandV4GetCallQuality VoiceControlCommandKindV4 = "get_call_quality"
 )
 
 // Valid reports whether k is a command kind of v4. A kind of no version, or
@@ -102,11 +103,41 @@ func (k VoiceControlCommandKindV4) Valid() bool {
 	case VoiceControlCommandV4Start, VoiceControlCommandV4SetMute, VoiceControlCommandV4SetDeafen,
 		VoiceControlCommandV4GetState, VoiceControlCommandV4Leave,
 		VoiceControlCommandV4SetDevices, VoiceControlCommandV4SetTalkMode,
-		VoiceControlCommandV4SetShareAudio, VoiceControlCommandV4SetShareAudioMute:
+		VoiceControlCommandV4SetShareAudio, VoiceControlCommandV4SetShareAudioMute,
+		VoiceControlCommandV4SetDiagnostics, VoiceControlCommandV4GetCallQuality:
 		return true
 	default:
 		return false
 	}
+}
+
+// VoiceControlEventKindV4 is what an event reports after negotiation.
+// The initial hello uses VoiceControlEventKind and VoiceControlSchemaV1.
+type VoiceControlEventKindV4 string
+
+// Voice control event kinds of v4.
+const (
+	VoiceControlEventV4Ack           VoiceControlEventKindV4 = "ack"
+	VoiceControlEventV4State         VoiceControlEventKindV4 = "state"
+	VoiceControlEventV4ProtocolError VoiceControlEventKindV4 = "protocol_error"
+	VoiceControlEventV4Levels        VoiceControlEventKindV4 = "levels"
+	VoiceControlEventV4GateEvent     VoiceControlEventKindV4 = "gate_event"
+	VoiceControlEventV4CallQuality   VoiceControlEventKindV4 = "call_quality"
+)
+
+// Valid reports whether k is an event kind of v4.
+func (k VoiceControlEventKindV4) Valid() bool {
+	switch k {
+	case VoiceControlEventV4Ack, VoiceControlEventV4State, VoiceControlEventV4ProtocolError,
+		VoiceControlEventV4Levels, VoiceControlEventV4GateEvent, VoiceControlEventV4CallQuality:
+		return true
+	default:
+		return false
+	}
+}
+
+func validateVoiceControlEventHeadV4(schema string, kind, want VoiceControlEventKindV4, seq int64) error {
+	return validateVoiceControlEventHeadIn(VoiceControlSchemaV4, schema, VoiceControlEventKind(kind), VoiceControlEventKind(want), seq)
 }
 
 // VoiceControlStartV4 is the first command of a v4 session (owner to
@@ -384,25 +415,57 @@ func (c VoiceControlSetShareAudioMuteV4) Validate() error {
 	return validateVoiceControlCommandHeadV4(c.Schema, c.Kind, VoiceControlCommandV4SetShareAudioMute, c.ID)
 }
 
+// VoiceControlSetDiagnosticsV4 sets whether the helper emits microphone
+// levels and gate transitions. These reports are off at the start of a session.
+type VoiceControlSetDiagnosticsV4 struct {
+	Schema string                    `json:"schema"`
+	Kind   VoiceControlCommandKindV4 `json:"kind"`
+	ID     int64                     `json:"id"`
+	On     bool                      `json:"on"`
+}
+
+func (VoiceControlSetDiagnosticsV4) voiceControlMessage() {}
+
+// Validate reports whether the command is well-formed.
+func (c VoiceControlSetDiagnosticsV4) Validate() error {
+	return validateVoiceControlCommandHeadV4(c.Schema, c.Kind, VoiceControlCommandV4SetDiagnostics, c.ID)
+}
+
+// VoiceControlGetCallQualityV4 asks for one call_quality event per sampled
+// participant, then the existing ack for this command. An empty sample is
+// valid and returns the ack alone.
+type VoiceControlGetCallQualityV4 struct {
+	Schema string                    `json:"schema"`
+	Kind   VoiceControlCommandKindV4 `json:"kind"`
+	ID     int64                     `json:"id"`
+}
+
+func (VoiceControlGetCallQualityV4) voiceControlMessage() {}
+
+// Validate reports whether the command is well-formed.
+func (c VoiceControlGetCallQualityV4) Validate() error {
+	return validateVoiceControlCommandHeadV4(c.Schema, c.Kind, VoiceControlCommandV4GetCallQuality, c.ID)
+}
+
 // VoiceControlAckV4 is VoiceControlAckV1 in v4. The refusals are v2's.
 // invalid is also the answer to a set_share_audio that breaks its shape, and
 // stopping to set_share_audio and set_share_audio_mute after leaving began,
 // as it is to set_mute. A share-audio command the helper cannot carry out is
 // not refused here: its ack is ok and the state says why not.
 type VoiceControlAckV4 struct {
-	Schema string                `json:"schema"`
-	Kind   VoiceControlEventKind `json:"kind"`
-	Seq    int64                 `json:"seq"`
-	ID     int64                 `json:"id"`
-	OK     bool                  `json:"ok"`
-	Error  VoiceControlErrorCode `json:"error,omitempty"`
+	Schema string                  `json:"schema"`
+	Kind   VoiceControlEventKindV4 `json:"kind"`
+	Seq    int64                   `json:"seq"`
+	ID     int64                   `json:"id"`
+	OK     bool                    `json:"ok"`
+	Error  VoiceControlErrorCode   `json:"error,omitempty"`
 }
 
 func (VoiceControlAckV4) voiceControlMessage() {}
 
 // Validate reports whether the ack is well-formed.
 func (a VoiceControlAckV4) Validate() error {
-	if err := validateVoiceControlEventHeadIn(VoiceControlSchemaV4, a.Schema, a.Kind, VoiceControlEventAck, a.Seq); err != nil {
+	if err := validateVoiceControlEventHeadV4(a.Schema, a.Kind, VoiceControlEventV4Ack, a.Seq); err != nil {
 		return err
 	}
 	if err := validateVoiceControlID(a.ID); err != nil {
@@ -418,13 +481,12 @@ func (a VoiceControlAckV4) Validate() error {
 }
 
 // VoiceControlStateV4 is a whole-state snapshot (helper to owner): every
-// field of VoiceControlStateV2, unchanged and by the same rules, and four
-// about the sound of the owner's screen share. It names no device, no
-// application and no stream.
+// field of VoiceControlStateV3, plus the active microphone processing.
+// It names no device, application or stream.
 type VoiceControlStateV4 struct {
-	Schema string                `json:"schema"`
-	Kind   VoiceControlEventKind `json:"kind"`
-	Seq    int64                 `json:"seq"`
+	Schema string                  `json:"schema"`
+	Kind   VoiceControlEventKindV4 `json:"kind"`
+	Seq    int64                   `json:"seq"`
 	// Phase, Reason and RetryInMS are as in VoiceControlStateV2.
 	Phase     VoiceControlPhase  `json:"phase"`
 	Reason    VoiceControlReason `json:"reason,omitempty"`
@@ -467,6 +529,15 @@ type VoiceControlStateV4 struct {
 	// Always written. A count and nothing else: which applications is never
 	// said.
 	ShareAudioSources int64 `json:"share_audio_sources"`
+	// Processing is always written, even when the module is off.
+	Processing VoiceControlProcessingV4 `json:"processing"`
+}
+
+// VoiceControlProcessingV4 reports the processing the helper is running.
+// The echo module performs both echo cancellation and noise suppression.
+type VoiceControlProcessingV4 struct {
+	EchoCancellation bool `json:"echo_cancellation"`
+	NoiseSuppression bool `json:"noise_suppression"`
 }
 
 func (VoiceControlStateV4) voiceControlMessage() {}
@@ -480,7 +551,7 @@ func (s VoiceControlStateV4) Blocks(b VoiceControlBlock) bool {
 // versions share.
 func (s VoiceControlStateV4) v2() VoiceControlStateV2 {
 	return VoiceControlStateV2{
-		Schema: VoiceControlSchemaV2, Kind: s.Kind, Seq: s.Seq,
+		Schema: VoiceControlSchemaV2, Kind: VoiceControlEventKind(s.Kind), Seq: s.Seq,
 		Phase: s.Phase, Reason: s.Reason, RetryInMS: s.RetryInMS,
 		Capture: s.Capture, Playback: s.Playback, Transmitting: s.Transmitting,
 		Muted: s.Muted, Deafened: s.Deafened, Blocked: s.Blocked,
@@ -502,10 +573,10 @@ func (s VoiceControlStateV4) v2() VoiceControlStateV2 {
 //     must agree, as muted and its block reason must;
 //   - share_audio_muted may be true whatever the rest says.
 //
-// Nothing ties the four to transmitting, to blocked or to capture: the
-// share's sound is not the microphone.
+// The share-audio fields are independent of transmitting, blocked and capture.
+// The processing flags agree because the echo module performs both jobs.
 func (s VoiceControlStateV4) Validate() error {
-	if err := validateVoiceControlEventHeadIn(VoiceControlSchemaV4, s.Schema, s.Kind, VoiceControlEventState, s.Seq); err != nil {
+	if err := validateVoiceControlEventHeadV4(s.Schema, s.Kind, VoiceControlEventV4State, s.Seq); err != nil {
 		return err
 	}
 	if err := s.v2().Validate(); err != nil {
@@ -544,26 +615,139 @@ func (s VoiceControlStateV4) Validate() error {
 	if s.ShareAudio != VoiceControlShareAudioOn && s.ShareAudioSources != 0 {
 		return errors.New("schema: voice control state share_audio_sources must be 0 unless share_audio is on")
 	}
+	if s.Processing.EchoCancellation != s.Processing.NoiseSuppression {
+		return errors.New("schema: voice control state echo_cancellation and noise_suppression must agree")
+	}
 	return nil
 }
 
 // VoiceControlProtocolErrorV4 is VoiceControlProtocolErrorV1 in v4.
 type VoiceControlProtocolErrorV4 struct {
-	Schema string                `json:"schema"`
-	Kind   VoiceControlEventKind `json:"kind"`
-	Seq    int64                 `json:"seq"`
-	Code   VoiceControlErrorCode `json:"code"`
+	Schema string                  `json:"schema"`
+	Kind   VoiceControlEventKindV4 `json:"kind"`
+	Seq    int64                   `json:"seq"`
+	Code   VoiceControlErrorCode   `json:"code"`
 }
 
 func (VoiceControlProtocolErrorV4) voiceControlMessage() {}
 
 // Validate reports whether the event is well-formed.
 func (e VoiceControlProtocolErrorV4) Validate() error {
-	if err := validateVoiceControlEventHeadIn(VoiceControlSchemaV4, e.Schema, e.Kind, VoiceControlEventProtocolError, e.Seq); err != nil {
+	if err := validateVoiceControlEventHeadV4(e.Schema, e.Kind, VoiceControlEventV4ProtocolError, e.Seq); err != nil {
 		return err
 	}
 	if !e.Code.Fatal() {
 		return fmt.Errorf("schema: voice control protocol_error code %q is not one that ends the session", e.Code)
+	}
+	return nil
+}
+
+// VoiceControlLevelsV4 reports microphone diagnostics. While enabled, the
+// helper sends these events at least 100 ms apart. Levels and thresholds are
+// integer dBFS, with the measured level clamped to -96 through 0.
+type VoiceControlLevelsV4 struct {
+	Schema           string                  `json:"schema"`
+	Kind             VoiceControlEventKindV4 `json:"kind"`
+	Seq              int64                   `json:"seq"`
+	LevelDB          int64                   `json:"level_db"`
+	OpenThresholdDB  int64                   `json:"open_threshold_db"`
+	CloseThresholdDB int64                   `json:"close_threshold_db"`
+	GateOpen         bool                    `json:"gate_open"`
+}
+
+func (VoiceControlLevelsV4) voiceControlMessage() {}
+
+// Validate reports whether the event is well-formed.
+func (e VoiceControlLevelsV4) Validate() error {
+	if err := validateVoiceControlEventHeadV4(e.Schema, e.Kind, VoiceControlEventV4Levels, e.Seq); err != nil {
+		return err
+	}
+	if e.LevelDB < -96 || e.LevelDB > 0 {
+		return errors.New("schema: voice control levels level_db must be -96 to 0")
+	}
+	return nil
+}
+
+// VoiceControlGateWhyV4 is the reason reported for a gate transition.
+type VoiceControlGateWhyV4 string
+
+// Gate transition reasons of v4.
+const (
+	VoiceControlGateWhyV4Sound     VoiceControlGateWhyV4 = "sound"
+	VoiceControlGateWhyV4HangEnded VoiceControlGateWhyV4 = "hang_ended"
+	VoiceControlGateWhyV4Mute      VoiceControlGateWhyV4 = "mute"
+	VoiceControlGateWhyV4Lock      VoiceControlGateWhyV4 = "lock"
+	VoiceControlGateWhyV4Limit     VoiceControlGateWhyV4 = "limit"
+)
+
+// Valid reports whether why is a gate transition reason of v4.
+func (why VoiceControlGateWhyV4) Valid() bool {
+	switch why {
+	case VoiceControlGateWhyV4Sound, VoiceControlGateWhyV4HangEnded, VoiceControlGateWhyV4Mute,
+		VoiceControlGateWhyV4Lock, VoiceControlGateWhyV4Limit:
+		return true
+	default:
+		return false
+	}
+}
+
+// VoiceControlGateEventV4 reports each open or close while diagnostics are
+// enabled. AtMS is the time of the transition in milliseconds.
+type VoiceControlGateEventV4 struct {
+	Schema string                  `json:"schema"`
+	Kind   VoiceControlEventKindV4 `json:"kind"`
+	Seq    int64                   `json:"seq"`
+	AtMS   int64                   `json:"at_ms"`
+	Open   bool                    `json:"open"`
+	Why    VoiceControlGateWhyV4   `json:"why"`
+}
+
+func (VoiceControlGateEventV4) voiceControlMessage() {}
+
+// Validate reports whether the event is well-formed.
+func (e VoiceControlGateEventV4) Validate() error {
+	if err := validateVoiceControlEventHeadV4(e.Schema, e.Kind, VoiceControlEventV4GateEvent, e.Seq); err != nil {
+		return err
+	}
+	if e.AtMS < 0 || e.AtMS > VoiceControlMaxID {
+		return errors.New("schema: voice control gate_event at_ms must be a nonnegative safe integer")
+	}
+	if !e.Why.Valid() {
+		return errors.New("schema: voice control gate_event why is not recognized")
+	}
+	return nil
+}
+
+// VoiceControlCallQualityV4 is one participant's sample, keyed by the
+// principal ID in the owner's roster. Each metric is omitted when unavailable.
+type VoiceControlCallQualityV4 struct {
+	Schema          string                  `json:"schema"`
+	Kind            VoiceControlEventKindV4 `json:"kind"`
+	Seq             int64                   `json:"seq"`
+	PrincipalID     int64                   `json:"principal_id"`
+	LossBasisPoints *int64                  `json:"loss_basis_points,omitempty"` // From packet counter deltas.
+	JitterUS        *int64                  `json:"jitter_us,omitempty"`
+	RTTUS           *int64                  `json:"rtt_us,omitempty"` // Round-trip time to the SFU.
+}
+
+func (VoiceControlCallQualityV4) voiceControlMessage() {}
+
+// Validate reports whether the event is well-formed.
+func (e VoiceControlCallQualityV4) Validate() error {
+	if err := validateVoiceControlEventHeadV4(e.Schema, e.Kind, VoiceControlEventV4CallQuality, e.Seq); err != nil {
+		return err
+	}
+	if e.PrincipalID <= 0 {
+		return errors.New("schema: voice control call_quality principal_id must be positive")
+	}
+	if e.LossBasisPoints != nil && (*e.LossBasisPoints < 0 || *e.LossBasisPoints > 10000) {
+		return errors.New("schema: voice control call_quality loss_basis_points must be 0 to 10000")
+	}
+	if e.JitterUS != nil && (*e.JitterUS < 0 || *e.JitterUS > VoiceControlMaxID) {
+		return errors.New("schema: voice control call_quality jitter_us must be a nonnegative safe integer")
+	}
+	if e.RTTUS != nil && (*e.RTTUS < 0 || *e.RTTUS > VoiceControlMaxID) {
+		return errors.New("schema: voice control call_quality rtt_us must be a nonnegative safe integer")
 	}
 	return nil
 }
@@ -592,6 +776,8 @@ type VoiceControlCommandV4 struct {
 	SetTalkMode       *VoiceControlSetTalkModeV4
 	SetShareAudio     *VoiceControlSetShareAudioV4
 	SetShareAudioMute *VoiceControlSetShareAudioMuteV4
+	SetDiagnostics    *VoiceControlSetDiagnosticsV4
+	GetCallQuality    *VoiceControlGetCallQualityV4
 }
 
 // VoiceControlEventV4 is one v4 event as ParseVoiceControlEventV4 read it:
@@ -604,13 +790,16 @@ type VoiceControlEventV4 struct {
 	Ack           *VoiceControlAckV4
 	State         *VoiceControlStateV4
 	ProtocolError *VoiceControlProtocolErrorV4
-	Unknown       VoiceControlEventKind
+	Levels        *VoiceControlLevelsV4
+	GateEvent     *VoiceControlGateEventV4
+	CallQuality   *VoiceControlCallQualityV4
+	Unknown       VoiceControlEventKindV4
 }
 
 // ParseVoiceControlCommandV4 reads one v4 command line, without its line
 // feed, with the framing rules and the order of refusals of
-// ParseVoiceControlCommand. A v1 or a v2 line is unknown_schema: a helper
-// that offers the three versions reads its first line with the reader of the
+// ParseVoiceControlCommand. A v1, v2 or v3 line is unknown_schema: a helper
+// that offers multiple versions reads its first line with the reader of the
 // version that line names, and from then on with that reader alone.
 //
 // The optional fields have the rule of every optional string
@@ -679,6 +868,12 @@ func ParseVoiceControlCommandV4(line []byte) (VoiceControlCommandV4, error) {
 	case VoiceControlCommandV4SetShareAudioMute:
 		c := &VoiceControlSetShareAudioMuteV4{Schema: VoiceControlSchemaV4, Kind: kind, ID: id, Muted: r.bool("muted")}
 		cmd.SetShareAudioMute, msg = c, c
+	case VoiceControlCommandV4SetDiagnostics:
+		c := &VoiceControlSetDiagnosticsV4{Schema: VoiceControlSchemaV4, Kind: kind, ID: id, On: r.bool("on")}
+		cmd.SetDiagnostics, msg = c, c
+	case VoiceControlCommandV4GetCallQuality:
+		c := &VoiceControlGetCallQualityV4{Schema: VoiceControlSchemaV4, Kind: kind, ID: id}
+		cmd.GetCallQuality, msg = c, c
 	default:
 		// Valid lists v4's kinds in full, so this is unreachable unless the
 		// two fall out of step; refuse rather than read a nil message.
@@ -714,6 +909,10 @@ func (c VoiceControlCommandV4) Kind() VoiceControlCommandKindV4 {
 		return VoiceControlCommandV4SetShareAudio
 	case c.SetShareAudioMute != nil:
 		return VoiceControlCommandV4SetShareAudioMute
+	case c.SetDiagnostics != nil:
+		return VoiceControlCommandV4SetDiagnostics
+	case c.GetCallQuality != nil:
+		return VoiceControlCommandV4GetCallQuality
 	}
 	return ""
 }
@@ -739,6 +938,10 @@ func (c VoiceControlCommandV4) ID() int64 {
 		return c.SetShareAudio.ID
 	case c.SetShareAudioMute != nil:
 		return c.SetShareAudioMute.ID
+	case c.SetDiagnostics != nil:
+		return c.SetDiagnostics.ID
+	case c.GetCallQuality != nil:
+		return c.GetCallQuality.ID
 	}
 	return 0
 }
@@ -750,9 +953,9 @@ func (c VoiceControlCommandV4) ID() int64 {
 // kind this version does not know comes back with Seq and Unknown set, to
 // skip.
 //
-// The three share-audio fields that are always written are required: a state
-// without one is invalid, not read as off. share_audio_problem is an optional
-// word, and one that is present and empty is invalid.
+// The three always-written share-audio fields and processing are required
+// on state. share_audio_problem is an optional word, and one that is present
+// and empty is invalid.
 func ParseVoiceControlEventV4(line []byte) (VoiceControlEventV4, error) {
 	fields, err := decodeVoiceControlObject(line)
 	if err != nil {
@@ -769,24 +972,20 @@ func ParseVoiceControlEventV4(line []byte) (VoiceControlEventV4, error) {
 	if !ok || kindText == "" {
 		return VoiceControlEventV4{}, voiceControlErr(VoiceControlErrorInvalid, 0, "kind must be a string")
 	}
-	kind := VoiceControlEventKind(kindText)
+	kind := VoiceControlEventKindV4(kindText)
 	ev := VoiceControlEventV4{Seq: seq}
-	if !kind.Valid() {
-		ev.Unknown = kind
-		return ev, nil
-	}
 	r := fieldReader{fields: fields}
 	var msg VoiceControlMessage
 	switch kind {
-	case VoiceControlEventHello:
+	case VoiceControlEventKindV4(VoiceControlEventHello):
 		return VoiceControlEventV4{}, voiceControlErr(VoiceControlErrorInvalid, 0, "a hello is written in %s only", VoiceControlSchemaV1)
-	case VoiceControlEventAck:
+	case VoiceControlEventV4Ack:
 		a := &VoiceControlAckV4{Schema: VoiceControlSchemaV4, Kind: kind, Seq: seq}
 		a.ID = r.int("id")
 		a.OK = r.bool("ok")
 		a.Error = VoiceControlErrorCode(r.optWord("error"))
 		ev.Ack, msg = a, a
-	case VoiceControlEventState:
+	case VoiceControlEventV4State:
 		s := &VoiceControlStateV4{Schema: VoiceControlSchemaV4, Kind: kind, Seq: seq}
 		s.Phase = VoiceControlPhase(r.str("phase"))
 		s.Reason = VoiceControlReason(r.optWord("reason"))
@@ -809,11 +1008,35 @@ func ParseVoiceControlEventV4(line []byte) (VoiceControlEventV4, error) {
 		s.ShareAudioMuted = r.bool("share_audio_muted")
 		s.ShareAudioProblem = VoiceControlShareAudioProblem(r.optWord("share_audio_problem"))
 		s.ShareAudioSources = r.int("share_audio_sources")
+		s.Processing = readVoiceControlProcessingV4(&r)
 		ev.State, msg = s, s
-	case VoiceControlEventProtocolError:
+	case VoiceControlEventV4ProtocolError:
 		e := &VoiceControlProtocolErrorV4{Schema: VoiceControlSchemaV4, Kind: kind, Seq: seq}
 		e.Code = VoiceControlErrorCode(r.str("code"))
 		ev.ProtocolError, msg = e, e
+	case VoiceControlEventV4Levels:
+		e := &VoiceControlLevelsV4{Schema: VoiceControlSchemaV4, Kind: kind, Seq: seq}
+		e.LevelDB = r.int("level_db")
+		e.OpenThresholdDB = r.int("open_threshold_db")
+		e.CloseThresholdDB = r.int("close_threshold_db")
+		e.GateOpen = r.bool("gate_open")
+		ev.Levels, msg = e, e
+	case VoiceControlEventV4GateEvent:
+		e := &VoiceControlGateEventV4{Schema: VoiceControlSchemaV4, Kind: kind, Seq: seq}
+		e.AtMS = r.int("at_ms")
+		e.Open = r.bool("open")
+		e.Why = VoiceControlGateWhyV4(r.str("why"))
+		ev.GateEvent, msg = e, e
+	case VoiceControlEventV4CallQuality:
+		e := &VoiceControlCallQualityV4{Schema: VoiceControlSchemaV4, Kind: kind, Seq: seq}
+		e.PrincipalID = r.int("principal_id")
+		e.LossBasisPoints = r.optInt("loss_basis_points")
+		e.JitterUS = r.optInt("jitter_us")
+		e.RTTUS = r.optInt("rtt_us")
+		ev.CallQuality, msg = e, e
+	default:
+		ev.Unknown = kind
+		return ev, nil
 	}
 	if r.missing != "" {
 		return VoiceControlEventV4{}, voiceControlErr(VoiceControlErrorInvalid, 0, "%s needs %s of the right type", kind, r.missing)
@@ -822,4 +1045,27 @@ func ParseVoiceControlEventV4(line []byte) (VoiceControlEventV4, error) {
 		return VoiceControlEventV4{}, &VoiceControlError{Code: VoiceControlErrorInvalid, detail: err.Error()}
 	}
 	return ev, nil
+}
+
+func readVoiceControlProcessingV4(r *fieldReader) VoiceControlProcessingV4 {
+	var raw json.RawMessage
+	if !r.take("processing", &raw, true) {
+		return VoiceControlProcessingV4{}
+	}
+	fields, err := decodeVoiceControlObject(raw)
+	if err != nil {
+		if r.missing == "" {
+			r.missing = "processing"
+		}
+		return VoiceControlProcessingV4{}
+	}
+	nested := fieldReader{fields: fields}
+	p := VoiceControlProcessingV4{
+		EchoCancellation: nested.bool("echo_cancellation"),
+		NoiseSuppression: nested.bool("noise_suppression"),
+	}
+	if nested.missing != "" && r.missing == "" {
+		r.missing = "processing." + nested.missing
+	}
+	return p
 }
