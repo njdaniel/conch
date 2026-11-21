@@ -23,6 +23,7 @@
 #
 # usage: CONCH_ACCEPT_ANDROID_LICENCES=1 ./toolchain.sh
 # then:  source "${CONCH_CACHE:-$HOME/.cache/conch}/android-env.sh"
+# CI runs --cli-version first to bootstrap the CLI and report its version.
 set -euo pipefail
 
 CACHE="${CONCH_CACHE:-$HOME/.cache/conch}"
@@ -52,7 +53,7 @@ trap 'rm -rf "$tmp"' EXIT
 
 if [ ! -x "$JDK_DIR/bin/java" ]; then
     curl -fsSL -o "$tmp/jdk.tgz" "$JDK_URL"
-    echo "$JDK_SHA256  $tmp/jdk.tgz" | sha256sum -c -
+    echo "$JDK_SHA256  $tmp/jdk.tgz" | sha256sum -c - >&2
     mkdir "$tmp/jdk"
     tar -xzf "$tmp/jdk.tgz" -C "$tmp/jdk" --strip-components=1
     mv "$tmp/jdk" "$JDK_DIR"
@@ -68,7 +69,7 @@ fi
 ANDROID_CLI="$CLT_DIR/bin/android"
 if [ ! -e "$CLT_DIR" ]; then
     curl -fsSL -o "$tmp/clt.zip" "$CLT_URL"
-    echo "$CLT_SHA1  $tmp/clt.zip" | sha1sum -c -
+    echo "$CLT_SHA1  $tmp/clt.zip" | sha1sum -c - >&2
     mkdir "$tmp/clt"
     unzip -q "$tmp/clt.zip" -d "$tmp/clt"
     mkdir -p "$SDK/cmdline-tools"
@@ -81,9 +82,37 @@ fi
 
 export JAVA_HOME="$JDK_DIR"
 export PATH="$JAVA_HOME/bin:$PATH"
-# Both the native launcher (bin/android-cli) and its bundle (cli/bundles)
-# resolve their paths from ANDROID_USER_HOME before falling back to ~/.android.
-export ANDROID_USER_HOME="$CACHE/android-user-home"
+
+run_android_cli() {
+    local operation=$1 attempt=1
+    shift
+    # The launcher and its bundle use ANDROID_USER_HOME. Java's repo-index
+    # temp files use java.io.tmpdir, independently of the launcher's TMPDIR.
+    # Retry a flaky CLI or SDK download, at most three attempts (#2007).
+    until ANDROID_USER_HOME="$CACHE/android-user-home" TMPDIR="$tmp" \
+        JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS:+$JAVA_TOOL_OPTIONS }-Djava.io.tmpdir=\"$tmp\"" \
+        "$ANDROID_CLI" --no-metrics --sdk="$SDK" "$@"; do
+        if [ "$attempt" -ge 3 ]; then
+            echo "toolchain: $operation failed $attempt times; giving up" >&2
+            return 1
+        fi
+        echo "toolchain: $operation failed (attempt $attempt of 3); retrying in $((attempt * 15))s" >&2
+        sleep $((attempt * 15))
+        attempt=$((attempt + 1))
+    done
+}
+
+if [ "${1:-}" = --cli-version ]; then
+    version_output=$(run_android_cli "Android CLI bootstrap" --version)
+    # The CLI prints its version last, after any bootstrap notices.
+    version=${version_output##*$'\n'}
+    if [[ ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+[a-zA-Z0-9.+-]*$ ]]; then
+        printf 'toolchain: could not read the Android CLI version from:\n%s\n' "$version_output" >&2
+        exit 1
+    fi
+    printf '%s\n' "$version"
+    exit 0
+fi
 
 packages=("platform-tools@$PLATFORM_TOOLS_VERSION" "platforms/android-35@2" "build-tools/36.0.0" "$NDK" "$CMAKE")
 if [ "${CONCH_ANDROID_NO_EMULATOR:-}" != 1 ]; then
@@ -91,23 +120,9 @@ if [ "${CONCH_ANDROID_NO_EMULATOR:-}" != 1 ]; then
 fi
 
 # In command-line tools 23.0, sdkmanager is a shim that rejects --no-metrics
-# and treats --licenses as a no-op. Pass --no-metrics to the launcher on the
-# very first invocation so the CLI receives it even on a cold cache.
+# and treats --licenses as a no-op. Use the CLI directly.
 # --force lets the CLI downgrade Platform-Tools in an existing cache.
-
-# One flaky download should not fail the run (#2007: a CI run lost the system
-# image to a closed connection). The tools' exit status does not say why an
-# install failed, so any failure is retried, at most three attempts in all.
-attempt=1
-until TMPDIR="$tmp" "$ANDROID_CLI" --no-metrics --sdk="$SDK" sdk install --force "${packages[@]}"; do
-    if [ "$attempt" -ge 3 ]; then
-        echo "toolchain: SDK package install failed $attempt times; giving up" >&2
-        exit 1
-    fi
-    echo "toolchain: SDK package install failed (attempt $attempt of 3); retrying in $((attempt * 15))s" >&2
-    sleep $((attempt * 15))
-    attempt=$((attempt + 1))
-done
+run_android_cli "SDK package install" sdk install --force "${packages[@]}"
 
 platform_tools_dir="$SDK/platform-tools"
 platform_tools_version=
