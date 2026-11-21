@@ -546,13 +546,29 @@ func TestMessageEditLive(t *testing.T) {
 	wide := f.mustPost(t, "ann", `{"body":"SECRET-wide"}`)
 	net := f.mustPost(t, "ann", `{"body":"SECRET-net",`+netAudience(f.net1.ID)+`}`)
 	whisper := f.mustPost(t, "ann", `{"body":"SECRET-whisper",`+whisperAudience(f.p("wes").ID)+`}`)
-	for _, feed := range append([]*frameFeed{annOther, v0, v1}, mapValues(v2, ev)...) {
-		feed.take(0)
+	setupSentinel := f.mustPost(t, "root", `{"body":"setup sentinel"}`)
+	drainSetup := func(name string, feed *frameFeed) {
+		waitFor(t, name+" to receive the setup sentinel", func() bool {
+			for _, fr := range decodeFrames(t, feed.take(0)) {
+				if fr.ID == setupSentinel {
+					return true
+				}
+			}
+			return false
+		})
 	}
-	time.Sleep(300 * time.Millisecond)
-	for _, feed := range append([]*frameFeed{annOther, v0, v1}, mapValues(v2, ev)...) {
-		feed.take(0)
+	for _, who := range people {
+		drainSetup(who+"'s /v2/ws", v2[who])
 	}
+	// New-message events are only sent to humans. Root's post also reaches
+	// both of Ann's events sockets, after any setup posts queued for them.
+	for _, who := range people[:6] {
+		drainSetup(who+"'s events socket", ev[who])
+	}
+	drainSetup("ann's other events socket", annOther)
+	drainSetup("the v0 socket", v0)
+	drainSetup("the v1 socket", v1)
+
 	readBefore := map[string]string{}
 	for _, who := range people[:6] {
 		readBefore[who] = f.callREST(t, "GET", "/v1/read-state", f.p(who).token, "").body
