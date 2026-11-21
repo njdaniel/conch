@@ -96,6 +96,54 @@ func TestRowsAskTheirRoute(t *testing.T) {
 	}
 }
 
+// TestPerProberExpectation: an own row with a withoutPassword refusal succeeds
+// for a prober who has a password (bea) and states that refusal for one who
+// has none (ola); a row without one is the same for both; the person
+// stream's two rows are of the first kind, and the refusal is the one the
+// server gives a credential made by another.
+func TestPerProberExpectation(t *testing.T) {
+	bea, ola := &member{name: "bea", password: true, mayInvite: true}, &member{name: "ola"}
+	refused := answer{http.StatusForbidden, "own_sign_in_required"}
+	plain := row{own: true}
+	split := row{own: true, withoutPassword: refused}
+	refusal := row{want: answer{http.StatusNotFound, "run_not_found"}}
+	for _, tc := range []struct {
+		name    string
+		r       row
+		p       *member
+		succeed bool
+		want    answer
+	}{
+		{"own row, password", plain, bea, true, answer{}},
+		{"own row, no password", plain, ola, true, answer{}},
+		{"split row, password", split, bea, true, answer{}},
+		{"split row, no password", split, ola, false, refused},
+		{"refusal row, password", refusal, bea, false, refusal.want},
+		{"refusal row, no password", refusal, ola, false, refusal.want},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.r.succeedsFor(tc.p); got != tc.succeed {
+				t.Errorf("succeedsFor = %v, want %v", got, tc.succeed)
+			}
+			if !tc.succeed {
+				if got := tc.r.wantFor(tc.p); got != tc.want {
+					t.Errorf("wantFor = %v, want %v", got, tc.want)
+				}
+			}
+		})
+	}
+	rows := personMatrixRows()
+	if len(rows) != 2 {
+		t.Fatalf("the person stream has %d rows, want the bearer's and the ticket's", len(rows))
+	}
+	for _, r := range rows {
+		if !r.succeedsFor(bea) || r.succeedsFor(ola) || r.wantFor(ola) != refused {
+			t.Errorf("%s (%s): bea succeeds = %v, ola succeeds = %v, ola's refusal = %v; want success for bea and %v for ola",
+				r.route, r.what, r.succeedsFor(bea), r.succeedsFor(ola), r.wantFor(ola), refused)
+		}
+	}
+}
+
 // TestCheckRefusal: the refusal check takes the stated answer and nothing
 // else.
 func TestCheckRefusal(t *testing.T) {

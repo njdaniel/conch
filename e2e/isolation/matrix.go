@@ -110,10 +110,27 @@ type row struct {
 	// joined through an invite), when it differs from want, which is then
 	// the refusal for one who has none (ola, made by hand).
 	withPassword answer
+	// withoutPassword turns an own row into a refusal for a prober who has no
+	// password (ola, made by hand: her credential came through
+	// POST /v1/principals/{id}/credentials, which the store records as made
+	// by another). The row succeeds for one who has (bea, who joined through
+	// an invite and made her own credential) and states this refusal for the
+	// rest. It is for a route that asks for a self-made credential: the row
+	// is then the end-to-end proof that a credential made on someone's behalf
+	// does not open it.
+	withoutPassword answer
+}
+
+// succeedsFor is true when the row, as an own row, must succeed for prober.
+func (r row) succeedsFor(prober *member) bool {
+	return r.own && (r.withoutPassword == (answer{}) || prober.password)
 }
 
 // wantFor is the refusal the row states for prober.
 func (r row) wantFor(prober *member) answer {
+	if !prober.password && r.withoutPassword != (answer{}) {
+		return r.withoutPassword
+	}
 	if !prober.mayInvite && r.mayNot != (answer{}) {
 		return r.mayNot
 	}
@@ -208,7 +225,7 @@ func id(n int64) string   { return itoa(n) }
 
 // matrixRows is the matrix.
 func matrixRows() []row {
-	return slices.Concat(coreMatrixRows(), reactionMatrixRows(), editMatrixRows(), notificationMatrixRows())
+	return slices.Concat(coreMatrixRows(), reactionMatrixRows(), editMatrixRows(), notificationMatrixRows(), personMatrixRows())
 }
 
 func coreMatrixRows() []row {
@@ -1060,7 +1077,7 @@ func (w *world) runRow(r row) (int, error) {
 			return 1, err
 		}
 		w.onBehalf = append(w.onBehalf, fmt.Sprintf("%s %d", r.route, got.status))
-	case r.own:
+	case r.succeedsFor(w.prober):
 		if !success {
 			return 1, fmt.Errorf("status %d %s, want a success: the route answers about the caller alone", got.status, w.h.redact(lkit.Truncate(string(got.body), 200)))
 		}

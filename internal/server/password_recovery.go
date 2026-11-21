@@ -68,6 +68,7 @@ const auditPasswordResetRefused = "password_reset_refused"
 func (s *Server) authChanged(ctx context.Context, id int64) {
 	s.hub.DropPrincipalAll(id)
 	s.events.dropPrincipalAll(id)
+	s.person.dropPrincipalAll(id)
 	s.events.notifyRosters()
 	s.voicePrincipalLostAccess(ctx, id, voiceReasonCredsRevoked)
 }

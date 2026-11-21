@@ -39,16 +39,21 @@ import (
 //     principal who issued it, never by the agent, so it is refused here, and
 //     ADR-017 confirms agents reach no DM or call.
 //
-// It is empty until the routes exist: #2019, #2021, #2030 and #2040
-// register the DM and call routes and the per-person stream, and each adds
-// its routes here in the same change. Every route that reads or writes a
+// It fills as the routes exist: the per-person stream (#2040) is here;
+// #2019, #2021 and #2030 register the DM and call routes, and each adds its
+// routes here in the same change. Every route that reads or writes a
 // person's DMs or calls belongs here, sockets included.
 //
 // A route that serves both a person's own data and anything else (one
 // socket for channels and DMs, say) cannot be listed whole without
 // refusing the rest: it calls selfMadeCredential itself before it sends the
 // person's own data.
-var selfMadeCredentialRoutes = map[string]bool{}
+var selfMadeCredentialRoutes = map[string]bool{
+	// The per-person events stream (#2040): DM frames and rings for the
+	// caller alone. A ticket-opened socket is judged by its credential's
+	// stored provenance (requestCredentialSelfMade).
+	"GET /v1/events/person/ws": true,
+}
 
 // requireSelfMadeCredential wraps next so it runs only for a request whose
 // credential is self-made (selfMadeCredential); any other gets the answer
