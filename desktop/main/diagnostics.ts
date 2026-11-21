@@ -1,5 +1,5 @@
 // The desktop's diagnostics bundle (issue #2084). Input: fixed diagnostic
-// lines chosen by main, build versions, the IPC refusal total, and the
+// lines chosen by main, build versions, counts of sampled events, and the
 // person's acts of previewing and saving. Output: the preview and those same
 // bytes in the file the person chose in the native save dialog.
 //
@@ -12,7 +12,7 @@
 // Export is local. Report a problem attachments would need a pkg/schema change.
 import { randomBytes } from 'node:crypto';
 import { isIP } from 'node:net';
-import type { DiagnosticsPreview, SaveOutcome } from '../../web/src/platform/desktop/bridge.ts';
+import type { DiagnosticsPreview, FeedKind, SaveOutcome } from '../../web/src/platform/desktop/bridge.ts';
 
 export const RING_LINES = 500;
 export const LINE_MAX_CHARS = 300;
@@ -20,12 +20,20 @@ export const BUNDLE_MAX_BYTES = 256 * 1024;
 // The longest line the ring scrubs; a longer one is kept as a marker.
 export const RECORD_MAX_CHARS = 512;
 
+// The only labels main supplies to the header's per-key counts.
+export type Refusal = 'sender' | 'destroyed' | 'frame' | 'subframe' | 'origin' | 'generation' | 'name' | 'rate' | 'size' | 'shape' | 'gesture' | 'disabled' | 'error';
+// Why a feed was closed, for the log line and the header.
+export type FeedEnding = 'unsubscribed' | 'document' | 'signed out' | 'server' | 'behind';
+type FeedDiagnosticEvent = 'opening' | FeedEnding | 'socket closed' | 'socket destroyed' | 'close deadline' | 'invalid frame';
+export type FeedDiagnosticKey = `${FeedKind} ${FeedDiagnosticEvent}`;
+
 // Written in two parts: this file's source holds no absolute URL.
 const SCHEMES = ['https', 'http', 'wss', 'ws', 'file', 'conch'];
 
-// Strip format characters so invisible splits cannot hide a key. Replace
-// controls and Unicode line separators so a line cannot forge another one.
-const FORMAT = /\p{Cf}/gu;
+// Strip format characters and invisible Hangul fillers so invisible splits
+// cannot hide a key or interfere with path detection. Replace controls and
+// Unicode line separators so a line cannot forge another one.
+const FORMAT = /[\p{Cf}\u115f\u1160\u3164\uffa0]/gu;
 const CONTROLS = /[\p{Cc}\p{Zl}\p{Zp}]/gu;
 
 // The quoted body runs to end of line if its closing delimiter is missing.
@@ -119,32 +127,60 @@ export class LogRing {
   }
 }
 
-// Each key must come from a closed vocabulary. Log the first event and then
-// events 2, 4, 8, etc. so repeated events take logarithmic space in the ring.
-export class GeometricSampler<Key extends string> {
-  readonly #counts = new Map<Key, { count: number; next: number }>();
+const MAX_SAMPLE_KEYS = 64;
 
-  sample(key: Key): boolean {
-    const state = this.#counts.get(key);
+// Each key must come from a closed vocabulary. Export events 1, 2, 4, 8,
+// etc. so repetition takes logarithmic space in the ring. Count events that
+// the caller deliberately keeps silent, without using an export slot on them.
+export class GeometricSampler<Key extends string> {
+  readonly #counts = new Map<Key, { count: number; eligible: number; next: number }>();
+
+  sample(key: Key, eligible = true): boolean {
+    let state = this.#counts.get(key);
     if (state === undefined) {
-      this.#counts.set(key, { count: 1, next: 2 });
-      return true;
+      // Keep the original keys and refuse new ones at the limit. Evicting a
+      // key would let it repeatedly re-enter and sample at its first event.
+      if (this.#counts.size >= MAX_SAMPLE_KEYS) return false;
+      state = { count: 0, eligible: 0, next: 1 };
+      this.#counts.set(key, state);
     }
     state.count++;
-    if (state.count !== state.next) return false;
+    if (!eligible || ++state.eligible !== state.next) return false;
     state.next *= 2;
     return true;
+  }
+
+  counts(): readonly (readonly [Key, number])[] {
+    return Array.from(this.#counts, ([key, { count }]) => [key, count] as const);
+  }
+
+  count(key: Key): number {
+    return this.#counts.get(key)?.count ?? 0;
   }
 }
 
 // Call sites opt in only with fixed text, numbers or closed vocabularies.
 export type MainLog = (line: string, options?: { readonly ring: true }) => void;
 
+// Keep the sampler sequences and counts for the lifetime of the export
+// logger, across profile feed and session replacements.
+interface DiagnosticSamples {
+  readonly feeds: GeometricSampler<FeedDiagnosticKey>;
+  readonly blocked: GeometricSampler<'blocked'>;
+}
+const diagnosticSamples = new WeakMap<MainLog, DiagnosticSamples>();
+
+export function diagnosticSamplesFor(log: MainLog): DiagnosticSamples | undefined {
+  return diagnosticSamples.get(log);
+}
+
 export function diagnosticsLogger(ring: LogRing, writeLocal: (line: string) => void): MainLog {
-  return (line, options) => {
+  const log: MainLog = (line, options) => {
     if (options?.ring === true) ring.record(line);
     writeLocal(line);
   };
+  diagnosticSamples.set(log, { feeds: new GeometricSampler(), blocked: new GeometricSampler() });
+  return log;
 }
 
 export interface BundleInput {
@@ -152,17 +188,34 @@ export interface BundleInput {
   readonly versions: Readonly<Record<string, string>>;
   readonly lines: readonly string[];
   readonly refusals: number;
+  readonly refusalCounts?: readonly (readonly [Refusal, number])[];
+  readonly feedCounts?: readonly (readonly [FeedDiagnosticKey, number])[];
+  readonly blocked?: number;
   readonly now: Date;
+}
+
+// A header key is a closed-vocabulary word (a refusal reason, a feed kind
+// and event): lower-case words and digits. The types keep it closed; this is
+// the second wall, since the header is not scrubbed: anything else prints as
+// 'other', so a key can never carry a newline or text (#2108 review).
+const HEADER_KEY = /^[a-z][a-z0-9 _-]{0,47}$/u;
+
+function countSummary(counts: readonly (readonly [Refusal | FeedDiagnosticKey, number])[], total: number): string {
+  const ordered = [...counts].sort(([a, n], [b, m]) => m - n || a.localeCompare(b));
+  const word = (key: string): string => (HEADER_KEY.test(key) ? key : 'other');
+  return ordered.length === 0 ? String(total) : `${String(total)} (${ordered.map(([key, count]) => `${word(key)} ${String(count)}`).join(', ')})`;
 }
 
 // buildBundle is the text the person sees and may save. If the lines make it
 // larger than BUNDLE_MAX_BYTES the oldest are left out, and it says how many.
-export function buildBundle({ versions, lines, refusals, now }: BundleInput): string {
+export function buildBundle({ versions, lines, refusals, refusalCounts = [], feedCounts = [], blocked = 0, now }: BundleInput): string {
   const head = [
     'Conch desktop diagnostics',
     `made: ${now.toISOString()}`,
     ...Object.entries(versions).map(([name, value]) => `${scrubLine(name)}: ${scrubLine(value)}`),
-    `IPC refusals since start: ${String(refusals)}`,
+    `IPC refusals since start: ${countSummary(refusalCounts, refusals)}`,
+    `Feed events since start: ${countSummary(feedCounts, feedCounts.reduce((total, [, count]) => total + count, 0))}`,
+    `Blocked requests since start: ${String(blocked)}`,
     '',
     'This file contains build versions and recent diagnostic events. Read it before sharing. It was made on this computer and has not been sent anywhere.',
     '',
@@ -208,9 +261,14 @@ export class Diagnostics {
   }
 
   // Hold the exact text returned with each main-generated ID, including the
-  // live refusal total IPC supplied for this preview.
-  preview(refusals: number): DiagnosticsPreview {
-    const text = buildBundle({ versions: this.#deps.versions, lines: this.#deps.ring.lines(), refusals, now: this.#deps.now() });
+  // sampler counts at the time of this preview.
+  preview(refusals: number, refusalCounts: readonly (readonly [Refusal, number])[] = []): DiagnosticsPreview {
+    const { versions, log, now } = this.#deps;
+    const samples = diagnosticSamplesFor(log);
+    const text = buildBundle({
+      versions, lines: this.#deps.ring.lines(), refusals, refusalCounts,
+      feedCounts: samples?.feeds.counts() ?? [], blocked: samples?.blocked.count('blocked') ?? 0, now: now(),
+    });
     const id = randomBytes(16).toString('hex');
     this.#shown.set(id, text);
     if (this.#shown.size > SNAPSHOT_LIMIT) {
