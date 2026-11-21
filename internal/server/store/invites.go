@@ -963,8 +963,9 @@ func (s *Store) redeemInvite(ctx context.Context, codeHash, name, record string,
 		lifetime := time.Duration(r.lifetimeMs) * time.Millisecond
 		exp := now.Add(lifetime)
 		// Issued by the invite, not by a principal: issued_by stays NULL
-		// (issue #1024).
-		cred, err := insertCredentialTx(ctx, tx, pid, fmt.Sprintf("invite %d", r.id), token, now, &exp, lifetime, 0)
+		// (issue #1024). Self-made (issue #2042): the redeemer is the
+		// person this redemption creates, so nobody else's credential it is.
+		cred, err := insertCredentialTx(ctx, tx, pid, fmt.Sprintf("invite %d", r.id), token, now, &exp, lifetime, 0, madeBySelf)
 		if err != nil {
 			return err
 		}

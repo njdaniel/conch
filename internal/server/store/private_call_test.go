@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -36,10 +38,25 @@ func newPrivateCallFixture(t *testing.T, s *Store) *privateCallFixture {
 			t.Fatal(err)
 		}
 		person.CredentialID = cred.ID
-	}
-	for i, person := range []PrivateCallActor{f.a, f.c} {
-		if err := s.BindPrivateCallConversation(ctx, int64(i+1), person.PrincipalID, f.b.PrincipalID); err != nil {
+		// CreateCredential("system", ...) records a credential made by
+		// another; these stand in for sign-ins the people made themselves.
+		if _, err := s.db.ExecContext(ctx, "UPDATE credentials SET self_made = 1 WHERE id = ?", cred.ID); err != nil {
 			t.Fatal(err)
+		}
+	}
+	// Conversations 1 (a and b) and 2 (c and b) are the DM store's own, each
+	// opened by both people, so each sees it.
+	for i, person := range []PrivateCallActor{f.a, f.c} {
+		lo, hi := min(person.PrincipalID, f.b.PrincipalID), max(person.PrincipalID, f.b.PrincipalID)
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO dm_conversations (id, lo, hi, created_at) VALUES (?, ?, ?, ?)`,
+			i+1, lo, hi, f.now.UnixMilli()); err != nil {
+			t.Fatal(err)
+		}
+		for _, id := range []int64{lo, hi} {
+			if _, err := s.db.ExecContext(ctx, `INSERT INTO dm_viewer_state (principal_id, conversation_id, state, updated_at)
+				VALUES (?, ?, 'open', ?)`, id, i+1, f.now.UnixMilli()); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 	return f
@@ -244,10 +261,15 @@ func TestPrivateCallRetryWindowAndAcceptedHolder(t *testing.T) {
 	if accepted.Call.State != schema.PrivateCallStateAccepted || !accepted.Call.SelectedHere {
 		t.Fatalf("accept: %+v", accepted)
 	}
-	for _, id := range []string{"accept", "other-id"} {
-		if retry := f.act(call, f.b, schema.PrivateCallEventAccept, id); !retry.Replayed || retry.Call.Revision != accepted.Call.Revision {
-			t.Fatalf("accept retry %q: %+v", id, retry)
-		}
+	if retry := f.act(call, f.b, schema.PrivateCallEventAccept, "accept"); !retry.Replayed || retry.Call.Revision != accepted.Call.Revision {
+		t.Fatalf("accept retry: %+v", retry)
+	}
+	if stale := f.act(call, f.b, schema.PrivateCallEventAccept, "other-id"); stale.Code != schema.ErrorCodeCallStateChanged {
+		t.Fatalf("accept with a fresh action id and stale revision: %+v", stale)
+	}
+	if conflict, err := f.s.ActOnPrivateCall(context.Background(), call.ID, schema.PrivateCallEventAccept, f.b,
+		schema.PrivateCallActionRequestV1{ActionID: "accept", Revision: accepted.Call.Revision}, f.clock); err != nil || conflict.Code != schema.ErrorCodeCallActionConflict {
+		t.Fatalf("accept with a reused action id and different revision: %+v, %v", conflict, err)
 	}
 	if wrong := f.act(call, f.b2, schema.PrivateCallEventAccept, "accept"); wrong.Code != schema.ErrorCodeCallStateChanged || wrong.Call.SelectedHere {
 		t.Fatalf("accept retry on second device: %+v", wrong)
@@ -263,6 +285,31 @@ func TestPrivateCallRetryWindowAndAcceptedHolder(t *testing.T) {
 	next := f.invite(1, f.a, "invite")
 	if !next.Created || next.Call.ID == call.ID || next.Call.State != schema.PrivateCallStateRinging {
 		t.Fatalf("invite id reuse at expiry: %+v", next)
+	}
+}
+
+func TestPrivateCallRefusalDoesNotUseActionID(t *testing.T) {
+	f := newPrivateCallFixture(t, openTestStore(t))
+	call := f.invite(1, f.a, "invite").Call
+	if out := f.act(call, f.b, schema.PrivateCallEventHangup, "hangup"); out.Code != schema.ErrorCodeCallStateChanged {
+		t.Fatalf("hangup before accept: %+v", out)
+	}
+	accepted := f.act(call, f.b, schema.PrivateCallEventAccept, "accept").Call
+	if out := f.act(accepted, f.b, schema.PrivateCallEventHangup, "hangup"); out.Code != "" || out.Call.State != schema.PrivateCallStateEnded {
+		t.Fatalf("hangup after accept with the same action id: %+v", out)
+	}
+}
+
+func TestPrivateCallReceiptsArePerCredential(t *testing.T) {
+	f := newPrivateCallFixture(t, openTestStore(t))
+	call := f.invite(1, f.a, "invite").Call
+	accepted := f.act(call, f.b, schema.PrivateCallEventAccept, "device-action").Call
+	ended := f.act(accepted, f.b2, schema.PrivateCallEventHangup, "device-action")
+	if ended.Code != "" || ended.Call.State != schema.PrivateCallStateEnded || ended.Replayed {
+		t.Fatalf("second credential using the same action id: %+v", ended)
+	}
+	if replay := f.act(call, f.b, schema.PrivateCallEventAccept, "device-action"); !replay.Replayed || replay.Call.ID != ended.Call.ID || replay.Call.State != ended.Call.State {
+		t.Fatalf("first credential's receipt: %+v", replay)
 	}
 }
 
@@ -285,6 +332,36 @@ func TestPrivateCallSelectedCredentialRevocation(t *testing.T) {
 	ended := f.stored(call.ID)
 	if ended.State != schema.PrivateCallStateEnded || ended.Reason != "" || ended.Revision != accepted.Revision+1 {
 		t.Fatalf("revoked selected credential: %s/%s revision %d", ended.State, ended.Reason, ended.Revision)
+	}
+}
+
+func TestPrivateCallRepeatLimitCountsUndeliveredAndExpiredInvites(t *testing.T) {
+	f := newPrivateCallFixture(t, openTestStore(t))
+	ctx := context.Background()
+	if _, err := f.s.db.ExecContext(ctx, "INSERT INTO blocks VALUES (?, ?, ?)",
+		f.b.PrincipalID, f.a.PrincipalID, f.now.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		out := f.invite(1, f.a, fmt.Sprintf("unavailable%d", i))
+		if out.Call.State != schema.PrivateCallStateUnavailable {
+			t.Fatalf("blocked invite: %+v", out)
+		}
+	}
+	if _, err := f.s.db.ExecContext(ctx, "DELETE FROM blocks"); err != nil {
+		t.Fatal(err)
+	}
+	ring := f.invite(1, f.a, "ring").Call
+	if ring.State != schema.PrivateCallStateRinging {
+		t.Fatalf("third invite: %+v", ring)
+	}
+	f.now = ring.RingDeadline.Time()
+	limited := f.invite(1, f.a, "fourth")
+	if limited.Code != schema.ErrorCodeRateLimited || limited.Call.ID != "" || limited.RetryAfter != 10*time.Minute-schema.PrivateCallRingSeconds*time.Second {
+		t.Fatalf("fourth invite: %+v", limited)
+	}
+	if got := f.stored(ring.ID); got.State != schema.PrivateCallStateMissed {
+		t.Fatalf("third invite after expiry: %+v", got)
 	}
 }
 
@@ -313,6 +390,47 @@ func TestPrivateCallReconcileAfterReopen(t *testing.T) {
 	}
 	if next := f.invite(1, f.b, "next"); next.Call.State != schema.PrivateCallStateRinging {
 		t.Fatalf("holders survived restart: %+v", next)
+	}
+}
+
+func TestPrivateCallSweepIsolatesMalformedCall(t *testing.T) {
+	ctx := context.Background()
+	f := newPrivateCallFixture(t, openTestStore(t))
+	d, err := f.s.CreatePrincipal(ctx, PrincipalHuman, "fourth")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.s.db.Exec(`INSERT INTO dm_conversations (id, lo, hi, created_at) VALUES (3, ?, ?, ?)`,
+		min(f.c.PrincipalID, d.ID), max(f.c.PrincipalID, d.ID), f.now.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	bad := f.invite(1, f.a, "bad").Call
+	var good privateCall
+	if err := f.s.withImmediateTx(ctx, func(tx execer) error {
+		good, err = createPrivateCall(ctx, tx, 3, f.c, d.ID, schema.PrivateCallEventInvite, f.now)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.s.db.Exec(`UPDATE private_calls SET deadline = deadline - 1 WHERE id = ?`, bad.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.now = bad.RingDeadline.Time()
+	f.sweep()
+	if got := f.stored(good.ID); got.State != schema.PrivateCallStateMissed || got.Revision != 2 {
+		t.Fatalf("unrelated call after sweep: %+v", got)
+	}
+	if got := f.stored(bad.ID); got.State != schema.PrivateCallStateRinging || got.Revision != 1 {
+		t.Fatalf("malformed call after sweep: %+v", got)
+	}
+	if err := f.s.RestartPrivateCalls(ctx, f.now); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.stored(bad.ID); got.State != schema.PrivateCallStateFailed || got.Revision != 2 || got.view(f.a).Validate() != nil {
+		t.Fatalf("malformed call after restart: %+v", got)
+	}
+	if _, err := privateCallHeldBy(ctx, f.s.db, f.a.PrincipalID); !errors.Is(err, ErrPrivateCallNotFound) {
+		t.Fatalf("holder after restart: %v", err)
 	}
 }
 
@@ -355,6 +473,11 @@ func TestInvalidateRestoredPrivateCalls(t *testing.T) {
 			if _, err := f.s.db.ExecContext(ctx, "DROP TRIGGER fail_restore"); err != nil {
 				t.Fatal(err)
 			}
+			if state == schema.PrivateCallStateRinging {
+				if _, err := f.s.db.Exec(`UPDATE private_calls SET deadline = deadline - 1 WHERE id = ?`, call.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if _, err := f.s.InvalidateRestored(ctx, f.now); err != nil {
 				t.Fatal(err)
 			}
@@ -378,14 +501,50 @@ func TestInvalidateRestoredPrivateCalls(t *testing.T) {
 	}
 }
 
+func TestPrivateCallMigrationGuardsRows(t *testing.T) {
+	f := newPrivateCallFixture(t, openTestStore(t))
+	// The pair is stored in its canonical order regardless of who called.
+	call := f.invite(1, f.b, "invite").Call
+	if call.State != schema.PrivateCallStateRinging {
+		t.Fatalf("invite with reversed pair: %+v", call)
+	}
+	for _, tc := range []struct {
+		name, statement, wantError string
+		args                       []any
+	}{
+		{"mismatched pair on insert", `INSERT INTO private_calls
+			(id, conversation_id, caller, callee, caller_credential, state, last_event, revision, created_at)
+			SELECT 'invalid-attempt-id', 2, caller, callee, caller_credential, state, last_event, revision, created_at
+			FROM private_calls WHERE id = ?`, "conversation participants", []any{call.ID}},
+		{"mismatched pair on update", `UPDATE private_calls SET conversation_id = 2 WHERE id = ?`, "cannot change its conversation or participants", []any{call.ID}},
+		{"unknown state", `UPDATE private_calls SET state = 'unknown' WHERE id = ?`, "CHECK constraint failed", []any{call.ID}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := f.s.db.Exec(tc.statement, tc.args...); err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("database error = %v, want %q", err, tc.wantError)
+			}
+		})
+	}
+}
+
+func TestPrivateCallMigrationRejectsLeftoverTable(t *testing.T) {
+	s := openTestStore(t)
+	if _, err := s.db.Exec(`PRAGMA user_version = 54`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.migrate(context.Background()); err == nil || !strings.Contains(err.Error(), "table private_calls already exists") {
+		t.Fatalf("migration 55 with a leftover table: %v", err)
+	}
+}
+
 func TestPrivateCallHistoryPageWithTiedTimestamps(t *testing.T) {
 	f := newPrivateCallFixture(t, openTestStore(t))
 	ctx := context.Background()
 	seen := make(map[string]bool, schema.MaxPrivateCallHistoryPage+1)
 	for i := 0; i <= schema.MaxPrivateCallHistoryPage; i++ {
 		call := f.invite(1, f.a, fmt.Sprintf("invite%d", i)).Call
-		if got := f.act(call, f.b, schema.PrivateCallEventDecline, fmt.Sprintf("decline%d", i)); got.Call.State != schema.PrivateCallStateDeclined {
-			t.Fatalf("decline: %+v", got)
+		if got := f.act(call, f.a, schema.PrivateCallEventCancel, fmt.Sprintf("cancel%d", i)); got.Call.State != schema.PrivateCallStateCancelled {
+			t.Fatalf("cancel: %+v", got)
 		}
 		seen[call.ID] = false
 	}

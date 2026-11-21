@@ -1,0 +1,5 @@
+{
+  "schema": "conch.voice_control.v4",
+  "kind": "get_call_quality",
+  "id": 4
+}

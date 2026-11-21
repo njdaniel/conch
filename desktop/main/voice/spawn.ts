@@ -1,7 +1,7 @@
 // Starting conch-voice from Electron main (issue #948; linux-desktop.md §4.1,
-// §5.3; issue #1785, windows-desktop.md §3.3, §3.7 for Windows): which
-// executable may be run, the environment it gets, and the one way it is
-// spawned.
+// §5.3; issue #1785, windows-desktop.md §3.3, §3.7; issue #1743,
+// macos-desktop.md §3.2): which executable may be run, the environment it
+// gets, and the one way it is spawned.
 //
 // Input: the app's resources directory, main's own environment, the
 // profile's configuration directory, the token, the nonce and the events
@@ -58,11 +58,11 @@ export function helperName(platform: NodeJS.Platform = process.platform): string
 const TOKEN_ENV = 'CONCH_TOKEN';
 const CONFIG_DIR_ENV = 'CONCH_CONFIG_DIR';
 
-// PASSED_THROUGH is every variable of main's environment the helper may see,
-// by exact name: what it and its libraries need to find the user's home,
-// PipeWire and the locale. None carries authority. Everything else, every
-// CONCH_ variable, RUST_LOG, LD_PRELOAD and NODE_OPTIONS included, is absent
-// by construction. The list is confirmed against a real session in #922 LE1.
+// PASSED_THROUGH names the Linux variables the helper may inherit: what it
+// and its libraries need to find the user's home, PipeWire and the locale.
+// None carries authority. All other parent variables, including CONCH_*,
+// RUST_LOG, LD_PRELOAD and NODE_OPTIONS, are absent by construction. The
+// list is confirmed against a real session in #922 LE1.
 export const PASSED_THROUGH: readonly string[] = [
   'HOME',
   'XDG_RUNTIME_DIR',
@@ -73,6 +73,10 @@ export const PASSED_THROUGH: readonly string[] = [
   'LC_CTYPE',
   'LC_MESSAGES',
 ];
+
+// macOS passes the user's home, temporary directory and locale by exact
+// name (macos-desktop.md §3.2). DYLD_* variables are outside this list.
+const PASSED_THROUGH_MACOS: readonly string[] = ['HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE', 'LC_MESSAGES'];
 
 // PASSED_THROUGH_WINDOWS is the same on Windows (windows-desktop.md §3.7),
 // matched without regard to case: what the helper and its libraries need to
@@ -98,12 +102,16 @@ export class HelperError extends Error {
   }
 }
 
+type AncestorStat = (path: string) => Promise<{ mode: number; uid: number; gid: number; isDirectory(): boolean }>;
+
 export interface FindDeps {
   // The uid the ownership checks compare against (a test stands in for
   // another user).
   readonly uid?: number;
   // The platform whose rules apply; process.platform by default.
   readonly platform?: NodeJS.Platform;
+  // Supplies ancestor metadata in tests without changing filesystem ownership.
+  readonly ancestorStat?: AncestorStat;
 }
 
 function codeOf(err: unknown): string {
@@ -117,13 +125,14 @@ function safeOwner(uid: number, own: number): boolean {
 // findHelper returns the bundled executable to run: <resources>/conch-voice,
 // an absolute path whose real location is inside the resources directory, a
 // regular file (not a link), executable, owned by the user or root and not
-// writable by group or others, in a directory with the same ownership and
-// write rules. A missing file is not-installed; anything else that fails is
+// writable by group or others, in a directory checked by safeAncestors.
+// A missing file is not-installed; anything else that fails is
 // untrusted, and nothing else is tried in its place.
-// scripts/desktop-deb-lifecycle.sh check_helper mirrors these rules; change both.
+// scripts/desktop-deb-lifecycle.sh check_helper mirrors the Linux rules.
 export async function findHelper(resources: string, deps: FindDeps = {}): Promise<string> {
   if (!isAbsolute(resources) || resources.includes('\0')) throw new HelperError('untrusted', 'the resources directory is not an absolute path');
-  if ((deps.platform ?? process.platform) === 'win32') return findHelperWindows(resources);
+  const platform = deps.platform ?? process.platform;
+  if (platform === 'win32') return findHelperWindows(resources);
   const own = deps.uid ?? (typeof process.getuid === 'function' ? process.getuid() : -1);
   const candidate = join(resources, HELPER_NAME);
   let st;
@@ -146,7 +155,7 @@ export async function findHelper(resources: string, deps: FindDeps = {}): Promis
     throw new HelperError('untrusted', 'the voice helper cannot be resolved');
   }
   if (!real.startsWith(realResources + sep)) throw new HelperError('untrusted', "the voice helper is not inside the app's resources");
-  await safeAncestors(dirname(real), own);
+  await safeAncestors(dirname(real), own, platform, deps.ancestorStat ?? lstat);
   return real;
 }
 
@@ -182,9 +191,14 @@ async function findHelperWindows(resources: string): Promise<string> {
 
 // safeAncestors checks every directory from dir up to /: each must be a
 // directory owned by the user or root, and either closed to writes by group
-// and others, or sticky and owned by root. Otherwise another user could
+// and others, sticky and owned by root, or writable only by root and the
+// trusted admin group on macOS. Otherwise another user could
 // rename a directory on the way and put another tree, or another
 // conch-voice, where the checked one was between the check and the spawn.
+// macOS admins can replace /Applications/Conch.app wholesale. The helper
+// shares the app's install-directory trust, as on Windows. Only the owner
+// or root can set or inherit ACLs on the helper path, which puts those ACLs
+// outside the threat model.
 //
 // How this differs from internal/cli/voicehelper/find.go's trusted(): that
 // walks the configured path one name at a time, following each link itself
@@ -201,20 +215,23 @@ function shown(path: string): string {
   return path.replace(/[^\x20-\x7e]/g, '?');
 }
 
-async function safeAncestors(dir: string, own: number): Promise<void> {
+async function safeAncestors(dir: string, own: number, platform: NodeJS.Platform, stat: AncestorStat): Promise<void> {
   let at = dir;
   for (;;) {
     let st;
     try {
-      st = await lstat(at);
+      st = await stat(at);
     } catch {
       throw new HelperError('untrusted', `${shown(at)} above the voice helper cannot be read`);
     }
     const closed = (st.mode & 0o022) === 0;
     const rootSticky = (st.mode & 0o1000) !== 0 && st.uid === 0;
+    // /Applications can be root:admin 0775. Allow admin (gid 80) here only
+    // on macOS, for root-owned directories with world writes off.
+    const darwinAdmin = platform === 'darwin' && st.uid === 0 && st.gid === 80 && (st.mode & 0o002) === 0;
     if (!st.isDirectory()) throw new HelperError('untrusted', `${shown(at)} is not a directory`);
     if (!safeOwner(st.uid, own)) throw new HelperError('untrusted', `${shown(at)} is not owned by you or by root`);
-    if (!(closed || rootSticky)) throw new HelperError('untrusted', `${shown(at)} may be changed by other users`, 'folder-writable');
+    if (!(closed || rootSticky || darwinAdmin)) throw new HelperError('untrusted', `${shown(at)} may be changed by other users`, 'folder-writable');
     const up = dirname(at);
     if (up === at) return;
     at = up;
@@ -222,7 +239,7 @@ async function safeAncestors(dir: string, own: number): Promise<void> {
 }
 
 export interface HelperEnvInput {
-  // main's own environment, read only for the names in PASSED_THROUGH.
+  // Main's own environment, read only for the platform's allowlisted names.
   readonly parent: NodeJS.ProcessEnv;
   // The profile's configuration directory: device settings never cross
   // accounts.
@@ -256,7 +273,7 @@ function baseEnv(parent: NodeJS.ProcessEnv, configDir: string, platform: NodeJS.
       if (value !== undefined && value !== '' && !value.includes('\0')) env[canonical] = value;
     }
   } else {
-    for (const name of PASSED_THROUGH) {
+    for (const name of platform === 'darwin' ? PASSED_THROUGH_MACOS : PASSED_THROUGH) {
       const value = parent[name];
       if (value !== undefined && value !== '' && !value.includes('\0')) env[name] = value;
     }
@@ -286,9 +303,8 @@ export function helperEnv(input: HelperEnvInput): Record<string, string> {
 }
 
 // helperArgs is the command line: `managed --events-pipe <name>` and the
-// caller's extra helper options. The name is a socket path on Linux and a
-// pipe name on Windows; neither is a secret. None may hold the token or the
-// nonce.
+// caller's extra helper options. The name is a Unix socket path or a Windows
+// pipe name and carries no secret. No argument may hold the token or nonce.
 export function helperArgs(endpointName: string, extra: readonly string[], secrets: readonly string[]): string[] {
   const args = [VOICE_CONTROL_SUBCOMMAND, VOICE_CONTROL_PIPE_FLAG, endpointName, ...extra];
   for (const a of args) {
@@ -337,6 +353,47 @@ export function oneShotSpawnOptions(env: Record<string, string>, platform: NodeJ
 }
 
 export const defaultOneShotSpawn: OneShotSpawnFn = (command, args, options) => nodeSpawn(command, args, options);
+
+export function runDarwinTempUtility(file: '/usr/bin/getconf' | '/bin/ls', args: string[], spawn: OneShotSpawnFn = nodeSpawn): Promise<string> {
+  return new Promise((resolve, reject) => {
+    // Ignoring TMPDIR depends on the exact child environment below. Darwin's
+    // confstr falls back to $TMPDIR when __dirhelper fails. The C locale also
+    // keeps ls output predictable for the ACL check.
+    const child = spawn(file, args, { env: { LC_ALL: 'C' }, stdio: ['ignore', 'pipe', 'pipe'], shell: false });
+    const output: Buffer[] = [];
+    let bytes = 0;
+    let settled = false;
+    const fail = (): void => {
+      settled = true;
+      clearTimeout(timer);
+      reject(new Error('voice: runtime directory check failed'));
+    };
+    const stop = (): void => {
+      if (settled) return;
+      fail();
+      child.kill('SIGKILL');
+    };
+    const timer = setTimeout(stop, 5000);
+    child.stdout.on('data', (chunk: Buffer) => {
+      if (settled) return;
+      bytes += chunk.length;
+      if (bytes > 16_384) stop();
+      else output.push(chunk);
+    });
+    child.stderr.on('data', stop);
+    child.on('error', fail);
+    child.on('close', (code) => {
+      if (settled) return;
+      if (code !== 0) {
+        fail();
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      resolve(Buffer.concat(output, bytes).toString('utf8'));
+    });
+  });
+}
 
 export function spawnHelper(
   spawnFn: SpawnFn,

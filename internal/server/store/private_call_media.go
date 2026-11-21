@@ -13,15 +13,15 @@ import (
 // Keep retired names as tombstones. A LiveKit refresh token can recreate an
 // old room when auto-create is enabled, including after our prefix changes.
 var privateCallMediaMigration = []string{
-	`CREATE TABLE IF NOT EXISTS call_rooms (
+	`CREATE TABLE call_rooms (
 		call_id TEXT PRIMARY KEY REFERENCES private_calls(id),
 		name TEXT NOT NULL UNIQUE,
 		retired INTEGER NOT NULL DEFAULT 0,
 		delete_pending INTEGER NOT NULL DEFAULT 0
 	)`,
-	`CREATE INDEX IF NOT EXISTS call_rooms_work ON call_rooms (retired, delete_pending)
+	`CREATE INDEX call_rooms_work ON call_rooms (retired, delete_pending)
 		WHERE retired = 0 OR delete_pending = 1`,
-	`CREATE TABLE IF NOT EXISTS call_room_holders (
+	`CREATE TABLE call_room_holders (
 		call_id TEXT NOT NULL REFERENCES call_rooms(call_id),
 		principal_id INTEGER NOT NULL REFERENCES principals(id),
 		credential_id INTEGER NOT NULL REFERENCES credentials(id),
@@ -31,7 +31,7 @@ var privateCallMediaMigration = []string{
 
 // Index the same ended_at written transactionally with room retirement.
 var privateCallMediaWatchMigration = []string{
-	`CREATE INDEX IF NOT EXISTS private_calls_ended_at ON private_calls (ended_at) WHERE ended_at IS NOT NULL`,
+	`CREATE INDEX private_calls_ended_at ON private_calls (ended_at) WHERE ended_at IS NOT NULL`,
 }
 
 // LiveKit refresh tokens have a 10-minute TTL plus about 60 seconds of
@@ -43,6 +43,15 @@ func retireCallRoom(ctx context.Context, tx execer, id string) error {
 		return err
 	}
 	_, err := tx.ExecContext(ctx, `UPDATE call_rooms SET retired = 1, delete_pending = 1 WHERE call_id = ?`, id)
+	return err
+}
+
+// retireLiveCallRooms queues media cleanup after a bulk restart or restore.
+func retireLiveCallRooms(ctx context.Context, tx execer) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM call_room_holders`); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE call_rooms SET retired = 1, delete_pending = 1 WHERE retired = 0`)
 	return err
 }
 
@@ -91,6 +100,12 @@ func (s *Store) GrantPrivateCallMedia(ctx context.Context, id string, actor Priv
 
 func (s *Store) withPrivateCallMedia(ctx context.Context, id string, actor PrivateCallActor, clock func() time.Time, allowed func(execer, privateCall) error) (out PrivateCallResult, err error) {
 	err = s.withImmediateTx(ctx, func(tx execer) error {
+		now := clock().Truncate(time.Millisecond)
+		if live, err := privateCallRequestLive(ctx, tx, actor, now); err != nil {
+			return err
+		} else if !live {
+			return ErrPrivateCallNotFound
+		}
 		c, err := privateCallByID(ctx, tx, id)
 		if err != nil {
 			return err
@@ -98,7 +113,7 @@ func (s *Store) withPrivateCallMedia(ctx context.Context, id string, actor Priva
 		if c.role(actor.PrincipalID) == "" {
 			return ErrPrivateCallNotFound
 		}
-		if _, err := refreshPrivateCall(ctx, tx, &c, clock().Truncate(time.Millisecond)); err != nil {
+		if _, err := refreshPrivateCall(ctx, tx, &c, now); err != nil {
 			return err
 		}
 		out.Call = c.view(actor)

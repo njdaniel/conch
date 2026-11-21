@@ -8,6 +8,7 @@
 // two: HTTP and WebSocket requests to exactly the live grant's LiveKit origin,
 // and one screen capture by the rules of display-capture.ts. WebRTC (ICE,
 // STUN, TURN) and WebTransport are not requests this module sees.
+import { diagnosticSamplesFor, GeometricSampler, type MainLog } from './diagnostics.ts';
 import type { App, Event, Session, WebContents } from 'electron';
 
 import { displayPermission, type DisplayCapture } from './display-capture.ts';
@@ -64,7 +65,7 @@ function describe(url: string): string {
 }
 
 export interface GuardDeps {
-  readonly log: (line: string) => void;
+  readonly log: MainLog;
   // What lets a clipboard write through and a link out (issue #947). Without
   // them (a unit test of the refusals alone) nothing is let through.
   readonly gestures?: Gestures;
@@ -150,11 +151,18 @@ export function guardSession(ses: Session, deps: GuardDeps): void {
   // https:`) lets any secure origin as far as here, so for those this is the
   // boundary, read afresh on every request: an end, a sign-out or a switch
   // forgets the grant first, and the next request is refused. It is also the
-  // observer the smoke test reads: a refusal is one stderr line. WebRTC
+  // observer the smoke test reads: the refused origin stays in the local log. WebRTC
   // (ICE, STUN, TURN) and WebTransport never reach onBeforeRequest: they are
   // outside this filter and the CSP's connect-src alike.
+  // A page can make requests without limit, so the export samples them
+  // (1, 2, 4, 8 ...) and the header carries the total across sessions (#2092).
+  const blockedSamples = diagnosticSamplesFor(deps.log)?.blocked ?? new GeometricSampler<'blocked'>();
   ses.webRequest.onBeforeRequest((details, callback) => {
     if (foreign(details.url) && !livekitAllowed(details.url, deps.liveOrigin?.() ?? null)) {
+      if (blockedSamples.sample('blocked')) {
+        const blocked = blockedSamples.count('blocked');
+        deps.log(`conch-desktop: blocked a request; ${String(blocked)} so far`, { ring: true });
+      }
       deps.log(`conch-desktop: blocked a request to ${describe(details.url)}`);
       callback({ cancel: true });
       return;

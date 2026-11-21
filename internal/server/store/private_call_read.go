@@ -39,13 +39,16 @@ func (s *Store) ListPrivateCalls(ctx context.Context, conversationID int64, acto
 		return out, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := privateCallPeer(ctx, tx, conversationID, actor.PrincipalID); err != nil {
-		return out, err
-	}
 	if live, err := privateCallRequestLive(ctx, tx, actor, now); err != nil {
 		return out, err
 	} else if !live {
 		return out, ErrPrivateCallPair
+	}
+	// History is a read of the pair: the conversation must be visible to
+	// this person and its peer known to them, the same lookup as an invite
+	// (a read needs no contact eligibility, only standing and the pair).
+	if _, err := privateCallPairTx(ctx, tx, actor.PrincipalID, conversationID); err != nil {
+		return out, err
 	}
 	rows, err := privateCallHistoryRows(ctx, tx, conversationID, actor.PrincipalID, cursor)
 	if err != nil {

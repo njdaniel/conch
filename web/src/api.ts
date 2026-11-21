@@ -1,4 +1,4 @@
-import { disablePrincipalResponseV1, listChannelBansResponseV1, messageV2, revokeIssuedResponseV1, type DisablePrincipalResponseV1, type RevokeIssuedResponseV1, messageRemovedV1, type MessageRemovedV1 } from './schema/generated';
+import { disablePrincipalResponseV1, listChannelBansResponseV1, listBlocksResponseV1, blockV1, messageV2, revokeIssuedResponseV1, type DisablePrincipalResponseV1, type RevokeIssuedResponseV1, messageRemovedV1, type MessageRemovedV1 } from './schema/generated';
 import { listOwnPushRegistrationsResponseV1, notificationPreferencesV1, pushConfigV1, pushRegistrationV1, type CreatePushRegistrationRequestV1, type NotificationPreferencesV1, type PushConfigV1, type PushRegistrationV1, type PutNotificationPreferencesRequestV1 } from './schema/generated';
 import { defaultShareQuality, type SettledQuality, type ShareQuality } from './voice/share';
 // The only module that holds the credential in use, and the only one that
@@ -155,9 +155,11 @@ import {
 import { listNetsResponseV1, type NetV1 } from './schema/net';
 import {
   createSignInLinkResponseV1,
+  listAccountNoticesResponseV1,
   listOwnSignInLinksResponseV1,
   redeemSignInLinkResponseV1,
   signInLinkPreviewV1,
+  type AccountNoticeV1,
   type CreateDeviceLinkRequestV1,
   type CreateSignInLinkRequestV1,
   type RedeemSignInLinkRequestV1,
@@ -1160,6 +1162,22 @@ export async function listDeviceLinks(): Promise<ApiResult<SignInLinkV1[]>> {
 // nothing; another's id is sign_in_link_not_found.
 export async function closeDeviceLink(id: number): Promise<InviteResult<null>> {
   return readDone(await authedSend(call('closeSignInLink', { id })));
+}
+
+// listAccountNotices reads what the server tells this person about their own
+// account and they have not dismissed (GET /v1/notices/mine, issue #2042):
+// today, a password set through a link another principal made. The server
+// answers an empty list to a sign-in someone else made for them, so an empty
+// list is not a promise that there is nothing to say.
+export async function listAccountNotices(): Promise<ApiResult<AccountNoticeV1[]>> {
+  const result = await authed(call('listNotices'), listAccountNoticesResponseV1);
+  return result.ok ? { ok: true, value: result.value.notices } : result;
+}
+
+// dismissAccountNotice dismisses one of this person's own notices; the
+// dismissal is theirs alone. Another's id is notice_not_found.
+export async function dismissAccountNotice(id: number): Promise<InviteResult<null>> {
+  return readDone(await authedSend(call('dismissNotice', { id })));
 }
 
 // Guest entry, for an operator (issue #714, design §2): the joining
@@ -2932,14 +2950,15 @@ async function requestTicket(): Promise<ApiResult<WSTicketV1>> {
 // The page's sockets. The occupancy socket (issue #596) is a voice socket to
 // the diagnostic ring, whose vocabulary has no word of its own for it, but it
 // keeps its own count of tries, so a presence socket's losses are not added
-// to it.
-type SocketName = DiagnosticSocket | 'occupancy';
-const diagnosticOf: Record<SocketName, DiagnosticSocket> = { messages: 'messages', events: 'events', voice: 'voice', occupancy: 'voice' };
+// to it. The person stream (issue #2040) is an events socket to the ring, for
+// the same reason, and counts its own tries.
+type SocketName = DiagnosticSocket | 'occupancy' | 'person';
+const diagnosticOf: Record<SocketName, DiagnosticSocket> = { messages: 'messages', events: 'events', voice: 'voice', occupancy: 'voice', person: 'events' };
 
 // How many times each socket has been tried since it was last open, for the
 // diagnostic ring: 0 while it is open or was never lost.
-const retries: Record<SocketName, number> = { messages: 0, events: 0, voice: 0, occupancy: 0 };
-const lost: Record<SocketName, boolean> = { messages: false, events: false, voice: false, occupancy: false };
+const retries: Record<SocketName, number> = { messages: 0, events: 0, voice: 0, occupancy: 0, person: 0 };
+const lost: Record<SocketName, boolean> = { messages: false, events: false, voice: false, occupancy: false, person: false };
 
 // connect asks for a ticket with the credential and opens the socket that
 // `query` names, with the ticket added. The ticket is single use, so a
@@ -3007,6 +3026,16 @@ async function connect(name: SocketName, id: OperationId, query: Readonly<Record
 // watchdog lives on; without it /v2/ws sends messages and nothing else.
 export const openSocket: OpenSocket = (channel, after, events) =>
   connect('messages', 'messagesSocket', { channel, after: String(after), heartbeat: '1' }, events);
+
+// openPersonSocket opens the per-person stream (issue #2040): the signed-in
+// person's own DM frames, with no channel. It is not the channel events
+// socket and shares nothing with it; the frames are read by
+// state/personStream.ts. The address carries no channel and no session: the
+// server opens it only for a person's own credential, and tells the socket its
+// instance id in its first frame.
+export function openPersonSocket(events: SocketEvents): Promise<ApiResult<FeedSocket>> {
+  return connect('person', 'personSocket', {}, events);
+}
 
 // Reaction consumers share the existing events socket. They do not pass
 // through message notifications, message scrolling, or read-state handling.
@@ -3430,6 +3459,18 @@ export async function stopVoiceShare(channel: string, startedAt?: string): Promi
 
 export async function listChannelBans(channel: string) {
   return readSent(await authedSend(call('listBans', { channel })), listChannelBansResponseV1);
+}
+// Personal blocks (issue #1832, docs/design/blocks.md): the caller's own list.
+// A block is a preference of the caller's, stored on the server so it reaches
+// every device and quiets push; it is never shown to the person blocked.
+export async function listBlocks() {
+  return readSent(await authedSend(call('listBlocks')), listBlocksResponseV1);
+}
+export async function blockPrincipal(id: number) {
+  return readSent(await authedSend(call('putBlock', { principal: id })), blockV1);
+}
+export async function unblockPrincipal(id: number): Promise<InviteResult<null>> {
+  return readDone(await authedSend(call('deleteBlock', { principal: id })));
 }
 export async function moderate(channel: string, op: 'kickVoice' | 'banMember' | 'unbanMember' | 'removeMessage' | 'removeOwnMessage', id: number): Promise<InviteResult<null>> {
   return readDone(await authedSend(call(op, { channel, principal: id, id })));

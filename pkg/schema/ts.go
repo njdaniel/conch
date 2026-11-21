@@ -89,6 +89,8 @@ var TSConstants = []TSConstant{
 	{Name: "VOICE_CONTROL_MAX_SERVER_BYTES", Value: VoiceControlMaxServerBytes},
 	{Name: "VOICE_CONTROL_MAX_CHANNEL_BYTES", Value: VoiceControlMaxChannelBytes},
 	{Name: "VOICE_CONTROL_MAX_RETRY_IN_MS", Value: VoiceControlMaxRetryInMS},
+	{Name: "VOICE_CONTROL_V4_MIN_LEVEL_DB", Value: VoiceControlV4MinLevelDB},
+	{Name: "VOICE_CONTROL_V4_MAX_LOSS_BASIS_POINTS", Value: VoiceControlV4MaxLossBasisPoints},
 	{Name: "VOICE_CONTROL_HELLO_TIMEOUT_MS", Value: VoiceControlHelloTimeoutMS},
 	{Name: "VOICE_CONTROL_ACK_TIMEOUT_MS", Value: VoiceControlAckTimeoutMS},
 	{Name: "VOICE_CONTROL_GATE_SHUT_MS", Value: VoiceControlGateShutMS},
@@ -127,7 +129,7 @@ var TSConstants = []TSConstant{
 	{Name: "MAX_ADMIN_MAX_PENDING", Value: MaxAdminMaxPending},
 	{Name: "MAX_ADMIN_REASON_CHARS", Value: MaxAdminReasonChars},
 
-	// Local direct messages (issue #2016, DRAFT pending ADR-017): the page
+	// Local direct messages (issue #2016, ADR-017): the page
 	// and nonce bounds a client must not exceed.
 	{Name: "DEFAULT_DM_PAGE_SIZE", Value: DefaultDMPageSize},
 	{Name: "MAX_DM_PAGE_SIZE", Value: MaxDMPageSize},
@@ -316,6 +318,27 @@ var TSTypes = []TSType{
 	{Value: VoiceControlAckV3{}, Schema: VoiceControlSchemaV3},
 	{Value: VoiceControlStateV3{}, Schema: VoiceControlSchemaV3},
 	{Value: VoiceControlProtocolErrorV3{}, Schema: VoiceControlSchemaV3},
+	// v4 (issues #2039 and #2085): a start that names a channel or a private
+	// call, microphone diagnostics and call quality. Its fixtures are in
+	// testdata/voice-control-v4/.
+	{Value: VoiceControlStartV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlSetMuteV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlSetDeafenV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlGetStateV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlLeaveV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlSetDevicesV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlSetTalkModeV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlSetShareAudioV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlSetShareAudioMuteV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlSetDiagnosticsV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlGetCallQualityV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlAckV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlProcessingV4{}},
+	{Value: VoiceControlStateV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlProtocolErrorV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlLevelsV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlGateEventV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlCallQualityV4{}, Schema: VoiceControlSchemaV4},
 	{Value: VoiceControlPipeAttachedV1{}, Schema: VoiceControlPipeSchemaV1},
 	// The device list `conch-voice devices --json` writes (issue #1378, D3-7
 	// of #771): the desktop owner reads it from a one-shot run. Its fixtures
@@ -324,6 +347,7 @@ var TSTypes = []TSType{
 	// every case of cases.json against this validator.
 	{Value: VoiceDevice{}},
 	{Value: VoiceDevicesV1{}, Schema: VoiceDevicesSchemaV1},
+	{Value: MuteKeyEventV1{}, Schema: MuteKeyEventSchemaV1, Family: "mute-key-event-v1"},
 	// Invites: the way in (ADR-008 §4). The code is in the create response
 	// alone; the new principal is in the redeem response.
 	{Value: PrincipalV0{}, Family: "principal-v0"},
@@ -434,6 +458,9 @@ var TSTypes = []TSType{
 	{Value: RedeemSetupTokenResponseV1{}, Family: "redeem-setup-token-response-v1"},
 	{Value: CreateDeviceLinkRequestV1{}, Family: "create-device-link-request-v1"},
 	{Value: ListOwnSignInLinksResponseV1{}, Family: "list-own-sign-in-links-response-v1"},
+	// Account notices (issue #2042): the member's own, dismissible.
+	{Value: AccountNoticeV1{}, Family: "account-notice-v1"},
+	{Value: ListAccountNoticesResponseV1{}, Family: "list-account-notices-response-v1"},
 
 	// The server's health, which carries its version (the sign-in page shows
 	// it). Not a versioned payload, so it has no fixture family.
@@ -553,7 +580,7 @@ var TSTypes = []TSType{
 	{Value: NotificationSummaryV1{}, Family: "notification-summary-v1", Schema: NotificationSummarySchemaV1},
 	{Value: ListPendingNotificationsResponseV1{}, Family: "list-pending-notifications-response-v1"},
 
-	// Local direct messages (issue #2016, DRAFT pending ADR-017): the
+	// Local direct messages (issue #2016, ADR-017): the
 	// conversation, its messages, read mark, files and preferences, the
 	// per-person stream's frames and snapshot, and version 2 of the pending
 	// feed, whose summaries say whether a message was said in a channel or
@@ -581,8 +608,14 @@ var TSTypes = []TSType{
 	{Value: DMFileV1{}, Family: "dm-file-v1", Schema: DMFileSchemaV1},
 	{Value: DMChangedV1{}, Family: "dm-changed-v1", Schema: DMChangedSchemaV1},
 	{Value: DMSnapshotV1{}, Family: "dm-snapshot-v1", Schema: DMSnapshotSchemaV1},
+	{Value: PersonStreamHelloV1{}, Family: "person-stream-hello-v1", Schema: PersonStreamHelloSchemaV1},
 	{Value: NotificationSummaryV2{}, Family: "notification-summary-v2", Schema: NotificationSummarySchemaV2},
 	{Value: ListPendingNotificationsResponseV2{}, Family: "list-pending-notifications-response-v2"},
+	// Personal blocks (issue #1832, docs/design/blocks.md): one entry, the
+	// caller's list, and the events signal that their list changed.
+	{Value: BlockV1{}, Family: "block-v1"},
+	{Value: ListBlocksResponseV1{}, Family: "list-blocks-response-v1"},
+	{Value: BlocksChangedV1{}, Family: "blocks-changed-v1", Schema: BlocksChangedSchemaV1},
 
 	// Private calls (issue #2029, DRAFT pending ADR-017): the attempt, the
 	// invite and action bodies, the answers, the stream's frames and
@@ -697,6 +730,8 @@ var TSVocabularyModes = map[string]TSVocabularyMode{
 	"PermissionPreset":   TSTolerant,
 	"PermissionsWarning": TSTolerant,
 	"IssuedKind":         TSTolerant,
+	// Account notices (account_notice.go): a later kind of notice.
+	"AccountNoticeKind": TSTolerant,
 	// Joining and the community model (guest.go, invite_v2.go, ADR-013):
 	// a later warning, link kind or directory scope.
 	"JoinWarning":    TSTolerant,
@@ -814,9 +849,12 @@ var TSVocabularyModes = map[string]TSVocabularyMode{
 	"VoiceDevicesConfig":      TSStrict,
 	"VoiceDevicesPipeWire":    TSStrict,
 
-	// Strict, for the same reason: version 3 of that protocol (issue #1851),
-	// its command kinds and the state of a share's sound.
+	// Strict, for the same reason: the v3 share-audio and v4 diagnostics
+	// vocabularies and their versioned command and event kinds.
 	"VoiceControlCommandKindV3":     TSStrict,
+	"VoiceControlCommandKindV4":     TSStrict,
+	"VoiceControlEventKindV4":       TSStrict,
+	"VoiceControlGateWhyV4":         TSStrict,
 	"VoiceControlShareAudio":        TSStrict,
 	"VoiceControlShareAudioProblem": TSStrict,
 

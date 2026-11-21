@@ -4,6 +4,7 @@
 - **Date:** 2026-10-05
 - **Deciders:** Nick (Tier-H)
 - **Proposal:** #82 · **Design:** [nets-and-whispers.md](../design/nets-and-whispers.md) · **Amends:** [ADR-000](ADR-000-charter.md) D11, D12
+- **Amended 2026-11-19 by [ADR-017](ADR-017-local-direct-messages-and-calls.md)** (Proposed; effective when Nick merges it): the D12 rewording (line 38) keeps standalone agent DMs at P6; local 1:1 human DMs are permitted. The text below is unchanged.
 
 ## Context
 

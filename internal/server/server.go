@@ -227,6 +227,16 @@ type Server struct {
 	// events socket writes: a test blocks in it to be a subscriber that is
 	// stuck in a write.
 	eventsBeforeWrite func()
+	// person is the registry of per-person stream sockets (person_stream.go),
+	// kept apart from events: it carries no channel.
+	person *personHub
+	// dmSnapshotSource builds the DM snapshot a person socket opens with.
+	// Nil means emptyDMSnapshot; the DM issues install the real one.
+	dmSnapshotSource dmSnapshotSource
+	// dmFrameAccess decides, per DM frame at write time, whether a person
+	// socket may be sent it (person_stream.go). Nil denies every frame: the socket drops them, so
+	// DMs reach no one until the DM store installs both hooks.
+	dmFrameAccess dmFrameAccess
 	// eventsBeforeEpochWrite, when set by a test, runs before every frame an
 	// events socket writes that is held to a read-state epoch (a read state
 	// or a notification message), with the encoded frame. A test that must
@@ -363,6 +373,7 @@ func New(cfg Config, st *store.Store) *Server {
 	s.removeStaleUploads()
 	s.voice = newVoicePoller(s)
 	s.events = newEventsHub()
+	s.person = newPersonHub()
 	s.metrics = newServerMetrics(s)
 	s.pushSender = s.newPushSender()
 	// Runs that end with their session change without SetRunState, so the
@@ -563,6 +574,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	defer s.voice.closeAll()
 	// Events sockets are hijacked too, and are closed the same way.
 	defer s.events.closeAll()
+	defer s.person.closeAll()
 	if s.lk != nil {
 		stop := s.voice.start(ctx)
 		defer stop()

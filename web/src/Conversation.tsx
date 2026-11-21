@@ -1,3 +1,4 @@
+import { BlockedRow, isCollapsedFor, useBlocksContext } from './blocks';
 import { platform } from './platform';
 import { hashForMessage } from './route';
 import { ModerationConfirm, useMayModerate, useMayRemoveOwn, useTombstones } from './Moderation';
@@ -153,7 +154,26 @@ export function messageName(message: MessageV2, people: ReadonlyMap<number, Pers
   return `${authorOf(message, people)}'s message, ${clock(message.created_at)}`;
 }
 
-export function Message({
+// Message is one message of a log, a thread or search results. A message by
+// someone the viewer blocks (issue #1832) is one collapsed row, "Blocked
+// message", whose Show reveals it in this view only: the state lives in this
+// row and is never stored, so another list, or this one read again, collapses
+// it again. Approval and admin-action cards and tombstones never collapse
+// (isBlockExempt).
+export function Message(props: Parameters<typeof ShownMessage>[0]) {
+  const { blocked } = useBlocksContext();
+  const [revealed, setRevealed] = useState(false);
+  if (!revealed && isCollapsedFor(blocked, props.message)) {
+    return (
+      <li className="message blocked" data-message-id={props.message.id} tabIndex={props.stop === true ? 0 : -1}>
+        <BlockedRow onShow={() => { setRevealed(true); }} />
+      </li>
+    );
+  }
+  return <ShownMessage {...props} />;
+}
+
+function ShownMessage({
   message,
   people,
   nets,

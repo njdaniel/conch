@@ -19,6 +19,7 @@
 //     opens the app as any launch does, text first, no helper, no voice;
 //   - turning it off removes only a file that carries the marker, and a file
 //     Conch did not write is never overwritten or removed.
+import type { MainLog } from './diagnostics.ts';
 import { randomBytes } from 'node:crypto';
 import { lstat, mkdir, open, readFile, realpath, rename, rm, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, join } from 'node:path';
@@ -42,7 +43,7 @@ export interface AutostartDeps {
   readonly home: string;
   // Test seam, see trustedTarget.
   readonly trustedAbove?: string;
-  readonly log: (line: string) => void;
+  readonly log: MainLog;
 }
 
 export function autostartPath(env: Readonly<Record<string, string | undefined>>, home: string): string {
@@ -140,12 +141,12 @@ export class Autostart {
   async enable(): Promise<AutostartResult> {
     const why = await this.availability();
     if (why === 'unpackaged') {
-      this.#deps.log('conch-desktop: launch at login is only for an installed build; an unpackaged run does not write an autostart entry');
+      this.#deps.log('conch-desktop: launch at login is only for an installed build; an unpackaged run does not write an autostart entry', { ring: true });
       return { ok: false, reason: 'unpackaged' };
     }
     if (why === 'launch-unsupported') return { ok: false, reason: why };
     if (why === 'unsafe-location') {
-      this.#deps.log('conch-desktop: launch at login needs the app installed where only you or the system can change it; no autostart entry was written');
+      this.#deps.log('conch-desktop: launch at login needs the app installed where only you or the system can change it; no autostart entry was written', { ring: true });
       return { ok: false, reason: 'unsafe-location' };
     }
     // The real path, checked again here, so the entry names what was judged.
@@ -154,6 +155,7 @@ export class Autostart {
     if (text === null) return { ok: false, reason: 'failed' };
     try {
       if ((await this.#existing()) === 'foreign') {
+        this.#deps.log('conch-desktop: an existing autostart entry was not written by Conch; it is left alone', { ring: true });
         this.#deps.log(`conch-desktop: ${this.#file} exists and was not written by Conch; it is left alone`);
         return { ok: false, reason: 'foreign-file' };
       }
@@ -174,7 +176,7 @@ export class Autostart {
       }
       return { ok: true };
     } catch {
-      this.#deps.log('conch-desktop: the autostart entry could not be written');
+      this.#deps.log('conch-desktop: the autostart entry could not be written', { ring: true });
       return { ok: false, reason: 'failed' };
     }
   }
@@ -187,6 +189,7 @@ export class Autostart {
         case 'absent':
           return { ok: true };
         case 'foreign':
+          this.#deps.log('conch-desktop: the autostart entry was not written by Conch; it is left alone', { ring: true });
           this.#deps.log(`conch-desktop: ${this.#file} was not written by Conch; it is left alone`);
           return { ok: false, reason: 'foreign-file' };
         case 'ours':
@@ -194,7 +197,7 @@ export class Autostart {
           return { ok: true };
       }
     } catch {
-      this.#deps.log('conch-desktop: the autostart entry could not be removed');
+      this.#deps.log('conch-desktop: the autostart entry could not be removed', { ring: true });
       return { ok: false, reason: 'failed' };
     }
   }

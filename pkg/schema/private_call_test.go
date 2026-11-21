@@ -2,14 +2,37 @@ package schema
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestNewPrivateCallID(t *testing.T) {
+	// Use the same reserved shape as voice_control v4, including custom
+	// prefixes, so any issued id can be sent to the voice helper.
+	roomName := regexp.MustCompile(`^[a-z0-9-]{0,31}-[a-z2-7]{26}$`)
+	for range 128 {
+		id := NewPrivateCallID()
+		if roomName.MatchString(id) {
+			t.Fatalf("issued attempt id %q matches the reserved room namespace", id)
+		}
+		decoded, err := base64.RawURLEncoding.Strict().DecodeString(id)
+		if err != nil || len(decoded) != 16 {
+			t.Fatalf("issued attempt id %q does not encode 128 bits of unpadded base64url: %v", id, err)
+		}
+		call := validCall(PrivateCallStateRinging)
+		call.ID = id
+		if err := call.Validate(); err != nil {
+			t.Fatalf("issued attempt id %q fails call validation: %v", id, err)
+		}
+	}
+}
 
 func TestPrivateCallGoldenFixtures(t *testing.T) {
 	calls := []string{
@@ -29,7 +52,6 @@ func TestPrivateCallGoldenFixtures(t *testing.T) {
 		{"private-call-response-v1-unavailable.json", func() dmValidator { return new(PrivateCallResponseV1) }},
 		{"private-call-response-v1-glare.json", func() dmValidator { return new(PrivateCallResponseV1) }},
 		{"private-call-response-v1-accepted.json", func() dmValidator { return new(PrivateCallResponseV1) }},
-		{"private-call-conflict-v1.json", func() dmValidator { return new(PrivateCallConflictV1) }},
 		{"private-call-session-v1.json", func() dmValidator { return new(PrivateCallSessionV1) }},
 		{"private-call-ringing-v1.json", func() dmValidator { return new(PrivateCallRingingV1) }},
 		{"private-call-stop-ringing-v1.json", func() dmValidator { return new(PrivateCallStopRingingV1) }},
@@ -261,7 +283,13 @@ func TestPrivateCallStepRefusals(t *testing.T) {
 		{"another attempt", func(n *PrivateCallV1) { n.ID = "Xe3Lm0Wq8NtRz5YbHc1uVg" }},
 		{"another pair", func(n *PrivateCallV1) { n.CalleeID = 9 }},
 		{"another reader", func(n *PrivateCallV1) { n.Role = PrivateCallRoleCallee; n.SelectedHere = false }},
+		{"caller credential gains selection on acceptance", func(n *PrivateCallV1) { n.SelectedHere = true }},
 	}
+	ringing.SelectedHere = true
+	if err := ValidatePrivateCallStep(ringing, accepted); err == nil {
+		t.Error("caller credential loses selection on acceptance")
+	}
+	ringing.SelectedHere = false
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			next := accepted
@@ -283,6 +311,12 @@ func TestPrivateCallStepRefusals(t *testing.T) {
 	ended.Reason = PrivateCallReasonGone
 	if err := ValidatePrivateCallStep(accepted, ended); err == nil {
 		t.Error("accepted -> ended (gone) accepted; gone is from active")
+	}
+	active.Revision = 3
+	active.Role, accepted.Role = PrivateCallRoleCallee, PrivateCallRoleCallee
+	active.SelectedHere = true
+	if err := ValidatePrivateCallStep(accepted, active); err == nil {
+		t.Error("callee credential gains selection after acceptance")
 	}
 }
 
@@ -386,14 +420,99 @@ func TestPrivateCallRequestsAndBodies(t *testing.T) {
 	}
 	// An invite or action body has no field for a device, room, camera or share: the
 	// server's strict decoding refuses one (400 invalid_request).
-	for _, field := range []string{"room", "token", "device", "credential_id", "camera", "screen_share", "video"} {
-		for name, into := range map[string]any{"invite": new(InvitePrivateCallRequestV1), "action": new(PrivateCallActionRequestV1)} {
-			dec := json.NewDecoder(strings.NewReader(`{"action_id":"a","revision":1,"` + field + `":1}`))
-			dec.DisallowUnknownFields()
-			if err := dec.Decode(into); err == nil {
-				t.Errorf("%s accepts %q", name, field)
+	for _, tt := range []struct {
+		name string
+		body string
+		new  func() dmValidator
+	}{
+		{"invite", `{"action_id":"a"}`, func() dmValidator { return new(InvitePrivateCallRequestV1) }},
+		{"action", `{"action_id":"a","revision":1}`, func() dmValidator { return new(PrivateCallActionRequestV1) }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			decode := func(body string, into dmValidator) error {
+				dec := json.NewDecoder(strings.NewReader(body))
+				dec.DisallowUnknownFields()
+				return dec.Decode(into)
 			}
-		}
+			valid := tt.new()
+			if err := decode(tt.body, valid); err != nil {
+				t.Fatal(err)
+			}
+			if err := valid.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			for _, field := range []string{"room", "token", "device", "credential_id", "camera", "screen_share", "video"} {
+				body := strings.TrimSuffix(tt.body, "}") + `,"` + field + `":1}`
+				want := `json: unknown field "` + field + `"`
+				if err := decode(body, tt.new()); err == nil || err.Error() != want {
+					t.Errorf("decode with %q = %v, want %s", field, err, want)
+				}
+			}
+		})
+	}
+}
+
+func TestPrivateCallAcceptRaceFixtures(t *testing.T) {
+	// The exact retry receives HTTP 200 and keeps the winning selection.
+	var winner PrivateCallResponseV1
+	assertValidGoldenFixture(t, "private-call-response-v1-accept-replayed.json", func() dmValidator { return &winner })
+	if !winner.Replayed || !winner.Call.SelectedHere || winner.Call.Role != PrivateCallRoleCallee ||
+		winner.Call.State != PrivateCallStateAccepted || winner.Call.Revision != 2 {
+		t.Fatalf("winning retry = %+v", winner)
+	}
+
+	// A competing credential receives HTTP 409 for the same revision, even
+	// if it submitted the same action id. Only its own selection differs.
+	var loser PrivateCallConflictV1
+	assertValidGoldenFixture(t, "private-call-conflict-v1.json", func() dmValidator { return &loser })
+	want := winner.Call
+	want.SelectedHere = false
+	if !reflect.DeepEqual(loser.Call, want) {
+		t.Errorf("competing accept = %+v, want %+v", loser.Call, want)
+	}
+}
+
+func TestPrivateCallInviteHTTPStatus(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "private-call-invite-status-v1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var statuses map[string]int
+	if err := json.Unmarshal(raw, &statuses); err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range []string{
+		"private-call-response-v1.json",
+		"private-call-response-v1-unavailable.json",
+		"private-call-response-v1-glare.json",
+		"private-call-response-v1-replayed.json",
+	} {
+		t.Run(file, func(t *testing.T) {
+			var response PrivateCallResponseV1
+			assertValidGoldenFixture(t, file, func() dmValidator { return &response })
+			if got, want := response.InviteHTTPStatus(), statuses[file]; got != want {
+				t.Errorf("invite HTTP status = %d, want %d", got, want)
+			}
+		})
+	}
+}
+
+func TestPrivateCallUnavailableStateFrame(t *testing.T) {
+	raw, err := os.ReadFile("testdata/invalid-private-call-state-v1-unavailable.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var frame PrivateCallStateV1
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&frame); err != nil {
+		t.Fatal(err)
+	}
+	if err := frame.Call.Validate(); err != nil {
+		t.Fatalf("the embedded caller view should be valid in an invite response: %v", err)
+	}
+	if err := frame.Validate(); err == nil || !strings.Contains(err.Error(), "unavailable call cannot appear in a state frame") {
+		t.Errorf("unavailable state frame: %v", err)
 	}
 }
 
@@ -418,6 +537,11 @@ func TestPrivateCallResponses(t *testing.T) {
 	if err := conflict.Validate(); err != nil {
 		t.Error(err)
 	}
+	conflict.Call = validCall(PrivateCallStateUnavailable)
+	if err := conflict.Validate(); err == nil {
+		t.Error("a call lookup exposes an unavailable attempt")
+	}
+	conflict.Call = acc
 	conflict.Code = "forbidden"
 	if err := conflict.Validate(); err == nil {
 		t.Error("conflict with another code")

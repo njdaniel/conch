@@ -85,9 +85,28 @@ func TestCommunityMigrationApprovalChain(t *testing.T) {
 	for _, stmt := range []string{
 		// Undo migration 41's DDL (archived_at), then migration 40's: the
 		// database is as a server at 39 held it.
-		"DROP TABLE push_registrations",          // migration 49 (issue #1714)
-		"DROP TABLE notification_preferences",    // migration 48 (issue #1713)
-		"ALTER TABLE channels DROP COLUMN topic", // migration 47 (issue #1503)
+		"DROP TABLE call_room_holders", // migration 56 (issue #2032); children before parents
+		"DROP TABLE call_rooms",
+		"DROP TABLE private_call_actions", // migration 55 (issue #2030)
+		"DROP TABLE private_call_holders",
+		"DROP TABLE private_calls",
+		"DROP TABLE dm_contact_preferences",             // migration 54 (issue #2018)
+		"ALTER TABLE principals DROP COLUMN dm_allowed", // migration 54
+		"DROP TABLE direct_messages_fts",                // migration 53 (issue #2017); children before parents
+		"DROP TABLE dm_read_marks",
+		"DROP TABLE dm_files",
+		"DROP TABLE direct_message_removals",
+		"DROP TABLE direct_message_revisions",
+		"DROP TABLE direct_messages",
+		"DROP TABLE dm_viewer_state",
+		"DROP TABLE dm_conversations",
+		"DROP TABLE account_notices",                      // migration 52 (issue #2042)
+		"ALTER TABLE credentials DROP COLUMN self_made",   // migration 52 (issue #2042)
+		"ALTER TABLE sign_in_links DROP COLUMN self_made", // migration 52
+		"DROP TABLE blocks",                               // migration 51 (issue #1832)
+		"DROP TABLE push_registrations",                   // migration 49 (issue #1714)
+		"DROP TABLE notification_preferences",             // migration 48 (issue #1713)
+		"ALTER TABLE channels DROP COLUMN topic",          // migration 47 (issue #1503)
 		`CREATE TABLE open_channels (channel_id INTEGER PRIMARY KEY REFERENCES channels (id), added_by INTEGER REFERENCES principals (id), added_at INTEGER NOT NULL)`, // migration 46 (issue #998)
 		"DROP TABLE message_removals",                         // migration 45 (issue #849); its triggers go with it
 		"DROP TABLE channel_bans",                             // migration 45 (issue #849)

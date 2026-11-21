@@ -9,6 +9,7 @@
 // nothing the renderer checked is trusted. Only the URL goes to the OS: no
 // header, cookie, token or referrer, and the app never fetches it. A window
 // the page opens is never created, whatever the answer.
+import type { MainLog } from './diagnostics.ts';
 import { LINK_GESTURE_MS, type Gestures } from './gestures.ts';
 
 export const MAX_LINK_LENGTH = 2048;
@@ -101,7 +102,7 @@ export interface LinkDeps {
   readonly confirm: (host: string, url: string) => Promise<boolean>;
   // Tells the person a link was refused. Never given the link.
   readonly tell: (message: string) => void;
-  readonly log: (line: string) => void;
+  readonly log: MainLog;
   readonly now?: () => number;
 }
 

@@ -9,6 +9,14 @@ afterEach(() => {
 
 const { services } = platform;
 
+it('sends fixed voice diagnostics through the desktop bridge and tolerates refusal', async () => {
+  const reportVoiceDiagnostic = vi.fn(() => Promise.reject(new Error('refused')));
+  Object.defineProperty(window, 'conchDesktop', { value: { reportVoiceDiagnostic }, configurable: true });
+  services.reportVoiceDiagnostic?.('encoder-cpu');
+  expect(reportVoiceDiagnostic).toHaveBeenCalledExactlyOnceWith('encoder-cpu');
+  await Promise.resolve();
+});
+
 describe('the desktop services of attachments, links and the clipboard (#947)', () => {
   it('marks a link for a new window, which main turns into the OS browser, never a window of the app', () => {
     expect(services.externalLink).toEqual({ target: '_blank', rel: 'noopener noreferrer' });

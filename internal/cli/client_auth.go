@@ -188,3 +188,20 @@ func (c *Client) CloseOwnDeviceLink(ctx context.Context, id int64) error {
 	endpoint := c.resolve("v1", "sign-in-links", "mine", strconv.FormatInt(id, 10))
 	return c.roundTrip(ctx, "close device link", http.MethodDelete, endpoint, nil, nil)
 }
+
+// ListAccountNotices returns the caller's own notices they have not
+// dismissed (issue #2042). A sign-in someone else made for the caller gets
+// an empty list.
+func (c *Client) ListAccountNotices(ctx context.Context) (schema.ListAccountNoticesResponseV1, error) {
+	var result accountNoticesDoc
+	if err := c.roundTrip(ctx, "list notices", http.MethodGet, c.resolve("v1", "notices", "mine"), nil, &result); err != nil {
+		return schema.ListAccountNoticesResponseV1{}, err
+	}
+	return result.ListAccountNoticesResponseV1, nil
+}
+
+// DismissAccountNotice dismisses one of the caller's own notices.
+func (c *Client) DismissAccountNotice(ctx context.Context, id int64) error {
+	endpoint := c.resolve("v1", "notices", "mine", strconv.FormatInt(id, 10))
+	return c.roundTrip(ctx, "dismiss notice", http.MethodDelete, endpoint, nil, nil)
+}

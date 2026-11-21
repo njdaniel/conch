@@ -1,0 +1,9 @@
+{
+  "schema": "conch.voice_control.v4",
+  "kind": "levels",
+  "seq": 7,
+  "level_db": -96,
+  "open_threshold_db": -34,
+  "close_threshold_db": -38,
+  "gate_open": false
+}

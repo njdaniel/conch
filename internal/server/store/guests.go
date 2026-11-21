@@ -385,7 +385,9 @@ func createGuestTx(ctx context.Context, tx execer, actor string, g NewGuest, p p
 		idle.Milliseconds()); err != nil {
 		return CreatedGuest{}, fmt.Errorf("store: create guest: visit: %w", err)
 	}
-	cred, err := insertCredentialTx(ctx, tx, pid, GuestCredentialLabel, p.token, now, &deadline, 0, issuerOf(actor))
+	// Self-made (issue #2042): the visitor admits themselves, through an
+	// invite or the open address, and the principal is created here.
+	cred, err := insertCredentialTx(ctx, tx, pid, GuestCredentialLabel, p.token, now, &deadline, 0, issuerOf(actor), madeBySelf)
 	if err != nil {
 		return CreatedGuest{}, err
 	}
@@ -1154,7 +1156,11 @@ func (s *Store) ConvertGuest(ctx context.Context, actor string, c GuestConversio
 			}
 		}
 		exp := now.Add(lifetime)
-		cred, err := insertCredentialTx(ctx, tx, c.PrincipalID, label, token, now, &exp, lifetime, issuerOf(actor))
+		// Self-made (issue #2042): the guest converts their own visit with a
+		// password they chose. No act-as path reaches a guest (an issued or
+		// rotated credential and every sign-in link refuse one), so the
+		// guest credential it replaces was self-made too.
+		cred, err := insertCredentialTx(ctx, tx, c.PrincipalID, label, token, now, &exp, lifetime, issuerOf(actor), madeBySelf)
 		if err != nil {
 			return err
 		}

@@ -161,6 +161,7 @@ func validOf[T interface {
 // validators is every vocabulary type with a Valid method. TestVocabularies
 // fails if a type has one and is not listed here.
 var validators = map[string]func(string) bool{
+	"AccountNoticeKind":        validOf[AccountNoticeKind](),
 	"ActivityKind":             validOf[ActivityKind](),
 	"AgentTier":                validOf[AgentTier](),
 	"ApprovalState":            validOf[ApprovalState](),
@@ -220,8 +221,11 @@ var validators = map[string]func(string) bool{
 	"VoiceCameraEndReason":     validOf[VoiceCameraEndReason](),
 	"VoiceTransmitState":       validOf[VoiceTransmitState](),
 
-	// Version 3 of the voice-helper control protocol (issue #1851).
+	// The versioned share-audio and diagnostics vocabularies.
 	"VoiceControlCommandKindV3":     validOf[VoiceControlCommandKindV3](),
+	"VoiceControlCommandKindV4":     validOf[VoiceControlCommandKindV4](),
+	"VoiceControlEventKindV4":       validOf[VoiceControlEventKindV4](),
+	"VoiceControlGateWhyV4":         validOf[VoiceControlGateWhyV4](),
 	"VoiceControlShareAudio":        validOf[VoiceControlShareAudio](),
 	"VoiceControlShareAudioProblem": validOf[VoiceControlShareAudioProblem](),
 

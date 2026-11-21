@@ -147,7 +147,7 @@ describe('the operation table', () => {
 
   it('opens its sockets by ticket on GET routes', () => {
     const sockets = entries.filter(([, entry]) => entry.socket === true);
-    expect(sockets.map(([id]) => id).sort()).toEqual(['eventsSocket', 'messagesSocket', 'occupancySocket', 'voiceSocket']);
+    expect(sockets.map(([id]) => id).sort()).toEqual(['eventsSocket', 'messagesSocket', 'occupancySocket', 'personSocket', 'voiceSocket']);
     for (const [, entry] of sockets) expect(entry.method).toBe('GET');
   });
 });

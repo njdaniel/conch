@@ -6,8 +6,8 @@
 //
 // Input: an invoke event from Electron, a function name and its arguments.
 // Output: an Envelope: the function's value, or one opaque `refused`, which is
-// counted and logged by reason (never by content) and executes nothing. The
-// order is fixed: caller, name, rate, size and shape of the arguments, then
+// counted and normally logged by reason (never by content) and executes nothing.
+// The order is fixed: caller, name, rate, size and shape of the arguments, then
 // the function. Arguments are plain data checked here; the renderer cannot
 // name a channel, a URL, a header or a method.
 //
@@ -15,10 +15,11 @@
 // (registerNotificationSupport), which Electron's ipcMain.on answers through
 // event.returnValue. notificationSupported() runs the same caller, rate and
 // shape checks and returns an Envelope too.
+import { GeometricSampler, type MainLog, type Refusal } from './diagnostics.ts';
 import { windowsKey } from '../../web/src/platform/desktop/windows-keys.ts';
 import type { IpcMain } from 'electron';
 
-import type { BridgeReply, BridgeRequest, CompanionPageEnd, CompanionPageEndKind, FeedRequest, IntegrationsView, InviteTarget, NotifyRequest, SettingsChange, SignInOutcome, VoiceDeviceKey } from '../../web/src/platform/desktop/bridge.ts';
+import type { BridgeReply, BridgeRequest, CompanionPageEnd, CompanionPageEndKind, FeedRequest, IntegrationsView, InviteTarget, NotifyRequest, SettingsChange, SignInOutcome, VoiceDeviceKey, VoiceDiagnostic } from '../../web/src/platform/desktop/bridge.ts';
 import { VOICE_DEVICES_MAX_NAME_BYTES, voiceControlTalkMode, type VoiceControlTalkMode } from '../../web/src/schema/generated.ts';
 import { isPageSaveKey, keyCodeText, saveValueFits } from './voice/oneshot.ts';
 import { validChannel, validDeviceName } from './voice/protocol.ts';
@@ -36,10 +37,12 @@ import { LINK_GESTURE_MS, type Gestures } from './gestures.ts';
 import type { DocumentGate } from './document.ts';
 import type { Notifications } from './notifications.ts';
 import { HOST, SCHEME } from './scheme.ts';
+import type { Diagnostics } from './diagnostics.ts';
 import type { Installed } from './installed.ts';
 import type { VoiceService } from './voice/service.ts';
 import type { SettingsService } from './settings.ts';
 import type { Companion } from './voice/companion.ts';
+import { isVoiceDiagnostic, voiceDiagnosticLog } from './voice/renderer-diagnostics.ts';
 import type { ShareSound } from './voice/share-audio.ts';
 import type { ShareAllowance } from './share-allowance.ts';
 
@@ -60,7 +63,7 @@ export interface InvokeEvent {
   readonly senderFrame: FrameLike | null;
 }
 
-export type Refusal = 'sender' | 'destroyed' | 'frame' | 'subframe' | 'origin' | 'generation' | 'name' | 'rate' | 'size' | 'shape' | 'gesture' | 'disabled' | 'error';
+export type { Refusal } from './diagnostics.ts';
 
 export interface IpcDeps {
   // The one web contents that may call main.
@@ -86,6 +89,9 @@ export interface IpcDeps {
   // What works on this desktop (issue #1593): read-only. Absent: main answers
   // no rows at all (NO_INTEGRATIONS), and the page shows no list.
   readonly integrations?: IntegrationsApi;
+  // The diagnostics bundle (issue #2084). Absent: the preview is null and a
+  // save fails (NO_DIAGNOSTICS).
+  readonly diagnostics?: DiagnosticsApi;
   // The screen companion (issue #1579). Absent: every grant is refused as
   // failed, and nothing is held to end.
   readonly companion?: CompanionApi;
@@ -97,7 +103,7 @@ export interface IpcDeps {
   // every call is refused (the page cannot turn the switch on).
   readonly shareSound?: ShareSoundApi;
   readonly now: () => number;
-  readonly log: (line: string) => void;
+  readonly log: MainLog;
 }
 
 export type ProfilesApi = Pick<
@@ -118,6 +124,8 @@ export interface IntegrationsApi {
 export type CompanionApi = Pick<Companion, 'grant' | 'stop' | 'end'>;
 export type ShareSoundApi = Pick<ShareSound, 'start' | 'choose' | 'mute' | 'end' | 'shareEnded'>;
 
+export type DiagnosticsApi = Pick<Diagnostics, 'save'> & { preview(...args: Parameters<Diagnostics['preview']>): ReturnType<Diagnostics['preview']> | null };
+const NO_DIAGNOSTICS: DiagnosticsApi = { preview: () => null, save: () => Promise.resolve('failed') };
 const NO_INTEGRATIONS: IntegrationsApi = { view: () => Promise.resolve({ rows: [] }) };
 
 const NO_COMPANION: CompanionApi = {
@@ -228,7 +236,11 @@ interface Handlers {
   readonly notifications: NotificationsApi;
   readonly settings: SettingsApi;
   readonly integrations: IntegrationsApi;
+  readonly diagnostics: DiagnosticsApi;
+  readonly refusals: number;
+  readonly refusalSamples: GeometricSampler<Refusal>;
   readonly companion: CompanionApi;
+  readonly reportVoiceDiagnostic: (diagnostic: VoiceDiagnostic) => void;
   // Absent (the switch off): a share-sound function never reaches its run.
   readonly shareSound: ShareSoundApi | null;
   readonly document: number;
@@ -420,25 +432,28 @@ function parseSaveDevice(args: readonly unknown[]): readonly unknown[] | null {
   const [request] = args;
   if (args.length !== 1 || !isRecord(request) || !hasExactKeys(request, ['key', 'value'])) return null;
   const { key, value } = request;
-  // keys.device and keys.talk are not the page's to name: see parseTalkBinding.
+  // Key bindings and their device are set by the binding request: see parseTalkBinding.
   if (!isPageSaveKey(key) || !saveValueFits(key, value)) return null;
   return [{ key, value }];
 }
 
-// A talk binding is exactly an id from the last listing (an opaque string, no
+// A voice key binding carries an id from the last listing (an opaque string, no
 // longer than a UUID plus a margin; the service looks it up) and a key code.
 // Windows accepts only an allowlisted physical code and a voice generation.
 function parseTalkBinding(args: readonly unknown[]): readonly unknown[] | null {
   const [request] = args;
   if (args.length !== 1 || !isRecord(request)) return null;
-  if (hasExactKeys(request, ['windowsCode', 'generation'])) {
+  const mute = request['binding'] === 'mute';
+  const fields = mute ? ['binding'] : [];
+  const binding = mute ? { binding: 'mute' } : {};
+  if (hasExactKeys(request, ['windowsCode', 'generation', ...fields])) {
     const { windowsCode, generation } = request;
-    return typeof windowsCode === 'string' && windowsKey(windowsCode) !== null && typeof generation === 'number' && Number.isSafeInteger(generation) && generation >= 0 ? [{ windowsCode, generation }] : null;
+    return typeof windowsCode === 'string' && windowsKey(windowsCode) !== null && typeof generation === 'number' && Number.isSafeInteger(generation) && generation >= 0 ? [{ windowsCode, generation, ...binding }] : null;
   }
-  if (!hasExactKeys(request, ['deviceId', 'code'])) return null;
+  if (!hasExactKeys(request, ['deviceId', 'code', ...fields])) return null;
   const { deviceId, code } = request;
   if (typeof deviceId !== 'string' || !/^[A-Za-z0-9-]{1,64}$/u.test(deviceId) || keyCodeText(code) === null) return null;
-  return [{ deviceId, code }];
+  return [{ deviceId, code, ...binding }];
 }
 
 // A companion grant is asked for exactly one channel, checked as a voice
@@ -450,13 +465,27 @@ function parseCompanionGrant(args: readonly unknown[]): readonly unknown[] | nul
   return isChannel(channel) ? [{ channel }] : null;
 }
 
-// The page's reason for ending its companion (issue #1992), for main's log
-// alone: none (an end as before), or exactly a kind of the closed vocabulary
-// and at most one short word of detail (an error's name and LiveKit's reason
-// name, a disconnect's cause, a URL's scheme). Nothing that could hold an
-// address, a message or a token passes, since it is written to the log.
+// The page's reason for ending its companion (issue #1992) is logged.
 const PAGE_END_KINDS: readonly CompanionPageEndKind[] = ['left', 'connect-failed', 'disconnected', 'dropped', 'insecure-address', 'cannot-share'];
 const isPageEndKind = (value: unknown): value is CompanionPageEndKind => typeof value === 'string' && (PAGE_END_KINDS as readonly string[]).includes(value);
+
+// connection.ts supplies these causes, CSP schemes and SDK error names.
+// A short word can still contain private text, so only recognized details
+// reach the log. Unknown details still let the companion end.
+const CONNECTION_ERRORS = ['LiveKitError', 'ConnectionError'];
+const CONNECTION_REASONS = ['NotAllowed', 'ServerUnreachable', 'InternalError', 'Cancelled', 'LeaveRequest', 'Timeout', 'WebSocket', 'ServiceNotFound'];
+const PAGE_END_DETAILS: Record<CompanionPageEndKind, readonly string[]> = {
+  left: [],
+  'connect-failed': [
+    'Error', 'TypeError', 'AbortError',
+    ...CONNECTION_ERRORS,
+    ...CONNECTION_ERRORS.flatMap((name) => CONNECTION_REASONS.map((reason) => `${name}:${reason}`)),
+  ],
+  disconnected: ['room_deleted', 'participant_removed', 'duplicate_identity', 'server_shutdown', 'lost'],
+  dropped: ['reconnect-timeout'],
+  'insecure-address': ['csp:connect-src:ws', 'csp:connect-src:http'],
+  'cannot-share': ['no-portal', 'not-wayland', 'capture-unsupported'],
+};
 
 export function parseCompanionEnd(args: readonly unknown[]): readonly unknown[] | null {
   if (args.length === 0) return args;
@@ -466,7 +495,7 @@ export function parseCompanionEnd(args: readonly unknown[]): readonly unknown[] 
   if (!isPageEndKind(kind)) return null;
   if (hasExactKeys(why, ['kind'])) return [{ kind } satisfies CompanionPageEnd];
   if (!hasExactKeys(why, ['kind', 'detail']) || typeof detail !== 'string' || !/^[A-Za-z][A-Za-z0-9_:-]{0,63}$/u.test(detail)) return null;
-  return [{ kind, detail } satisfies CompanionPageEnd];
+  return [{ kind, detail: PAGE_END_DETAILS[kind].includes(detail) ? detail : 'other' } satisfies CompanionPageEnd];
 }
 
 // The share sound's choice is exactly one of the two words of its vocabulary:
@@ -729,7 +758,7 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
       return key !== 'audio.talk_mode' || value !== 'push_to_talk';
     },
   },
-  // Talk-key setup (issue #1381). The listing opens no device; a save writes
+  // Talk and mute key setup (#1381, #2056). The listing opens no device; a save writes
   // the person's voice.toml and is the person's act alone. Two processes in a
   // row, so the rate is low.
   voiceKeyDevices: { limit: 20, maxBytes: 0, parse: none, run: ({ voice }) => voice.keyDevices() },
@@ -738,6 +767,22 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
     maxBytes: 256,
     parse: parseTalkBinding,
     run: ({ voice }, [request]) => voice.saveTalkBinding(request as import('../../web/src/platform/desktop/bridge.ts').VoiceTalkBindingRequest),
+    gesture: true,
+  },
+  // The diagnostics bundle (issue #2084). The preview is read-only text main
+  // built from its own redacted ring; the ID selects that text for the save.
+  // The save writes it to the path the person chooses after their own input.
+  // Also gesture-gated: the preview is main's log, so a page script can't
+  // read it unasked; the click that opens it is the person's input.
+  diagnosticsPreview: {
+    limit: 30, maxBytes: 0, parse: none, gesture: true,
+    run: ({ diagnostics, refusals, refusalSamples }) => diagnostics.preview(refusals, refusalSamples.counts()),
+  },
+  diagnosticsSave: {
+    limit: 10,
+    maxBytes: 64,
+    parse: (args) => (args.length === 1 && typeof args[0] === 'string' && /^[0-9a-f]{32}$/u.test(args[0]) ? args : null),
+    run: ({ diagnostics }, [id]) => diagnostics.save(id as string),
     gesture: true,
   },
   // The update family (issue #1600). Restart is the person's act alone: it
@@ -812,6 +857,14 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
   // Its one optional argument is the page's reason, for main's log alone
   // (issue #1992); stopping needs no act either way.
   companionEnd: { limit: 60, maxBytes: 256, parse: parseCompanionEnd, run: ({ companion }, args) => (args.length === 0 ? companion.stop() : companion.stop(args[0] as CompanionPageEnd)) },
+  reportVoiceDiagnostic: {
+    limit: 60,
+    maxBytes: 32,
+    parse: (args) => (args.length === 1 && isVoiceDiagnostic(args[0]) ? args : null),
+    run: ({ reportVoiceDiagnostic }, [diagnostic]) => {
+      reportVoiceDiagnostic(diagnostic as VoiceDiagnostic);
+    },
+  },
   // The Linux screen share's sound (issue #1854). Each is refused outright
   // unless main's own switch is on. None carries a scope, an application, a
   // process, a device or a gesture flag: main builds the first four, and the
@@ -875,12 +928,15 @@ function requireSound(sound: ShareSoundApi | null): ShareSoundApi {
 
 export class Ipc {
   readonly #deps: IpcDeps;
+  readonly #reportVoiceDiagnostic: (diagnostic: VoiceDiagnostic) => void;
   readonly #limits = new Map<InvokedFunction, RateLimit>(INVOKED_FUNCTIONS.map((name) => [name, new RateLimit(SPECS[name].limit)]));
   readonly #supportLimit = new RateLimit(120);
+  readonly #refusalSamples = new GeometricSampler<Refusal>();
   #refusals = 0;
 
   constructor(deps: IpcDeps) {
     this.#deps = deps;
+    this.#reportVoiceDiagnostic = voiceDiagnosticLog(deps.log, deps.now);
   }
 
   // How many invocations have been refused since start.
@@ -888,9 +944,18 @@ export class Ipc {
     return this.#refusals;
   }
 
-  #refuse(reason: Refusal): Envelope {
+  #refuse(reason: Refusal, log = true): Envelope {
     this.#refusals++;
-    this.#deps.log(`conch-desktop: refused an IPC call (${reason}); ${String(this.#refusals)} so far`);
+    // Silent refusals count toward their reason in the preview without
+    // advancing the sample sequence for refusals that can be logged.
+    const sampled = this.#refusalSamples.sample(reason, log);
+    if (log) {
+      if (sampled) {
+        this.#deps.log(`conch-desktop: refused an IPC call (${reason}); ${String(this.#refusals)} so far`, { ring: true });
+      } else {
+        this.#deps.log(`conch-desktop: refused an IPC call (${reason}); ${String(this.#refusals)} so far`);
+      }
+    }
     return { ok: false, kind: 'refused' };
   }
 
@@ -900,7 +965,10 @@ export class Ipc {
     if (typeof name !== 'string' || !(INVOKED_FUNCTIONS as readonly string[]).includes(name)) return this.#refuse('name');
     const fn = name as InvokedFunction;
     const spec = SPECS[fn];
-    if (this.#limits.get(fn)?.allow(this.#deps.now()) !== true) return this.#refuse('rate');
+    if (this.#limits.get(fn)?.allow(this.#deps.now()) !== true) {
+      // A burst of diagnostics should not flood the log with rate refusals.
+      return this.#refuse('rate', fn !== 'reportVoiceDiagnostic');
+    }
     if (!plain(args)) return this.#refuse('shape');
     if (JSON.stringify(args).length > spec.maxBytes + 2) return this.#refuse('size');
     const owned = this.#deps.owned();
@@ -932,7 +1000,11 @@ export class Ipc {
         notifications: this.#deps.notifications,
         settings: this.#deps.settings,
         integrations: this.#deps.integrations ?? NO_INTEGRATIONS,
+        diagnostics: this.#deps.diagnostics ?? NO_DIAGNOSTICS,
+        refusals: this.#refusals,
+        refusalSamples: this.#refusalSamples,
         companion: this.#deps.companion ?? NO_COMPANION,
+        reportVoiceDiagnostic: this.#reportVoiceDiagnostic,
         shareSound: this.#deps.shareSound ?? null,
         document: this.#deps.gate.generation,
         arm: () => this.#deps.share?.arm(owned) ?? false,

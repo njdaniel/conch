@@ -170,9 +170,10 @@ type voiceCompanion struct {
 }
 
 // voiceRoomState is the poller's memory of one stored voice room. All fields
-// except the immutable name and channelID, and the two locks of its own, are
+// except the immutable id, name and channelID, and the two locks of its own, are
 // guarded by voicePoller.mu.
 type voiceRoomState struct {
+	id        int64
 	name      string
 	channelID int64
 	// order puts the room's transmit rows into the audit log in the order
@@ -815,7 +816,7 @@ func (p *voicePoller) roomLocked(room store.VoiceRoom) *voiceRoomState {
 	r := p.rooms[room.RoomName]
 	if r == nil {
 		r = &voiceRoomState{
-			name: room.RoomName, channelID: room.ChannelID, participants: map[int64]voiceSeen{}, evicted: map[int64]uint64{},
+			id: room.ID, name: room.RoomName, channelID: room.ChannelID, participants: map[int64]voiceSeen{}, evicted: map[int64]uint64{},
 			reports: make(chan struct{}, 1), withdrawing: map[voiceWithdrawKey]uint64{},
 			shares: map[int64]*voiceShare{}, cameras: map[int64]*voiceCamera{}, camWithdrawing: map[voiceWithdrawKey]uint64{}, camTracks: map[string]*voiceCameraTrack{},
 		}
@@ -2315,18 +2316,20 @@ type voiceRotation struct {
 
 // rotateInvalid is the invariant (design note §5): every live room whose
 // holders are not all valid is given a new name in the store and forgotten by
-// the poller, whose presence for the old room goes with it. It needs only the
-// store, so it runs whether or not LiveKit answers. It returns the rotations
+// the poller, whose presence for the old room goes with it. Rotation uses the
+// store, so it proceeds whether or not LiveKit answers. It returns the rotations
 // it made; the old rooms still have to be deleted in LiveKit, which is the
 // caller's job (a hook does it at once, the sweep finds any that were missed).
 //
-// A store failure is returned and a sweep is scheduled soon. A rotation that
-// fails does not stop the others: one bad row must not keep another channel's
-// removed member in a room.
+// A store failure is returned, camera claims in rooms still awaiting rotation
+// are ended, and a sweep is scheduled soon. A failed rotation does not stop
+// the others: one bad row must not keep another channel's removed member in
+// a room.
 func (p *voicePoller) rotateInvalid(ctx context.Context) ([]voiceRotation, error) {
 	violations, err := p.invalid(ctx, p.now())
 	if err != nil {
 		p.sweepSoon()
+		p.endCamerasAwaitingRotation(ctx)
 		return nil, err
 	}
 	var done []voiceRotation
@@ -2347,6 +2350,7 @@ func (p *voicePoller) rotateInvalid(ctx context.Context) ([]voiceRotation, error
 	}
 	if failure != nil {
 		p.sweepSoon()
+		p.endCamerasAwaitingRotation(ctx)
 	}
 	return done, failure
 }
@@ -2725,7 +2729,8 @@ func (s *Server) voiceEnforceHolders(ctx context.Context) []voiceRotation {
 	// every such claim has returned: each re-reads the room's liveness after
 	// its grant and withdraws what it granted if the room is gone. This
 	// covers the hooks that end no share by principal: a credential revoked,
-	// every credential revoked.
+	// every credential revoked. If rotation failed, rotateInvalid already ended
+	// the camera claims in affected rooms before reaching this wait.
 	s.voice.waitRunningClaims()
 	return rotated
 }
@@ -2980,7 +2985,8 @@ func (s *Server) voiceEvictLost(ctx context.Context, reason string, principals [
 
 // voiceCredentialRevoked runs after credentialID was revoked or replaced: its
 // presence and occupancy sockets close and, if a session was issued under it,
-// its room is rotated.
+// its room is rotated. If rotation fails, the room's cameras end before this
+// hook answers, without waiting for the sweep's retry.
 func (s *Server) voiceCredentialRevoked(ctx context.Context, credentialID int64) {
 	s.voice.dropCredential(credentialID)
 	if s.lk == nil {

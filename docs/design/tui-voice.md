@@ -122,6 +122,13 @@ Every message has `schema` and `kind`. Commands also have `id`; events have `seq
 
 `transcript-join-mute-leave.json` shows a whole session; the other transcripts show one rule each. `TestVoiceControlTranscripts` checks every transcript against rules 2 to 12, and the Rust side checks its real output against the same rules (§13).
 
+In v4, the owner reads the `get_call_quality` ack before sending another
+quality poll. The helper emits all `call_quality` samples for that poll before
+its ack. An empty sample has only the ack. If a poll arrives before the helper
+writes the previous poll's ack, the helper gives the overlapping poll an error
+ack with `invalid` in FIFO order and emits no samples for it. This keeps each
+sample associated with one poll without adding a request ID to the event.
+
 ## 6. State
 
 ### Phases
@@ -277,7 +284,11 @@ Nothing else is added, and nothing secret is ever in the command line, which is 
 
 **Server and channel.** The helper uses `start.server` and `start.channel`. In managed mode `CONCH_SERVER` (removed anyway), `--server`, `server` and `channel` in `voice.toml`, the stored-login fallback and the default server are not consulted, and a `voice.toml` that sets `server` or `channel` is not an error: the file is shared with standalone use. `[keys]` and `[audio]` are read as today, so the key device and audio devices a person set up for `conch-voice` are the ones the TUI uses.
 
-**The `[keys]` grammar on Windows** (`docs/design/windows-desktop.md` §4.5, #1781). On Windows there is no key device: `keys.device` is refused, and a binding is a scan code or a mouse button, `talk = "sc:0x29"`, `mute = "sc:0xE0,0x1D"`, `deafen = "mouse:5"` (`sc:0xNN` from `01` to `7F`, `sc:0xE0,0xNN` with the `E0` prefix, `mouse:4`, `mouse:5`; nothing else, and no path). `conch-voice config set keys.talk <value>` writes the form, and the desktop's shell writes it the same way from the renderer's `KeyboardEvent.code`. On Linux these forms are refused and the `KEY_*` names and decimal codes are as they were. `sc:0x45` is Pause and NumLock is `sc:0xE0,0x45`; `sc:0x54`, `sc:0xE0,0x46` and `sc:0xE0,0x2A` never fire and are refused (windows-desktop.md §4.5). The first press after every start, device removal or wake gap only arms the binding (§4.4), so a talk key held at once transmits nothing: after a removal or gap the state is `ptt: lost` until the talk key has been released once. The states and reasons (`ptt: ready`, `lost`, `ptt_problem`) are the same on both.
+**The `[keys]` grammar on Windows** ([Windows desktop design §4.5](windows-desktop.md#45-configuration), #1781). `keys.device` is refused. A binding is `sc:0xNN` with `NN` from `01` to `7F`, `sc:0xE0,0xNN` with the `E0` prefix, `mouse:4` or `mouse:5`. Letters are case-insensitive and spaces are invalid. For example, set `talk = "sc:0x29"`, `mute = "sc:0xE0,0x1D"` or `deafen = "mouse:5"` in `voice.toml`, or use `conch-voice config set keys.talk sc:0x29`. Linux accepts its existing `KEY_*` names and decimal codes and refuses the Windows forms. `sc:0x45` is Pause and `sc:0xE0,0x45` is NumLock. The helper refuses `sc:0x54`, `sc:0xE0,0x46` and `sc:0xE0,0x2A` because the source never delivers those codes.
+
+The desktop renderer captures talk and mute bindings in the focused configuration window using `KeyboardEvent.code` for physical keys and `MouseEvent.button` for mouse buttons. The shell translates the physical key to its Windows scan code, including the `E0` prefix where needed. DOM buttons `3` and `4` become `mouse:4` and `mouse:5`, respectively. The shell passes the translated value to `conch-voice config set keys.<action> <value>`. For deafen, use `voice.toml` or `conch-voice config set keys.deafen <value>`. The capture uses only the focused window's events. The helper keeps Raw Input private and reports only bound actions and device state. A new talk key takes effect on the next join. If you're in a call, leave and rejoin to use it.
+
+**Using a Windows binding.** Tap and release the talk key once after starting the helper, then hold it to talk. A binding starts unarmed and only a release arms it, including for mute and deafen. Repeats do nothing, including after `max_transmit_secs` stops a held transmission. After a device removal or an input-thread wake gap, the helper again requires a release and reports `ptt: lost` until the talk key is released (the first configured binding if there is no talk key). If the thread stops reporting for more than `VoiceControlOwnerPollMS` while a bound key is held, the watchdog closes the push-to-talk gate and reports `ptt_problem: read_failed`. See [Windows desktop design §4.4](windows-desktop.md#44-fail-closed-rules-on-windows).
 
 **Two TUIs.** Each TUI has its own configuration directory (`CONCH_CONFIG_DIR`, UX-08), its own supervisor and its own helper, started by it and stopped only by it. Neither can see, signal or reconfigure the other's.
 

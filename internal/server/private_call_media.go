@@ -35,7 +35,7 @@ func (p *voicePoller) privateCallMedia() privateCallMediaService {
 }
 
 func (s *Server) handlePrivateCallSession(w http.ResponseWriter, r *http.Request) {
-	actor, ok := privateCallActor(w, r)
+	actor, ok := s.privateCallActor(w, r)
 	if !ok {
 		return
 	}

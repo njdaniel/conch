@@ -5,9 +5,10 @@ import { describe, expect, it } from 'vitest';
 import type { Feeds } from '../../main/api/feeds.ts';
 import type { Files } from '../../main/files.ts';
 import type { Service } from '../../main/api/service.ts';
+import { Diagnostics, diagnosticsLogger, LogRing, RING_LINES, type MainLog } from '../../main/diagnostics.ts';
 import { DocumentGate } from '../../main/document.ts';
 import { Gestures, LINK_GESTURE_MS } from '../../main/gestures.ts';
-import { checkCaller, Ipc, parseRequest, plain, type CompanionApi, type InstalledApi, type IntegrationsApi, type InvitesApi, type NotificationsApi, type ProfilesApi, type VoiceApi, type SettingsApi, type ContentsLike, type FrameLike, type InvokeEvent } from '../../main/ipc.ts';
+import { checkCaller, Ipc, parseRequest, plain, type CompanionApi, type DiagnosticsApi, type InstalledApi, type IntegrationsApi, type InvitesApi, type NotificationsApi, type ProfilesApi, type VoiceApi, type SettingsApi, type ContentsLike, type FrameLike, type InvokeEvent } from '../../main/ipc.ts';
 import { COMPANION_FUNCTIONS, INVOKED_FUNCTIONS, TAG_MAX, VOICE_EVENTS, VOICE_FUNCTIONS } from '../../shared/bridge-names.ts';
 import { ShareAllowance } from '../../main/share-allowance.ts';
 import { deliverVoice } from '../../main/voice/events.ts';
@@ -25,6 +26,7 @@ interface Fixture {
   readonly main: FrameLike;
   readonly calls: [string, unknown][];
   readonly logs: string[];
+  readonly ring: LogRing;
   readonly clock: { now: number };
   // Whether main's compatibility verdict lets a sign-in happen (issue #946).
   readonly permit: { value: boolean };
@@ -32,9 +34,10 @@ interface Fixture {
   readonly share: ShareAllowance;
   readonly activation: object;
   event(over?: Partial<InvokeEvent>): InvokeEvent;
+  replaceWindow(): InvokeEvent;
 }
 
-function fixture(realGestures?: Gestures): Fixture {
+function fixture(realGestures?: Gestures, makeDiagnostics?: (ring: LogRing, log: MainLog) => DiagnosticsApi): Fixture {
   const main = frame();
   const contents = Object.assign(new EventEmitter(), { destroyed: false, mainFrame: main, isDestroyed() { return this.destroyed; } });
   const gate = new DocumentGate();
@@ -54,6 +57,8 @@ function fixture(realGestures?: Gestures): Fixture {
     return name === 'signInPermitted' ? () => permit.value : record(`profiles.${name}`);
   } });
   const logs: string[] = [];
+  const ring = new LogRing();
+  const log = diagnosticsLogger(ring, (line) => logs.push(line));
   const clock = { now: 1_000_000 };
   const input = { recent: false };
   const files = new Proxy({} as Files, { get: (_t, name: string) => record(`files.${name}`) });
@@ -70,9 +75,123 @@ function fixture(realGestures?: Gestures): Fixture {
   const gestures = realGestures ?? { take: () => (input.recent ? ('pointer' as const) : null) };
   const installed = new Proxy({} as InstalledApi, { get: (_t, name: string) => record(`installed.${name}`) });
   const share = new ShareAllowance({ now: () => clock.now, generation: () => gate.generation });
-  const ipc = new Ipc({ owned: () => contents, gate, service, feeds, files, gestures, profiles, voice, invites, notifications, settings, integrations, companion, share, installed, now: () => clock.now, log: (line) => logs.push(line) });
-  return { ipc, gate, contents, main, calls, logs, clock, permit, input, share, activation, event: (over = {}) => ({ sender: contents, senderFrame: main, ...over }) };
+  let owned: ContentsLike = contents;
+  const diagnostics = makeDiagnostics?.(ring, log);
+  const ipc = new Ipc({ owned: () => owned, gate, service, feeds, files, gestures, profiles, voice, invites, notifications, settings, integrations, companion, share, installed, ...(diagnostics === undefined ? {} : { diagnostics }), now: () => clock.now, log });
+  return {
+    ipc, gate, contents, main, calls, logs, ring, clock, permit, input, share, activation,
+    event: (over = {}) => ({ sender: owned, senderFrame: owned.mainFrame, ...over }),
+    replaceWindow: () => {
+      const replacement = frame('replacement');
+      gate.begin();
+      gate.commit(replacement);
+      owned = { isDestroyed: () => false, mainFrame: replacement };
+      return { sender: owned, senderFrame: replacement };
+    },
+  };
 }
+
+// The alignment, reason masking and flood sequences from refuse.mjs.
+const refusalProbes: readonly {
+  name: string;
+  exercise: (f: Fixture) => Promise<void>;
+  total: number;
+  reasons: readonly (readonly [reason: string, logged: number])[];
+}[] = [
+  {
+    name: 'silent refusals in the old sampling slots',
+    exercise: async (f) => {
+      const event = f.event();
+      const report = () => f.ipc.invoke(event, 'reportVoiceDiagnostic', ['sdk-warning']);
+      for (let i = 0; i < 60; i++) expect((await report()).ok).toBe(true);
+      expect((await report()).ok).toBe(false);
+      for (let round = 0; round < 50; round++) {
+        for (let i = 0; i < (round === 0 ? 98 : 99); i++) {
+          await f.ipc.invoke(event, 'diagnosticsSave', ['x'.repeat(i % 7)]);
+        }
+        await report();
+      }
+    },
+    total: 5_000,
+    reasons: [['shape', 10], ['rate', 4_939]],
+  },
+  {
+    name: 'a single reason in all old sampling slots',
+    exercise: async (f) => {
+      const event = f.event();
+      await f.ipc.invoke(event, 'no-such-name', []);
+      for (let round = 0; round < 3; round++) {
+        for (let i = 0; i < (round === 0 ? 98 : 99); i++) {
+          await f.ipc.invoke(event, 'diagnosticsSave', [1]);
+        }
+        await f.ipc.invoke(event, 'no-such-name', []);
+      }
+    },
+    total: 300,
+    reasons: [['name', 4], ['shape', 10], ['rate', 286]],
+  },
+  {
+    name: 'a flood of one reason',
+    exercise: async (f) => {
+      const event = f.event();
+      for (let i = 0; i < 50_100; i++) await f.ipc.invoke(event, 'no-such-name', []);
+    },
+    total: 50_100,
+    reasons: [['name', 50_100]],
+  },
+];
+
+it.each(refusalProbes)('samples logged refusals by reason with $name', async ({ exercise, total, reasons }) => {
+  const f = fixture();
+  const history = 'voice: helper 1 lost: ack-timeout';
+  f.ring.record(history);
+  await exercise(f);
+
+  expect(f.ipc.refusals).toBe(total);
+  const local = f.logs.filter((line) => line.includes('refused an IPC call'));
+  const exported = f.ring.lines().filter((line) => line.includes('refused an IPC call'));
+  const sampled = new Set<string>();
+  for (const [reason, count] of reasons) {
+    const lines = local.filter((line) => line.includes(`(${reason})`));
+    expect(lines).toHaveLength(count);
+    for (let n = 1; n <= count; n *= 2) sampled.add(lines[n - 1] ?? '');
+  }
+  expect(local).toHaveLength(reasons.reduce((sum, [, count]) => sum + count, 0));
+  expect(exported).toEqual(local.filter((line) => sampled.has(line)));
+  expect(f.ring.lines()[0]).toBe(history);
+});
+
+describe('voice renderer diagnostics', () => {
+  it('accepts only fixed codes and leaves raw console text, URLs and tokens out of the log', async () => {
+    const f = fixture();
+    const report = (value: unknown) => f.ipc.invoke(f.event(), 'reportVoiceDiagnostic', [value]);
+    expect((await report('WebRTC wss://h/?token=private')).ok).toBe(false);
+    expect((await report('constructor')).ok).toBe(false);
+    expect((await report('sdp-bundle-collision')).ok).toBe(true);
+    expect(f.logs).toEqual([
+      'conch-desktop: refused an IPC call (shape); 1 so far',
+      'conch-desktop: refused an IPC call (shape); 2 so far',
+      'conch-desktop: voice renderer error: LiveKit SDP description rejected due to a BUNDLE codec collision.',
+    ]);
+  });
+
+  it('rate-limits each diagnostic across window replacement and keeps distinct reports', async () => {
+    const f = fixture();
+    const report = (event: InvokeEvent, code: string) => f.ipc.invoke(event, 'reportVoiceDiagnostic', [code]);
+    expect((await report(f.event(), 'sdk-warning')).ok).toBe(true);
+    const next = f.replaceWindow();
+    f.clock.now += 9_999;
+    expect((await report(next, 'sdk-warning')).ok).toBe(true);
+    expect((await report(next, 'encoder-cpu')).ok).toBe(true);
+    expect(f.logs).toEqual([
+      'conch-desktop: voice renderer warning: LiveKit SDK warning.',
+      'conch-desktop: voice renderer warning: Screen share encoder is CPU-limited.',
+    ]);
+    f.clock.now += 1;
+    expect((await report(next, 'sdk-warning')).ok).toBe(true);
+    expect(f.logs).toHaveLength(3);
+  });
+});
 
 describe('every invocation is checked before anything else', () => {
   it('runs a call from the owned contents’ live main frame at the app’s own origin', async () => {
@@ -650,6 +769,7 @@ describe('the voice family (issue #1374)', () => {
     await f.ipc.invoke(f.event(), 'voiceKeyDevices', []);
     await f.ipc.invoke(f.event(), 'voiceSaveTalkBinding', [{ deviceId: 'abc-123', code: 275 }]);
     await f.ipc.invoke(f.event(), 'voiceSaveTalkBinding', [{ windowsCode: 'Mouse5', generation: 7 }]);
+    await f.ipc.invoke(f.event(), 'voiceSaveTalkBinding', [{ deviceId: 'abc-123', code: 30, binding: 'mute' }]);
     expect(f.calls).toEqual([
       ['voice.state', []],
       ['voice.join', [join]],
@@ -669,12 +789,14 @@ describe('the voice family (issue #1374)', () => {
       ['voice.keyDevices', []],
       ['voice.saveTalkBinding', [{ deviceId: 'abc-123', code: 275 }]],
       ['voice.saveTalkBinding', [{ windowsCode: 'Mouse5', generation: 7 }]],
+      ['voice.saveTalkBinding', [{ deviceId: 'abc-123', code: 30, binding: 'mute' }]],
     ]);
     expect(f.ipc.refusals).toBe(0);
   });
 
   it.each([
     ['voiceSaveTalkBinding', [{ windowsCode: 'KeyA', generation: -1 }]],
+    ['voiceSaveTalkBinding', [{ windowsCode: 'KeyA', generation: 1, binding: 'deafen' }]],
     ['voiceSaveTalkBinding', [{ windowsCode: 'KeyA', generation: 1, text: 'private' }]],
     ['voiceSaveTalkBinding', [{ windowsCode: 'private text', generation: 1 }]],
     ['voiceSaveTalkBinding', [{ windowsCode: 'KeyA' }]],
@@ -900,6 +1022,7 @@ describe('the voice family (issue #1374)', () => {
       ['voiceSetDeafen', [true]], ['voiceSetDevices', [{ input: 'Mic' }]], ['voiceSetTalkMode', ['open']],
       ['voiceDevices', []], ['voiceSaveDevice', [{ key: 'audio.input', value: 'Mic' }]],
       ['voiceKeyDevices', []], ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: 275 }]],
+      ['reportVoiceDiagnostic', ['encoder-cpu']],
     ];
     expect(calls.map(([name]) => name).sort()).toEqual([...VOICE_FUNCTIONS].sort());
     for (const [name, args] of calls) expect(await f.ipc.invoke(event, name, args), name).toEqual({ ok: false, kind: 'refused' });
@@ -1023,12 +1146,19 @@ describe('the companion family (issue #1579)', () => {
     [{ kind: 'left' }],
     [{ kind: 'connect-failed', detail: 'ConnectionError:WebSocket' }],
     [{ kind: 'disconnected', detail: 'room_deleted' }],
-    [{ kind: 'insecure-address', detail: 'ws' }],
+    [{ kind: 'insecure-address', detail: 'csp:connect-src:ws' }],
     [{ kind: 'cannot-share', detail: 'capture-unsupported' }],
   ])('passes the page’s reason for ending the companion on to it, for the log (issue #1992): %j', async (why) => {
     const f = fixture();
     expect(await f.ipc.invoke(f.event(), 'companionEnd', [why])).toEqual({ ok: true, value: { ran: 'companion.stop' } });
     expect(f.calls).toEqual([['companion.stop', [why]]]);
+  });
+
+  it('replaces an unknown short companion detail before it can be logged', async () => {
+    const f = fixture();
+    const why = { kind: 'connect-failed', detail: 'Payroll-West' };
+    expect((await f.ipc.invoke(f.event(), 'companionEnd', [why])).ok).toBe(true);
+    expect(f.calls).toEqual([['companion.stop', [{ kind: 'connect-failed', detail: 'other' }]]]);
   });
 
   it('needs no gesture to end the companion', async () => {
@@ -1344,5 +1474,91 @@ describe('the settings family (issue #1587)', () => {
     f.input.recent = true;
     expect(await f.ipc.invoke(f.event(), 'settingsSet', args)).toEqual({ ok: false, kind: 'refused' });
     expect(f.calls).toEqual([]);
+  });
+});
+
+function diagnosticsFor(ring: LogRing, log: MainLog, written?: [string, string][]): Diagnostics {
+  return new Diagnostics({
+    ring,
+    versions: {},
+    now: () => new Date(0),
+    chooseSavePath: () => Promise.resolve('/tmp/chosen.txt'),
+    writeFile: (path, bytes) => {
+      written?.push([path, new TextDecoder().decode(bytes)]);
+      return Promise.resolve();
+    },
+    downloadsDir: () => '/tmp',
+    join: (...parts) => parts.join('/'),
+    isAbsolute: (path) => path.startsWith('/'),
+    log,
+  });
+}
+
+describe('the diagnostics bundle (issue #2084)', () => {
+  // burn.mjs exhausted two sampling sequences, then churn removed their
+  // earlier samples. The preview still needs the count for each reason.
+  it.each([
+    { laterRate: 60_000, total: 130_060, rate: 130_000, rateLines: [] },
+    { laterRate: 62_000, total: 132_060, rate: 132_000, rateLines: ['conch-desktop: refused an IPC call (rate); 131132 so far'] },
+  ])('shows refusal totals after eviction and $laterRate more rate refusals', async ({ laterRate, total, rate, rateLines }) => {
+    const f = fixture(undefined, diagnosticsFor);
+    const event = f.event();
+    const preview = () => f.ipc.invoke(event, 'diagnosticsPreview', []);
+    const refusalLines = () => f.ring.lines().filter((line) => line.includes('refused an IPC call'));
+
+    for (let n = 0; n < 30 + 70_000; n++) await preview();
+    expect(refusalLines()).toHaveLength(22);
+    for (let n = 0; n < RING_LINES; n++) f.ring.record('conch-desktop: intervening log line');
+    expect(refusalLines()).toEqual([]);
+
+    f.clock.now += 61_000;
+    for (let n = 0; n < 30 + laterRate; n++) await preview();
+    f.clock.now += 61_000;
+    f.input.recent = true;
+    const result = await preview();
+    if (!result.ok) throw new Error('preview refused');
+    const shown = result.value as ReturnType<Diagnostics['preview']>;
+    expect(refusalLines()).toEqual(['conch-desktop: refused an IPC call (gesture); 70032 so far', ...rateLines]);
+    expect(shown.text).toContain(`IPC refusals since start: ${String(total)} (rate ${String(rate)}, gesture 60)\n`);
+  });
+
+  it('saves the preview selected by ID only after the person’s own input', async () => {
+    const written: [string, string][] = [];
+    const f = fixture(new Gestures(() => 0), (ring, log) => diagnosticsFor(ring, log, written));
+    const { ring } = f;
+    ring.record('first preview');
+    const refusedPreview = { ok: false, kind: 'refused' };
+    // The preview is main's log: no page script reads it without the person's input.
+    expect(await f.ipc.invoke(f.event(), 'diagnosticsPreview', [])).toEqual(refusedPreview);
+    f.contents.emit('input-event', {}, { type: 'mouseUp' });
+    const first = await f.ipc.invoke(f.event(), 'diagnosticsPreview', []);
+    if (!first.ok) throw new Error('preview refused');
+    const shown = first.value as ReturnType<Diagnostics['preview']>;
+    expect(shown.text).toContain('first preview');
+    expect(shown.text).toContain('IPC refusals since start: 1 (gesture 1)\n');
+    ring.record('second preview');
+    // Even a silent rate refusal contributes to the live header.
+    for (let i = 0; i < 60; i++) expect((await f.ipc.invoke(f.event(), 'reportVoiceDiagnostic', ['sdk-warning'])).ok).toBe(true);
+    expect((await f.ipc.invoke(f.event(), 'reportVoiceDiagnostic', ['sdk-warning'])).ok).toBe(false);
+    f.contents.emit('input-event', {}, { type: 'mouseUp' });
+    const second = await f.ipc.invoke(f.event(), 'diagnosticsPreview', []);
+    if (!second.ok) throw new Error('second preview refused');
+    const newer = second.value as ReturnType<Diagnostics['preview']>;
+    expect(newer.id).not.toBe(shown.id);
+    expect(newer.text).toContain('second preview');
+    expect(newer.text).toContain('IPC refusals since start: 2 (gesture 1, rate 1)\n');
+
+    const refused = { ok: false, kind: 'refused' };
+    expect(await f.ipc.invoke(f.event(), 'diagnosticsPreview', ['x'])).toEqual(refused);
+    expect(await f.ipc.invoke(f.event(), 'diagnosticsSave', [shown.id])).toEqual(refused);
+    f.contents.emit('input-event', {}, { type: 'mouseUp' });
+    for (const args of [[], ['/tmp/evil'], [shown.id, 'extra']]) {
+      expect(await f.ipc.invoke(f.event(), 'diagnosticsSave', args)).toEqual(refused);
+    }
+    expect(written).toEqual([]);
+    expect(await f.ipc.invoke(f.event(), 'diagnosticsSave', [shown.id])).toEqual({ ok: true, value: 'saved' });
+    expect(written).toEqual([['/tmp/chosen.txt', shown.text]]);
+    expect(shown.text).not.toContain('second preview');
+    expect(await f.ipc.invoke(f.event(), 'diagnosticsSave', [newer.id])).toEqual(refused);
   });
 });

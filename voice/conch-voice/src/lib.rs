@@ -31,6 +31,9 @@
 //! endpoint named by `--events-pipe` (required on macOS and Windows). Its channel, server
 //! and login come from its owner's start.
 //!
+//! The desktop's input-only `watch-mute-key` command reads the configured mute binding
+//! and sends its presses to main while the owner's stdin pipe is open.
+//!
 //! A desktop owner speaking `conch.voice_control.v3` can also ask for the sound of its
 //! screen share (#1586, `docs/design/linux-share-audio.md`; [`share_audio`]): the input is
 //! then also, on Linux, the other applications' playback streams PipeWire lists, each
@@ -67,6 +70,7 @@
 //!   Windows over WASAPI through the `wasapi` crate.
 //! - [`session`]: the loop that decides everything, written against the traits in [`sdk`].
 //! - [`managed`]: `conch-voice managed`, the helper `conch`'s TUI starts and drives.
+//! - [`echo_measurement`]: echo levels from a known sweep and synthetic or captured frames.
 //! - [`share_audio`], [`share_capture`] and [`share_eligibility`]: the sound of a v3 owner's
 //!   screen share: its state and track, its captures and mix, and what is left out of them.
 //! - [`livekit`]: those traits over LiveKit's SDK, kept thin.
@@ -89,6 +93,7 @@ pub mod cli;
 pub mod config_cmd;
 pub mod devices;
 pub mod echo;
+pub mod echo_measurement;
 pub mod error;
 pub mod input;
 pub mod keydev;
@@ -113,7 +118,7 @@ pub mod share_eligibility;
 pub mod status;
 pub mod transmit;
 
-use std::io::{IsTerminal, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -313,14 +318,7 @@ pub fn join(
             Some((device, bindings)) => {
                 // With a key device, a client started with no standard input runs on.
                 input::stdin_lines(inputs.clone(), AtEnd::Release);
-                keydev::spawn(
-                    device,
-                    bindings,
-                    DeviceRule::EventDevice,
-                    KeyTimings::default(),
-                    inputs,
-                )
-                .map_err(Error::Runtime)?;
+                watch_configured_keys(device, bindings, inputs)?;
             }
             None => input::stdin_lines(inputs, AtEnd::Quit),
         }
@@ -557,6 +555,96 @@ pub fn config_unset(
     config_cmd::unset_keys(environment, key)
 }
 
+/// Atomically saves the Linux mute device and binding for desktop.
+///
+/// # Errors
+///
+/// If the save is refused, the settings are unchanged.
+pub fn config_set_mute_binding(
+    environment: &Environment,
+    device: &str,
+    value: &str,
+) -> Result<(), Error> {
+    config_cmd::set_mute_binding(environment, device, value)
+}
+
+// Both commands use the production device rule at the same entry point.
+fn watch_configured_keys(
+    device: std::path::PathBuf,
+    bindings: conch_voice_control::KeyBindings,
+    inputs: mpsc::UnboundedSender<session::Input>,
+) -> Result<(), Error> {
+    keydev::spawn(
+        device,
+        bindings,
+        DeviceRule::EventDevice,
+        KeyTimings::default(),
+        inputs,
+    )
+    .map_err(Error::Runtime)
+}
+
+/// Watches the configured mute key for desktop main. A press writes one
+/// schema event as a JSON line. No key code or audio leaves this process;
+/// the desktop owner decides whether a press mutes or unmutes.
+///
+/// Exit on owner pipe closure even if the device is idle or unavailable.
+///
+/// # Errors
+///
+/// A refused configuration, a failed thread start, or a failed output write.
+pub fn watch_mute_key(environment: &Environment) -> Result<(), Error> {
+    use conch_voice_control::{Key, KeyAction, KeyEvent};
+    use session::Input;
+
+    // Start before reading the configuration or touching the device.
+    std::thread::Builder::new()
+        .name("conch-voice-mute-owner".to_owned())
+        .spawn(|| {
+            let _ = std::io::stdin().lock().read_exact(&mut [0]);
+            lines::exit(0);
+        })
+        .map_err(Error::Runtime)?;
+
+    let Some(dir) = conch_voice_api::default_config_dir(
+        environment.conch_config_dir.as_deref(),
+        environment.xdg_config_home.as_deref(),
+        environment.home.as_deref(),
+        environment.appdata.as_deref(),
+    )?
+    else {
+        return Ok(());
+    };
+    let mut config = cli::read_config(&dir.join("voice.toml"))?;
+    if config.keys.mute.is_none() {
+        return Ok(());
+    }
+    config.keys.talk = None;
+    config.keys.deafen = None;
+    let Some((device, bindings)) = cli::key_device(&config, false)? else {
+        return Ok(());
+    };
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    watch_configured_keys(device, bindings, tx)?;
+    let mut out = std::io::stdout().lock();
+    while let Some(input) = rx.blocking_recv() {
+        if let Input::Key(KeyEvent {
+            key: Key::Mute,
+            action: KeyAction::Press,
+        }) = input
+        {
+            write_mute_key_press(&mut out).map_err(Error::Output)?;
+        }
+    }
+    Ok(())
+}
+
+fn write_mute_key_press(out: &mut impl Write) -> std::io::Result<()> {
+    serde_json::to_writer(&mut *out, &conch_voice_api::MuteKeyEventV1::PRESS)?;
+    out.write_all(b"\n")?;
+    out.flush()
+}
+
 /// `conch-voice keys <device>`: says that it will show every key pressed on the device,
 /// and then does, on the terminal, until Ctrl-C.
 ///
@@ -590,6 +678,20 @@ mod tests {
         scrubber.always(&Secret::new(FAKE_LOGIN));
         scrubber.connection(&Secret::new(FAKE_JOIN), &Secret::new(FAKE_ROOM));
         scrubber
+    }
+
+    #[test]
+    fn mute_key_press_matches_the_schema_fixture() {
+        let mut out = Vec::new();
+        write_mute_key_press(&mut out).unwrap();
+        // A Windows checkout may give the fixture CRLF line endings.
+        let fixture: Vec<u8> =
+            include_bytes!("../../../pkg/schema/testdata/mute-key-event-v1.json")
+                .iter()
+                .copied()
+                .filter(|b| *b != b'\r')
+                .collect();
+        assert_eq!(out, fixture);
     }
 
     #[cfg(windows)]

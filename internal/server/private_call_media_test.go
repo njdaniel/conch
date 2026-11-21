@@ -461,6 +461,25 @@ func TestPrivateCallMediaRetirementRetriesAndStaleRejoin(t *testing.T) {
 	}
 }
 
+func TestPrivateCallMediaRestoreQueuesRoomCleanup(t *testing.T) {
+	f, _, bobTok, _ := privateCallHTTPFixture(t)
+	media := addFakePrivateCallMedia(t, f.srv)
+	call := answerPrivateCallMediaTest(t, f, invitePrivateCallMediaTest(t, f, "invite"), bobTok, "answer")
+	session := privateCallSessionTest(t, f.do(t, "POST", "/v1/calls/"+call.ID+"/session", f.aliceTok, ""))
+	media.rooms[session.Room] = []livekit.Participant{{Identity: session.Identity}}
+	if _, err := f.srv.store.InvalidateRestored(t.Context(), f.srv.now()); err != nil {
+		t.Fatal(err)
+	}
+	holders, err := f.srv.store.PrivateCallMediaHolders(t.Context(), call.ID)
+	if err != nil || len(holders) != 0 {
+		t.Fatalf("retired room retained media holders: %v, %v", holders, err)
+	}
+	f.srv.voice.runPrivateCallMediaPass(t.Context())
+	if _, ok := media.rooms[session.Room]; ok {
+		t.Fatal("restored private call's room survived cleanup")
+	}
+}
+
 func TestPrivateCallMediaWithoutLiveKit(t *testing.T) {
 	f, _, bobTok, _ := privateCallHTTPFixture(t)
 	call := answerPrivateCallMediaTest(t, f, invitePrivateCallMediaTest(t, f, "first"), bobTok, "answer")

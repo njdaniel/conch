@@ -12,6 +12,7 @@
 // - Nothing here persists: no storage, no file. A relaunch is signed out.
 import type { ApiFailure, CameraClaimResult, TransmitAnswer, VoiceSessionResult } from '../logic/api';
 import { afterAuthSignal } from '../logic/auth';
+import { isDevelopmentServer } from '../logic/development';
 import type { AuthSignal, AuthStep } from '../logic/auth';
 import { authorization, build, type Built, type RequestName } from '../logic/requests';
 import type {
@@ -100,6 +101,12 @@ export class ApiClient {
 
   get server(): string {
     return this.origin;
+  }
+
+  // The address in use is plain http:// (the development profile, M-R1). Read
+  // from the address itself, so the marking cannot disagree with the connection.
+  get development(): boolean {
+    return isDevelopmentServer(this.origin);
   }
 
   get signedIn(): boolean {

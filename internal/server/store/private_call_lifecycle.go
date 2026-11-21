@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/njdaniel/conch/pkg/schema"
@@ -55,7 +56,10 @@ func privateCallStillAllowed(ctx context.Context, tx execer, c privateCall, now 
 			}
 		}
 	}
-	return privateCallContactAllowed(ctx, tx, c.CallerID, c.CalleeID)
+	// Design §4.1's "revoked" row: no block either way, both standing, DMs on
+	// for both and for the server. A preference or a visibility change does
+	// not end a call already rung; it refuses the next invite (dmContactTx).
+	return dmPairReachableTx(ctx, tx, c.CallerID, c.CalleeID)
 }
 
 func privateCallDeadlineEvent(c privateCall, now time.Time) string {
@@ -86,30 +90,39 @@ func applyPrivateCallServerEvent(ctx context.Context, tx execer, c *privateCall,
 	return transitionPrivateCall(ctx, tx, c, row, 0, now)
 }
 
-func eachLivePrivateCall(ctx context.Context, tx execer, fn func(*privateCall) error) error {
-	rows, err := tx.QueryContext(ctx, `SELECT `+privateCallColumns+` FROM private_calls c
-		WHERE c.id IN (SELECT call_id FROM private_call_holders)`)
+func heldPrivateCallIDs(ctx context.Context, tx execer) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT call_id FROM private_call_holders`)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	var calls []privateCall
 	defer func() { _ = rows.Close() }()
+	var ids []string
 	for rows.Next() {
-		c, err := scanPrivateCall(rows)
-		if err != nil {
-			return err
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
 		}
-		calls = append(calls, c)
+		ids = append(ids, id)
 	}
-	if err := rows.Err(); err != nil {
+	return ids, rows.Err()
+}
+
+func sweepPrivateCall(ctx context.Context, tx execer, id string, now time.Time) error {
+	if _, err := tx.ExecContext(ctx, `SAVEPOINT sweep_private_call`); err != nil {
 		return err
 	}
-	for i := range calls {
-		if err := fn(&calls[i]); err != nil {
-			return err
+	c, err := privateCallByID(ctx, tx, id)
+	if err == nil {
+		_, err = refreshPrivateCall(ctx, tx, &c, now)
+	}
+	if err != nil {
+		slog.ErrorContext(ctx, "store: could not sweep private call", "call_id", id, "error", err)
+		if _, rollbackErr := tx.ExecContext(ctx, `ROLLBACK TO sweep_private_call`); rollbackErr != nil {
+			return errors.Join(err, rollbackErr)
 		}
 	}
-	return nil
+	_, err = tx.ExecContext(ctx, `RELEASE sweep_private_call`)
+	return err
 }
 
 // SweepPrivateCalls enforces persisted deadlines and current entitlements
@@ -117,13 +130,16 @@ func eachLivePrivateCall(ctx context.Context, tx execer, fn func(*privateCall) e
 func (s *Store) SweepPrivateCalls(ctx context.Context, clock func() time.Time) error {
 	return s.withImmediateTx(ctx, func(tx execer) error {
 		now := clock().Truncate(time.Millisecond)
-		if err := eachLivePrivateCall(ctx, tx, func(c *privateCall) error {
-			_, err := refreshPrivateCall(ctx, tx, c, now)
-			return err
-		}); err != nil {
+		ids, err := heldPrivateCallIDs(ctx, tx)
+		if err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, `DELETE FROM private_call_actions WHERE expires_at <= ?`, now.UnixMilli())
+		for _, id := range ids {
+			if err := sweepPrivateCall(ctx, tx, id, now); err != nil {
+				return err
+			}
+		}
+		_, err = tx.ExecContext(ctx, `DELETE FROM private_call_actions WHERE expires_at <= ?`, now.UnixMilli())
 		return err
 	})
 }
@@ -131,25 +147,28 @@ func (s *Store) SweepPrivateCalls(ctx context.Context, clock func() time.Time) e
 // RestartPrivateCalls reconciles all live attempts before a server serves.
 func (s *Store) RestartPrivateCalls(ctx context.Context, now time.Time) error {
 	return s.withImmediateTx(ctx, func(tx execer) error {
-		return restartPrivateCallsTx(ctx, tx, now)
-	})
-}
-
-func restartPrivateCallsTx(ctx context.Context, tx execer, now time.Time) error {
-	return eachLivePrivateCall(ctx, tx, func(c *privateCall) error {
-		return applyPrivateCallServerEvent(ctx, tx, c, schema.PrivateCallEventRestart, now)
+		return resetPrivateCallsTx(ctx, tx, now, schema.PrivateCallReasonServerRestart)
 	})
 }
 
 func restorePrivateCallsTx(ctx context.Context, tx execer, now time.Time) error {
-	return eachLivePrivateCall(ctx, tx, func(c *privateCall) error {
-		row, ok := schema.NextPrivateCall(string(c.State), schema.PrivateCallEventRestart)
-		if !ok {
-			return fmt.Errorf("store: invalid restore in private call state %q", c.State)
-		}
-		row.Reason = privateCallReasonRestore
-		return transitionPrivateCall(ctx, tx, c, row, 0, now)
-	})
+	return resetPrivateCallsTx(ctx, tx, now, privateCallReasonRestore)
+}
+
+// Startup and restore fail every live attempt under the write lock, even
+// if a stored deadline or other live-state field cannot form a valid document.
+func resetPrivateCallsTx(ctx context.Context, tx execer, now time.Time, reason schema.PrivateCallReason) error {
+	if _, err := tx.ExecContext(ctx, `UPDATE private_calls SET state = 'failed', reason = ?, last_event = ?,
+		revision = revision + 1, deadline = NULL, ended_at = MAX(created_at, ?),
+		caller_absent_since = NULL, callee_absent_since = NULL
+		WHERE state IN ('ringing', 'accepted', 'active')`, reason, schema.PrivateCallEventRestart, now.UnixMilli()); err != nil {
+		return err
+	}
+	if err := retireLiveCallRooms(ctx, tx); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `DELETE FROM private_call_holders`)
+	return err
 }
 
 func recordPrivateCallAbsence(ctx context.Context, tx execer, c privateCall, callerPresent, calleePresent bool, now time.Time) error {
