@@ -2,9 +2,12 @@
 // lines, its bound, the bundle's size cap, and the shown-before-saved rule.
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
+import type { Session } from 'electron';
 import { describe, expect, it } from 'vitest';
 
-import { RECORD_MAX_CHARS, BUNDLE_MAX_BYTES, buildBundle, Diagnostics, diagnosticsLogger, LINE_MAX_CHARS, LogRing, RING_LINES, scrubLine } from '../../main/diagnostics.ts';
+import { RECORD_MAX_CHARS, BUNDLE_MAX_BYTES, buildBundle, Diagnostics, diagnosticsLogger, diagnosticSamplesFor, GeometricSampler, LINE_MAX_CHARS, LogRing, RING_LINES, scrubLine } from '../../main/diagnostics.ts';
+import { guardSession } from '../../main/guards.ts';
+import { voiceDiagnosticLog } from '../../main/voice/renderer-diagnostics.ts';
 
 const NOW = new Date('2026-11-20T10:00:00Z');
 
@@ -435,6 +438,15 @@ describe('scrubLine', () => {
     expect(out).not.toMatch(/[\p{Cf}\p{Cc}]/u);
   });
 
+  it.each([
+    ['U+3164', '\u3164'],
+    ['U+115F', '\u115f'],
+    ['U+1160', '\u1160'],
+    ['U+FFA0', '\uffa0'],
+  ])('scrubs a path after the invisible filler %s', (_name, filler) => {
+    expect(scrubLine(`cannot read ${filler}/home/nick/secret plan.txt`)).toBe('cannot read [path]');
+  });
+
   // All three lengths from scrub-time.mjs, across each backtracking probe.
   const longShapes = [
     ['hyphens', (n: number) => 'a-'.repeat(n / 2)],
@@ -551,6 +563,34 @@ describe('LogRing', () => {
   });
 });
 
+describe('GeometricSampler', () => {
+  // burn.mjs counted how many export slots a million events of one key use.
+  it.each([
+    { events: 1, samples: 1 },
+    { events: 7, samples: 3 },
+    { events: 8, samples: 4 },
+    { events: 1_000_000, samples: 20 },
+  ])('uses $samples export slots for $events events of one key', ({ events, samples }) => {
+    const sampler = new GeometricSampler<'event'>();
+    let exported = 0;
+    for (let n = 0; n < events; n++) if (sampler.sample('event')) exported++;
+    expect(exported).toBe(samples);
+    expect(sampler.counts()).toEqual([['event', events]]);
+  });
+
+  it('keeps its first 64 keys and their sampling sequence when more arrive', () => {
+    const sampler = new GeometricSampler<string>();
+    const keys = Array.from({ length: 64 }, (_, n) => `key ${String(n)}`);
+    expect(keys.map((key) => sampler.sample(key))).toEqual(keys.map(() => true));
+    for (let n = 0; n < 1_000; n++) expect(sampler.sample(`overflow ${String(n)}`)).toBe(false);
+    expect(sampler.sample('overflow 0')).toBe(false);
+    expect(sampler.counts()).toEqual(keys.map((key) => [key, 1]));
+    expect(sampler.sample('key 0')).toBe(true);
+    expect(sampler.sample('key 0')).toBe(false);
+    expect(sampler.count('key 0')).toBe(3);
+  });
+});
+
 describe('buildBundle', () => {
   it('keeps version names and values from forging header lines', () => {
     const text = buildBundle({ versions: { 'a\nb': 'c\nlog (last 0 lines' }, lines: [], refusals: 0, now: new Date(0) });
@@ -568,11 +608,15 @@ describe('buildBundle', () => {
 
   it('is at most 256 KiB whatever it is given, dropping the oldest lines and saying so', () => {
     const lines = Array.from({ length: 5000 }, (_, n) => `conch-desktop: ${String(n).padStart(5, '0')} ${'x'.repeat(200)}`);
-    const text = buildBundle({ versions: {}, lines, refusals: 0, now: NOW });
+    const text = buildBundle({
+      versions: {}, lines, refusals: 3, refusalCounts: [['gesture', 3]],
+      feedCounts: [['messages opening', 2], ['voice invalid frame', 1]], blocked: 25, now: NOW,
+    });
     expect(Buffer.byteLength(text, 'utf8')).toBeLessThanOrEqual(BUNDLE_MAX_BYTES);
     expect(text).toContain('older log lines left out');
     expect(text).toContain('04999');
     expect(text).not.toContain('conch-desktop: 00000');
+    expect(text).toContain('IPC refusals since start: 3 (gesture 3)\nFeed events since start: 3 (messages opening 2, voice invalid frame 1)\nBlocked requests since start: 25\n');
   });
 
   it('is under the cap for a full ring of full-length lines', () => {
@@ -588,6 +632,7 @@ function fixture(chosen: string | null = '/tmp/out/diag.txt') {
   const ring = new LogRing();
   const written: [string, string][] = [];
   const logs: string[] = [];
+  const log = diagnosticsLogger(ring, (line) => logs.push(line));
   const asked: string[] = [];
   const state = { chosen, fail: false };
   const diagnostics = new Diagnostics({
@@ -606,20 +651,103 @@ function fixture(chosen: string | null = '/tmp/out/diag.txt') {
     downloadsDir: () => '/home/p/Downloads',
     join: (...parts) => parts.join('/'),
     isAbsolute: (path) => path.startsWith('/'),
-    log: (line) => logs.push(line),
+    log,
   });
-  return { ring, written, logs, asked, state, diagnostics };
+  return { ring, written, logs, log, asked, state, diagnostics };
 }
 
+// evict.mjs exercised the request handler and the seven renderer codes at
+// their local throttle. Simulate both with an in-memory session and clock.
+const evictionProbes = [
+  {
+    name: 'blocked requests across guard installations',
+    exercise: ({ log, logs }: ReturnType<typeof fixture>): readonly string[] => {
+      type Listener = (details: { url: string }, callback: (result: { cancel?: boolean }) => void) => void;
+      const webRequest = {
+        listener: undefined as Listener | undefined,
+        onBeforeRequest(listener: Listener): void {
+          this.listener = listener;
+        },
+      };
+      const noop = (): void => undefined;
+      const ses = {
+        setPermissionRequestHandler: noop,
+        setPermissionCheckHandler: noop,
+        setDevicePermissionHandler: noop,
+        setDisplayMediaRequestHandler: noop,
+        on: noop,
+        setSpellCheckerEnabled: noop,
+        webRequest,
+      };
+      let cancelled = 0;
+      let allowed = 0;
+      for (const requests of [512, 513]) {
+        guardSession(ses as unknown as Session, { log });
+        webRequest.listener?.({ url: 'conch-app://ui/' }, (result) => {
+          if (result.cancel !== true) allowed++;
+        });
+        for (let n = 0; n < requests; n++) {
+          webRequest.listener?.({ url: url('foreign.invalid/private') }, (result) => {
+            if (result.cancel === true) cancelled++;
+          });
+        }
+      }
+      expect(cancelled).toBe(1025);
+      expect(allowed).toBe(2);
+      expect(logs.filter((line) => line === `conch-desktop: blocked a request to ${url('foreign.invalid')}`)).toHaveLength(1025);
+      return [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024].map((n) => `conch-desktop: blocked a request; ${String(n)} so far`);
+    },
+    blocked: 1025,
+  },
+  {
+    name: 'renderer diagnostics at 42 reports per minute',
+    exercise: ({ log, logs }: ReturnType<typeof fixture>): readonly string[] => {
+      let now = 0;
+      const report = voiceDiagnosticLog(log, () => now);
+      const codes = ['capture-stalled', 'encoder-cpu', 'sdp-retry', 'sdp-rejected', 'sdp-bundle-collision', 'sdk-warning', 'sdk-error'] as const;
+      for (let n = 0; n < 128; n++, now += 10_000) for (const code of codes) report(code);
+      expect(logs).toHaveLength(128 * codes.length);
+      const sampled: string[] = [];
+      for (const n of [1, 2, 4, 8, 16, 32, 64, 128]) sampled.push(...logs.slice((n - 1) * codes.length, n * codes.length));
+      return sampled;
+    },
+    blocked: 0,
+  },
+];
+
 describe('Diagnostics', () => {
+  it.each(evictionProbes)('keeps prior export history through $name', ({ exercise, blocked }) => {
+    const f = fixture();
+    const history = [
+      'voice: helper 1 lost: ack-timeout',
+      'conch-desktop: refused an IPC call (gesture); 1 so far',
+      'conch-desktop: refused an IPC call (shape); 2 so far',
+    ];
+    for (const line of history) f.ring.record(line);
+    const first = f.diagnostics.preview(2, [['gesture', 1], ['shape', 1]]);
+    const sampled = exercise(f);
+    const next = f.diagnostics.preview(2, [['gesture', 1], ['shape', 1]]);
+    expect(f.ring.lines()).toEqual([...history, ...sampled]);
+    expect(next.text).toContain('IPC refusals since start: 2 (gesture 1, shape 1)\n');
+    expect(next.text).toContain(`Blocked requests since start: ${String(blocked)}\n`);
+    expect(next.text).toContain(history[0]);
+    expect(first.text).toContain('Blocked requests since start: 0\n');
+  });
+
   it('writes the preview selected by ID even after a newer preview', async () => {
     const f = fixture();
+    const feeds = diagnosticSamplesFor(f.log)?.feeds;
+    feeds?.sample('messages opening');
     f.ring.record('conch-desktop: before');
     const shown = f.diagnostics.preview(12);
+    feeds?.sample('messages opening');
+    feeds?.sample('occupancy invalid frame');
     f.ring.record('conch-desktop: after the preview');
     const newer = f.diagnostics.preview(34);
     expect(shown.text).toContain('IPC refusals since start: 12');
+    expect(shown.text).toContain('Feed events since start: 1 (messages opening 1)\n');
     expect(newer.text).toContain('IPC refusals since start: 34');
+    expect(newer.text).toContain('Feed events since start: 3 (messages opening 2, occupancy invalid frame 1)\n');
     expect(newer.text).toContain('after the preview');
     expect(newer.id).not.toBe(shown.id);
     expect(await f.diagnostics.save(shown.id)).toBe('saved');
