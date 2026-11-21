@@ -103,7 +103,7 @@ export function intBetween(min: number, max = Number.MAX_SAFE_INTEGER): Validato
   return validator((v, path) =>
     typeof v === 'number' && Number.isSafeInteger(v) && v >= min && v <= max
       ? []
-      : [`${path}: want an integer from ${min} to ${max}`],
+      : [`${path}: want an integer from ${String(min)} to ${String(max)}`],
   );
 }
 

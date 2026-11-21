@@ -95,7 +95,7 @@ var (
 
 // combinators is what validate.ts exports for generated code to use, in the
 // order the import names them. No generated name may be one of them.
-var combinators = []string{"array", "bool", "int", "json", "object", "optional", "str", "tagged", "timestamp", "tolerant", "vocab"}
+var combinators = []string{"array", "bool", "int", "intBetween", "json", "object", "optional", "str", "tagged", "timestamp", "tolerant", "vocab"}
 
 // decl is one struct to write: a TSTypes or a TSUnions entry.
 type decl struct {
@@ -399,13 +399,16 @@ func (g *generator) writeStruct(d *decl) error {
 	}
 	g.writeInterface(d.name, fields, "")
 	b.WriteString("\n")
-	if d.typ == reflect.TypeFor[schema.VoiceControlStartV4]() {
+	switch d.typ {
+	case reflect.TypeFor[schema.VoiceControlStartV4]():
 		g.writeVoiceControlStartV4(d, fields)
-		return nil
+	case reflect.TypeFor[schema.VoiceControlProcessingV4]():
+		g.writeVoiceControlProcessingV4(d, fields)
+	default:
+		fmt.Fprintf(b, "export const %s = ", d.value)
+		g.writeObject(d.name, fields, "")
+		b.WriteString(";\n")
 	}
-	fmt.Fprintf(b, "export const %s = ", d.value)
-	g.writeObject(d.name, fields, "")
-	b.WriteString(";\n")
 	return nil
 }
 
@@ -415,7 +418,7 @@ func (g *generator) writeVoiceControlStartV4(d *decl, fields []field) {
 	b := &g.body
 	fmt.Fprintf(b, "const %sShape = ", d.value)
 	g.writeObject(d.name, fields, "")
-	fmt.Fprintf(b, ";\nconst voiceControlRoomNameV4 = /%s/;\n", schema.VoiceControlV4RoomNamePattern)
+	fmt.Fprintf(b, ";\nconst voiceControlCallIDV4 = /%s/;\n", schema.VoiceControlV4CallIDPattern)
 	b.WriteString("\nexport function voiceControlStartV4(value: unknown, path = '$'): string[] {\n")
 	b.WriteString("  if (typeof value === 'object' && value !== null && !Array.isArray(value)) {\n")
 	b.WriteString("    if (('channel' in value) === ('call' in value)) {\n")
@@ -427,10 +430,7 @@ func (g *generator) writeVoiceControlStartV4(d *decl, fields []field) {
 	b.WriteString("    )) {\n")
 	b.WriteString("      return [path + '.channel: want a valid channel name'];\n")
 	b.WriteString("    }\n")
-	b.WriteString("    if ('call' in value && typeof value.call === 'string' && (\n")
-	b.WriteString("      value.call.length < MIN_PRIVATE_CALL_ID_BYTES || value.call.length > MAX_PRIVATE_CALL_ID_BYTES ||\n")
-	b.WriteString("      /[^A-Za-z0-9_-]/.test(value.call) || voiceControlRoomNameV4.test(value.call)\n")
-	b.WriteString("    )) {\n")
+	b.WriteString("    if ('call' in value && typeof value.call === 'string' && !voiceControlCallIDV4.test(value.call)) {\n")
 	b.WriteString("      return [path + '.call: want a valid call attempt ID'];\n")
 	b.WriteString("    }\n")
 	b.WriteString("    if (!('kind' in value) || value.kind !== 'start') {\n")
@@ -438,6 +438,24 @@ func (g *generator) writeVoiceControlStartV4(d *decl, fields []field) {
 	b.WriteString("    }\n")
 	b.WriteString("  }\n")
 	b.WriteString("  return voiceControlStartV4Shape(value, path);\n}\n")
+}
+
+func (g *generator) writeVoiceControlProcessingV4(d *decl, fields []field) {
+	b := &g.body
+	fmt.Fprintf(b, "const %sShape = ", d.value)
+	g.writeObject(d.name, fields, "")
+	b.WriteString(`;
+
+export function voiceControlProcessingV4(value: unknown, path = '$'): string[] {
+  if (typeof value === 'object' && value !== null && !Array.isArray(value) &&
+      'echo_cancellation' in value && typeof value.echo_cancellation === 'boolean' &&
+      'noise_suppression' in value && typeof value.noise_suppression === 'boolean' &&
+      value.echo_cancellation !== value.noise_suppression) {
+    return [path + ': echo_cancellation and noise_suppression must agree'];
+  }
+  return voiceControlProcessingV4Shape(value, path);
+}
+`)
 }
 
 func (g *generator) writeInterface(name string, fields []field, indent string) {
@@ -635,6 +653,16 @@ func (g *generator) ref(t reflect.Type, where string) (expr, error) {
 		}
 		return g.vocabulary(t, where)
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		switch where {
+		case "VoiceControlLevelsV4.LevelDB":
+			return expr{"number", "intBetween(VOICE_CONTROL_V4_MIN_LEVEL_DB, 0)", []string{"intBetween"}}, nil
+		case "VoiceControlCallQualityV4.LossBasisPoints":
+			return expr{"number", "intBetween(0, VOICE_CONTROL_V4_MAX_LOSS_BASIS_POINTS)", []string{"intBetween"}}, nil
+		case "VoiceControlGateEventV4.AtMS", "VoiceControlCallQualityV4.JitterUS", "VoiceControlCallQualityV4.RTTUS":
+			return expr{"number", "intBetween(0, VOICE_CONTROL_MAX_ID)", []string{"intBetween"}}, nil
+		case "VoiceControlCallQualityV4.PrincipalID", "VoiceControlStartV4.PrincipalID":
+			return expr{"number", "intBetween(1)", []string{"intBetween"}}, nil
+		}
 		return expr{"number", "int", []string{"int"}}, nil
 	case reflect.Bool:
 		return expr{"boolean", "bool", []string{"bool"}}, nil
