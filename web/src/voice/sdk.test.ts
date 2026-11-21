@@ -519,6 +519,7 @@ vi.mock('livekit-client', () => {
     };
   }
   class Room {
+    readonly options: RoomOptions;
     // Read with permission requests as asked: the stub never asks for any.
     static getLocalDevices(kind: string, requestPermissions: boolean) {
       state.listed.push([kind, requestPermissions]);
@@ -595,7 +596,8 @@ vi.mock('livekit-client', () => {
       },
     };
     constructor(options: RoomOptions) {
-      state.roomOptions = options;
+      this.options = { ...options };
+      state.roomOptions = this.options;
       state.room = this;
     }
     on(event: string, fn: (...args: unknown[]) => void) {
@@ -3218,8 +3220,9 @@ describe('the screen companion room (issue #1581)', () => {
 
   it.each([false, true])('keeps VP8 receive placeholders out of the publisher offer for companion=%s (issue #2055)', async (companion) => {
     const adapter = newLiveKitRoom();
-    if (companion) adapter.setCompanion?.(true);
     adapter.setWatches(new Set(), null);
+    await adapter.switchOutput('out-1');
+    if (companion) adapter.setCompanion?.(true);
     await adapter.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
 
     const { Room: RealRoom } = await vi.importActual<typeof import('livekit-client')>('livekit-client');

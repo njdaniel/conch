@@ -998,15 +998,7 @@ class KeptCam implements KeptCamera {
 export const levelWindow = 512;
 
 class LiveKitAdapter implements Room {
-  private sdkRoom: LiveKitRoom | undefined;
-
-  private get room(): LiveKitRoom {
-    // The companion's publisher only sends its screen. Use LiveKit's dual-PC
-    // mode to keep receive sections out of its publisher BUNDLE. In single-PC
-    // mode the SDK adds a VP8 bitrate fmtp on the send section, but its
-    // normalizer cannot copy it to receive sections with no VP8 fmtp line.
-    return this.sdkRoom ??= new LiveKitRoom(this.companion ? { ...roomOptions, singlePeerConnection: false } : roomOptions);
-  }
+  private readonly room = new LiveKitRoom(roomOptions);
   // Set by close(); every step after an await checks it.
   private closed = false;
   private events: RoomEvents | null = null;
@@ -1120,6 +1112,10 @@ class LiveKitAdapter implements Room {
     // connection's.
     redactor.hold(this, token, roomName);
     const room = this.room;
+    // Select dual-PC mode at join, after all pre-connection settings. This
+    // keeps the receive sections out of the companion's publisher BUNDLE,
+    // where the SDK adds VP8 bitrate parameters to the send section alone.
+    if (this.companion) room.options.singlePeerConnection = false;
     room
       .on(RoomEvent.Reconnecting, events.onReconnecting)
       // A signal-only resume (the signal socket lost, the media kept) is the
