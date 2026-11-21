@@ -36,16 +36,18 @@ func dmObjectNames(t *testing.T, s *Store) []string {
 
 var wantDMTables = []string{
 	"direct_message_removals", "direct_message_revisions", "direct_messages", "direct_messages_fts",
-	"dm_conversations", "dm_files", "dm_read_marks", "dm_viewer_state",
+	"dm_contact_preferences", "dm_conversations", "dm_files", "dm_read_marks", "dm_viewer_state",
 }
 
-// dmDropStatements undo migration 51, children before parents. The tests
+// dmDropStatements undo migrations 54 and 53, children before parents. The tests
 // that rewind a database to an older version to run a migration on it (the
 // topic, community, issued-by and author-removal ones) run them first, as each
 // later migration's author has added theirs: the rewind must leave no object
 // of a migration the old version has not made.
 var dmDropStatements = []string{
-	"DROP TABLE direct_messages_fts", // migration 53 (issue #2017)
+	"DROP TABLE dm_contact_preferences",             // migration 54 (issue #2018)
+	"ALTER TABLE principals DROP COLUMN dm_allowed", // migration 54
+	"DROP TABLE direct_messages_fts",                // migration 53 (issue #2017)
 	"DROP TABLE dm_read_marks",
 	"DROP TABLE dm_files",
 	"DROP TABLE direct_message_removals",
@@ -56,8 +58,8 @@ var dmDropStatements = []string{
 }
 
 // dropDMObjects returns a migrated database to its state before migration 53:
-// the migration only adds tables, so removing them (and the triggers that go
-// with them) and the version is that state.
+// migrations 53 and 54 only add tables and a column, so removing them (and
+// the triggers that go with them) and the version is that state.
 func dropDMObjects(t *testing.T, s *Store, version int) {
 	t.Helper()
 	for _, stmt := range dmDropStatements {
@@ -166,8 +168,8 @@ func TestDMMigrationUpgradeReopenAndRestore(t *testing.T) {
 		t.Fatalf("seed reads: bob %v carol %v", beforeBob, beforeCarol)
 	}
 
-	// Make it a database from before migration 53.
-	preDM := len(migrations) - 1
+	// Make it a database from before migration 53 (and so 54).
+	preDM := dmPolicyMigration - 2
 	dropDMObjects(t, s, preDM)
 	if got := dmObjectNames(t, s); len(got) != 0 {
 		t.Fatalf("after the drop: %v", got)
