@@ -48,7 +48,7 @@ function powerRig(initial = 'active') {
 afterEach(() => { vi.useRealTimers(); });
 
 describe('Windows powerMonitor uses the shared contract', () => {
-  it('locks by muting, unlocks without unmuting, and suspends by leaving; resume does nothing', async () => {
+  it('mutes on lock and before leaving on suspend, and keeps mute on unlock and resume', async () => {
     const r = powerRig();
     r.power.emit('lock-screen');
     expect(r.rules.locked).toBe(true);
@@ -66,7 +66,7 @@ describe('Windows powerMonitor uses the shared contract', () => {
     expect(r.companion.end).toHaveBeenLastCalledWith('suspend');
     r.power.emit('resume');
     expect(r.voice.leave).toHaveBeenCalledOnce();
-    expect(r.voice.setMute.mock.calls).toEqual([[true]]);
+    expect(r.voice.setMute.mock.calls).toEqual([[true], [true]]);
     expect(r.companion.end).toHaveBeenCalledTimes(2);
     r.watcher.stop();
   });
@@ -99,6 +99,19 @@ describe('Windows powerMonitor uses the shared contract', () => {
     expect(r.rules.lockObservation).toBe('available');
     expect(r.notifications.setLocked).toHaveBeenLastCalledWith(false);
     expect(r.voice.setMute).not.toHaveBeenCalled();
+    r.watcher.stop();
+  });
+
+  it('requires fresh lock evidence when the idle state is unknown on resume', () => {
+    const r = powerRig();
+    expect(r.rules.lockObservation).toBe('available');
+    r.power.emit('suspend');
+    r.power.state = 'unknown';
+    r.power.emit('resume');
+    expect(r.rules.sleeping).toBe(false);
+    expect(r.rules.lockObservation).toBe('unavailable');
+    r.power.emit('unlock-screen');
+    expect(r.rules.lockObservation).toBe('available');
     r.watcher.stop();
   });
 
@@ -259,7 +272,7 @@ describe('Windows close and tray reuse the shared policy', () => {
     const voice = new VoiceService({
       supervisor, locked: () => false, log: () => undefined,
       identity: () => Promise.resolve({ profileId: 'p1', configDir: 'C:\\Conch\\profiles\\p1', principalId: 7, credential: () => ({ origin: 'https://example.org', token: 'test' }), current: () => true }),
-      oneShot: { cancel: () => Promise.resolve(), devices: () => Promise.resolve({ ok: false, error: 'not-installed' }), save: () => Promise.resolve({ ok: false, error: 'not-installed' }) },
+      oneShot: { cancel: () => Promise.resolve(), devices: () => Promise.resolve({ ok: false, error: 'not-installed' }), save: () => Promise.resolve({ ok: false, error: 'not-installed' }), saveMuteBinding: () => Promise.resolve({ ok: false, error: 'not-installed' }) },
     });
     try {
       const joining = voice.join({ channel: 'general', muted: false, deafened: false });

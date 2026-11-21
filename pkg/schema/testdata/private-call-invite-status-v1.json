@@ -1,0 +1,6 @@
+{
+  "private-call-response-v1.json": 201,
+  "private-call-response-v1-unavailable.json": 200,
+  "private-call-response-v1-glare.json": 200,
+  "private-call-response-v1-replayed.json": 200
+}

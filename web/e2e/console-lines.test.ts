@@ -75,6 +75,18 @@ describe('withoutJoinTokenInSocketRefusals', () => {
     expect(out.filter((l) => l.includes('eyJjoin'))).toEqual([refused]);
   });
 
+  it('allows the room renewal 404 and still flags the token in other console lines', () => {
+    const line = `error: WebSocket connection to '${origin}/rtc/v1?access_token=eyJjoin${rejected('404')}`;
+    const leak = 'log: eyJjoin';
+    const browserLog = [logged(line)];
+    const check = (lines: string[]) => secretLines(withoutJoinTokenInSocketRefusals(lines, browserLog, origin), browserLog, ['eyJjoin']);
+    expect(check([line])).toEqual([]);
+    expect(check([line, leak, line])).toEqual([
+      'page console: log: [secret #0]',
+      `browser log (network): ${line.replace('eyJjoin', '[secret #0]')}`,
+    ]);
+  });
+
   it('keeps another secret in an allowed line', () => {
     const [out] = fromBrowser([`error: WebSocket connection to '${origin}/rtc/v1?access_token=eyJjoin&join_request=conch_pat_x${tail}`]);
     expect(out).toContain('conch_pat_x');

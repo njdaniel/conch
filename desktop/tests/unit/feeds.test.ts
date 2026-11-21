@@ -26,6 +26,7 @@ import {
 } from '../../main/api/feeds.ts';
 import { agentConstructor, connector, createNodeConnect } from '../../main/api/socket.ts';
 import { Session } from '../../main/api/session.ts';
+import { diagnosticSamplesFor, diagnosticsLogger, LogRing, type MainLog } from '../../main/diagnostics.ts';
 import { makePki, type Pki } from './support.ts';
 import type { FeedEvent } from '../../shared/bridge-names.ts';
 
@@ -70,7 +71,7 @@ interface Rig {
   readonly timers: { run: () => void; ms: number; cleared: boolean }[];
 }
 
-function rig(limits: { maxQueuedFrames?: number; maxQueuedBytes?: number } = {}): Rig {
+function rig(limits: { maxQueuedFrames?: number; maxQueuedBytes?: number } = {}, log?: MainLog): Rig {
   const session = new Session();
   session.setOrigin('http://127.0.0.1:8080');
   session.adopt(TOKEN);
@@ -121,7 +122,7 @@ function rig(limits: { maxQueuedFrames?: number; maxQueuedBytes?: number } = {})
     deliver: (document, event) => {
       events.push([document, event]);
     },
-    log: (line) => logs.push(line),
+    log: log ?? ((line) => logs.push(line)),
     setTimer: (run, ms) => {
       const timer = { run, ms, cleared: false };
       timers.push(timer);
@@ -143,6 +144,66 @@ const flush = async (): Promise<void> => {
 };
 
 const types = (r: Rig): string[] => r.events.map(([, e]) => (e.type === 'close' ? `close ${String(e.code)}` : e.type === 'frames' ? `frames ${String(e.frames.length)}` : e.type));
+
+// feedchurn.mjs used an immediate close handshake and could evict both
+// earlier lines with 167 cycles. The socket here never uses the network.
+it.each([167, 1_001])('keeps export history through %i feed churn cycles', async (cycles) => {
+  const session = new Session();
+  session.setOrigin('http://127.0.0.1:8080');
+  session.adopt(TOKEN);
+  const ring = new LogRing();
+  const local: string[] = [];
+  const history = ['voice: helper 1 lost: ack-timeout', 'conch-desktop: refused an IPC call (gesture); 1 so far'];
+  for (const line of history) ring.record(line);
+  const feeds = new Feeds({
+    session,
+    client: { send: () => Promise.resolve({ kind: 'answer', status: 200, ok: true }) },
+    connect: (_url, _headers, on) => ({
+      close: () => {
+        queueMicrotask(() => { on.close(1000, ''); });
+      },
+      destroy: () => true,
+    }),
+    deliver: () => undefined,
+    log: diagnosticsLogger(ring, (line) => local.push(line)),
+    setTimer: () => ({}),
+    clearTimer: () => undefined,
+  });
+  for (let i = 0; i < cycles; i++) {
+    expect(feeds.subscribe(1, 1, occupancy)).toBe(true);
+    expect(feeds.unsubscribe(1, 1)).toBe(true);
+    await flush();
+  }
+  expect(local).toHaveLength(3 * cycles);
+  const sampled: string[] = [];
+  for (let n = 1; n <= cycles; n *= 2) sampled.push(...local.slice(3 * (n - 1), 3 * n));
+  expect(ring.lines()).toEqual([...history, ...sampled]);
+});
+
+it('samples each feed kind independently and keeps counts across activations', () => {
+  const ring = new LogRing();
+  const log = diagnosticsLogger(ring, () => undefined);
+  const first = rig({}, log);
+  const second = rig({}, log);
+  for (const [r, id, request] of [
+    [first, 1, messages], [first, 2, messages],
+    [second, 1, occupancy], [second, 2, messages], [second, 3, messages],
+  ] as const) {
+    expect(r.feeds.subscribe(1, id, request)).toBe(true);
+    expect(r.feeds.unsubscribe(1, id)).toBe(true);
+    r.sockets.at(-1)?.on.close(1000, '');
+  }
+  const events = (kind: string) => [
+    `conch-desktop: feed ${kind} opening; 1 open, 0 closing`,
+    `conch-desktop: feed ${kind} closed (unsubscribed); 0 open, 1 closing`,
+    `conch-desktop: feed ${kind} socket closed; 0 open, 0 closing`,
+  ];
+  expect(ring.lines()).toEqual([...events('messages'), ...events('messages'), ...events('occupancy'), ...events('messages')]);
+  expect(diagnosticSamplesFor(log)?.feeds.counts()).toEqual([
+    ['messages opening', 4], ['messages unsubscribed', 4], ['messages socket closed', 4],
+    ['occupancy opening', 1], ['occupancy unsubscribed', 1], ['occupancy socket closed', 1],
+  ]);
+});
 
 describe('what the renderer may ask for', () => {
   it.each<[unknown, FeedRequest | null]>([
@@ -281,7 +342,41 @@ describe('frames', () => {
       [1, { id: 1, type: 'frames', frames: [MESSAGE] }],
     ]);
     // The log says what kind of feed, never what the frame held.
-    expect(r.logs.filter((l) => l.includes('dropped'))).toEqual(['conch-desktop: dropped an invalid messages frame; 1 so far']);
+    expect(r.logs.filter((l) => l.includes('dropped'))).toEqual(
+      [1, 2, 4].map((n) => `conch-desktop: dropped an invalid messages frame; ${String(n)} so far`),
+    );
+  });
+
+  it.each([
+    { frames: 100, samples: 7 },
+    { frames: 50_000, samples: 16 },
+  ])('exports $samples samples for $frames invalid frames and gives a second kind its first sample', ({ frames, samples }) => {
+    const ring = new LogRing();
+    const local: string[] = [];
+    const log = diagnosticsLogger(ring, (line) => local.push(line));
+    const history = 'voice: helper 1 lost: ack-timeout';
+    ring.record(history);
+    const r = rig({}, log);
+    expect(r.feeds.subscribe(1, 1, messages)).toBe(true);
+    expect(r.feeds.subscribe(1, 2, occupancy)).toBe(true);
+    const [busy, quiet] = r.sockets;
+    if (busy === undefined || quiet === undefined) throw new Error('missing fake feed socket');
+    const invalid = new ArrayBuffer(0);
+    for (let n = 0; n < frames; n++) busy.on.frame(invalid);
+    quiet.on.frame(invalid);
+    expect(r.feeds.invalid).toBe(frames + 1);
+    const dropped = (kind: string, count: number) => `conch-desktop: dropped an invalid ${kind} frame; ${String(count)} so far`;
+    expect(ring.lines()[0]).toBe(history);
+    expect(ring.lines().filter((line) => line.includes('dropped'))).toEqual([
+      ...Array.from({ length: samples }, (_, n) => dropped('messages', 2 ** n)),
+      dropped('occupancy', frames + 1),
+    ]);
+    expect(local).toContain(dropped('messages', 100));
+    expect(local.filter((line) => line.includes('dropped'))).toHaveLength(samples + Math.floor(frames / 100) + 1);
+    expect(diagnosticSamplesFor(log)?.feeds.counts()).toEqual([
+      ['messages opening', 1], ['occupancy opening', 1],
+      ['messages invalid frame', frames], ['occupancy invalid frame', 1],
+    ]);
   });
 
   it('sends one batch at a time: what arrives while one is in flight waits for its acknowledgement', () => {

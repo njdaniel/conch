@@ -192,11 +192,13 @@ const (
 	// the chat view and esc goes back to it.
 	modeDirectory
 	modeCommunity
+	modeDM
 )
 
 // Model is the root Bubble Tea model. Network results enter Update as messages,
 // keeping state transitions deterministic and independently testable.
 type Model struct {
+	dm       dmView
 	ctx      context.Context
 	api      API
 	authorID int64
@@ -416,6 +418,8 @@ func (m Model) status() string {
 		return m.directoryStatus()
 	case modeCommunity:
 		return m.communityStatus()
+	case modeDM:
+		return m.dm.status
 	}
 	return m.inboxStatus
 }
@@ -537,6 +541,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.help, m.helpTop, m.helpTopic = true, 0, topicKeys
 			return m, nil
 		}
+		if m.mode == modeDM {
+			return m.dmKey(msg)
+		}
 		if m.mode == modeDirectory {
 			return m.directoryKey(msg)
 		}
@@ -551,6 +558,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "ctrl+d":
 				return m.enterDirectory()
+			case "ctrl+g":
+				return m.enterDM(0)
 			case "ctrl+p":
 				return m.enterCommunity()
 			case "ctrl+r", "ctrl+u":
@@ -762,6 +771,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+	case dmPollDue:
+		if m.mode == modeDM && m.dm.ctx == msg.ctx {
+			cmd := m.refreshDM()
+			return m, tea.Batch(cmd, dmPoll(msg.ctx))
+		}
+	case dmLoaded:
+		return m.dmLoadDone(msg), nil
+	case dmOpened:
+		return m.dmOpenDone(msg)
+	case dmWritten:
+		return m.dmWriteDone(msg)
 	case directoryLoaded:
 		return m.directoryLoaded(msg)
 	case channelActed:
@@ -2123,7 +2143,7 @@ func clipTail(value string, width int) string {
 // secrecy, and users should not mistake it for the latter.
 const whisperNotice = "note: whispers are recorded in the audit log"
 
-const slashHint = `commands: /net [name], /w <ids> <text>, /react, /unreact, /reactors, /emoji, /channels, /people, /voice help, /help; start a message with // to send a literal /`
+const slashHint = `commands: /net [name], /w <ids> <text>, /react, /unreact, /reactors, /emoji, /channels, /people, /dm [id], /voice help, /help; start a message with // to send a literal /`
 
 // submit handles enter in the channel pane: a slash command, or a message sent
 // to the current target. Every refusal leaves the input as typed and sends
@@ -2132,6 +2152,20 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	body := strings.TrimSpace(m.input)
 	if body == "" {
 		return m, nil
+	}
+	// DMs are available even to people who have joined no channel.
+	if name, rest := splitCommand(body); name == "/dm" {
+		var id int64
+		if rest != "" {
+			var err error
+			id, err = strconv.ParseInt(rest, 10, 64)
+			if err != nil || id <= 0 {
+				m.setStatus(modeChannels, "usage: /dm [principal-id]")
+				return m, nil
+			}
+		}
+		m.input = ""
+		return m.enterDM(id)
 	}
 	if len(m.channels) == 0 {
 		m.setStatus(modeChannels, "no channel selected yet")

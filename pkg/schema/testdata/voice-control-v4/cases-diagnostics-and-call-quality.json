@@ -1,0 +1,314 @@
+{
+  "description": "Conformance cases for microphone diagnostics, state processing and call quality in voice control v4.",
+  "cases": [
+    {
+      "name": "set_diagnostics with on missing",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"set_diagnostics\",\"id\":2}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 2
+      }
+    },
+    {
+      "name": "set_diagnostics with on null",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"set_diagnostics\",\"id\":2,\"on\":null}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 2
+      }
+    },
+    {
+      "name": "set_diagnostics with on non-boolean",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"set_diagnostics\",\"id\":2,\"on\":0}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 2
+      }
+    },
+    {
+      "name": "levels at the ceiling",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"levels\",\"seq\":7,\"level_db\":0,\"open_threshold_db\":-34,\"close_threshold_db\":-38,\"gate_open\":false}",
+      "want": {
+        "result": "accept",
+        "kind": "levels"
+      }
+    },
+    {
+      "name": "levels below the floor",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"levels\",\"seq\":7,\"level_db\":-97,\"open_threshold_db\":-34,\"close_threshold_db\":-38,\"gate_open\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "levels above the ceiling",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"levels\",\"seq\":7,\"level_db\":1,\"open_threshold_db\":-34,\"close_threshold_db\":-38,\"gate_open\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "levels with fractional dB",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"levels\",\"seq\":7,\"level_db\":-40.5,\"open_threshold_db\":-34,\"close_threshold_db\":-38,\"gate_open\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "levels with missing open threshold",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"levels\",\"seq\":7,\"level_db\":-96,\"close_threshold_db\":-38,\"gate_open\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "levels with missing close threshold",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"levels\",\"seq\":7,\"level_db\":-96,\"open_threshold_db\":-34,\"gate_open\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "levels with missing gate state",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"levels\",\"seq\":7,\"level_db\":-96,\"open_threshold_db\":-34,\"close_threshold_db\":-38}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "gate event at zero milliseconds",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"gate_event\",\"seq\":8,\"at_ms\":0,\"open\":true,\"why\":\"sound\"}",
+      "want": {
+        "result": "accept",
+        "kind": "gate_event"
+      }
+    },
+    {
+      "name": "gate event with a negative time",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"gate_event\",\"seq\":8,\"at_ms\":-1,\"open\":true,\"why\":\"sound\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "gate event without the open flag",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"gate_event\",\"seq\":8,\"at_ms\":500,\"why\":\"sound\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "gate event with an unknown reason",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"gate_event\",\"seq\":8,\"at_ms\":500,\"open\":true,\"why\":\"other\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "gate event closed by mute",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"gate_event\",\"seq\":10,\"at_ms\":1400,\"open\":false,\"why\":\"mute\"}",
+      "want": {
+        "result": "accept",
+        "kind": "gate_event"
+      }
+    },
+    {
+      "name": "gate event closed by lock",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"gate_event\",\"seq\":10,\"at_ms\":1400,\"open\":false,\"why\":\"lock\"}",
+      "want": {
+        "result": "accept",
+        "kind": "gate_event"
+      }
+    },
+    {
+      "name": "gate event closed by limit",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"gate_event\",\"seq\":10,\"at_ms\":1400,\"open\":false,\"why\":\"limit\"}",
+      "want": {
+        "result": "accept",
+        "kind": "gate_event"
+      }
+    },
+    {
+      "name": "state without processing",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"off\",\"share_audio_muted\":false,\"share_audio_sources\":0}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "state with null processing",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"off\",\"share_audio_muted\":false,\"share_audio_sources\":0,\"processing\":null}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "state with non-object processing",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"off\",\"share_audio_muted\":false,\"share_audio_sources\":0,\"processing\":[]}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "state without echo cancellation flag",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"off\",\"share_audio_muted\":false,\"share_audio_sources\":0,\"processing\":{\"noise_suppression\":false}}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "state without noise suppression flag",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"off\",\"share_audio_muted\":false,\"share_audio_sources\":0,\"processing\":{\"echo_cancellation\":false}}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "state with non-boolean processing flag",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"off\",\"share_audio_muted\":false,\"share_audio_sources\":0,\"processing\":{\"echo_cancellation\":1,\"noise_suppression\":true}}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "state with mismatched processing flags",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"off\",\"share_audio_muted\":false,\"share_audio_sources\":0,\"processing\":{\"echo_cancellation\":true,\"noise_suppression\":false}}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "quality without a principal",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"call_quality\",\"seq\":12,\"loss_basis_points\":0,\"jitter_us\":3200,\"rtt_us\":21800}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "quality with a zero principal",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"call_quality\",\"seq\":12,\"principal_id\":0,\"loss_basis_points\":0,\"jitter_us\":3200,\"rtt_us\":21800}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "quality with null packet loss",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"call_quality\",\"seq\":12,\"principal_id\":9,\"loss_basis_points\":null,\"jitter_us\":3200,\"rtt_us\":21800}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "quality with negative packet loss",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"call_quality\",\"seq\":12,\"principal_id\":9,\"loss_basis_points\":-1,\"jitter_us\":3200,\"rtt_us\":21800}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "quality with packet loss above 100 percent",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"call_quality\",\"seq\":12,\"principal_id\":9,\"loss_basis_points\":10001,\"jitter_us\":3200,\"rtt_us\":21800}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "quality with zero jitter",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"call_quality\",\"seq\":12,\"principal_id\":9,\"loss_basis_points\":0,\"jitter_us\":0,\"rtt_us\":21800}",
+      "want": {
+        "result": "accept",
+        "kind": "call_quality"
+      }
+    },
+    {
+      "name": "quality with negative jitter",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"call_quality\",\"seq\":12,\"principal_id\":9,\"loss_basis_points\":0,\"jitter_us\":-1,\"rtt_us\":21800}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "quality with zero SFU RTT",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"call_quality\",\"seq\":12,\"principal_id\":9,\"loss_basis_points\":0,\"jitter_us\":3200,\"rtt_us\":0}",
+      "want": {
+        "result": "accept",
+        "kind": "call_quality"
+      }
+    },
+    {
+      "name": "quality with fractional SFU RTT",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"call_quality\",\"seq\":12,\"principal_id\":9,\"loss_basis_points\":0,\"jitter_us\":3200,\"rtt_us\":0.5}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "quality with negative SFU RTT",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"call_quality\",\"seq\":12,\"principal_id\":9,\"loss_basis_points\":0,\"jitter_us\":3200,\"rtt_us\":-1}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    }
+  ]
+}

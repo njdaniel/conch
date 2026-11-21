@@ -142,6 +142,33 @@ pub fn unset_keys(environment: &Environment, key: KeysKey) -> Result<(), Error> 
     unset_keys_in(&dir, key, &mut || {})
 }
 
+/// Saves the Linux mute binding and its device in one replacement of voice.toml.
+pub(crate) fn set_mute_binding(
+    environment: &Environment,
+    device: &str,
+    value: &str,
+) -> Result<(), Error> {
+    save_with(
+        &config_dir(environment)?,
+        &|old, name| {
+            let keys = Config::parse(old, name)?.keys;
+            // A mute save must not retarget an existing push-to-talk binding.
+            if keys.talk.is_some() && keys.device.as_deref().is_some_and(|path| path != device) {
+                return Err(conch_voice_control::Error::InvalidConfigValue {
+                    file: name.to_owned(),
+                    key: KeysKey::Device.dotted().to_owned(),
+                    message: "choose the same input device as the existing push-to-talk binding"
+                        .to_owned(),
+                }
+                .into());
+            }
+            let with_device = set_keys_value(old, name, KeysKey::Device, device)?;
+            Ok(set_keys_value(&with_device, name, KeysKey::Mute, value)?)
+        },
+        &mut || {},
+    )
+}
+
 fn config_dir(environment: &Environment) -> Result<PathBuf, Error> {
     default_config_dir(
         environment.conch_config_dir.as_deref(),
@@ -480,6 +507,43 @@ mod tests {
 
     fn save_now(dir: &Path, key: AudioKey, value: &str) -> Result<(), Error> {
         save(dir, key, value, &mut || {})
+    }
+
+    #[test]
+    fn mute_binding_save_preserves_the_existing_talk_device_and_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let environment = Environment {
+            conch_config_dir: Some(dir.path().as_os_str().to_owned()),
+            ..Environment::default()
+        };
+        let device = "/dev/input/by-id/old-event-kbd";
+        let original = format!("[keys]\ndevice = \"{device}\" # keep\ntalk = 97\n");
+        write(&path, &original, 0o600);
+        for (try_device, key) in [("/dev/input/by-id/new-event-kbd", "30"), (device, "97")] {
+            assert!(set_mute_binding(&environment, try_device, key).is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        }
+        set_mute_binding(&environment, device, "30").unwrap();
+        let config = crate::cli::read_config(&path).unwrap();
+        assert_eq!(config.keys.device.as_deref(), Some(device));
+        assert!(config.keys.talk.is_some());
+        assert!(config.keys.mute.is_some());
+        assert!(fs::read_to_string(path).unwrap().contains(" # keep"));
+    }
+
+    #[test]
+    fn invalid_mute_binding_does_not_save_the_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let environment = Environment {
+            conch_config_dir: Some(dir.path().as_os_str().to_owned()),
+            ..Environment::default()
+        };
+        let original = "[keys]\ndeafen = 30\n";
+        write(&path, original, 0o600);
+        assert!(set_mute_binding(&environment, "/dev/input/by-id/new-event-kbd", "30").is_err());
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
     }
 
     #[test]
@@ -1207,6 +1271,73 @@ mod windows_tests {
         let config = crate::cli::read_config(&path).unwrap();
         assert_eq!(config.audio.input.as_deref(), Some("new"));
         assert_eq!(config.server.as_deref(), Some("http://127.0.0.1:8080"));
+    }
+
+    #[test]
+    fn windows_config_set_round_trips_bindings_and_preserves_comments() {
+        use crate::cli::{Invocation, key_device, parse, read_config};
+        use conch_voice_control::WindowsBinding::{Mouse, Scan};
+
+        let dir = tempfile::tempdir().unwrap();
+        let environment = Environment {
+            conch_config_dir: Some(dir.path().as_os_str().to_owned()),
+            ..Environment::default()
+        };
+        let path = dir.path().join(FILE_NAME);
+        let original = "# my keys\n[keys]\ntalk = \"mouse:4\" # talk\nmute = \"sc:0xE0,0x1D\"\ndeafen = \"mouse:5\"\n";
+        fs::write(&path, original).unwrap();
+
+        let Invocation::ConfigSetKeys { key, value } =
+            parse(["conch-voice", "config", "set", "keys.talk", "sc:0x29"]).unwrap()
+        else {
+            panic!("expected config set keys.talk");
+        };
+        set_keys(&environment, key, &value).unwrap();
+        let edited = original.replace("mouse:4", "sc:0x29");
+        assert_eq!(fs::read_to_string(&path).unwrap(), edited);
+        let (_, bindings) = key_device(&read_config(&path).unwrap(), false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            bindings.talk().and_then(|key| key.windows_binding()),
+            Some(Scan(0x29))
+        );
+        assert_eq!(
+            bindings.mute().and_then(|key| key.windows_binding()),
+            Some(Scan(0xE01D))
+        );
+        assert_eq!(
+            bindings.deafen().and_then(|key| key.windows_binding()),
+            Some(Mouse(5))
+        );
+
+        for (field, key, value, hint) in [
+            (
+                "keys.device",
+                KeysKey::Device,
+                "/dev/input/event3",
+                "Linux setting",
+            ),
+            ("keys.talk", KeysKey::Talk, "KEY_F13", "mouse:4"),
+            ("keys.talk", KeysKey::Talk, "183", "mouse:4"),
+            ("keys.talk", KeysKey::Talk, "sc:0x80", "mouse:4"),
+            ("keys.talk", KeysKey::Talk, "sc:0x54", "mouse:4"),
+        ] {
+            let error = parse(["conch-voice", "config", "set", field, value]).unwrap_err();
+            assert_eq!(error.exit_code(), 2);
+            assert!(error.to_string().contains(hint), "{error}");
+            assert!(!error.to_string().contains(value), "{error}");
+            assert!(set_keys(&environment, key, value).is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap(), edited);
+        }
+        assert!(set_keys(&environment, KeysKey::Mute, "SC:0X29").is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), edited);
+        assert!(matches!(
+            parse(["conch-voice", "config", "unset", "keys.device"]),
+            Ok(Invocation::ConfigUnset {
+                key: KeysKey::Device
+            })
+        ));
     }
 
     #[test]

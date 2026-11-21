@@ -16,6 +16,8 @@ func (s *Server) routeTable() []route {
 		return route{pattern: pattern, access: a, handler: h}
 	}
 	hf := func(f http.HandlerFunc) http.Handler { return f }
+	callActions := newChannelWriteLimiter(inviteLimit{"private_call_actions", privateCallActionBurst,
+		privateCallActionBurst * privateCallActionRefill})
 	return []route{
 		rt("GET /healthz", accessExempt, hf(s.handleHealth)),
 		rt("GET /v0/ws", accessAuthenticated, hf(s.handleWS)),
@@ -25,8 +27,22 @@ func (s *Server) routeTable() []route {
 		// The events socket (issue #269) takes a ticket too: it is the one a
 		// browser opens.
 		{pattern: "GET /v1/events/ws", access: accessAuthenticated, handler: hf(s.handleEventsWS), acceptsTicket: true},
+		// The per-person events stream (issue #2040): DM frames and, later,
+		// rings, scoped to the caller, with no channel. A credential the person
+		// made for themselves only: the route is in selfMadeCredentialRoutes,
+		// which refuses another's credential and an agent (403
+		// own_sign_in_required), and the handler refuses a guest, all before
+		// the upgrade. It takes a ticket, as the channel socket does.
+		{pattern: "GET /v1/events/person/ws", access: accessAuthenticated, handler: hf(s.handlePersonEventsWS), acceptsTicket: true},
 		rt("POST /v1/ws-tickets", accessAuthenticated, hf(s.handleCreateWSTicket)),
 		rt("GET /v1/whoami", accessAuthenticated, hf(s.handleWhoAmI)),
+		rt("POST /v1/dms/{conversation}/calls", accessAuthenticated, s.privateCallInviteHandler()),
+		rt("GET /v1/dms/{conversation}/calls", accessAuthenticated, hf(s.handleListPrivateCalls)),
+		rt("GET /v1/calls/current", accessAuthenticated, hf(s.handleCurrentPrivateCall)),
+		rt("POST /v1/calls/{call}/accept", accessAuthenticated, s.privateCallAction(schema.PrivateCallEventAccept, callActions)),
+		rt("POST /v1/calls/{call}/decline", accessAuthenticated, s.privateCallAction(schema.PrivateCallEventDecline, callActions)),
+		rt("POST /v1/calls/{call}/cancel", accessAuthenticated, s.privateCallAction(schema.PrivateCallEventCancel, callActions)),
+		rt("POST /v1/calls/{call}/hangup", accessAuthenticated, s.privateCallAction(schema.PrivateCallEventHangup, callActions)),
 		// Preview as member (issue #1515): the entry read of the one request
 		// header, Conch-Preview-As. It is one of the five previewable routes.
 		rt("GET /v1/preview", accessAuthenticated, hf(s.handlePreview)).asPreviewable(),
@@ -203,6 +219,11 @@ func (s *Server) routeTable() []route {
 		rt("GET /v1/notifications/preferences", accessAuthenticated, s.membersOnly(hf(s.handleGetNotificationPreferences))),
 		rt("PUT /v1/notifications/preferences", accessAuthenticated, s.membersOnly(hf(s.handlePutNotificationPreferences))),
 		rt("GET /v1/notifications/pending", accessAuthenticated, s.membersOnly(hf(s.handleListPendingNotifications))),
+		// Personal blocks (issue #1832, docs/design/blocks.md): the caller's
+		// own list, for people with a full credential; see blocks.go.
+		rt("GET /v1/blocks", accessAuthenticated, s.membersOnly(hf(s.handleListBlocks))),
+		rt("PUT /v1/blocks/{principal_id}", accessAuthenticated, s.membersOnly(hf(s.handlePutBlock))),
+		rt("DELETE /v1/blocks/{principal_id}", accessAuthenticated, s.membersOnly(hf(s.handleDeleteBlock))),
 		// Push registrations (issue #1714): the same people-only rule, and the
 		// same limiter. The config is the one route any signed-in caller may
 		// read: nothing in it is secret. "mine" is a literal, so the mux never
@@ -397,6 +418,11 @@ func (s *Server) routeTable() []route {
 		rt("POST /v1/sign-in-links/mine", accessAuthenticated, hf(s.handleCreateDeviceLink)),
 		rt("GET /v1/sign-in-links/mine", accessAuthenticated, hf(s.handleListOwnDeviceLinks)),
 		rt("DELETE /v1/sign-in-links/mine/{id}", accessAuthenticated, hf(s.handleCloseOwnDeviceLink)),
+		// Account notices (issue #2042): what the member is told about their
+		// own account, such as a password set through a link someone else
+		// made. Their own, on a sign-in of their own. See account_notices.go.
+		rt("GET /v1/notices/mine", accessAuthenticated, hf(s.handleListAccountNotices)),
+		rt("DELETE /v1/notices/mine/{id}", accessAuthenticated, hf(s.handleDismissAccountNotice)),
 		// Operator sign-in and setup (issue #709). The second step of an
 		// operator's sign-in and the setup token's redemption are exempt, as
 		// the sign-in is, limited before any work and over HTTPS or loopback

@@ -176,6 +176,10 @@ var authorityAllowlist = []authorityAllowed{
 	{"store/directory.go", "Store.DirectoryMembershipAudience", kindRoleSQL, 1, "the operator cell of see_member_directory is fixed on (schema.Permission.Fixed), so every operator and the owner is in the audience of the directory signal (design §13.6); it addresses a frame and grants nothing"},
 	{"store/credentials.go", "Store.RotateCredential", kindRoleCompare, 1, whyTarget + ": an owner's credential"},
 	{"store/credentials.go", "Store.revokeCredential", kindRoleCompare, 2, whyTarget + ": an owner's credential, and the last owner's sign-in"},
+	// #2030: a private call's own caller/callee role (schema.PrivateCallRole),
+	// not a principal's server role: it picks which side's selected credential
+	// the reader is compared with, and grants nothing.
+	{"store/private_call.go", "privateCall.view", kindRoleCompare, 1, "a private call's caller or callee side (schema.PrivateCallRole), not a principal's role: it picks the side whose selected endpoint is compared with the reader's credential, and decides no authority"},
 	{"store/disable.go", "Store.RevokeAllCredentialsAs", kindRoleCompare, 1, whyTarget + ": the last owner's sign-in"},
 	{"store/disable.go", "disablePrincipalTx", kindRoleCompare, 1, whyTarget + ": the last owner"},
 	{"store/disable.go", "liveOperatorCredentialsTx", kindRoleSQL, 2, whyTarget + ": counts the owners who can still sign in"},
@@ -199,6 +203,7 @@ var authorityAllowlist = []authorityAllowed{
 	{"store/queries.go", "Principal.IsOwner", kindRoleCompare, 1, whyOwnerMark},
 	{"store/queries.go", "ownerProtectedTx", kindRoleCompare, 1, whyTarget + ": nobody but an owner acts on an owner"},
 	{"store/voice_permission.go", "Store.SetVoiceAllowed", kindRoleCompare, 1, whyOwnerMark + ": the caller side of owner protection, read under the write lock"},
+	{"store/dm_policy.go", "Store.SetDMAllowed", kindRoleCompare, 1, whyOwnerMark + ": the caller side of owner protection, read under the write lock (#2018, as SetVoiceAllowed)"},
 	{"store/roles.go", "Store.BootstrapOperatorWith", kindRoleSQL, 1, whyRoleAdmin + ": the first operator"},
 	{"store/roles.go", "reportPromotedOwners", kindRoleSQL, 1, whyRoleAdmin + ": the migration's report of owners"},
 	{"store/roles.go", "setRoleTx", kindRoleCompare, 9, whyRoleAdmin},

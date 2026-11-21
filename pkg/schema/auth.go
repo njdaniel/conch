@@ -120,6 +120,15 @@ const (
 	// review F6). Checked in the authentication middleware, so no route can
 	// forget it.
 	ErrorCodeSetupIncomplete = "setup_incomplete"
+	// ErrorCodeOwnSignInRequired (HTTP 403): the route is the caller's own
+	// (their direct messages, their calls, their stream) and the credential
+	// the request came with was made by someone else: an operator's
+	// credential or sign-in link for them (act_as_members), or one from
+	// before credentials recorded who made them (issue #2042, decision 4 on
+	// #2013). The person signs in themselves (with their password, or a
+	// device link they made on such a sign-in) and repeats the request.
+	// Every other route takes the credential as it always did.
+	ErrorCodeOwnSignInRequired = "own_sign_in_required"
 	// ErrorCodePasswordRequired (HTTP 409): the request would create an
 	// account with no password. POST /v1/invites/redeem answers it once
 	// passwords exist (migration 32): a client that predates them must be

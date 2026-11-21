@@ -241,16 +241,19 @@ describe('the listing', () => {
 });
 
 describe('what the save takes', () => {
-  it('keys.device is a by-id path of a name fit for a rule; keys.talk a code 1..767; the page names neither', () => {
-    expect([...SAVE_KEYS]).toEqual([...PAGE_SAVE_KEYS, 'keys.device', 'keys.talk']);
-    for (const k of ['keys.device', 'keys.talk']) expect(isPageSaveKey(k), k).toBe(false);
+  it('keys.device is a by-id path of a name fit for a rule; bindings take codes 1..767 and stay out of the device-save route', () => {
+    expect([...SAVE_KEYS]).toEqual([...PAGE_SAVE_KEYS, 'keys.device', 'keys.talk', 'keys.mute']);
+    for (const k of ['keys.device', 'keys.talk', 'keys.mute']) expect(isPageSaveKey(k), k).toBe(false);
     for (const v of ['/dev/input/by-id/usb-K-event-kbd', '/dev/input/by-id/usb-0c45:7403_USB#Kbd+a=b@c.d-event-mouse']) expect(saveValueFits('keys.device', v), v).toBe(true);
     for (const v of ['', '/dev/input/event3', '/dev/input/by-id/', '/dev/input/by-id/../event3', '/dev/input/by-id/a/b', '/dev/input/by-id/a"b', '/dev/input/by-id/a\\b', '/dev/input/by-id/a\nb', ' /dev/input/by-id/a', '/dev/input/by-id/a ', '/etc/passwd', 'usb-K-event-kbd', '--help', '/dev/input/by-id/é', `/dev/input/by-id/${'x'.repeat(201)}`]) {
       expect(saveValueFits('keys.device', v), v).toBe(false);
     }
     for (const v of ['1', '30', '275', '767']) expect(saveValueFits('keys.talk', v), v).toBe(true);
     for (const v of ['0', '768', '-1', '01', '1.5', '1e2', ' 5', '5 ', 'KEY_F13', '', '0x10', '+5', '99999']) expect(saveValueFits('keys.talk', v), v).toBe(false);
-    for (const k of ['keys.mute', 'keys.deafen']) expect(saveValueFits(k, '30'), k).toBe(false);
+    expect(saveValueFits('keys.mute', '30')).toBe(true);
+    expect(saveValueFits('keys.mute', 'mouse:5')).toBe(true);
+    expect(saveValueFits('keys.mute', '768')).toBe(false);
+    expect(saveValueFits('keys.deafen', '30')).toBe(false);
   });
 });
 
@@ -280,6 +283,9 @@ class FakeOneShot {
     this.calls.push([configDir, key, value]);
     if (this.gate !== null) await this.gate;
     return this.answers.shift() ?? { ok: true };
+  }
+  saveMuteBinding(configDir: string, device: string, code: string): Promise<VoiceSaveResult> {
+    return this.save(configDir, device, code);
   }
   cancel(): Promise<void> {
     return Promise.resolve();
@@ -344,6 +350,14 @@ describe('saving the binding', () => {
     expect(one.calls).toEqual([
       ['/nonexistent/config/p1', 'keys.device', '/dev/input/by-id/usb-Example_Keyboard-event-kbd'],
       ['/nonexistent/config/p1', 'keys.talk', '275'],
+    ]);
+  });
+
+  it('saves a Linux mute device and binding together for the current profile', async () => {
+    const deviceId = await listed();
+    expect(await svc.saveTalkBinding({ deviceId, code: 30, binding: 'mute' })).toEqual({ ok: true });
+    expect(one.calls).toEqual([
+      ['/nonexistent/config/p1', '/dev/input/by-id/usb-Example_Keyboard-event-kbd', '30'],
     ]);
   });
 
@@ -440,7 +454,7 @@ describe('nothing privileged is run', () => {
   it('no spawn call names sudo, pkexec, setfacl, usermod, udevadm or a shell', () => {
     for (const f of files) {
       const src = readFileSync(f, 'utf8');
-      for (const m of src.matchAll(/\b(?:spawn|execFile|exec|fork)\s*\(([^)]*)\)/gu)) {
+      for (const m of src.matchAll(/\b(?:spawn|nodeSpawn|execFile|exec|fork)\s*\(([^)]*)\)/gu)) {
         expect(m[1], `${f}: ${m[0]}`).not.toMatch(/sudo|pkexec|setfacl|usermod|udevadm|gpasswd|\/bin\/(?:ba)?sh|'sh'|"sh"/u);
       }
     }
@@ -489,11 +503,11 @@ describe('Windows talk binding configuration', () => {
     expect(one.calls).toHaveLength(2);
     expect(credential).not.toHaveBeenCalled();
   });
-  it('lists Windows configuration without enumerating Linux devices, and saves only a translated binding', async () => {
+  it.each([undefined, 'mute'] as const)('saves the translated Windows binding (%s) without a Linux device', async (binding) => {
     const { one, svc } = make();
     expect(await svc.keyDevices()).toEqual({ ok: true, platform: 'win32', devices: [], disclosure: [] });
-    expect(await svc.saveTalkBinding({ windowsCode: 'ControlRight', generation: 0 })).toEqual({ ok: true });
-    expect(one.calls).toEqual([['/nonexistent/config/p1', 'keys.talk', 'sc:0xE0,0x1D']]);
+    expect(await svc.saveTalkBinding({ windowsCode: 'ControlRight', generation: 0, ...(binding === undefined ? {} : { binding }) })).toEqual({ ok: true });
+    expect(one.calls).toEqual([['/nonexistent/config/p1', `keys.${binding ?? 'talk'}`, 'sc:0xE0,0x1D']]);
   });
   it('refuses stale generations, raw text, Linux forms and concurrent saves', async () => {
     const { one, svc } = make();

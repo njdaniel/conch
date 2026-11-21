@@ -27,9 +27,12 @@
 //     canonical per CanonicalReactionKey.
 //   - DMMessageV1 (conch.dm_message.v1), DMChangedV1 (conch.dm_changed.v1)
 //     and DMSnapshotV1 (conch.dm_snapshot.v1), the local direct-message
-//     frames of the per-person stream (issue #2016, DRAFT pending ADR-017;
+//     frames of the per-person stream (issue #2016, ADR-017;
 //     dm.go). A DM document names its conversation by conversation_id and
 //     never carries a channel_id.
+//   - PersonStreamHelloV1 (conch.person_stream_hello.v1), the first frame of
+//     the per-person events stream: the socket's own instance id (issue
+//     #2040; person_stream.go).
 //
 // Their request and response bodies (CreateSessionRequestV1,
 // CreateRunRequestV1, SetRunStateRequestV1, ListRunsResponseV1,

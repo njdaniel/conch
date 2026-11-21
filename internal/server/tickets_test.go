@@ -402,7 +402,7 @@ func TestWSTicketOnlyOnOptedInRoutes(t *testing.T) {
 			optedIn = append(optedIn, rt.pattern)
 		}
 	}
-	want := []string{"GET /v2/ws", "GET /v1/events/ws", "GET /v1/voice/ws", "GET /v1/voice/occupancy/ws"}
+	want := []string{"GET /v2/ws", "GET /v1/events/ws", "GET /v1/events/person/ws", "GET /v1/voice/ws", "GET /v1/voice/occupancy/ws"}
 	if strings.Join(optedIn, "|") != strings.Join(want, "|") {
 		t.Errorf("routes that accept a ticket = %v, want only %v", optedIn, want)
 	}

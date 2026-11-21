@@ -1,0 +1,242 @@
+{
+  "description": "Conformance cases for the v4 start destination: a channel or a private call attempt, exactly one. The forms and results are those of voice-control/cases.json. TestVoiceControlV4IsV3 also runs the v3 conformance cases through the v4 readers with processing added to state.",
+  "cases": [
+    {
+      "name": "start naming a channel",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"channel\":\"general\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "accept",
+        "kind": "start"
+      }
+    },
+    {
+      "name": "start naming a canonical call attempt ID",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"call\":\"k3Jx9dQ0mT7vB2nYw5LcRg\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "accept",
+        "kind": "start"
+      }
+    },
+    {
+      "name": "start naming a call with the old minimum length",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"call\":\"aaaaaaaaaaaaaaaa\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "start naming a call with the old maximum length",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"call\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "start with a bearer credential as the call",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"call\":\"conch_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "start with nonzero trailing base64url bits in the call",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"call\":\"k3Jx9dQ0mT7vB2nYw5LcRh\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "start with a trailing newline in the call",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"call\":\"k3Jx9dQ0mT7vB2nYw5LcRg\\n\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "start naming both a channel and a call",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"channel\":\"general\",\"call\":\"k3Jx9dQ0mT7vB2nYw5LcRg\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "start naming neither",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "start with an empty channel",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"channel\":\"\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "start with an empty call",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"call\":\"\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "start with a call too short",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"call\":\"aaaaaaaaaaaaaaa\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "start with a call too long",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"call\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "start with a call that is not URL-safe: a room name has no place here",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"call\":\"room/aaaaaaaaaaaaaaaa\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "start with a default Conch room name as the call",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"call\":\"conch-mfqwcylbmfqwcylbmfqwcylbme\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "start with a custom Conch room name as the call",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"call\":\"alpha-2-mfqwcylbmfqwcylbmfqwcylbme\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "start with a call that is a URL",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"call\":\"https://conch.example.org/call/aaaaaaaaaa\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "start with a call of the wrong type",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"call\":7,\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "start with a channel of the wrong type",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"channel\":7,\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "start with no principal_id (call)",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"call\":\"k3Jx9dQ0mT7vB2nYw5LcRg\",\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "a v3 start is unknown_schema to the v4 reader",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"channel\":\"general\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_schema",
+        "id": 0
+      }
+    },
+    {
+      "name": "a v3 set_mute is unknown_schema to the v4 reader",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_mute\",\"id\":2,\"muted\":true}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_schema",
+        "id": 0
+      }
+    },
+    {
+      "name": "set_share_audio in a call session is well-formed: the helper refuses it into the state",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"set_share_audio\",\"id\":3,\"capturing\":true,\"scope\":\"system_excluding_call\",\"application_name\":\"Conch\"}",
+      "want": {
+        "result": "accept",
+        "kind": "set_share_audio"
+      }
+    },
+    {
+      "name": "a command kind of no version",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"place_call\",\"id\":2}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_kind",
+        "id": 2
+      }
+    }
+  ]
+}

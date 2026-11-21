@@ -73,7 +73,7 @@ async function rig() {
 describe('lock and suspend end a live share through the real companion', () => {
   it.each([
     ['lock', (r: Awaited<ReturnType<typeof rig>>) => r.life.lockSignal('logind', true), ['mute true']],
-    ['suspend', (r: Awaited<ReturnType<typeof rig>>) => r.life.suspend(), ['leave']],
+    ['suspend', (r: Awaited<ReturnType<typeof rig>>) => r.life.suspend(), ['mute true', 'leave']],
   ] as const)('%s tells the page, deletes the viewer grant and forgets the share', async (reason, act, voiceCalls) => {
     const r = await rig();
     expect(r.companion.liveOrigin()).not.toBeNull();

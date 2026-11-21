@@ -14,11 +14,15 @@ import (
 //
 // A DM conversation is a durable, private exchange between exactly two local
 // human principals on one server. There is one per pair: the pair is stored
-// in canonical order (the smaller principal id first), so opening a
-// conversation with someone is idempotent from either side and resumes the
-// one that exists. A conversation is not a channel. It has no members list,
-// no roles, no nets, no whispers, no threads and no payloads, and it is
-// named by its own id, conversation_id, in an id space of its own: a DM
+// in canonical order (the smaller principal id first). Successful opens
+// from either side, including concurrent ones, return the same id. A
+// participant may read or resume a conversation only when it is already
+// visible to them: they opened it themselves, or it has been shared by a
+// first message (or, with calls, a first invite). Archiving or hiding it
+// affects the list, not that visibility. A conversation is not a channel.
+// It has no members list, roles, nets, whispers, threads or payloads and is
+// named by its own opaque id, conversation_id, in an id space of its own.
+// Its value and order reveal nothing about who opened first. A DM
 // document never carries channel_id, and a channel document never carries
 // conversation_id. A client that holds both tells them apart by the field
 // name and by the document's schema name, never by the number.
@@ -56,8 +60,9 @@ import (
 // state, never when the conversation was opened (design §3.2). A frame (a
 // message, an edit, a removal, a change signal; the author's own and the
 // peer's alike) goes to a participant's socket only while that participant
-// has current access: the credential is live and is the person's own (not an
-// act-as credential), the person is enabled, and no personal block (#1832)
+// can see the conversation and has current access: the credential is live
+// and is the person's own (not an act-as credential), the person is enabled,
+// and no personal block (#1832)
 // holds in either direction between the pair. While a block holds, no DM
 // frame of the pair is delivered to either participant: removing one's own
 // message after the peer blocked you sends the peer nothing, and sends your
@@ -88,29 +93,47 @@ import (
 //  3. 403 ErrorCodeOwnSignInRequired: the caller's credential is an act-as
 //     credential; refused on every DM route, reads included.
 //  4. 403 ErrorCodeDMsOff: on a write (send, edit, call invite) and on an
-//     open that would create a conversation, the caller's own DMs or the
-//     server's are switched off. It is answered before anything about the
-//     conversation or the peer is looked up, so a send to a conversation
-//     that does not exist is dms_off too. It says nothing about anyone else.
-//     Reads, removing one's own message, and an open that only resumes an
-//     existing conversation are not refused by it.
+//     open of a pair the caller cannot yet see, the caller's own DMs or the
+//     server's are switched off. A send checks this before looking up the
+//     conversation, so a send to a nonexistent conversation is dms_off too.
+//     An open may check for a visible conversation to decide whether the
+//     write gate applies. The gate says nothing about anyone else. Reads,
+//     removing one's own message, and resuming an already visible
+//     conversation are exempt.
 //  5. 429 rate_limited (existing): the per-person buckets of design §5.
 //     Refused attempts spend them too, so probing costs tokens.
-//  6. 404 ErrorCodeDMNotFound: no such conversation, or the caller is not
-//     one of its pair, whatever the caller's role. One answer, one body.
+//  6. 404 ErrorCodeDMNotFound: on a conversation-id route, no such conversation
+//     or it is not visible to this caller, whatever the caller's role. One
+//     answer, one body, including to the peer of an empty open.
 //     404 principal_not_found (existing): on open, the target does not
-//     exist, has ended, or is hidden from the caller. One body for all three.
+//     exist, is an ended guest, or is hidden or unknown to the caller.
+//     For a pair the caller cannot yet see, this also covers disabled people
+//     or agents and active guests the caller neither shares a channel with
+//     nor invited. PUT /v1/blocks/{id} refuses the same set. One body for all.
 //  7. 400 invalid_request (existing): a malformed request or cursor; a body
 //     that tries a payload, audience or thread (the request types here have
 //     no such fields and are decoded with unknown fields refused); on open,
 //     the target is the caller, or an agent.
 //  8. 403 ErrorCodeContactUnavailable: the target is visible but cannot be
-//     contacted now (disabled, a guest, a block either way, their preference,
-//     their switch, hide-members visibility). One code, one message; it never says
-//     which, and never who blocked whom. It applies to an open that would
-//     create a conversation, to send and to edit, and to nothing else: a
-//     read, a removal of one's own message, and an open of a conversation
-//     that already exists (a blocked or unreachable peer included) succeed.
+//     contacted now. This applies to send, edit, and an open of a pair the
+//     caller cannot yet see when the target lookup succeeds. Eligibility checks
+//     standing (including guest status), a block either way, the target's preference
+//     and switch, and hide-members visibility. One code and message cover all
+//     reasons and never say who blocked whom. Reads, removals of one's own
+//     messages, and resuming an already visible conversation are allowed even
+//     when the peer cannot be contacted, subject to the checks above.
+//
+// DM refusal matrix (design §3.2) for a visible target the caller cannot
+// contact, with the preceding checks satisfied:
+//
+//     Conversation as seen by caller      POST /v1/dms             Read by conversation id
+//     No pair row                         403 contact_unavailable  404 dm_not_found
+//     Empty open visible only to peer     403 contact_unavailable  404 dm_not_found
+//     Already visible to caller          200 (resume)             200
+//
+// The 403 body is identical in both cases. An empty open never appears in
+// the other participant's list, snapshot or stream. Their own eligible open
+// can establish visibility for them without exposing the prior open.
 //
 // Everything here is additive: new types, constants and error codes, and the
 // optional PrincipalAdminV1.DMAllowed. The one change to a published family
@@ -151,8 +174,8 @@ const (
 	// MaxDMClientNonceBytes is the longest client nonce a send may carry.
 	MaxDMClientNonceBytes = 64
 	// DMClientNonceWindowSeconds is how long the server remembers a send's
-	// client nonce: at least a day. A repeat inside the window is the same
-	// send; after it, a new one.
+	// client nonce: at least a day. An identical repeat inside the window
+	// replays the same message; after it, the nonce can start a new send.
 	DMClientNonceWindowSeconds = 86400
 	// MaxDMCursorBytes is the longest list cursor the server issues.
 	MaxDMCursorBytes = 128
@@ -166,36 +189,37 @@ const (
 // message_edit_window_closed and message_edit_limit_reached (409, as for
 // channel messages).
 const (
-	// ErrorCodeDMNotFound: no such conversation, or the caller is not one of
-	// its two participants (HTTP 404). The two are one answer, whatever the
-	// caller's role, operators included.
+	// ErrorCodeDMNotFound: no such conversation, or it is not visible to the
+	// caller (HTTP 404). One answer covers nonparticipants, operators
+	// included, and a participant who cannot see the peer's empty open.
 	ErrorCodeDMNotFound = "dm_not_found"
 	// ErrorCodeContactUnavailable: the target is visible to the caller but
-	// cannot be contacted (HTTP 403), on an open that would create a
-	// conversation, on send and on edit: disabled, a block in either
-	// direction (#1832), the target's contact preference, the target's
-	// per-person switch, a guest, or hide-members visibility. The caller
-	// learns only "can't contact", never which, so no refusal announces a
-	// block or a preference. Reading, removing one's own messages, and
-	// opening a conversation that already exists are not refused by it, even
-	// with a blocked or unreachable peer: they succeed, read only.
+	// cannot be contacted (HTTP 403). An open of a pair the caller cannot yet
+	// see can return this for a listed guest, a block in either direction
+	// (#1832), the target's contact preference or per-person switch, or
+	// hide-members visibility. A disabled target can also cause this on send
+	// or edit. The caller learns only "can't contact", so no refusal reveals
+	// the reason or the existence of a peer's empty open. Reading, removing
+	// one's own messages, and resuming an already visible conversation are
+	// exempt from the contact check.
 	ErrorCodeContactUnavailable = "contact_unavailable"
 	// ErrorCodeDMsOff: the caller's own direct messages are switched off by
 	// an operator, or the server-wide switch is off (HTTP 403), on send, edit
-	// and an open that would create a conversation. It is checked before the
-	// conversation or the peer is looked up (the order in the header), so it
-	// answers a send to a conversation that does not exist as well as to one
-	// that does. It says nothing about anyone but the caller and the server.
+	// and an open of a pair the caller cannot yet see. A send checks this
+	// before looking up the conversation (see the refusal order above), so
+	// it also answers a send to a nonexistent conversation. It says nothing
+	// about anyone but the caller and the server.
 	ErrorCodeDMsOff = "dms_off"
-	// ErrorCodeOwnSignInRequired: the caller's credential is an act-as
-	// credential (HTTP 403, ADR-017 Decision 7), so every DM route refuses
-	// it, reads included. It says nothing about anyone but the caller; the
-	// person signs in themself.
-	ErrorCodeOwnSignInRequired = "own_sign_in_required"
+	// ErrorCodeOwnSignInRequired (declared in auth.go, issue #2042) is also
+	// a DM refusal: the caller's credential is an act-as credential (HTTP
+	// 403, ADR-017 Decision 7), so every DM route refuses it, reads
+	// included. It says nothing about anyone but the caller; the person
+	// signs in themself.
 	// ErrorCodeDMNonceConflict: a send repeats a client nonce the author used
 	// in this conversation inside DMClientNonceWindowSeconds, with a
-	// different body or file_ids (HTTP 409). An identical repeat is not an
-	// error; it answers the original message with Replayed set.
+	// different body or ordered file_ids from the original request (HTTP
+	// 409). An identical repeat answers the same message in its current
+	// visible state with Replayed set.
 	ErrorCodeDMNonceConflict = "dm_nonce_conflict"
 	// ErrorCodeDMRequireAuth: conchd runs with authentication off, so there
 	// is no principal to hold a conversation (HTTP 400).
@@ -345,7 +369,9 @@ func (k DMChangeKind) Valid() bool {
 type DMConversationV1 struct {
 	// Schema is the document discriminator; always DMConversationSchemaV1.
 	Schema string `json:"schema"`
-	// ID is the conversation id. It is not a channel id.
+	// ID is an opaque, positive server-local conversation id, exactly
+	// representable by clients using JavaScript numbers. It is not a channel
+	// id, and its order says nothing about when or by whom a pair was opened.
 	ID int64 `json:"id"`
 	// ParticipantIDs is the two participants, ascending and distinct.
 	ParticipantIDs []int64 `json:"participant_ids"`
@@ -391,8 +417,8 @@ func (c DMConversationV1) Validate() error {
 	if c.Schema != DMConversationSchemaV1 {
 		return fmt.Errorf("schema: dm conversation schema must be %q, got %q", DMConversationSchemaV1, c.Schema)
 	}
-	if c.ID <= 0 {
-		return errors.New("schema: dm conversation id must be positive")
+	if !validDMConversationID(c.ID) {
+		return errors.New("schema: dm conversation id must be a positive safe integer")
 	}
 	if err := validateDMParticipants(c.ParticipantIDs); err != nil {
 		return err
@@ -418,6 +444,9 @@ func (c DMConversationV1) Validate() error {
 	if c.LastMessageID > 0 && c.Revision == 0 {
 		return errors.New("schema: dm conversation with a message must have a positive revision")
 	}
+	if c.LastMessageID == 0 && (c.Revision != 0 || c.Unread != 0) {
+		return errors.New("schema: dm conversation without a message must have zero revision and unread")
+	}
 	if (c.LastMessageID == 0) != (c.LastMessageAt == nil) {
 		return errors.New("schema: dm conversation last_message_at must be present exactly when last_message_id is")
 	}
@@ -431,6 +460,12 @@ func (c DMConversationV1) Validate() error {
 		return fmt.Errorf("schema: dm conversation unread must be between 0 and %d", MaxUnreadCount)
 	}
 	return nil
+}
+
+// validDMConversationID checks the positive integer range shared by Go and
+// JavaScript. The server chooses ids independently of open order.
+func validDMConversationID(id int64) bool {
+	return id > 0 && id <= 1<<53-1
 }
 
 // validateDMParticipants checks a conversation's pair: exactly two positive
@@ -449,17 +484,17 @@ func validateDMParticipants(ids []int64) error {
 }
 
 // OpenDMRequestV1 is the body of POST /v1/dms: open the conversation with
-// PeerID, or resume the one that exists. It is idempotent and answers 200
-// with the conversation every time, from either participant, whether or not
-// this request was the first: there is no 201 and no "created" flag, so an
-// open tells its caller nothing about whether the peer opened first. An open
-// tells the peer nothing either: the conversation enters the peer's list, and
-// their stream, with its first message. Opening a hidden conversation sets it
-// open again; an archived one stays archived. An open that would create a
-// conversation is a write (it can be dms_off, rate_limited or
-// contact_unavailable); an open of one that exists is a read and succeeds
-// even when the peer cannot be contacted (see the refusal order in this
-// file's header).
+// PeerID, or resume the conversation already visible to the caller. Every
+// successful open answers 200 with the caller's view of the same conversation.
+// The opaque id, status and body reveal nothing about whether the peer
+// opened first. There is no 201 or "created" flag. An empty open is private
+// to its opener until the peer makes their own eligible open, or a first
+// message (or, with calls, an invite) makes it visible to them. Opening a
+// hidden conversation sets it open again. An archived one stays archived.
+// An open that first makes the conversation visible to the caller is a
+// write (it can be dms_off, rate_limited or contact_unavailable), even if the
+// peer already opened it silently. Resuming an already visible conversation
+// is a read and needs no contact eligibility (see the refusal order above).
 type OpenDMRequestV1 struct {
 	PeerID int64 `json:"peer_id"`
 }
@@ -487,13 +522,14 @@ func (r OpenDMResponseV1) Validate() error {
 // caller's conversations in one DMState (open by default, archived by
 // ?state=archived; hidden ones are never listed). The order is newest
 // activity first: last_message_at descending, then the conversations with
-// no message by id descending (message ids of different conversations are
-// not comparable, so they never order a list). Conversations is never null
-// and holds at most MaxDMConversationsPage.
+// no message by id descending. Ordering by opaque conversation id provides
+// a stable sort for those rows and says nothing about when they were opened.
+// Message ids of different conversations never order a list. Conversations
+// is never null and holds at most MaxDMConversationsPage.
 //
 // NextCursor is opaque: the client passes it back as ?cursor= and never
 // reads it. It is present only when there may be more, and is never a
-// function of conversations the caller is not in. A cursor the server did
+// function of conversations the caller cannot see. A cursor the server did
 // not issue, or that is longer than MaxDMCursorBytes, is invalid_request.
 // A conversation whose activity moves while a client pages may appear twice
 // or be missed; the reconnect snapshot, each conversation's Revision and
@@ -607,8 +643,8 @@ func (m DMMessageV1) Validate() error {
 	if m.ID <= 0 {
 		return errors.New("schema: dm message id must be positive")
 	}
-	if m.ConversationID <= 0 {
-		return errors.New("schema: dm message conversation_id must be positive")
+	if !validDMConversationID(m.ConversationID) {
+		return errors.New("schema: dm message conversation_id must be a positive safe integer")
 	}
 	if m.AuthorID <= 0 {
 		return errors.New("schema: dm message author_id must be positive")
@@ -654,9 +690,11 @@ func (m DMMessageV1) Validate() error {
 // client once per message (a random 128-bit value, base64url, is the
 // intent), and reused unchanged on every retry of that message. The server
 // keys it on (conversation, author, nonce) for DMClientNonceWindowSeconds:
-// a repeat with the same body and file_ids answers 200 with the message the
-// first one stored and Replayed set, and stores and sends nothing; a repeat
-// that differs answers ErrorCodeDMNonceConflict. A first send answers 201.
+// a repeat with the original body and ordered file_ids answers 200 with
+// Replayed set and the same message id in its current visible state,
+// including any later edit or tombstone. It stores and sends nothing.
+// A different body or ordered file_ids with the same nonce answers 409
+// ErrorCodeDMNonceConflict. A first send answers 201.
 //
 // The body is bounded as a channel post's is (MaxPostRequestBytes for the
 // whole request), and, as a channel send's and a DM edit's are, it must not be
@@ -689,8 +727,23 @@ func (r PostDMMessageRequestV1) Validate() error {
 type PostDMMessageResponseV1 struct {
 	Message DMMessageV1 `json:"message"`
 	// Replayed is true when the request repeated an earlier send's nonce
-	// and this is that send's message.
+	// and inputs. Message is that send's current copy as seen by its author.
 	Replayed bool `json:"replayed,omitempty"`
+}
+
+// Validate reports whether the response carries a well-formed author copy.
+// A first send cannot already be edited or removed.
+func (r PostDMMessageResponseV1) Validate() error {
+	if err := r.Message.Validate(); err != nil {
+		return err
+	}
+	if r.Message.ClientNonce == "" {
+		return errors.New("schema: post dm message response must carry client_nonce")
+	}
+	if !r.Replayed && (r.Message.EditedAt != nil || r.Message.Removed) {
+		return errors.New("schema: only a replayed dm send can return an edited or removed message")
+	}
+	return nil
 }
 
 // EditDMMessageRequestV1 is the body of PATCH
@@ -997,8 +1050,8 @@ func (r DMReadStateV1) Validate() error {
 	if r.Schema != DMReadStateSchemaV1 {
 		return fmt.Errorf("schema: dm read state schema must be %q, got %q", DMReadStateSchemaV1, r.Schema)
 	}
-	if r.ConversationID <= 0 {
-		return errors.New("schema: dm read state conversation_id must be positive")
+	if !validDMConversationID(r.ConversationID) {
+		return errors.New("schema: dm read state conversation_id must be a positive safe integer")
 	}
 	if r.LastReadID < 0 {
 		return errors.New("schema: dm read state last_read_id must not be negative")
@@ -1016,8 +1069,8 @@ func (r DMReadStateV1) Validate() error {
 }
 
 // SetDMStateRequestV1 is the body of PUT /v1/dms/{conversation}/state: the
-// caller's archive, hide or reopen. It changes nothing for the peer and
-// sends the peer nothing.
+// caller's archive, hide or reopen of a conversation already visible to
+// them. It changes nothing for the peer and sends the peer nothing.
 type SetDMStateRequestV1 struct {
 	State DMState `json:"state"`
 }
@@ -1110,7 +1163,7 @@ type DMPermissionResponseV1 struct {
 // its uploader, only in this conversation, and only once. A channel file
 // cannot be attached to a DM, nor a DM file to a channel message: each
 // answers its route's not-attachable error and does not say why. A file of
-// a conversation the caller is not in answers
+// a conversation the caller cannot see answers
 // ErrorCodeDMNotFound.
 type DMFileV1 struct {
 	Schema         string    `json:"schema"`
@@ -1129,8 +1182,8 @@ func (f DMFileV1) Validate() error {
 	if f.Schema != DMFileSchemaV1 {
 		return fmt.Errorf("schema: dm file schema must be %q, got %q", DMFileSchemaV1, f.Schema)
 	}
-	if f.ConversationID <= 0 {
-		return errors.New("schema: dm file conversation_id must be positive")
+	if !validDMConversationID(f.ConversationID) {
+		return errors.New("schema: dm file conversation_id must be a positive safe integer")
 	}
 	// The rest are FileV1's rules; a stand-in channel id satisfies the one
 	// rule that does not apply.
@@ -1161,8 +1214,8 @@ func (c DMChangedV1) Validate() error {
 	if c.Schema != DMChangedSchemaV1 {
 		return fmt.Errorf("schema: dm changed schema must be %q, got %q", DMChangedSchemaV1, c.Schema)
 	}
-	if c.ConversationID <= 0 {
-		return errors.New("schema: dm changed conversation_id must be positive")
+	if !validDMConversationID(c.ConversationID) {
+		return errors.New("schema: dm changed conversation_id must be a positive safe integer")
 	}
 	if c.Kind == "" {
 		return errors.New("schema: dm changed kind is required")

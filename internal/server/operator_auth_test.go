@@ -583,12 +583,20 @@ var reauthDecisions = map[string]reauthDecision{
 
 	// Every write anyone authenticated may make: in the class only where an
 	// operator's use creates a principal or a link (rule: reauthOperators).
-	"POST /v1/invites":                                                {reauthNone, "retired for everyone: answers 409 invite_kind_retired and makes nothing (issue #1134)"},
-	"POST /v2/invites":                                                {reauthOperators, "an operator's member link makes principals, with no allowance, and may never expire"},
-	"DELETE /v1/invites/{id}":                                         {reauthNone, "closes an invite"},
-	"POST /v1/ws-tickets":                                             {reauthNone, "a one-use socket ticket for the caller's own credential, no principal or link"},
-	"POST /v0/channels/{channel}/messages":                            {reauthNone, "a message"},
-	"POST /v1/channels/{channel}/messages":                            {reauthNone, "a message"},
+	"POST /v1/invites":                     {reauthNone, "retired for everyone: answers 409 invite_kind_retired and makes nothing (issue #1134)"},
+	"POST /v2/invites":                     {reauthOperators, "an operator's member link makes principals, with no allowance, and may never expire"},
+	"DELETE /v1/invites/{id}":              {reauthNone, "closes an invite"},
+	"POST /v1/ws-tickets":                  {reauthNone, "a one-use socket ticket for the caller's own credential, no principal or link"},
+	"POST /v0/channels/{channel}/messages": {reauthNone, "a message"},
+	"POST /v1/channels/{channel}/messages": {reauthNone, "a message"},
+	// #2030: a member's own private call actions. None makes a principal,
+	// credential, link, permit or hook; the media grant is #2032's and is
+	// issued only to the accepting credential.
+	"POST /v1/dms/{conversation}/calls":                               {reauthNone, "a member's own call invitation: no principal, credential, link, permit or hook, no grant"},
+	"POST /v1/calls/{call}/accept":                                    {reauthNone, "the callee's own answer: no principal, credential, link, permit or hook"},
+	"POST /v1/calls/{call}/decline":                                   {reauthNone, "the callee's own refusal"},
+	"POST /v1/calls/{call}/cancel":                                    {reauthNone, "the caller's own cancel"},
+	"POST /v1/calls/{call}/hangup":                                    {reauthNone, "either side ends its own call"},
 	"POST /v2/channels/{channel}/messages":                            {reauthNone, "a message"},
 	"POST /v2/channels/{channel}/files":                               {reauthNone, "a file"},
 	"POST /v1/channels/{channel}/voice/session":                       {reauthNone, "joins voice"},
@@ -627,6 +635,7 @@ var reauthDecisions = map[string]reauthDecision{
 	"DELETE /v1/credentials/mine/{id}":                                                     {reauthNone, "ends one of the caller's own sign-ins"},
 	"POST /v1/sign-in-links/mine":                                                          {reauthNone, "a member's own device link: the handler refuses operators and asks its own recent password proof (#712)"},
 	"DELETE /v1/sign-in-links/mine/{id}":                                                   {reauthNone, "closes one of the caller's own device links"},
+	"DELETE /v1/notices/mine/{id}":                                                         {reauthNone, "dismisses one of the caller's own notices; grants nothing (issue #2042)"},
 	"POST /v1/guest/end":                                                                   {reauthNone, "a guest ends its own visit"},
 	"POST /v1/guest/convert":                                                               {reauthNone, "a guest makes its own account: no operator acts, and it proves itself with the visit's credential and, when the policy is closed, an operator's permit"},
 	"POST /v1/password/mine":                                                               {reauthNone, "proves itself: a setup token or an enrolment link"},
@@ -638,6 +647,8 @@ var reauthDecisions = map[string]reauthDecision{
 	"POST /v1/channels":                                                                    {reauthNone, "a member makes a channel: no grant beyond the creator's own membership of it"},
 	"POST /v1/channels/{channel}/join":                                                     {reauthNone, "a member joins a public channel themselves, with can_decide = 0: no grant"},
 	"PUT /v1/notifications/preferences":                                                    {reauthNone, "a person sets their own sign-in's notification preferences (issue #1713): no grant, and nothing another person can see"},
+	"PUT /v1/blocks/{principal_id}":                                                        {reauthNone, "a person blocks someone on their own list (issue #1832): a preference, no grant, and nothing another person can see"},
+	"DELETE /v1/blocks/{principal_id}":                                                     {reauthNone, "a person unblocks someone on their own list (issue #1832): no grant"},
 	"POST /v1/push/registrations":                                                          {reauthNone, "a person registers their own sign-in for push (issue #1714): no grant, and the target is write-only"},
 	"PUT /v1/push/registrations/{id}":                                                      {reauthNone, "a person replaces the target of their own sign-in's registration (issue #1714): no grant"},
 	"DELETE /v1/push/registrations/{id}":                                                   {reauthNone, "a person ends their own sign-in's registration (issue #1714): no grant"},
