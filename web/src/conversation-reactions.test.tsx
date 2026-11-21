@@ -47,26 +47,25 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 it('reaches thread reactions by Tab and keeps main-log arrows in their own bar', async () => {
+  vi.mocked(api.readReactions).mockImplementation((_channel, ids) => Promise.resolve({
+    ok: true,
+    value: { summaries: ids.includes(2) ? [{
+      schema: 'conch.reaction_summary.v1', channel_id: 7, message_id: 2,
+      as_of: at, reactions: [{ emoji: '👍', count: 1, me: false }],
+    }] : [] },
+  }));
   render(view([by(1, 2)]));
   const root = document.querySelector<HTMLElement>('li[data-message-id="1"]');
   if (root === null) throw new Error('missing root');
-  await waitFor(() => { expect(within(root).getByRole('button', { name: /Add reaction/ }).hasAttribute('disabled')).toBe(false); });
-  root.focus();
-  fireEvent.keyDown(root, { key: 'ArrowRight' });
-  const ownAdd = within(root).getByRole('button', { name: /Add reaction/ });
-  expect(document.activeElement).toBe(ownAdd);
-  expect(ownAdd.tabIndex).toBe(-1);
-  fireEvent.click(within(root).getByRole('button', { name: /Reply to/ }));
+  fireEvent.click(within(root).getByRole('button', { name: /^More actions for / }));
+  fireEvent.click(within(root).getByRole('menuitem', { name: 'Reply' }));
   const thread = await screen.findByRole('region', { name: /Thread around/ });
-  await waitFor(() => { expect(within(thread).getAllByRole('button', { name: /Add reaction/ })).toHaveLength(2); });
-  const replyAdd = within(thread).getAllByRole('button', { name: /Add reaction/ })[1];
-  await waitFor(() => { expect(replyAdd?.hasAttribute('disabled')).toBe(false); });
-  expect(replyAdd?.tabIndex).toBe(0);
-  replyAdd?.focus();
-  fireEvent.keyDown(replyAdd ?? thread, { key: 'Escape' });
+  const chip = await within(thread).findByRole('button', { name: 'thumbs up: 1 reaction' });
+  expect(chip.tabIndex).toBe(0);
+  chip.focus();
+  fireEvent.keyDown(chip, { key: 'Escape' });
   expect(document.activeElement?.getAttribute('data-message-id')).toBe('2');
-  // With the outer toolbar disabled, Right must not enter the nested thread.
-  ownAdd.setAttribute('disabled', '');
+  // An empty outer toolbar must not send Right Arrow into the nested thread.
   root.focus();
   fireEvent.keyDown(root, { key: 'ArrowRight' });
   expect(document.activeElement).toBe(root);
@@ -76,7 +75,7 @@ it('reaches thread reactions by Tab and keeps main-log arrows in their own bar',
 it.each([false, true])('does not advertise absent reaction navigation (removed=%s)', async (removed) => {
   if (!removed) vi.mocked(api.readReactions).mockResolvedValue({ ok: false, failure: 'invalid', code: 'reactions_unsupported' });
   render(view([by(1, 2, { removed })]));
-  await waitFor(() => { expect(document.querySelector('.reactions')).toBeNull(); });
+  await waitFor(() => { expect(document.querySelector('.reaction-controls')).toBeNull(); });
   expect(document.querySelector('li[aria-description]')).toBeNull();
 });
 
@@ -85,19 +84,23 @@ it('does not advertise arrow navigation in search/context messages', () => {
   expect(document.querySelector('li[aria-description]')).toBeNull();
 });
 
-it('puts Add beside Reply without rendering an empty reaction row', async () => {
+it('offers Add reaction and Reply in the message menu without rendering an empty reaction row', async () => {
   render(view([by(1, 2)]));
   const root = document.querySelector<HTMLElement>('li[data-message-id="1"]');
   if (root === null) throw new Error('missing root');
-  const add = within(root).getByRole('button', { name: /Add reaction/ });
-  const reply = within(root).getByRole('button', { name: /Reply to/ });
-  expect(add.parentElement).toBe(reply.parentElement);
+  const button = within(root).getByRole('button', { name: /^More actions for / });
+  expect(within(root).queryByRole('button', { name: /^(Add reaction|Reply)/ })).toBeNull();
+  expect(root.hasAttribute('aria-description')).toBe(false);
   expect(root.querySelector('.reactions')).toBeNull();
-  await waitFor(() => { expect(add.hasAttribute('disabled')).toBe(false); });
+  fireEvent.contextMenu(within(root).getByText('from 2'));
+  const menu = within(root).getByRole('menu');
+  expect(within(menu).getByRole('menuitem', { name: 'Reply' })).toBeTruthy();
+  const add = within(menu).getByRole('menuitem', { name: 'Add reaction' });
+  await waitFor(() => { expect(add.hasAttribute('aria-disabled')).toBe(false); });
   expect(root.querySelector('.reactions')).toBeNull();
   fireEvent.click(add);
   expect(within(root).getByRole('dialog', { name: 'Emoji' })).toBeTruthy();
   fireEvent.keyDown(screen.getByRole('searchbox'), { key: 'Escape' });
   expect(root.querySelector('.reactions')).toBeNull();
-  expect(document.activeElement).toBe(add);
+  expect(document.activeElement).toBe(button);
 });

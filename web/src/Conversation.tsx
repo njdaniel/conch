@@ -5,7 +5,7 @@ import { ModerationConfirm, useMayModerate, useMayRemoveOwn, useTombstones } fro
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import * as api from './api';
 import { archivedLine } from './archived';
-import { ReactionBar, ReactionScope, useHasReactions } from './Reactions';
+import { ReactionBar, ReactionScope, useReactionPicker } from './Reactions';
 import { Composer } from './Composer';
 import { guestName } from './guestName';
 import { Avatar, PrivateMark } from './Icons';
@@ -235,7 +235,8 @@ function ShownMessage({
   const mayRemove = mayModerate || mayRemoveOwn;
   const [removing, setRemoving] = useState(false);
   useEffect(() => { if (message.removed === true || !mayRemove) setRemoving(false); }, [message.removed, mayRemove]);
-  const hasReactions = useHasReactions() && message.removed !== true;
+  const more = useRef<HTMLButtonElement>(null);
+  const { addReaction, picker, hasReactionControls } = useReactionPicker(message.id, message.removed !== true, more);
   const who = messageName(message, people);
   const approval = message.removed === true ? null : approvalOf(message);
   const attachments = message.removed === true ? null : attachmentsOf(message);
@@ -281,19 +282,30 @@ function ShownMessage({
   }
   const items: readonly MenuItem[] = message.removed === true ? [] : [
     ...(editor === undefined ? actions ?? [] : []),
+    ...(onReply === undefined || message.thread_root_id !== undefined ? [] : [{
+      key: 'reply',
+      label: 'Reply',
+      onSelect: () => {
+        const button = more.current;
+        if (button === null) return;
+        onReply(message.id, button);
+        const composer = row.current?.querySelector<HTMLTextAreaElement>(':scope > .thread-view .reply-composer textarea:enabled');
+        (composer ?? button).focus();
+      },
+    }]),
+    ...(addReaction === undefined ? [] : [addReaction]),
     ...(mayRemove ? [{ key: 'remove-message', label: mayRemoveOwn ? 'Remove' : 'Remove message', onSelect: () => { setRemoving(true); } }] : []),
     { key: 'copy-link', label: 'Copy link', onSelect: () => { copy('link'); } },
     { key: 'copy-text', label: 'Copy text', onSelect: () => { copy('text'); } },
   ];
   const [menuOpen, setMenuOpen] = useState(false);
-  const more = useRef<HTMLButtonElement>(null);
   const openers = useOpeners(items.length > 0, () => {
     setMenuOpen(true);
-  });
+  }, { row: 'li[data-message-id], .thread-view' });
   const named = approval === null && editor === undefined && mentions(message.body, people.get(viewer)?.name ?? '');
   const classes = ['message', ...(highlighted ? ['message-linked'] : []), ...(cont ? ['cont'] : []), ...(named ? ['mentions-you'] : []), ...(items.length > 0 ? ['has-actions'] : []), ...(editor === undefined ? [] : ['editing'])];
   return (
-    <li ref={row} className={classes.join(' ')} data-message-id={message.id} tabIndex={stop ? 0 : -1} aria-description={hasReactions && reactionNavigation ? "Use Right Arrow for reaction controls; Left and Right Arrow move between them, Escape returns to the message." : undefined} {...(context === undefined ? {} : { 'aria-describedby': `reply-context-${String(message.id)}` })} {...openers}>
+    <li ref={row} className={classes.join(' ')} data-message-id={message.id} tabIndex={stop ? 0 : -1} aria-description={hasReactionControls && reactionNavigation ? "Use Right Arrow for reaction controls; Left and Right Arrow move between them, Escape returns to the message." : undefined} {...(context === undefined ? {} : { 'aria-describedby': `reply-context-${String(message.id)}` })} {...openers}>
       {named ? <span className="vh">Mentions you. </span> : null}
       {context === undefined ? null : (
         <p className="reply-context" id={`reply-context-${String(message.id)}`}>
@@ -334,10 +346,7 @@ function ShownMessage({
       {onOpen === undefined ? null : <button type="button" className="search-open" aria-label={`Open context for ${who}`} onClick={() => {
         onOpen(message.id);
       }}>Open context</button>}
-      <ReactionBar enabled={message.removed !== true} logNavigation={reactionNavigation} id={message.id} channel={channel} label={who} people={people} onUnauthorized={onUnauthorized}>
-        {onReply === undefined || message.removed === true || message.thread_root_id !== undefined ? null : <button type="button" className="message-action reply-action" aria-label={`Reply to ${who}`} onClick={(event) => {
-          onReply(message.id, event.currentTarget);
-        }}>Reply</button>}
+      <ReactionBar enabled={message.removed !== true} logNavigation={reactionNavigation} id={message.id} channel={channel} label={who} people={people} onUnauthorized={onUnauthorized} picker={picker}>
         {onOpenThread === undefined || message.thread_root_id === undefined ? null : <button type="button" className="message-action" aria-label={`Open thread for ${who}`} onClick={(event) => {
           onOpenThread(message.thread_root_id as number, event.currentTarget);
         }}>Open thread</button>}
@@ -813,7 +822,7 @@ export function Conversation({
     threadReturn.current = null;
     const list = log.current;
     const target = back.opener?.isConnected === true ? back.opener
-      : list?.querySelector<HTMLElement>(`[data-message-id="${String(back.root)}"] .reply-action`)
+      : list?.querySelector<HTMLElement>(`[data-message-id="${String(back.root)}"] > .message-menu > .more-actions`)
         ?? list?.querySelector<HTMLElement>(`[data-message-id="${String(back.root)}"]`)
         ?? list?.querySelector<HTMLElement>(`[data-message-id="${String(back.anchor)}"]`);
     target?.focus();
