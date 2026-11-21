@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import type { Feeds } from '../../main/api/feeds.ts';
 import type { Files } from '../../main/files.ts';
 import type { Service } from '../../main/api/service.ts';
-import { Diagnostics, diagnosticsLogger, LogRing, RING_LINES, type MainLog } from '../../main/diagnostics.ts';
+import { Diagnostics, DiagnosticSamples, diagnosticsLogger, LogRing, RING_LINES, type MainLog } from '../../main/diagnostics.ts';
 import { DocumentGate } from '../../main/document.ts';
 import { Gestures, LINK_GESTURE_MS } from '../../main/gestures.ts';
 import { checkCaller, Ipc, parseRequest, plain, type CompanionApi, type DiagnosticsApi, type InstalledApi, type IntegrationsApi, type InvitesApi, type NotificationsApi, type ProfilesApi, type VoiceApi, type SettingsApi, type ContentsLike, type FrameLike, type InvokeEvent } from '../../main/ipc.ts';
@@ -1480,6 +1480,7 @@ describe('the settings family (issue #1587)', () => {
 function diagnosticsFor(ring: LogRing, log: MainLog, written?: [string, string][]): Diagnostics {
   return new Diagnostics({
     ring,
+    samples: new DiagnosticSamples(),
     versions: {},
     now: () => new Date(0),
     chooseSavePath: () => Promise.resolve('/tmp/chosen.txt'),
@@ -1536,6 +1537,7 @@ describe('the diagnostics bundle (issue #2084)', () => {
     const shown = first.value as ReturnType<Diagnostics['preview']>;
     expect(shown.text).toContain('first preview');
     expect(shown.text).toContain('IPC refusals since start: 1 (gesture 1)\n');
+    expect(shown.text).toContain('Renderer diagnostics since start: 0\n');
     ring.record('second preview');
     // Even a silent rate refusal contributes to the live header.
     for (let i = 0; i < 60; i++) expect((await f.ipc.invoke(f.event(), 'reportVoiceDiagnostic', ['sdk-warning'])).ok).toBe(true);
@@ -1547,6 +1549,8 @@ describe('the diagnostics bundle (issue #2084)', () => {
     expect(newer.id).not.toBe(shown.id);
     expect(newer.text).toContain('second preview');
     expect(newer.text).toContain('IPC refusals since start: 2 (gesture 1, rate 1)\n');
+    expect(newer.text).toContain('Renderer diagnostics since start: 60 (sdk-warning 60)\n');
+    expect(ring.lines().filter((line) => line.includes('voice renderer'))).toHaveLength(1);
 
     const refused = { ok: false, kind: 'refused' };
     expect(await f.ipc.invoke(f.event(), 'diagnosticsPreview', ['x'])).toEqual(refused);

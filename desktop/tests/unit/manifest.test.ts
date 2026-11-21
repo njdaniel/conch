@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { buildCompat, buildManifest } from '../../build/manifest.ts';
-import { handle, parseManifest } from '../../main/scheme.ts';
+import { GeometricSampler } from '../../main/diagnostics.ts';
+import { handle, parseManifest, type SchemeDeps } from '../../main/scheme.ts';
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -40,13 +41,15 @@ describe('buildManifest', () => {
     expect([...manifest.keys()].filter((path) => path.startsWith('/sounds/')).sort()).toEqual(
       ['/sounds/join.wav', '/sounds/leave.wav', '/sounds/message.wav', '/sounds/share.wav'],
     );
+    const deps: SchemeDeps = {
+      manifest,
+      readFile: (path) => Promise.resolve(readFileSync(join(root, path))),
+      log: () => undefined,
+      samples: new GeometricSampler(),
+    };
     for (const sound of ['message', 'join', 'leave', 'share']) {
       const url = `conch-app://ui/sounds/${sound}.wav`;
-      const response = await handle({ url, method: 'GET' }, {
-        manifest,
-        readFile: (path) => Promise.resolve(readFileSync(join(root, path))),
-        log: () => undefined,
-      });
+      const response = await handle({ url, method: 'GET' }, deps);
       expect(response.status).toBe(200);
       expect(response.headers.get('Content-Type')).toBe('audio/wav');
       expect(Buffer.from(await response.arrayBuffer())).toEqual(readFileSync(join(root, 'sounds', `${sound}.wav`)));

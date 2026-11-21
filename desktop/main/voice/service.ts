@@ -25,7 +25,7 @@
 //     the screen is locked, setMute(false) is refused (`locked`) and every
 //     start is muted, so nothing transmits again until a deliberate unmute
 //     after unlock (issue #1588).
-import type { MainLog } from '../diagnostics.ts';
+import { GeometricSampler, type MainLog } from '../diagnostics.ts';
 import { VOICE_CONTROL_STOP_KILL_AFTER_MS, type VoiceControlTalkMode } from '../../../web/src/schema/generated.ts';
 import type {
   NativeVoiceDevicesResult,
@@ -215,6 +215,7 @@ function helperOf(h: HelperView): NativeVoiceHelper {
 }
 
 export class VoiceService {
+  private readonly oneShotRefusals = new GeometricSampler<typeof UPDATE_PENDING>();
   private channel: string | null = null;
   private last: JoinRequest | null = null;
   private lastGeneration = 0;
@@ -563,7 +564,11 @@ export class VoiceService {
   // too, so after a replacement it is refused with the join's reason.
   private async oneShotRefused(): Promise<boolean> {
     if (!(await this.replaced())) return false;
-    this.deps.log('voice: one-shot run refused: the installed files were replaced; restart to finish the update', { ring: true });
+    if (this.oneShotRefusals.sample(UPDATE_PENDING)) {
+      this.deps.log('voice: one-shot run refused: the installed files were replaced; restart to finish the update', { ring: true });
+    } else {
+      this.deps.log('voice: one-shot run refused: the installed files were replaced; restart to finish the update');
+    }
     return true;
   }
 

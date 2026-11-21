@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 
 import { describe, expect, it } from 'vitest';
 
+import { diagnosticsLogger, GeometricSampler, LogRing } from '../../main/diagnostics.ts';
 import { CONTENT_SECURITY_POLICY } from '../../main/csp.ts';
 import { handle, parseManifest, resolve, SCHEME_PRIVILEGES, type Manifest } from '../../main/scheme.ts';
 
@@ -102,9 +103,11 @@ describe('parseManifest', () => {
 
 describe('handle', () => {
   const files: Record<string, string> = { '/index.html': INDEX, '/assets/app-AbC_1-2.js': JS, '/favicon-32.png': 'png' };
-  function deps(overrides: Partial<Record<string, string | Error>> = {}): { logs: string[]; d: Parameters<typeof handle>[1] } {
+  function deps(overrides: Partial<Record<string, string | Error>> = {}): { ring: LogRing; logs: string[]; d: Parameters<typeof handle>[1] } {
     const logs: string[] = [];
+    const ring = new LogRing();
     return {
+      ring,
       logs,
       d: {
         manifest: manifest(),
@@ -113,7 +116,8 @@ describe('handle', () => {
           if (v instanceof Error) return Promise.reject(v);
           return Promise.resolve(new TextEncoder().encode(v));
         },
-        log: (l) => logs.push(l),
+        log: diagnosticsLogger(ring, (line) => logs.push(line)),
+        samples: new GeometricSampler(),
       },
     };
   }
@@ -155,23 +159,26 @@ describe('handle', () => {
     }
   });
 
-  it('answers 500 and logs a summary and the local path when a hash no longer matches', async () => {
-    const { d, logs } = deps({ '/assets/app-AbC_1-2.js': 'tampered();' });
-    const r = await handle({ url: 'conch-app://ui/assets/app-AbC_1-2.js', method: 'GET' }, d);
-    expect(r.status).toBe(500);
-    expectHeaders(r);
-    expect(await r.text()).not.toContain('tampered');
-    expect(logs).toHaveLength(2);
-    expect(logs[0]).toBe('conch-desktop: a file no longer has the hash the manifest lists');
-    expect(logs[1]).toContain('/assets/app-AbC_1-2.js');
+  it.each([
+    {
+      name: 'a file with a different hash', path: '/assets/app-AbC_1-2.js', contents: 'tampered();',
+      summary: 'conch-desktop: a file no longer has the hash the manifest lists',
+    },
+    {
+      name: 'an unreadable file', path: '/favicon-32.png', contents: new Error('ENOENT'),
+      summary: 'conch-desktop: a file listed in the manifest could not be read',
+    },
+  ])('answers 500 and samples the export for $name', async ({ path, contents, summary }) => {
+    const { d, logs, ring } = deps({ [path]: contents });
+    for (let n = 0; n < 8; n++) {
+      const r = await handle({ url: `conch-app://ui${path}`, method: 'GET' }, d);
+      expect(r.status).toBe(500);
+      expectHeaders(r);
+      expect(await r.text()).toBe('internal error');
+    }
+    expect(ring.lines()).toEqual([summary, summary, summary, summary]);
+    expect(logs.filter((line) => line.includes(path))).toHaveLength(8);
     expect(logs.join('\n')).not.toContain('tampered');
-  });
-
-  it('answers 500 when a listed file cannot be read', async () => {
-    const { d, logs } = deps({ '/favicon-32.png': new Error('ENOENT') });
-    const r = await handle({ url: 'conch-app://ui/favicon-32.png', method: 'GET' }, d);
-    expect(r.status).toBe(500);
-    expect(logs).toHaveLength(2);
   });
 });
 
