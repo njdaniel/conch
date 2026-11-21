@@ -261,6 +261,11 @@ var validators = map[string]func(string) bool{
 	"DMChangeKind":       validOf[DMChangeKind](),
 	"DMOrder":            validOf[DMOrder](),
 	"MessageContextKind": validOf[MessageContextKind](),
+
+	// Private calls (issue #2029).
+	"PrivateCallState":  validOf[PrivateCallState](),
+	"PrivateCallReason": validOf[PrivateCallReason](),
+	"PrivateCallRole":   validOf[PrivateCallRole](),
 }
 
 // namers is every …Names() func, by the type it names. TestVocabularies fails

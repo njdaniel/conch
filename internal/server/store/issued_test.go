@@ -430,7 +430,7 @@ func TestMigration42IssuedBy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, stmt := range []string{
+	for _, stmt := range slices.Concat(dmDropStatements, []string{
 		"DROP TABLE account_notices",                      // migration 52 (issue #2042)
 		"ALTER TABLE credentials DROP COLUMN self_made",   // migration 52 (issue #2042)
 		"ALTER TABLE sign_in_links DROP COLUMN self_made", // migration 52
@@ -447,7 +447,7 @@ func TestMigration42IssuedBy(t *testing.T) {
 		"ALTER TABLE credentials DROP COLUMN issued_by",
 		"ALTER TABLE hooks DROP COLUMN issued_by",
 		fmt.Sprintf("PRAGMA user_version = %d", issuedByMigration-1),
-	} {
+	}) {
 		if _, err := rewind.Exec(stmt); err != nil {
 			t.Fatalf("rewind %q: %v", stmt, err)
 		}

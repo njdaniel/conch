@@ -1172,6 +1172,9 @@ BEGIN SELECT RAISE(ABORT, 'message removals are permanent'); END`,
 )`,
 		`CREATE INDEX account_notices_open ON account_notices (principal_id, id) WHERE dismissed_at IS NULL`,
 	},
+	// 53 (dmMigration): local direct messages (issue #2017, ADR-017). The
+	// statements are in dm_migration.go, beside the store code they serve.
+	dmMigration,
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction

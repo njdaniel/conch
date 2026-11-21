@@ -1,0 +1,113 @@
+{
+  "transitions": [
+    {
+      "from": "none",
+      "event": "invite",
+      "to": "ringing",
+      "actor": "caller"
+    },
+    {
+      "from": "none",
+      "event": "invite_unavailable",
+      "to": "unavailable",
+      "actor": "caller"
+    },
+    {
+      "from": "ringing",
+      "event": "accept",
+      "to": "accepted",
+      "actor": "callee"
+    },
+    {
+      "from": "ringing",
+      "event": "decline",
+      "to": "declined",
+      "actor": "callee"
+    },
+    {
+      "from": "ringing",
+      "event": "cancel",
+      "to": "cancelled",
+      "actor": "caller"
+    },
+    {
+      "from": "ringing",
+      "event": "ring_expired",
+      "to": "missed",
+      "actor": "server"
+    },
+    {
+      "from": "accepted",
+      "event": "joined",
+      "to": "active",
+      "actor": "server"
+    },
+    {
+      "from": "accepted",
+      "event": "join_expired",
+      "to": "failed",
+      "reason": "join_timeout",
+      "actor": "server"
+    },
+    {
+      "from": "accepted",
+      "event": "hangup",
+      "to": "ended",
+      "reason": "hangup",
+      "actor": "either"
+    },
+    {
+      "from": "active",
+      "event": "hangup",
+      "to": "ended",
+      "reason": "hangup",
+      "actor": "either"
+    },
+    {
+      "from": "active",
+      "event": "grace_expired",
+      "to": "ended",
+      "reason": "gone",
+      "actor": "server"
+    },
+    {
+      "from": "ringing",
+      "event": "revoked",
+      "to": "cancelled",
+      "actor": "server"
+    },
+    {
+      "from": "accepted",
+      "event": "revoked",
+      "to": "ended",
+      "actor": "server"
+    },
+    {
+      "from": "active",
+      "event": "revoked",
+      "to": "ended",
+      "actor": "server"
+    },
+    {
+      "from": "ringing",
+      "event": "restart",
+      "to": "failed",
+      "reason": "server_restart",
+      "actor": "server"
+    },
+    {
+      "from": "accepted",
+      "event": "restart",
+      "to": "failed",
+      "reason": "server_restart",
+      "actor": "server"
+    },
+    {
+      "from": "active",
+      "event": "restart",
+      "to": "failed",
+      "reason": "server_restart",
+      "actor": "server"
+    }
+  ]
+}
