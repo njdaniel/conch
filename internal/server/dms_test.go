@@ -493,16 +493,87 @@ func TestDMOpenRefusals(t *testing.T) {
 	}
 }
 
+func TestDMPeerNameOnHideMembersServer(t *testing.T) {
+	f := newDMFixture(t)
+	ctx := context.Background()
+	st := f.srv.store
+	doc, err := st.Permissions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.PutPermissions(ctx, fmt.Sprintf("principal:%d", f.root.ID), f.root.ID, schema.PutPermissionsRequestV1{
+		Revision: doc.Revision,
+		Changes:  []schema.PermissionChangeV1{{Permission: schema.PermSeeMemberDirectory, Role: schema.PermissionRoleMember, Granted: false}},
+	}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	general, err := st.ChannelByName(ctx, "general")
+	if err != nil {
+		t.Fatal(err)
+	}
+	viewer := f.join(t)
+	for _, tc := range []struct {
+		name       string
+		talked     bool
+		peerChange string
+		wantName   bool
+	}{
+		{"empty after leaving", false, "leave", false},
+		{"talked after leaving", true, "leave", true}, // Decision 11 keeps the name with the conversation's history.
+		{"hidden after talking", true, "hide", false},
+		{"disabled after leaving and talking", true, "leave and disable", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			peer := f.join(t)
+			conv := f.mustOpen(t, viewer, peer.p.ID)
+			if conv.PeerName != peer.p.Name {
+				t.Fatalf("open peer_name = %q, want %q while sharing general", conv.PeerName, peer.p.Name)
+			}
+			if tc.talked {
+				f.send(t, conv.ID, viewer.p.ID, time.Now())
+			}
+			switch tc.peerChange {
+			case "leave", "leave and disable":
+				if err := st.LeaveChannel(ctx, general.ID, peer.p.ID, time.Now()); err != nil {
+					t.Fatal(err)
+				}
+				if tc.peerChange == "leave and disable" {
+					if _, err := st.DisablePrincipal(ctx, "system", peer.p.ID); err != nil {
+						t.Fatal(err)
+					}
+				}
+			case "hide":
+				if _, err := st.HidePrincipal(ctx, "system", peer.p.ID, store.HideOptions{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			rec := f.do(t, http.MethodGet, fmt.Sprintf("/v1/dms/%d", conv.ID), viewer.tok, "")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("read conversation: %d %s", rec.Code, rec.Body)
+			}
+			var body map[string]json.RawMessage
+			dmDecode(t, rec, &body)
+			name, present := body["peer_name"]
+			if tc.wantName {
+				if string(name) != strconv.Quote(peer.p.Name) {
+					t.Errorf("peer_name = %s, want %q", name, peer.p.Name)
+				}
+			} else if present {
+				t.Errorf("peer_name = %s, want omitted", name)
+			}
+		})
+	}
+}
+
 func TestDMNewConversationBucket(t *testing.T) {
 	f := newDMFixture(t)
 	a, b, c, d := f.join(t), f.join(t), f.join(t), f.join(t)
 	f.srv.setDMNewLimit(inviteLimit{name: "dm_new_conversations", burst: 2, window: 24 * time.Hour})
 	f.mustOpen(t, a, b.p.ID)
-	// A resume spends nothing, either way round.
+	// A resume of a visible pair spends nothing.
 	for range 3 {
 		f.mustOpen(t, a, b.p.ID)
 	}
-	f.mustOpen(t, b, a.p.ID) // b's first sight of a pair a opened silently is an introduction: one token for b
 	// A refused open of a new pair spends a token too: probing costs.
 	f.wantError(t, f.open(t, a, 987654), http.StatusNotFound, "principal_not_found")
 	rec := f.open(t, a, c.p.ID)
@@ -510,34 +581,51 @@ func TestDMNewConversationBucket(t *testing.T) {
 	if rec.Header().Get("Retry-After") == "" {
 		t.Error("429 without Retry-After")
 	}
+	// A resume is still allowed once the bucket is empty.
+	f.mustOpen(t, a, b.p.ID)
+
+	// Give b one token. Their first open of a's silent pair spends it.
+	f.srv.setDMNewLimit(inviteLimit{name: "dm_new_conversations", burst: 1, window: 24 * time.Hour})
+	f.mustOpen(t, b, a.p.ID)
+	f.wantError(t, f.open(t, b, c.p.ID), http.StatusTooManyRequests, "rate_limited")
+	f.mustOpen(t, b, a.p.ID)
 	// The bucket is per person.
 	f.mustOpen(t, d, c.p.ID)
-	// And a resume is still allowed once it is empty.
-	f.mustOpen(t, a, b.p.ID)
 }
 
 func TestDMRoutesRefuseAgentsGuestsAndAuthOff(t *testing.T) {
 	f := newDMFixture(t)
 	a := f.join(t)
+	guest := newGuest(t, f.srv, "Pat", time.Hour, 2*time.Hour)
+	_, actAs, err := f.srv.store.CreateCredential(context.Background(), "principal:"+strconv.FormatInt(f.root.ID, 10), a.p.ID, "act as", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct{ method, path, body string }{
 		{http.MethodPost, "/v1/dms", `{"peer_id":1}`},
 		{http.MethodGet, "/v1/dms", ""},
 		{http.MethodGet, "/v1/dms/1", ""},
 		{http.MethodPut, "/v1/dms/1/state", `{"state":"open"}`},
 	} {
-		if rec := f.do(t, tc.method, tc.path, f.botTok, tc.body); rec.Code != http.StatusForbidden {
-			t.Errorf("agent %s %s: %d %s, want 403", tc.method, tc.path, rec.Code, rec.Body)
+		for _, caller := range []struct {
+			name, token string
+			status      int
+			code        string
+		}{
+			{"agent", f.botTok, http.StatusForbidden, ""},
+			{"guest", guest.Token, http.StatusForbidden, schema.ErrorCodeGuestNotAllowed},
+			{"anonymous", "", http.StatusUnauthorized, ""},
+			{"act-as", actAs, http.StatusForbidden, schema.ErrorCodeOwnSignInRequired},
+		} {
+			t.Run(caller.name+" "+tc.method+" "+tc.path, func(t *testing.T) {
+				rec := f.do(t, tc.method, tc.path, caller.token, tc.body)
+				if caller.code != "" {
+					f.wantError(t, rec, caller.status, caller.code)
+				} else if rec.Code != caller.status {
+					t.Errorf("status %d %s, want %d", rec.Code, rec.Body, caller.status)
+				}
+			})
 		}
-		if rec := f.do(t, tc.method, tc.path, "", tc.body); rec.Code != http.StatusUnauthorized {
-			t.Errorf("anonymous %s %s: %d, want 401", tc.method, tc.path, rec.Code)
-		}
-		// An operator-made credential for a member is refused, reads included.
-		_, tok, err := f.srv.store.CreateCredential(context.Background(), "principal:"+strconv.FormatInt(f.root.ID, 10), a.p.ID, "act as", nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		rec := f.do(t, tc.method, tc.path, tok, tc.body)
-		f.wantError(t, rec, http.StatusForbidden, schema.ErrorCodeOwnSignInRequired)
 	}
 	// Under AuthOff there is no person to hold a conversation.
 	off := newAuthFixture(t, AuthOff)

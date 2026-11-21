@@ -265,9 +265,22 @@ func TestSelfMadeCredentialCheck(t *testing.T) {
 // Every route in selfMadeCredentialRoutes is registered, authenticated
 // (an exempt route has no credential to judge), not previewable (a preview
 // reads as the member, which these routes exist to prevent) and out of the
-// setup scope.
+// setup scope. Every registered DM and call route is covered unless exempted.
 func TestSelfMadeCredentialRoutes(t *testing.T) {
 	srv := newTestServerWithConfig(t, Config{AuthMode: AuthRequired})
+	// Future operator switch routes may be exempted by their full pattern,
+	// with a comment explaining the operator permission that gates each one.
+	dmAndCallCredentialExemptions := map[string]bool{}
+	for pattern := range srv.routeByPattern {
+		path := pattern
+		if _, rest, ok := strings.Cut(pattern, " "); ok {
+			path = rest
+		}
+		if (strings.HasPrefix(path, "/v1/dms") || strings.HasPrefix(path, "/v1/calls")) &&
+			!dmAndCallCredentialExemptions[pattern] && !selfMadeCredentialRoutes[pattern] {
+			t.Errorf("registered DM or call route %s is missing from selfMadeCredentialRoutes", pattern)
+		}
+	}
 	for pattern := range selfMadeCredentialRoutes {
 		rt, ok := srv.routeByPattern[pattern]
 		switch {
