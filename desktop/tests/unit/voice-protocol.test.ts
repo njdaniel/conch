@@ -277,24 +277,24 @@ function casesOf(dir: string, direction: string): (Case & { readonly dir: string
     );
 }
 
-describe('the v4 TypeScript command validators match the Go conformance cases', () => {
-  const cases = casesOf('voice-control-v4', 'command');
+describe.each(['command', 'event'])('the v4 TypeScript %s validators match the Go conformance cases', (direction) => {
+  const cases = casesOf('voice-control-v4', direction);
 
-  it('finds the command cases', () => {
+  it('finds the conformance cases', () => {
     expect(cases.length).toBeGreaterThan(0);
   });
 
   it.each(cases)('$name', (c) => {
     const doc: unknown = JSON.parse(lineOf(c.dir, c).toString('utf8'));
     if (typeof doc !== 'object' || doc === null || !('kind' in doc) || typeof doc.kind !== 'string') {
-      throw new Error('expected a command kind in the fixture');
+      throw new Error('expected a message kind in the fixture');
     }
-    const family = `command-${doc.kind.replaceAll('_', '-')}`;
+    const family = `${direction}-${doc.kind.replaceAll('_', '-')}`;
     const check = validators[c.dir]?.[family];
     if (c.want.result === 'accept') {
       expect(check).toBeDefined();
       expect(check?.(doc)).toEqual([]);
-    } else if (c.want.code === 'unknown_kind') {
+    } else if (c.want.result === 'skip' || c.want.code === 'unknown_kind') {
       expect(check).toBeUndefined();
     } else {
       expect(check).toBeDefined();

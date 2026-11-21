@@ -5,7 +5,7 @@
 // validate.ts. To change one, change the Go type or the table and run
 // `go generate ./pkg/schema`; scripts/schema-ts-check.sh fails while this file
 // differs from what that writes.
-import { array, bool, int, json, object, optional, str, tagged, timestamp, tolerant, vocab } from './validate';
+import { array, bool, int, intBetween, json, object, optional, str, tagged, timestamp, tolerant, vocab } from './validate';
 
 // Constants of pkg/schema the client must agree with the server on.
 export const EMOJI_VERSION = '18.0';
@@ -28,6 +28,8 @@ export const VOICE_CONTROL_MAX_HELPER_VERSION_BYTES = 64;
 export const VOICE_CONTROL_MAX_SERVER_BYTES = 1024;
 export const VOICE_CONTROL_MAX_CHANNEL_BYTES = 400;
 export const VOICE_CONTROL_MAX_RETRY_IN_MS = 600000;
+export const VOICE_CONTROL_V4_MIN_LEVEL_DB = -96;
+export const VOICE_CONTROL_V4_MAX_LOSS_BASIS_POINTS = 10000;
 export const VOICE_CONTROL_HELLO_TIMEOUT_MS = 5000;
 export const VOICE_CONTROL_ACK_TIMEOUT_MS = 5000;
 export const VOICE_CONTROL_GATE_SHUT_MS = 100;
@@ -2580,12 +2582,12 @@ const voiceControlStartV4Shape = object<VoiceControlStartV4>({
   server: str,
   channel: optional(str),
   call: optional(str),
-  principal_id: int,
+  principal_id: intBetween(1),
   credential: voiceControlCredential,
   muted: bool,
   deafened: bool,
 });
-const voiceControlRoomNameV4 = /^[a-z0-9-]{0,31}-[a-z2-7]{26}$/;
+const voiceControlCallIDV4 = /^[A-Za-z0-9_-]{21}[AQgw]$/;
 
 export function voiceControlStartV4(value: unknown, path = '$'): string[] {
   if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
@@ -2598,10 +2600,7 @@ export function voiceControlStartV4(value: unknown, path = '$'): string[] {
     )) {
       return [path + '.channel: want a valid channel name'];
     }
-    if ('call' in value && typeof value.call === 'string' && (
-      value.call.length < MIN_PRIVATE_CALL_ID_BYTES || value.call.length > MAX_PRIVATE_CALL_ID_BYTES ||
-      /[^A-Za-z0-9_-]/.test(value.call) || voiceControlRoomNameV4.test(value.call)
-    )) {
+    if ('call' in value && typeof value.call === 'string' && !voiceControlCallIDV4.test(value.call)) {
       return [path + '.call: want a valid call attempt ID'];
     }
     if (!('kind' in value) || value.kind !== 'start') {
@@ -2826,10 +2825,20 @@ export interface VoiceControlProcessingV4 {
   noise_suppression: boolean;
 }
 
-export const voiceControlProcessingV4 = object<VoiceControlProcessingV4>({
+const voiceControlProcessingV4Shape = object<VoiceControlProcessingV4>({
   echo_cancellation: bool,
   noise_suppression: bool,
 });
+
+export function voiceControlProcessingV4(value: unknown, path = '$'): string[] {
+  if (typeof value === 'object' && value !== null && !Array.isArray(value) &&
+      'echo_cancellation' in value && typeof value.echo_cancellation === 'boolean' &&
+      'noise_suppression' in value && typeof value.noise_suppression === 'boolean' &&
+      value.echo_cancellation !== value.noise_suppression) {
+    return [path + ': echo_cancellation and noise_suppression must agree'];
+  }
+  return voiceControlProcessingV4Shape(value, path);
+}
 
 // schema.VoiceControlStateV4
 export const voiceControlStateV4Schema = 'conch.voice_control.v4';
@@ -2914,7 +2923,7 @@ export const voiceControlLevelsV4 = object<VoiceControlLevelsV4>({
   schema: vocab<typeof voiceControlLevelsV4Schema>({ [voiceControlLevelsV4Schema]: true }),
   kind: voiceControlEventKindV4,
   seq: int,
-  level_db: int,
+  level_db: intBetween(VOICE_CONTROL_V4_MIN_LEVEL_DB, 0),
   open_threshold_db: int,
   close_threshold_db: int,
   gate_open: bool,
@@ -2947,7 +2956,7 @@ export const voiceControlGateEventV4 = object<VoiceControlGateEventV4>({
   schema: vocab<typeof voiceControlGateEventV4Schema>({ [voiceControlGateEventV4Schema]: true }),
   kind: voiceControlEventKindV4,
   seq: int,
-  at_ms: int,
+  at_ms: intBetween(0, VOICE_CONTROL_MAX_ID),
   open: bool,
   why: voiceControlGateWhyV4,
 });
@@ -2969,10 +2978,10 @@ export const voiceControlCallQualityV4 = object<VoiceControlCallQualityV4>({
   schema: vocab<typeof voiceControlCallQualityV4Schema>({ [voiceControlCallQualityV4Schema]: true }),
   kind: voiceControlEventKindV4,
   seq: int,
-  principal_id: int,
-  loss_basis_points: optional(int),
-  jitter_us: optional(int),
-  rtt_us: optional(int),
+  principal_id: intBetween(1),
+  loss_basis_points: optional(intBetween(0, VOICE_CONTROL_V4_MAX_LOSS_BASIS_POINTS)),
+  jitter_us: optional(intBetween(0, VOICE_CONTROL_MAX_ID)),
+  rtt_us: optional(intBetween(0, VOICE_CONTROL_MAX_ID)),
 });
 
 // schema.VoiceControlPipeKind

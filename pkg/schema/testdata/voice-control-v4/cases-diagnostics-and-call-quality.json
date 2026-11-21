@@ -300,6 +300,15 @@
         "result": "refuse",
         "code": "invalid"
       }
+    },
+    {
+      "name": "quality with negative SFU RTT",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"call_quality\",\"seq\":12,\"principal_id\":9,\"loss_basis_points\":0,\"jitter_us\":3200,\"rtt_us\":-1}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
     }
   ]
 }

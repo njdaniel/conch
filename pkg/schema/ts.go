@@ -89,6 +89,8 @@ var TSConstants = []TSConstant{
 	{Name: "VOICE_CONTROL_MAX_SERVER_BYTES", Value: VoiceControlMaxServerBytes},
 	{Name: "VOICE_CONTROL_MAX_CHANNEL_BYTES", Value: VoiceControlMaxChannelBytes},
 	{Name: "VOICE_CONTROL_MAX_RETRY_IN_MS", Value: VoiceControlMaxRetryInMS},
+	{Name: "VOICE_CONTROL_V4_MIN_LEVEL_DB", Value: VoiceControlV4MinLevelDB},
+	{Name: "VOICE_CONTROL_V4_MAX_LOSS_BASIS_POINTS", Value: VoiceControlV4MaxLossBasisPoints},
 	{Name: "VOICE_CONTROL_HELLO_TIMEOUT_MS", Value: VoiceControlHelloTimeoutMS},
 	{Name: "VOICE_CONTROL_ACK_TIMEOUT_MS", Value: VoiceControlAckTimeoutMS},
 	{Name: "VOICE_CONTROL_GATE_SHUT_MS", Value: VoiceControlGateShutMS},

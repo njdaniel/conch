@@ -8,13 +8,19 @@ import (
 	"slices"
 )
 
-// VoiceControlV4RoomNamePattern reserves the room namespace on the control
-// pipe. Conch generates room names with a configurable lower-case prefix
-// ending in '-' and a 26-character lower-case base32 suffix (store/voice.go).
-// This also covers rooms with a prefix from a previous configuration.
-const VoiceControlV4RoomNamePattern = `^[a-z0-9-]{0,31}-[a-z2-7]{26}$`
+// VoiceControlV4CallIDPattern matches the canonical unpadded base64url
+// encoding of the 16 bytes minted by NewPrivateCallID. Only two bits of
+// the last character carry data, so its four unused bits must be zero.
+const VoiceControlV4CallIDPattern = `^[A-Za-z0-9_-]{21}[AQgw]$`
 
-var voiceControlV4RoomName = regexp.MustCompile(VoiceControlV4RoomNamePattern)
+var voiceControlV4CallIDRE = regexp.MustCompile(VoiceControlV4CallIDPattern)
+
+const (
+	// VoiceControlV4MinLevelDB is the floor of the reported microphone level.
+	VoiceControlV4MinLevelDB = -96
+	// VoiceControlV4MaxLossBasisPoints is the packet-loss value for 100 percent.
+	VoiceControlV4MaxLossBasisPoints = 10000
+)
 
 // Version 4 of the managed voice-helper control protocol (issue #2039, child
 // of #2013; ADR-017 Decision 13, Nick's decision 12 of 2026-11-19, and
@@ -155,12 +161,10 @@ type VoiceControlStartV4 struct {
 	// string.
 	Channel string `json:"channel,omitempty"`
 	// Call is the opaque attempt id of the private call to join (PrivateCallV1
-	// ID): 16 to MaxPrivateCallIDBytes URL-safe characters. Absent for a
-	// channel. It is an id and never a room name, a token or a URL: the
-	// helper gets the media grant from the server, for its own side only.
-	// The owner takes this value from the server's attempt record. Validation
-	// excludes Conch's room namespace. The session route verifies the attempt
-	// exists and that the authenticated endpoint is authorized to join it.
+	// ID): 22 canonical unpadded base64url characters from NewPrivateCallID.
+	// Absent for a channel. The owner takes it from the server's attempt
+	// record. The session route verifies the attempt exists and that the
+	// authenticated endpoint is authorized to join it.
 	Call        string                 `json:"call,omitempty"`
 	PrincipalID int64                  `json:"principal_id"`
 	Credential  VoiceControlCredential `json:"credential"`
@@ -189,11 +193,8 @@ func (s VoiceControlStartV4) Validate() error {
 			return err
 		}
 	case s.Call != "":
-		if len(s.Call) < MinPrivateCallIDBytes || !validDMToken(s.Call, MaxPrivateCallIDBytes) {
-			return fmt.Errorf("schema: voice control start call must be %d to %d URL-safe characters", MinPrivateCallIDBytes, MaxPrivateCallIDBytes)
-		}
-		if voiceControlV4RoomName.MatchString(s.Call) {
-			return errors.New("schema: voice control start call matches a reserved room name")
+		if !voiceControlV4CallIDRE.MatchString(s.Call) {
+			return errors.New("schema: voice control start call must be a canonical 22-character private call attempt ID")
 		}
 	default:
 		return errors.New("schema: voice control start must name a channel or a call")
@@ -434,6 +435,11 @@ func (c VoiceControlSetDiagnosticsV4) Validate() error {
 // VoiceControlGetCallQualityV4 asks for one call_quality event per sampled
 // participant, then the existing ack for this command. An empty sample is
 // valid and returns the ack alone.
+//
+// The owner reads the ack before sending another get_call_quality. If a
+// poll arrives before the helper writes the previous poll's ack, the helper
+// returns an error ack with invalid for the overlapping poll in FIFO order
+// and emits no call_quality events for it.
 type VoiceControlGetCallQualityV4 struct {
 	Schema string                    `json:"schema"`
 	Kind   VoiceControlCommandKindV4 `json:"kind"`
@@ -662,8 +668,8 @@ func (e VoiceControlLevelsV4) Validate() error {
 	if err := validateVoiceControlEventHeadV4(e.Schema, e.Kind, VoiceControlEventV4Levels, e.Seq); err != nil {
 		return err
 	}
-	if e.LevelDB < -96 || e.LevelDB > 0 {
-		return errors.New("schema: voice control levels level_db must be -96 to 0")
+	if e.LevelDB < VoiceControlV4MinLevelDB || e.LevelDB > 0 {
+		return fmt.Errorf("schema: voice control levels level_db must be %d to 0", VoiceControlV4MinLevelDB)
 	}
 	return nil
 }
@@ -740,8 +746,8 @@ func (e VoiceControlCallQualityV4) Validate() error {
 	if e.PrincipalID <= 0 {
 		return errors.New("schema: voice control call_quality principal_id must be positive")
 	}
-	if e.LossBasisPoints != nil && (*e.LossBasisPoints < 0 || *e.LossBasisPoints > 10000) {
-		return errors.New("schema: voice control call_quality loss_basis_points must be 0 to 10000")
+	if e.LossBasisPoints != nil && (*e.LossBasisPoints < 0 || *e.LossBasisPoints > VoiceControlV4MaxLossBasisPoints) {
+		return fmt.Errorf("schema: voice control call_quality loss_basis_points must be 0 to %d", VoiceControlV4MaxLossBasisPoints)
 	}
 	if e.JitterUS != nil && (*e.JitterUS < 0 || *e.JitterUS > VoiceControlMaxID) {
 		return errors.New("schema: voice control call_quality jitter_us must be a nonnegative safe integer")

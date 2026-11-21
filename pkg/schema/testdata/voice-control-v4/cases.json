@@ -11,7 +11,7 @@
       }
     },
     {
-      "name": "start naming a call",
+      "name": "start naming a canonical call attempt ID",
       "direction": "command",
       "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"call\":\"k3Jx9dQ0mT7vB2nYw5LcRg\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
       "want": {
@@ -20,21 +20,53 @@
       }
     },
     {
-      "name": "start naming a call at the shortest id",
+      "name": "start naming a call with the old minimum length",
       "direction": "command",
       "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"call\":\"aaaaaaaaaaaaaaaa\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
       "want": {
-        "result": "accept",
-        "kind": "start"
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
       }
     },
     {
-      "name": "start naming a call at the longest id",
+      "name": "start naming a call with the old maximum length",
       "direction": "command",
       "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"call\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
       "want": {
-        "result": "accept",
-        "kind": "start"
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "start with a bearer credential as the call",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"call\":\"conch_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "start with nonzero trailing base64url bits in the call",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"call\":\"k3Jx9dQ0mT7vB2nYw5LcRh\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "start with a trailing newline in the call",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"call\":\"k3Jx9dQ0mT7vB2nYw5LcRg\\n\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
       }
     },
     {

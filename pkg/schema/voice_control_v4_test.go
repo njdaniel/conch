@@ -451,7 +451,7 @@ func TestVoiceControlCommandKindV4(t *testing.T) {
 }
 
 // voiceControlV4Transcripts is every transcript of v4 and the version its
-// session is in, except the diagnostics and quality transcript checked below.
+// session is in, except the diagnostics and quality transcripts checked below.
 var voiceControlV4Transcripts = map[string]string{
 	"transcript-negotiation-v4-owner-channel.json": VoiceControlSchemaV4,
 	"transcript-negotiation-v4-owner-call.json":    VoiceControlSchemaV4,
@@ -460,7 +460,10 @@ var voiceControlV4Transcripts = map[string]string{
 	"transcript-version-fixed.json":                VoiceControlSchemaV4,
 }
 
-const voiceControlV4DiagnosticsTranscript = "transcript-diagnostics-and-call-quality.json"
+const (
+	voiceControlV4DiagnosticsTranscript = "transcript-diagnostics-and-call-quality.json"
+	voiceControlV4OverlappingPolls      = "transcript-overlapping-call-quality-polls.json"
+)
 
 func readVoiceControlV4Transcript(t *testing.T, name string) []voiceControlStep {
 	t.Helper()
@@ -612,7 +615,28 @@ func TestVoiceControlV4Transcripts(t *testing.T) {
 // TestVoiceControlV4DiagnosticsTranscript pins the opt-in diagnostics and
 // the per-participant sample followed by an ack, including the empty sample.
 func TestVoiceControlV4DiagnosticsTranscript(t *testing.T) {
-	steps := readVoiceControlV4Transcript(t, voiceControlV4DiagnosticsTranscript)
+	checkVoiceControlV4QualityTranscript(t, voiceControlV4DiagnosticsTranscript, []string{
+		"ack 1 true",
+		"diagnostics 2 true", "ack 2 true", "levels false", "gate true sound", "levels true", "gate false hang_ended",
+		"diagnostics 3 false", "ack 3 true",
+		"poll 4", "quality 9", "quality 11", "quality 14", "ack 4 true",
+		"poll 5", "ack 5 true",
+		"ack 6 true",
+	})
+}
+
+func TestVoiceControlV4OverlappingQualityPolls(t *testing.T) {
+	checkVoiceControlV4QualityTranscript(t, voiceControlV4OverlappingPolls, []string{
+		"ack 1 true",
+		"poll 2", "poll 3", "ack 2 true", "ack 3 false invalid",
+		"poll 4", "quality 9", "ack 4 true",
+		"ack 5 true",
+	})
+}
+
+func checkVoiceControlV4QualityTranscript(t *testing.T, name string, want []string) {
+	t.Helper()
+	steps := readVoiceControlV4Transcript(t, name)
 	hello, err := ParseVoiceControlEvent(compactVoiceControlFixture(t, steps[0].Message))
 	if err != nil || hello.Hello == nil || !hello.Hello.Offers(VoiceControlSchemaV4) || steps[0].From != "helper" {
 		t.Fatalf("want the v1 hello offering v4, got %v", err)
@@ -653,16 +677,12 @@ func TestVoiceControlV4DiagnosticsTranscript(t *testing.T) {
 		case ev.CallQuality != nil:
 			observed = append(observed, fmt.Sprintf("quality %d", ev.CallQuality.PrincipalID))
 		case ev.Ack != nil:
-			observed = append(observed, fmt.Sprintf("ack %d %t", ev.Ack.ID, ev.Ack.OK))
+			ack := fmt.Sprintf("ack %d %t", ev.Ack.ID, ev.Ack.OK)
+			if !ev.Ack.OK {
+				ack += " " + string(ev.Ack.Error)
+			}
+			observed = append(observed, ack)
 		}
-	}
-	want := []string{
-		"ack 1 true",
-		"diagnostics 2 true", "ack 2 true", "levels false", "gate true sound", "levels true", "gate false hang_ended",
-		"diagnostics 3 false", "ack 3 true",
-		"poll 4", "quality 9", "quality 11", "quality 14", "ack 4 true",
-		"poll 5", "ack 5 true",
-		"ack 6 true",
 	}
 	if !reflect.DeepEqual(observed, want) {
 		t.Errorf("got %q, want %q", observed, want)
@@ -672,7 +692,7 @@ func TestVoiceControlV4DiagnosticsTranscript(t *testing.T) {
 // TestVoiceControlV4FixturesAreAllClaimed: every file under the v4 directory
 // is read by a test.
 func TestVoiceControlV4FixturesAreAllClaimed(t *testing.T) {
-	claimed := map[string]bool{voiceControlV4DiagnosticsTranscript: true}
+	claimed := map[string]bool{voiceControlV4DiagnosticsTranscript: true, voiceControlV4OverlappingPolls: true}
 	for _, name := range voiceControlV4CaseFiles {
 		claimed[name] = true
 	}
@@ -824,12 +844,16 @@ func TestVoiceControlStartV4Validate(t *testing.T) {
 	}{
 		{"channel", func(*VoiceControlStartV4) {}, true},
 		{"call", func(s *VoiceControlStartV4) { s.Channel, s.Call = "", voiceControlV4CallID }, true},
+		{"server-issued call", func(s *VoiceControlStartV4) { s.Channel, s.Call = "", NewPrivateCallID() }, true},
 		{"both", func(s *VoiceControlStartV4) { s.Call = voiceControlV4CallID }, false},
 		{"neither", func(s *VoiceControlStartV4) { s.Channel = "" }, false},
 		{"call too short", func(s *VoiceControlStartV4) { s.Channel, s.Call = "", "abc" }, false},
 		{"call with a slash", func(s *VoiceControlStartV4) { s.Channel, s.Call = "", "room/"+voiceControlV4CallID }, false},
 		{"call is a default room name", func(s *VoiceControlStartV4) { s.Channel, s.Call = "", "conch-mfqwcylbmfqwcylbmfqwcylbme" }, false},
 		{"call is a custom room name", func(s *VoiceControlStartV4) { s.Channel, s.Call = "", "alpha-2-mfqwcylbmfqwcylbmfqwcylbme" }, false},
+		{"call is a bearer credential", func(s *VoiceControlStartV4) {
+			s.Channel, s.Call = "", CredentialTokenPrefix+strings.Repeat("A", CredentialTokenLength-len(CredentialTokenPrefix))
+		}, false},
 		{"v3 schema", func(s *VoiceControlStartV4) { s.Schema = VoiceControlSchemaV3 }, false},
 		{"no principal", func(s *VoiceControlStartV4) { s.PrincipalID = 0 }, false},
 		{"bad credential", func(s *VoiceControlStartV4) { s.Credential = "" }, false},
