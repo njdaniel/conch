@@ -6,6 +6,7 @@ import { visualOrder } from './arrangement';
 import { useArrangement } from './useArrangement';
 import type { SettingsChange } from './ChannelSettingsAsk';
 import type { InVoice } from './voice/useOccupancy';
+import { ChannelJoin, type ChannelJoinHandler } from './voice/channelJoin';
 import { headingId } from './Conversation';
 import { Avatar, Glyph } from './Icons';
 import { ServerVersion, TemporaryBanner } from './ServerVersion';
@@ -198,6 +199,7 @@ export function Lobby({
   readonly overlay?: ReactNode;
 }) {
   const desktop = useContext(DesktopOS) !== null;
+  const joinVoice = useRef<ChannelJoinHandler | null>(null);
   const [panelOpen, setPanelOpen] = useState(isWide);
   const wideNow = useWide();
   // A column left open would cover the page once the window narrows: it
@@ -473,6 +475,9 @@ export function Lobby({
                   {...(onInviteTo === undefined ? {} : { onInvite: onInviteTo })}
                   {...(onLeft === undefined ? {} : { onLeft })}
                   {...(onUnauthorized === undefined ? {} : { onUnauthorized })}
+                  onJoinVoice={(channel) => {
+                    joinVoice.current?.(channel);
+                  }}
                   onOpen={(name) => {
                     onOpen(name);
                     if (phone) {
@@ -545,7 +550,9 @@ export function Lobby({
           <VoiceLive.Provider value={setLive}>
             <MicTestShown.Provider value={!phone || view === 'voice'}>
               <VoiceStrip.Provider value={phone && view !== 'voice' ? openVoice : null}>
-                <StageHost.Provider value={stage}>{voice}</StageHost.Provider>
+                <StageHost.Provider value={stage}>
+                  <ChannelJoin.Provider value={joinVoice}>{voice}</ChannelJoin.Provider>
+                </StageHost.Provider>
               </VoiceStrip.Provider>
             </MicTestShown.Provider>
           </VoiceLive.Provider>

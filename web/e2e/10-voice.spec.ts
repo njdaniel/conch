@@ -106,6 +106,45 @@ test.describe('with LiveKit', () => {
   // token only the scan found (signal-tokens.ts), which end in a dot.
   const livekitTokens = (p: { readonly watch: { readonly livekitTokens: readonly string[] } }): string[] => p.watch.livekitTokens.filter((t) => !t.endsWith('.'));
 
+  test('a channel double-click joins once and leaves an active room in place', async ({ browser }) => {
+    const other = 'double-click-room';
+    const made = await vw.api(vw.operator, 'POST', '/v0/channels', { name: other });
+    expect(made.status).toBe(201);
+    const added = await vw.api(vw.operator, 'PUT', `/v1/channels/${other}/members/${String(vw.alice.id)}`);
+    expect(added.status).toBe(204);
+    const a = await person(browser, 'alice', { viewport: { width: 1440, height: 900 } });
+    try {
+      const voice = voiceRegion(a.page);
+      const first = channelButton(a.page, vw.channel);
+      const second = channelButton(a.page, other);
+      const sessions: string[] = [];
+      a.page.on('request', (request) => {
+        const path = new URL(request.url()).pathname;
+        if (request.method() === 'POST' && path.endsWith('/voice/session')) sessions.push(path);
+      });
+
+      await first.click();
+      await expect(voice.getByRole('button', { name: 'Join voice in #voice-room' })).toBeEnabled();
+      expect(sessions).toHaveLength(0);
+      await a.page.getByRole('button', { name: `Actions for ${other}` }).dblclick();
+      expect(sessions).toHaveLength(0);
+      await second.dblclick();
+      await expect(conversation(a.page).getByRole('heading', { name: other, exact: true })).toBeVisible();
+      await expect(voice).toContainText(`Connected in #${other}`, { timeout: 30_000 });
+      expect(sessions).toEqual([`/v1/channels/${other}/voice/session`]);
+
+      await second.dblclick();
+      await first.dblclick();
+      await expect(conversation(a.page).getByRole('heading', { name: vw.channel, exact: true })).toBeVisible();
+      await expect(voice).toContainText(`Connected in #${other}`);
+      expect(sessions).toHaveLength(1);
+      await voice.getByRole('button', { name: 'Leave voice' }).click();
+      await expect(voice.getByRole('button', { name: 'Join voice in #voice-room' })).toBeEnabled();
+    } finally {
+      await closeAll(a.context);
+    }
+  });
+
   test('a member joins, is heard only while transmitting, shows as talking, and is audited as a reported pair', async ({ browser }) => {
     const a = await person(browser, 'alice');
     const b = await person(browser, 'bob');

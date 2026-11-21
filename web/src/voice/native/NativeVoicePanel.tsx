@@ -15,7 +15,9 @@ import { Glyph } from '../../Icons';
 import type { NativeVoiceView } from '../../platform/desktop/bridge';
 import type { NativeVoice, NativeVoiceError } from '../../platform/types';
 import type { ChannelV0 } from '../../schema/channel';
+import type { VoicePresenceV2 } from '../../schema/voice';
 import type { Person } from '../../useLiveChannel';
+import { useChannelJoin } from '../channelJoin';
 import { occupants, sharers } from '../presence';
 import { nameOf, Roster } from '../VoicePanel';
 import { VoiceDiagnostics } from '../VoiceDiagnostics';
@@ -108,6 +110,7 @@ export function NativeVoicePanel({
   viewerName = '',
   people,
   voiceAllowed,
+  reachable = true,
   channels,
   onUnauthorized,
   onOpen,
@@ -125,6 +128,7 @@ export function NativeVoicePanel({
   readonly viewerName?: string;
   readonly people: ReadonlyMap<number, Person>;
   readonly voiceAllowed: boolean;
+  readonly reachable?: boolean;
   readonly channels: readonly ChannelV0[];
   readonly onUnauthorized: () => void;
   readonly onOpen: (name: string) => void;
@@ -180,7 +184,9 @@ export function NativeVoicePanel({
   const room = occupants(presence);
   const mine = room.find((o) => o.principal === viewer);
   if (session && joined !== null && mine !== undefined && presence !== null) own.current = { channel: joined, joinedAt: mine.joinedAt };
-  const duplicate = !session && mine !== undefined && !(own.current !== null && own.current.channel === shown && own.current.joinedAt === mine.joinedAt);
+  const otherDevice = (occupant: typeof mine) =>
+    occupant !== undefined && !(own.current !== null && own.current.channel === shown && own.current.joinedAt === occupant.joinedAt);
+  const duplicate = !session && otherDevice(mine);
 
   const [warned, setWarned] = useState<string | null>(null);
   useEffect(() => {
@@ -217,18 +223,26 @@ export function NativeVoicePanel({
     if (!out.ok) setNote(out.error === undefined ? errorWords.lost : errorWords[out.error]);
   };
 
-  const join = () => {
-    if (actions === undefined || channel === null) return;
-    if (duplicate && warned !== channel) {
+  const viewed = channels.find((c) => c.name === channel);
+  const archived = isArchived(viewed);
+  const canStart = signedIn && voiceAllowed && reachable && !session && !archived && view.status !== 'unavailable' && view.status !== 'stopping';
+  const joining = useRef(false);
+  const join = (current: VoicePresenceV2) => {
+    if (!canStart || actions === undefined || channel === null || joining.current) return;
+    if (!current.available || !current.configured || (viewed !== undefined && current.channel_id !== viewed.id)) return;
+    if (otherDevice(occupants(current).find((o) => o.principal === viewer)) && warned !== channel) {
       setWarned(channel);
       return;
     }
     setWarned(null);
-    void outcome(() => actions.join({ channel, muted: last.current.muted, deafened: last.current.deafened }));
+    joining.current = true;
+    void outcome(() => actions.join({ channel, muted: last.current.muted, deafened: last.current.deafened })).finally(() => {
+      joining.current = false;
+    });
   };
+  useChannelJoin(viewed, canStart && actions !== undefined, snapshot, join);
 
   const available = presence !== null && presence.available && presence.configured;
-  const archived = isArchived(channels.find((c) => c.name === channel));
   const cutOff = presence !== null && !presence.available;
   const roster = cutOff ? [] : room.sort((a, b) => a.principal - b.principal);
   const noSpeaking: ReadonlySet<number> = new Set();
@@ -266,7 +280,7 @@ export function NativeVoicePanel({
   }
   const shareReason = companion === null ? null : shareDisabledReason({ joined, shown: channel, live });
   const share = companion === null ? null : <ShareButton companion={companion} joined={joined} reason={shareReason} />;
-  const canJoin = !unavailable && channel !== null && !archived && available && view.status !== 'stopping';
+  const canJoin = canStart && channel !== null && available && (viewed === undefined || presence.channel_id === viewed.id);
 
   return (
     <section aria-label="Voice" className={`voice ${phaseClass(view)}${helper?.transmitting === true ? ' sending' : ''}`}>
@@ -324,7 +338,7 @@ export function NativeVoicePanel({
               <>
               {share}
               <OptionsButton open={options} onToggle={() => { setOptions(!options); }} />
-              <button type="button" className="primary" onClick={join} disabled={!canJoin || actions === undefined}>
+              <button type="button" className="primary" onClick={() => { if (presence !== null) join(presence); }} disabled={!canJoin || actions === undefined}>
                 <Glyph name="headphones" />
                 <span className="btn-text">Join voice {dest}</span>
               </button>
