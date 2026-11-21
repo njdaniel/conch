@@ -1626,6 +1626,23 @@ label {
   padding: 0;
 }
 
+.message-day {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s3) var(--s2);
+  color: var(--muted);
+  font-size: var(--small);
+  font-weight: 600;
+}
+
+.message-day::before,
+.message-day::after {
+  content: '';
+  flex: 1;
+  border-top: 1px solid var(--border);
+}
+
 .message {
   display: grid;
   grid-template-columns: 2.25rem minmax(0, 1fr);

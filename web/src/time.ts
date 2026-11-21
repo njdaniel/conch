@@ -1,6 +1,6 @@
 // Every time and date the page shows comes from here (F26), so a message's
 // "21:36" and an invite's "expires Nov 6, 2026, 20:36" cannot disagree about
-// the hour cycle: all four are one Intl.DateTimeFormat family, in the reader's
+// the hour cycle: they use one Intl.DateTimeFormat family, in the reader's
 // own locale (for the order and names of a date) and time zone, on a 24-hour
 // clock, as the page's message times always were (accessible names and tests
 // read "21:36", not "9:36 PM"). A value that is not a time is
@@ -30,6 +30,15 @@ export const timeWithSeconds = (at: Instant): string => format('seconds', { ...h
 
 // dateOf: the day.
 export const dateOf = (at: Instant): string => format('date', { day: 'numeric', month: 'short', year: 'numeric' }, at);
+
+// sameLocalDay compares the reader's calendar days, including at midnight
+// when the dates in the server's UTC timestamps may still be the same.
+export function sameLocalDay(before: Instant | undefined, at: Instant): boolean {
+  if (before === undefined) return false;
+  const start = before instanceof Date ? before : new Date(before);
+  const end = at instanceof Date ? at : new Date(at);
+  return start.getFullYear() === end.getFullYear() && start.getMonth() === end.getMonth() && start.getDate() === end.getDate();
+}
 
 // dateTimeOf: the day and the time of day, to the minute.
 export const dateTimeOf = (at: Instant): string => format('datetime', { day: 'numeric', month: 'short', year: 'numeric', ...hours, minute: '2-digit' }, at);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { dateOf, dateTimeOf, timeOf, timeWithSeconds } from './time';
+import { dateOf, dateTimeOf, sameLocalDay, timeOf, timeWithSeconds } from './time';
 
 // A moment built from local parts, so the expected text does not depend on the
 // time zone the tests run in.
@@ -24,6 +24,19 @@ describe('the time helper', () => {
   it('takes a string, a number or a date, and the same moment reads the same', () => {
     expect(timeOf(at.toISOString())).toBe(timeOf(at));
     expect(timeOf(at.getTime())).toBe(timeOf(at));
+  });
+
+  it('compares local calendar days across midnight and a change of year', () => {
+    const late = new Date(2026, 11, 31, 23, 59);
+    const midnight = new Date(2027, 0, 1);
+    expect(sameLocalDay(early, at)).toBe(true);
+    expect(sameLocalDay(late.toISOString(), midnight.toISOString())).toBe(false);
+    expect(sameLocalDay(new Date(2026, 0, 1), midnight)).toBe(false);
+    expect(sameLocalDay(undefined, midnight)).toBe(false);
+  });
+
+  it('compares the time in the reader’s zone independently of the timestamp offset', () => {
+    expect(sameLocalDay('2026-01-01T01:00:00+02:00', '2025-12-31T23:00:00Z')).toBe(true);
   });
 
   it('returns what it was given when that is not a time', () => {

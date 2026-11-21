@@ -29,7 +29,7 @@ import { canLoadOlder, editsKnown, isLater, lastId, oldestId, ordered } from './
 import type { LiveStatus, Person } from './useLiveChannel';
 import { mentions } from './useNotifications';
 import { useAuthorNames } from './useAuthorNames';
-import { timeOf } from './time';
+import { dateOf, dateTimeOf, sameLocalDay, timeOf } from './time';
 import { fromServer } from './schema/validate';
 
 // The time of day, in the reader's own locale and time zone (time.ts).
@@ -93,7 +93,7 @@ const sameRun = 5 * 60 * 1000;
 const authorMarks: readonly IdentityKey[] = ['agent', 'manager', 'operator'];
 
 function Line({
-  time,
+  at,
   author,
   authorId,
   person,
@@ -105,7 +105,7 @@ function Line({
   onCardDisappear,
   children,
 }: {
-  readonly time: string;
+  readonly at: string;
   readonly author: string;
   readonly authorId: number;
   readonly person: Person | undefined;
@@ -124,7 +124,7 @@ function Line({
       <Avatar id={authorId} name={author} />
       <div className="msg-head">
         {badge === null ? null : <span className="audience">{badge} </span>}
-        <time>{time}</time> {interactive ? <ProfileCard id={authorId} person={person} viewer={viewer} name={author} className="author" onDisappear={onCardDisappear} /> : <span className="author">{author}</span>}
+        <time dateTime={at} title={dateTimeOf(at)}>{clock(at)}</time> {interactive ? <ProfileCard id={authorId} person={person} viewer={viewer} name={author} className="author" onDisappear={onCardDisappear} /> : <span className="author">{author}</span>}
         <IdentityMarks kind={person?.kind} role={person?.role} manages={person?.manages} only={authorMarks} textForm />
         <span className="vh">: </span>
       </div>
@@ -301,7 +301,7 @@ function ShownMessage({
         </p>
       )}
       <Line
-        time={clock(message.created_at)}
+        at={message.created_at}
         author={authorOf(message, people)}
         authorId={message.author_id}
         person={people.get(message.author_id)}
@@ -377,6 +377,7 @@ function replyContext(root: MessageV2 | undefined, people: ReadonlyMap<number, P
 
 function Pending({
   send,
+  after,
   me,
   nets,
   viewer,
@@ -384,6 +385,7 @@ function Pending({
   onDismiss,
 }: {
   readonly send: PendingSend;
+  readonly after: string | number | undefined;
   readonly me: Person;
   readonly nets: ReadonlyMap<number, string>;
   readonly viewer: number;
@@ -395,40 +397,52 @@ function Pending({
     : send.status === 'failed' ? 'Failed'
     : 'Not confirmed: check the conversation before retrying';
   return (
-    <li className="message pending">
-      <Line
-        time={clock(send.at)}
-        author={me.name}
-        authorId={viewer}
-        person={me}
-        viewer={viewer}
-        badge={send.audience === undefined ? null : audienceLabel(send.audience, viewer, nets)}
-        tag={tag}
-        {...(send.status === 'sending' ? {} : { tone: send.status })}
-      >
-        <Linkified text={send.body} />
-      </Line>
-      {send.status === 'sending' ? null : (
-        <div className="msg-actions">
-          {' '}
-          <button
-            type="button"
-            onClick={() => {
-              onRetry(send.localId);
-            }}
-          >
-            Retry
-          </button>{' '}
-          <button
-            type="button"
-            onClick={() => {
-              onDismiss(send.localId);
-            }}
-          >
-            Dismiss
-          </button>
-        </div>
-      )}
+    <>
+      {sameLocalDay(after, send.at) ? null : <DayDivider at={send.at} />}
+      <li className="message pending">
+        <Line
+          at={new Date(send.at).toISOString()}
+          author={me.name}
+          authorId={viewer}
+          person={me}
+          viewer={viewer}
+          badge={send.audience === undefined ? null : audienceLabel(send.audience, viewer, nets)}
+          tag={tag}
+          {...(send.status === 'sending' ? {} : { tone: send.status })}
+        >
+          <Linkified text={send.body} />
+        </Line>
+        {send.status === 'sending' ? null : (
+          <div className="msg-actions">
+            {' '}
+            <button
+              type="button"
+              onClick={() => {
+                onRetry(send.localId);
+              }}
+            >
+              Retry
+            </button>{' '}
+            <button
+              type="button"
+              onClick={() => {
+                onDismiss(send.localId);
+              }}
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+      </li>
+    </>
+  );
+}
+
+function DayDivider({ at }: { readonly at: string | number }) {
+  const date = dateOf(at);
+  return (
+    <li role="presentation">
+      <div className="message-day" role="separator" aria-label={date}>{date}</div>
     </li>
   );
 }
@@ -551,8 +565,13 @@ function ThreadView({ highlightedId, rootId, root, chat, channel, live, archived
         </div>
       ) : null}
       <ol className="messages" aria-label="Root and replies">
-        {messages.map((message) => <Message highlighted={message.id === highlightedId} key={message.id} message={message} people={people} nets={nets} viewer={viewer} channel={channel} sent={message.id === sentMark} cont={false} onUnauthorized={onUnauthorized} notice={notices.get(message.id) ?? null} editor={editorFor(message, (saved) => { setFetched((previous) => previous.map((held) => held.id === saved.id ? saved : held)); })} />)}
-        {pending.map((send) => <Pending key={`local-${String(send.localId)}`} send={send} me={me} nets={nets} viewer={viewer} onRetry={onRetrySend} onDismiss={onDismissSend} />)}
+        {messages.map((message, i) => (
+          <Fragment key={message.id}>
+            {sameLocalDay(messages[i - 1]?.created_at, message.created_at) ? null : <DayDivider at={message.created_at} />}
+            <Message highlighted={message.id === highlightedId} message={message} people={people} nets={nets} viewer={viewer} channel={channel} sent={message.id === sentMark} cont={false} onUnauthorized={onUnauthorized} notice={notices.get(message.id) ?? null} editor={editorFor(message, (saved) => { setFetched((previous) => previous.map((held) => held.id === saved.id ? saved : held)); })} />
+          </Fragment>
+        ))}
+        {pending.map((send, i) => <Pending key={`local-${String(send.localId)}`} send={send} after={pending[i - 1]?.at ?? messages.at(-1)?.created_at} me={me} nets={nets} viewer={viewer} onRetry={onRetrySend} onDismiss={onDismissSend} />)}
       </ol>
       {nextAfter === undefined ? null : (
         <button type="button" disabled={status === 'loading'} onClick={() => {
@@ -1026,6 +1045,7 @@ export function Conversation({
   }, [repliesSettled, channelId, viewer, replyDrafts]);
 
   const shown = ordered(chat);
+  const pending = chat.pending.filter((send) => send.threadRootId === undefined);
   // Expanded threads share this channel timeline's mark; they deliberately
   // have no second divider or independent unread position.
   // The reducer retains the opening head across view remounts and live arrivals.
@@ -1333,8 +1353,11 @@ export function Conversation({
             if (item !== null) setLastFocused(Number(item.dataset.messageId));
           }}
         >
-          {shown.map((message, i) => (
-            <Fragment key={message.id}>
+          {shown.map((message, i) => {
+            const before = shown[i - 1];
+            const startsDay = !sameLocalDay(before?.created_at, message.created_at);
+            return <Fragment key={message.id}>
+              {startsDay ? <DayDivider at={message.created_at} /> : null}
               {message.id === unreadId ? (
                 <li className="new-messages-row" role="presentation">
                   <div ref={divider} className="new-messages" role="separator" aria-label="New messages">New messages</div>
@@ -1346,14 +1369,13 @@ export function Conversation({
                 reactionNavigation
                 replies={replyCounts.get(message.id) ?? 0}
                 {...(message.thread_root_id === undefined ? {} : { context: replyContext(chat.byId.get(message.thread_root_id), people) })}
-                key={message.id}
                 message={message}
                 people={people}
                 nets={nets}
                 viewer={viewer}
                 channel={channel}
                 sent={message.id === sentMark}
-                cont={message.id !== unreadId && continues(shown[i - 1], message)}
+                cont={!startsDay && message.id !== unreadId && continues(before, message)}
                 onUnauthorized={onUnauthorized}
                 onReply={openFrom}
                 onOpenThread={openFrom}
@@ -1388,10 +1410,10 @@ export function Conversation({
                   />
                 )}
               />
-            </Fragment>
-          ))}
-          {chat.pending.filter((send) => send.threadRootId === undefined).map((send) => (
-            <Pending key={`local-${String(send.localId)}`} send={send} me={me} nets={nets} viewer={viewer} onRetry={onRetrySend} onDismiss={onDismissSend} />
+            </Fragment>;
+          })}
+          {pending.map((send, i) => (
+            <Pending key={`local-${String(send.localId)}`} send={send} after={pending[i - 1]?.at ?? shown.at(-1)?.created_at} me={me} nets={nets} viewer={viewer} onRetry={onRetrySend} onDismiss={onDismissSend} />
           ))}
         </ol>
       </div>
