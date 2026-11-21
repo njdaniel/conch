@@ -64,12 +64,18 @@ var principalReads = []principalRead{
 	// operator holding manage_channels, or a manager of the channel), and a
 	// manager's ban target, a member of the channel it manages.
 	{"store/bans.go", "Store.ListChannelBans", 1, readOperatorOrMaker},
-	// #2017: a DM's peer, read before any may-know check. No route calls
-	// OpenDM yet (ADR-017's release gate). #2018, pair eligibility and
-	// mutual visibility, gates it, and must make a peer the caller may not
-	// know, or a hidden one, the same ErrPrincipalNotFound as an id never
-	// issued, before any route reaches it.
-	{"store/dm.go", "openDMTx", 1, readGated},
+	// #2017, #2018: a DM's peer, only when the caller may know it by
+	// knownPrincipalsSQL and it is not hidden or an ended guest; any other
+	// id is the same ErrPrincipalNotFound as one never issued.
+	{"store/dm.go", "openDMTx", 1, readPredicate},
+	// #2018: the DM policy. Whether a viewer may know a target and whether a
+	// conversation's peer is shown by name answer a yes or a no by the
+	// directory's rule; the per-person switch is one bit; SetDMAllowed is
+	// the operator's switch, behind manage_members, as SetVoiceAllowed.
+	{"store/dm_policy.go", "dmMayKnowTx", 1, readPredicate},
+	{"store/dm_policy.go", "dmPeerFormerTx", 1, readPredicate},
+	{"store/dm_policy.go", "dmPrincipalAllowedTx", 1, readOwnOrInternal},
+	{"store/dm_policy.go", "Store.SetDMAllowed", 2, readOperatorOrMaker},
 	// #1832: a block's target, only when the owner may know it by
 	// knownPrincipalsSQL (the directory's rule) and it is not hidden.
 	{"store/blocks.go", "Store.PutBlock", 1, readPredicate},
@@ -204,6 +210,9 @@ var predicateNames = map[string]string{
 	"directoryKnowersTx":                "knowsCond",
 	"Store.DirectoryMembershipAudience": "knowsCondExcept",
 	"Store.PutBlock":                    "knownPrincipalsSQL",
+	"openDMTx":                          "knownPrincipalsSQL",
+	"dmMayKnowTx":                       "knownPrincipalsSQL",
+	"dmPeerFormerTx":                    "knownPrincipalsSQL",
 }
 
 var selectsPrincipals = regexp.MustCompile(`(?i)\b(from|join)\s+principals\b`)
