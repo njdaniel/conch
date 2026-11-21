@@ -5,18 +5,21 @@
 //! enhancement (ERLE), or no measurement when the sweep was not detected. Owns no audio
 //! devices and keeps no state or samples between measurements.
 
-use conch_voice_audio::{FRAME_LEN, FRAME_MS, Frame};
+use std::f64::consts::TAU;
+
+use conch_voice_audio::{FRAME_LEN, FRAME_MS, Frame, SAMPLE_RATE};
 
 use crate::echo::FLOOR_RMS;
 
 const MAX_DELAY_SAMPLES: usize = 500 / FRAME_MS as usize * FRAME_LEN;
-// The coarse search samples the sweep at 6 kHz and tests every fourth possible delay.
-// The finer delay spacing keeps the nearest candidate within two samples of the echo.
-const COARSE_SAMPLE_STEP: usize = 8;
-const COARSE_DELAY_STEP: usize = 4;
-// Require at least 1% of microphone power to match the sweep. This keeps an unrelated
-// sound in the room from counting as echo and raises the reporting floor in a noisy room.
-const MIN_MATCH_SHARE: f64 = 0.01;
+// The coarse search uses 8 kHz windows, leaving a transition band above the sweep.
+const COARSE_SAMPLE_STEP: usize = 6;
+const LOW_PASS_CUTOFF_HZ: f64 = 3200.0;
+const LOW_PASS_RADIUS: usize = 128;
+const REFINE_RADIUS: usize = 4;
+// Require normalized correlation across the whole sweep. Even a perfectly matching
+// 20 ms excerpt of a one-second sweep has correlation of only about 0.14.
+const MIN_CORRELATION: f64 = 0.20;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EchoMeasurement {
@@ -39,7 +42,8 @@ pub struct EchoReduction {
 /// capture frames allow for delays up to 500 ms, including any delay introduced by
 /// processing. When supplied, `processed` covers the same capture interval as `raw`.
 ///
-/// The strongest delayed match estimates the power of the coherent echo. The two captures
+/// The strongest delayed match estimates the power of the coherent echo. Detection uses
+/// normalized correlation over the whole sweep in its frequency band. The two captures
 /// are aligned independently so a delay introduced by the canceller does not count as
 /// attenuation. This estimates the strongest path, so diffuse reflections and distortion
 /// can escape measurement.
@@ -60,12 +64,23 @@ pub fn measure(
     if !reference_power.is_finite() || reference_power <= f64::from(FLOOR_RMS).powi(2) {
         return None;
     }
-    let before = strongest_match(reference, reference_power, raw.as_flattened())?;
+    let taps = low_pass_taps();
+    let coarse_reference = low_pass(reference, &taps, COARSE_SAMPLE_STEP);
+    let find_echo = |frames: &[Frame]| {
+        strongest_match(
+            reference,
+            reference_power,
+            &coarse_reference,
+            &taps,
+            frames.as_flattened(),
+        )
+    };
+    let before = find_echo(raw)?;
     if before.echo_power <= before.floor {
         return None;
     }
     let reduction = if let Some(frames) = processed {
-        let after = strongest_match(reference, reference_power, frames.as_flattened())?;
+        let after = find_echo(frames)?;
         Some(EchoReduction {
             db: 10.0 * (before.echo_power / after.echo_power.max(after.floor)).log10(),
             lower_bound: after.echo_power <= after.floor,
@@ -84,19 +99,42 @@ struct Match {
     floor: f64,
 }
 
-fn strongest_match(reference: &[f32], reference_power: f64, capture: &[f32]) -> Option<Match> {
+fn strongest_match(
+    reference: &[f32],
+    reference_power: f64,
+    coarse_reference: &[f64],
+    taps: &[f64],
+    capture: &[f32],
+) -> Option<Match> {
     if capture.iter().any(|sample| !sample.is_finite()) {
         return None;
     }
     let last_delay = MAX_DELAY_SAMPLES.min(capture.len() - reference.len());
     let window = |delay| &capture[delay..delay + reference.len()];
 
-    // Every candidate uses the whole reference and the same number of captured samples.
-    // Use the coarse grid to avoid scanning a multi-second sweep at every sample offset.
+    // Filter the capture before taking any of the decimated windows. Keep every
+    // integer delay eligible because the old delay grid could favor a sidelobe.
+    let filter_end = capture
+        .len()
+        .min(last_delay + reference.len() + LOW_PASS_RADIUS);
+    let filtered = low_pass(&capture[..filter_end], taps, 1);
+    let coarse_window = |delay| {
+        filtered[delay..delay + reference.len()]
+            .iter()
+            .copied()
+            .step_by(COARSE_SAMPLE_STEP)
+    };
+    let coarse_dot = |delay| {
+        coarse_reference
+            .iter()
+            .zip(coarse_window(delay))
+            .map(|(&played, captured)| played * captured)
+            .sum::<f64>()
+    };
     let mut coarse_delay = 0;
     let mut coarse_peak = 0.0;
-    for delay in (0..=last_delay).step_by(COARSE_DELAY_STEP) {
-        let peak = dot(reference, window(delay), COARSE_SAMPLE_STEP).abs();
+    for delay in 0..=last_delay {
+        let peak = coarse_dot(delay).abs();
         if peak > coarse_peak {
             coarse_delay = delay;
             coarse_peak = peak;
@@ -105,48 +143,103 @@ fn strongest_match(reference: &[f32], reference_power: f64, capture: &[f32]) -> 
 
     let mut best_delay = coarse_delay;
     let mut peak = 0.0;
-    let first = coarse_delay.saturating_sub(COARSE_DELAY_STEP - 1);
-    let last = last_delay.min(coarse_delay + COARSE_DELAY_STEP - 1);
+    let first = coarse_delay.saturating_sub(REFINE_RADIUS);
+    let last = last_delay.min(coarse_delay + REFINE_RADIUS);
     for delay in first..=last {
-        let score = dot(reference, window(delay), 1).abs();
+        let score = dot(reference, window(delay)).abs();
         if score > peak {
             best_delay = delay;
             peak = score;
         }
     }
 
-    // Squared projection onto the reference, expressed as mean square per sample.
+    // Test the squared, normalized correlation in the sweep band. A short tone
+    // can line up with a small part of the chirp and still fail this test.
+    let capture_energy: f64 = coarse_window(best_delay)
+        .map(|sample| sample * sample)
+        .sum();
+    let reference_energy: f64 = coarse_reference.iter().map(|sample| sample * sample).sum();
+    let min_match_energy = MIN_CORRELATION.powi(2) * capture_energy;
+    let coherent = coarse_dot(best_delay).powi(2) > min_match_energy * reference_energy;
+
+    // Report the full-rate projection and use in-band capture power for the floor.
     let mean_product = peak / reference.len() as f64;
     Some(Match {
-        echo_power: mean_product.powi(2) / reference_power,
-        floor: (MIN_MATCH_SHARE * power(window(best_delay))).max(f64::from(FLOOR_RMS).powi(2)),
+        echo_power: if coherent {
+            mean_product.powi(2) / reference_power
+        } else {
+            0.0
+        },
+        floor: (min_match_energy / coarse_reference.len() as f64).max(f64::from(FLOOR_RMS).powi(2)),
     })
 }
 
-fn dot(a: &[f32], b: &[f32], step: usize) -> f64 {
+fn low_pass_taps() -> [f64; 2 * LOW_PASS_RADIUS + 1] {
+    let cutoff = TAU * LOW_PASS_CUTOFF_HZ / f64::from(SAMPLE_RATE);
+    // Symmetric Blackman-windowed sinc, normalized for unit gain at DC.
+    let mut taps = std::array::from_fn(|index| {
+        let offset = index as f64 - LOW_PASS_RADIUS as f64;
+        let phase = TAU * offset / (2 * LOW_PASS_RADIUS) as f64;
+        let window = 0.42 + 0.5 * phase.cos() + 0.08 * (2.0 * phase).cos();
+        let sinc = if index == LOW_PASS_RADIUS {
+            cutoff
+        } else {
+            (cutoff * offset).sin() / offset
+        };
+        window * sinc
+    });
+    let sum: f64 = taps.iter().sum();
+    for tap in &mut taps {
+        *tap /= sum;
+    }
+    taps
+}
+
+fn low_pass(samples: &[f32], taps: &[f64], step: usize) -> Vec<f64> {
+    // Zero padding keeps the reference and capture on their original timelines.
+    let mut padded = vec![0.0; samples.len() + taps.len() - 1];
+    let start = taps.len() / 2;
+    padded[start..start + samples.len()].copy_from_slice(samples);
+    padded
+        .windows(taps.len())
+        .step_by(step)
+        .map(|window| {
+            window
+                .iter()
+                .zip(taps)
+                .map(|(&sample, &tap)| f64::from(sample) * tap)
+                .sum()
+        })
+        .collect()
+}
+
+fn dot(a: &[f32], b: &[f32]) -> f64 {
     a.iter()
         .zip(b)
-        .step_by(step)
         .map(|(&a, &b)| f64::from(a) * f64::from(b))
         .sum()
 }
 
 fn power(samples: &[f32]) -> f64 {
-    dot(samples, samples, 1) / samples.len() as f64
+    dot(samples, samples) / samples.len() as f64
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use conch_voice_audio::{SAMPLE_RATE, SILENCE};
+    use conch_voice_audio::SILENCE;
     use std::f32::consts::TAU;
 
     fn sweep() -> Vec<Frame> {
+        sweep_between(400.0, 2400.0)
+    }
+
+    fn sweep_between(start_hz: f32, end_hz: f32) -> Vec<Frame> {
         let mut frames = vec![SILENCE; 1000 / FRAME_MS as usize];
         for (i, sample) in frames.as_flattened_mut().iter_mut().enumerate() {
             let seconds = i as f32 / SAMPLE_RATE as f32;
-            // A 400 Hz to 2.4 kHz linear sweep over one second.
-            *sample = 0.08 * (TAU * seconds * (400.0 + 1000.0 * seconds)).sin();
+            let phase = TAU * seconds * (start_hz + (end_hz - start_hz) * 0.5 * seconds);
+            *sample = 0.08 * phase.sin();
         }
         frames
     }
@@ -180,6 +273,61 @@ mod tests {
         let off = measure(&played, &raw, None).unwrap();
         assert_eq!(off.raw_echo_dbfs, result.raw_echo_dbfs);
         assert_eq!(off.reduction, None);
+    }
+
+    #[test]
+    fn out_of_band_sweep_does_not_hide_unchanged_echo() {
+        let played = sweep();
+        let raw = delayed(&played, 1732, 0.25);
+        // Exercise the review input and a sweep that would alias at the new 8 kHz rate.
+        for (start_hz, end_hz) in [(5600.0, 3600.0), (7600.0, 5600.0)] {
+            let interferer = delayed(&sweep_between(start_hz, end_hz), 12000, 1.0);
+            let mut processed = raw.clone();
+            for (sample, &interference) in processed
+                .as_flattened_mut()
+                .iter_mut()
+                .zip(interferer.as_flattened())
+            {
+                *sample += interference;
+            }
+
+            let reduction = measure(&played, &raw, Some(&processed))
+                .unwrap()
+                .reduction
+                .unwrap();
+            assert!(reduction.db.abs() < 0.01, "{start_hz} Hz: {reduction:?}");
+            assert!(!reduction.lower_bound);
+        }
+    }
+
+    #[test]
+    fn a_two_sample_delay_change_does_not_reduce_echo() {
+        // Near the top of the sweep band, the old delay grid can prefer a sidelobe.
+        let played = sweep_between(1600.0, 2900.0);
+        let raw = delayed(&played, 1732, 0.25);
+        let processed = delayed(&played, 1734, 0.25);
+        let reduction = measure(&played, &raw, Some(&processed))
+            .unwrap()
+            .reduction
+            .unwrap();
+        assert!(reduction.db.abs() < 0.01, "{reduction:?}");
+        assert!(!reduction.lower_bound);
+    }
+
+    #[test]
+    fn a_short_tone_crossing_the_sweep_does_not_count_as_echo() {
+        let played = sweep();
+        let mut capture = vec![SILENCE; played.len()];
+        let tone_len = (SAMPLE_RATE * 20 / 1000) as usize;
+        let start = (capture.as_flattened().len() - tone_len) / 2;
+        for (i, sample) in capture.as_flattened_mut()[start..start + tone_len]
+            .iter_mut()
+            .enumerate()
+        {
+            *sample = 0.08 * (TAU * 1400.0 * i as f32 / SAMPLE_RATE as f32).sin();
+        }
+
+        assert_eq!(measure(&played, &capture, None), None);
     }
 
     #[test]
