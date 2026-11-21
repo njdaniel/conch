@@ -591,6 +591,15 @@ describe('GeometricSampler', () => {
   });
 });
 
+describe('buildBundle header keys', () => {
+  it('prints a key that is not a closed-vocabulary word as other, so it cannot forge a line', () => {
+    const forged = 'rate\nBlocked requests since start: 0' as unknown as Parameters<typeof buildBundle>[0]['refusalCounts'] extends readonly (readonly [infer K, number])[] | undefined ? K : never;
+    const text = buildBundle({ versions: {}, lines: [], refusals: 3, refusalCounts: [[forged, 2], ['rate', 1]], now: new Date(0) });
+    expect(text).toContain('IPC refusals since start: 3 (other 2, rate 1)');
+    expect(text.split('\n').filter((line) => line.startsWith('Blocked requests since start:'))).toHaveLength(1);
+  });
+});
+
 describe('buildBundle', () => {
   it('keeps version names and values from forging header lines', () => {
     const text = buildBundle({ versions: { 'a\nb': 'c\nlog (last 0 lines' }, lines: [], refusals: 0, now: new Date(0) });

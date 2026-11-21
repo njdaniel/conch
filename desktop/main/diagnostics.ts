@@ -194,9 +194,16 @@ export interface BundleInput {
   readonly now: Date;
 }
 
+// A header key is a closed-vocabulary word (a refusal reason, a feed kind
+// and event): lower-case words and digits. The types keep it closed; this is
+// the second wall, since the header is not scrubbed: anything else prints as
+// 'other', so a key can never carry a newline or text (#2108 review).
+const HEADER_KEY = /^[a-z][a-z0-9 _-]{0,47}$/u;
+
 function countSummary(counts: readonly (readonly [Refusal | FeedDiagnosticKey, number])[], total: number): string {
   const ordered = [...counts].sort(([a, n], [b, m]) => m - n || a.localeCompare(b));
-  return ordered.length === 0 ? String(total) : `${String(total)} (${ordered.map(([key, count]) => `${key} ${String(count)}`).join(', ')})`;
+  const word = (key: string): string => (HEADER_KEY.test(key) ? key : 'other');
+  return ordered.length === 0 ? String(total) : `${String(total)} (${ordered.map(([key, count]) => `${word(key)} ${String(count)}`).join(', ')})`;
 }
 
 // buildBundle is the text the person sees and may save. If the lines make it
