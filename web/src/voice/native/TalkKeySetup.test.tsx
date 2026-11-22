@@ -132,6 +132,31 @@ describe('TalkKeySetup', () => {
     expect(screen.queryByText(/Press the key/)).toBeNull();
   });
 
+  it('Shift+Tab leaves automatic capture without binding Shift', async () => {
+    await open();
+    accept();
+    const target = screen.getByRole('button', { name: 'Cancel' });
+    target.focus();
+    fireEvent.keyDown(target, { code: 'ShiftLeft', shiftKey: true });
+    const tab = new KeyboardEvent('keydown', { code: 'Tab', shiftKey: true, bubbles: true, cancelable: true });
+    fireEvent(target, tab);
+    fireEvent.keyUp(target, { code: 'ShiftLeft' });
+    expect(tab.defaultPrevented).toBe(false);
+    expect(screen.getByText('none chosen')).toBeTruthy();
+    expect(screen.queryByText(/Press the key/)).toBeNull();
+  });
+
+  it('binds Shift when pressed and released on its own', async () => {
+    const f = await open();
+    accept();
+    fireEvent.keyDown(window, { code: 'ShiftRight', shiftKey: true });
+    expect(screen.getByText('none chosen')).toBeTruthy();
+    fireEvent.keyUp(window, { code: 'ShiftRight' });
+    expect(screen.getByText('Right Shift', { selector: 'bdi' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => { expect(f.saveTalkBinding).toHaveBeenCalledWith({ deviceId: 'k1', code: 54 }); });
+  });
+
   it('captures Mouse 4, and the first buttons stay clicks', async () => {
     await open();
     accept();

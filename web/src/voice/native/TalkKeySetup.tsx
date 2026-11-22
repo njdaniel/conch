@@ -143,7 +143,9 @@ export function TalkKeySetup({
   // The capture: listeners exist only while capturing.
   useEffect(() => {
     if (!capturing) return;
+    let pendingShift: string | null = null;
     const take = (next: EvdevKey) => {
+      pendingShift = null;
       setKey(next);
       setRefused(false);
       setCapturing(false);
@@ -152,12 +154,19 @@ export function TalkKeySetup({
     const onKey = (e: KeyboardEvent) => {
       // Leave the capture without consuming keyboard navigation.
       if (e.code === 'Tab' || e.target instanceof HTMLSelectElement) {
+        pendingShift = null;
         setCapturing(false);
         return;
       }
       e.preventDefault();
       e.stopPropagation();
       if (e.repeat) return;
+      // Wait for Shift to be released so Shift+Tab can move focus.
+      if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
+        pendingShift = e.code;
+        return;
+      }
+      pendingShift = null;
       if (e.code === 'Escape') {
         setCapturing(false);
         return;
@@ -165,6 +174,11 @@ export function TalkKeySetup({
       const found = keyForCode(e.code);
       if (found === null) setRefused(true);
       else take(found);
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.code !== pendingShift) return;
+      const found = keyForCode(e.code);
+      if (found !== null) take(found);
     };
     const onMouse = (e: MouseEvent) => {
       // The first three buttons are the click itself and stay a click.
@@ -175,9 +189,11 @@ export function TalkKeySetup({
       take(found);
     };
     window.addEventListener('keydown', onKey, true);
+    window.addEventListener('keyup', onKeyUp, true);
     window.addEventListener('mousedown', onMouse, true);
     return () => {
       window.removeEventListener('keydown', onKey, true);
+      window.removeEventListener('keyup', onKeyUp, true);
       window.removeEventListener('mousedown', onMouse, true);
     };
   }, [capturing]);
