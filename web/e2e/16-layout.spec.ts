@@ -9,7 +9,7 @@ import type { BrowserContextOptions, Locator, Page, WebSocketRoute } from '@play
 import { voicePresenceV2, type VoicePresenceV2 } from '../src/schema/voice';
 import { channelButton, drawDesktopStrip, expect, expectFits, mainNav, messages, openChannel, phoneSizes, showView, signIn, statusLine, test } from './fixtures';
 import { runV1 } from '../src/schema/run';
-import { openSession } from './api';
+import { attach, openSession } from './api';
 import { call, ok, type World } from './world';
 
 const sizes: readonly (readonly [string, BrowserContextOptions])[] = [
@@ -722,4 +722,80 @@ test('P1980 under the desktop app\'s strip the "Checking your sign-in" card is a
   await expect(page.locator('#root > .desktop-bar'), 'the strip is still drawn over the form').toHaveCount(1);
   const form = await boxOf(card, 'the sign-in form');
   expect(Math.abs(checking.width - form.width), `the checking card is ${String(checking.width)} px wide, the form ${String(form.width)} px`).toBeLessThanOrEqual(1);
+});
+
+test('scrolling an image-heavy desktop chat keeps the composer in place', async ({ meet, secrets, world }) => {
+  const channel = `composer-${Date.now().toString(36)}`;
+  await must(world, world.tokens.operator, 'POST', '/v0/channels', { name: channel });
+  const me = await member(world, channel, `${channel}-member`);
+  secrets.push(me.token);
+  const { page } = await meet({ viewport: { width: 1215, height: 900 } });
+  const image = await page.evaluate(async () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 320;
+    canvas.height = 560;
+    const context = canvas.getContext('2d');
+    if (context === null) throw new Error('no canvas for the fixture image');
+    context.fillStyle = '#168953';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    const png = await new Promise<Blob | null>((resolve) => {
+      canvas.toBlob(resolve, 'image/png');
+    });
+    if (png === null) throw new Error('no fixture image');
+    return Array.from(new Uint8Array(await png.arrayBuffer()));
+  });
+  const bytes = new Uint8Array(image);
+  for (let i = 0; i < 6; i++) {
+    await attach(world, me.token, channel, `Attachment ${String(i)}`, [{ filename: `sample-${String(i)}.png`, mediaType: 'image/png', bytes }]);
+  }
+  await servePresence(page, world, me.token, channel, []);
+  await signIn(page, world, me.token, me.name);
+  await openChannel(page, channel);
+  await drawDesktopStrip(page);
+
+  const log = messages(page);
+  const composer = page.locator('.composer');
+  const dock = page.locator('.dock');
+  await expect(log.getByRole('button', { name: 'Enlarge sample-5.png' })).toBeVisible();
+
+  for (const height of [900, 560]) {
+    await page.setViewportSize({ width: 1215, height });
+    await log.evaluate((element) => {
+      window.scrollTo(0, 0);
+      element.scrollTop = element.scrollHeight;
+    });
+    const maximum = await log.evaluate((element) => element.scrollHeight - element.clientHeight);
+    expect(maximum).toBeGreaterThan(0);
+    if (height === 560) {
+      expect(await page.evaluate(() => document.documentElement.scrollHeight)).toBeGreaterThan(height);
+    }
+    const before = await boxOf(composer, 'the composer before scrolling');
+    const transcript = await boxOf(log, 'the transcript');
+    await page.mouse.move(transcript.x + 40, transcript.y + 30);
+    await page.mouse.wheel(0, -200);
+    await expect.poll(() => log.evaluate((element) => element.scrollTop)).toBeLessThan(maximum - 20);
+    await page.mouse.wheel(0, 2000);
+    await expect.poll(() => log.evaluate((element) => element.scrollTop)).toBeGreaterThanOrEqual(maximum - 1);
+
+    // Scroll past the end, allowing Chromium to apply a chained scroll if
+    // there is one. The short window has extra document space to scroll into.
+    await page.mouse.wheel(0, 2000);
+    await page.evaluate(() => new Promise<void>((resolve) => {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => { resolve(); });
+      });
+    }));
+    expect(await page.evaluate(() => window.scrollY)).toBe(0);
+    const after = await boxOf(composer, 'the composer after scrolling');
+    expect(after.y).toBeCloseTo(before.y, 0);
+    expect(after.y + after.height).toBeCloseTo((await boxOf(dock, 'the voice dock')).y, 0);
+
+    if (height === 560) {
+      const header = await boxOf(page.locator('.topbar'), 'the top bar');
+      await page.mouse.move(header.x + 20, header.y + header.height / 2);
+      await page.mouse.wheel(0, 2000);
+      await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+      await expect(page.getByRole('textbox', { name: `Message #${channel}` })).toBeInViewport();
+    }
+  }
 });
