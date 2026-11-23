@@ -3294,10 +3294,24 @@ export async function reportVoiceTransmit(channel: string, state: VoiceTransmitS
 
 // Probe on HTTP first so an older server never receives a WebSocket upgrade
 // with a version it cannot serve. Only a validated v3 reply enables v3.
+//
+// v2 is chosen only on the one answer that says "this server is older": an
+// alpha.21 server refuses a schema value it does not know with 400
+// invalid_request (writeVoicePresenceSchemaInvalid), before it checks
+// anything else. A network error, a 5xx, a 429 or a malformed v3 body says
+// nothing about the server's version, and picking v2 on one would pin a
+// healthy v3 server's socket to v2 (no 480p or 1440p) until some other
+// reconnect. Those are handed back as the probe's own failure instead: the
+// Feed that calls this goes through its 1 s .. 30 s backoff and calls again,
+// which probes again, so a transient failure costs one wait and never a
+// downgrade, and it cannot hammer. A 401 comes back as 'unauthorized', which
+// authed has already signed out for and the Feed reports as such.
 export async function openVoiceSocket(channel: string, events: SocketEvents): Promise<ApiResult<FeedSocket>> {
-  const supported = await authed(call('voicePresence', { channel }, queryOf({ schema: voicePresenceV3Schema })), voicePresenceV3);
-  const schema = supported.ok ? voicePresenceV3Schema : voicePresenceV2Schema;
-  return connect('voice', 'voiceSocket', { channel, schema }, events);
+  const probe = await authed(call('voicePresence', { channel }, queryOf({ schema: voicePresenceV3Schema })), voicePresenceV3, true);
+  if (probe.ok) return connect('voice', 'voiceSocket', { channel, schema: voicePresenceV3Schema }, events);
+  const legacy = probe.failure === 'invalid' && probe.status === 400 && probe.code === 'invalid_request';
+  if (!legacy) return probe;
+  return connect('voice', 'voiceSocket', { channel, schema: voicePresenceV2Schema }, events);
 }
 
 // Voice occupancy (issue #596): how many are in each channel's voice, for
