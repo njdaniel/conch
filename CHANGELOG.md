@@ -12,7 +12,7 @@ release that Nick publishes.
 
 This pre-release updates the server, CLI and desktop together. Reload open browser tabs after upgrading to get the new web client.
 
-**Back up each server before upgrading from alpha.21.** The database moves from migration 49 to 55. Rolling back to alpha.21 restores the pre-upgrade snapshot. See [Upgrade and rollback](docs/deploy.md#11-upgrade-and-rollback).
+**Back up each server before upgrading from alpha.21.** The database moves from migration 49 to 55. Rolling back to alpha.21 restores the pre-upgrade snapshot. See [Upgrade and rollback](docs/deploy.md#11-upgrading-and-rolling-back).
 
 **Linux share sound is off by default again** (#1999). In alpha.21 it was on, and it captured the call itself: the other person heard their own voice through a screen share. Until the leak is fixed and the L-S6 echo test (#922) passes, a Linux share is silent unless the desktop is started with `CONCH_LINUX_SHARE_AUDIO=1`. **alpha.21 Linux desktop testers: don't share with sound,** or start the app with `CONCH_LINUX_SHARE_AUDIO=0`.
 
@@ -48,7 +48,7 @@ This pre-release updates the server, CLI and desktop together. Reload open brows
 
 - The x86_64 `.deb` remains a technical preview (#1603). See the [Linux desktop tester guide](docs/desktop/linux.md) for package verification.
 - The release includes key selection and the existing per-device Linux push-to-talk backend. Global push-to-talk on COSMIC still needs the hardware acceptance run (#1385). Native X11 push-to-talk is tracked in #1388.
-- Screen-share sound is experimental. The feedback and isolation checks are still pending (#922, #1999). The package's Linux screen share continues to use the desktop portal.
+- Screen-share sound stays off by default (see the note at the top) and is experimental when turned on. The feedback and isolation checks are still pending (#922, #1999). The package's Linux screen share continues to use the desktop portal.
 
 ## [0.1.0-alpha.21] - 2026-11-18
 
