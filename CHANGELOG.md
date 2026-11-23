@@ -8,21 +8,23 @@ release that Nick publishes.
 
 ## [Unreleased]
 
-## [0.1.0-alpha.22] - 2026-11-22
+## [0.1.0-alpha.22] - 2026-11-23
 
 This pre-release updates the server, CLI and desktop together. Reload open browser tabs after upgrading to get the new web client.
+
+**Back up each server before upgrading from alpha.21.** The database moves from migration 49 to 55. Rolling back to alpha.21 restores the pre-upgrade snapshot. See [Upgrade and rollback](docs/deploy.md#11-upgrade-and-rollback).
 
 **Linux share sound is off by default again** (#1999). In alpha.21 it was on, and it captured the call itself: the other person heard their own voice through a screen share. Until the leak is fixed and the L-S6 echo test (#922) passes, a Linux share is silent unless the desktop is started with `CONCH_LINUX_SHARE_AUDIO=1`. **alpha.21 Linux desktop testers: don't share with sound,** or start the app with `CONCH_LINUX_SHARE_AUDIO=0`.
 
 **Upgrade `conch` together with the server.** Authors can now remove their own messages (#1828). The new tombstone ("This message was removed by its author.") makes an older `conch` TUI or CLI drop its events connection and reconnect on every author removal, and label the message "removed by a moderator". History is unaffected.
 
-**Desktop voice: echo cancellation and noise suppression are on in the desktop app** (#186, #2002). On open mic with speakers, the other person no longer hears themselves, and room noise is suppressed. `audio.echo_cancellation = false` in `voice.toml` turns it off. The standalone helper and the TUI keep it off unless the file turns it on. How well it cancels on a given room and speakers is still to be measured by hand.
+**Desktop voice enables echo cancellation and noise suppression by default** (#186, #2002). `audio.echo_cancellation = false` in `voice.toml` turns it off. The standalone helper and the TUI keep it off unless the file turns it on. Physical room and speaker validation is pending.
 
 **The Windows installer is in the release** as an unsigned preview (#1991, #1996): `Conch-<version>-unsigned-preview-setup.exe`. Windows SmartScreen warns on first run. Screen sharing from Windows says it isn't available yet; watching a share works.
 
 ### Added
 - **Calendar dates in message history** (#2119) and **double-click a voice channel to join** (#2120) in the web and desktop clients.
-- **Local direct-message foundations** for signed-in members, with conversation routes, personal events and CLI/TUI commands (#2017–#2019, #2028, #2040). The server also adds private call invitations and the desktop helper's v4 control protocol, which can negotiate down with older clients (#2029, #2030, #2039).
+- **Local direct-message foundations** for signed-in members, with conversation routes, personal events and CLI/TUI commands (#2017–#2019, #2028, #2040). The server adds durable private-call invitation state and the repository adds v4 voice-control schema fixtures (#2029, #2030, #2039). Device ringing, answering, private-call media and helper v4 negotiation are still in development.
 - **Voice and share diagnostics** in the dock and an opt-in, redacted desktop diagnostics export with a preview before saving (#2082, #2084, #2088).
 - **An author removes their own message** (#1828). There's no time window. People and guests may; agents may not yet. A message carrying an approval or admin-action card stays moderator-only. Removal is soft: copies others already received are not recalled.
 - **An operator deletes a message through the AI admin door** (#1967): the approval-gated `remove_message` admin action, so Nick can remove a message from Claude Code.
