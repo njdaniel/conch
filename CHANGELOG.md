@@ -8,6 +8,10 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.22] - 2026-11-22
+
+This pre-release updates the server, CLI and desktop together. Reload open browser tabs after upgrading to get the new web client.
+
 **Linux share sound is off by default again** (#1999). In alpha.21 it was on, and it captured the call itself: the other person heard their own voice through a screen share. Until the leak is fixed and the L-S6 echo test (#922) passes, a Linux share is silent unless the desktop is started with `CONCH_LINUX_SHARE_AUDIO=1`. **alpha.21 Linux desktop testers: don't share with sound,** or start the app with `CONCH_LINUX_SHARE_AUDIO=0`.
 
 **Upgrade `conch` together with the server.** Authors can now remove their own messages (#1828). The new tombstone ("This message was removed by its author.") makes an older `conch` TUI or CLI drop its events connection and reconnect on every author removal, and label the message "removed by a moderator". History is unaffected.
@@ -17,6 +21,9 @@ release that Nick publishes.
 **The Windows installer is in the release** as an unsigned preview (#1991, #1996): `Conch-<version>-unsigned-preview-setup.exe`. Windows SmartScreen warns on first run. Screen sharing from Windows says it isn't available yet; watching a share works.
 
 ### Added
+- **Calendar dates in message history** (#2119) and **double-click a voice channel to join** (#2120) in the web and desktop clients.
+- **Local direct-message foundations** for signed-in members, with conversation routes, personal events and CLI/TUI commands (#2017–#2019, #2028, #2040). The server also adds private call invitations and the desktop helper's v4 control protocol, which can negotiate down with older clients (#2029, #2030, #2039).
+- **Voice and share diagnostics** in the dock and an opt-in, redacted desktop diagnostics export with a preview before saving (#2082, #2084, #2088).
 - **An author removes their own message** (#1828). There's no time window. People and guests may; agents may not yet. A message carrying an approval or admin-action card stays moderator-only. Removal is soft: copies others already received are not recalled.
 - **An operator deletes a message through the AI admin door** (#1967): the approval-gated `remove_message` admin action, so Nick can remove a message from Claude Code.
 - **A mute key on the desktop** (#2056): set it in Voice options beside the talk key. It toggles mute in voice, does nothing outside voice, and can only mute, never unmute, while the screen is locked, during suspend or when lock status is unknown.
@@ -24,12 +31,22 @@ release that Nick publishes.
 - **Desktop sounds** (#1924): the optional message and call sounds now play in the desktop app too (`media-src 'self'` only).
 
 ### Fixed
+- **Reply and Add reaction** are in the message context menu (#2121). Member invites explain which channel the invite grants access to (#2118), and sign-in fields work better with password managers (#2077).
+- **Linux Talk Key setup** starts by asking for the desired key or mouse button. Device instructions appear after selection when access is needed. Shift+Tab moves focus without selecting Shift (#2129).
+- **Desktop screen-share video** uses separate LiveKit publishing and subscribing connections to avoid a VP8 negotiation collision (#2055).
+- **Rust URL parsing dependency** updated for [RUSTSEC-2026-0592](https://rustsec.org/advisories/RUSTSEC-2026-0592) (#2135).
 - **The desktop's open microphone no longer chatters on room noise** (#2001): it needs 40 ms of sound to open, closes 4 dB lower than it opens, holds 800 ms between words, and fades instead of cutting. Defaults: threshold −34 dBFS (was −40), hang 800 ms (was 400). Mute still cuts at once.
 - **Choosing Open microphone during a desktop call is saved,** and choosing push-to-talk with the arrow keys works (#1993).
 - **Windows screen share** says why a connection can't be made instead of waiting forever, and Share says it isn't available yet (#1992).
 - **Windows polish** (#1994): the invite card comes into view and takes focus only when nothing else has it; "this app" wording in desktop Settings; the window remembers being maximized; the firewall prompts are documented for testers.
 - **Windows desktop** (#1978–#1980): `conch://invite/?` links parse; Windows-specific wording; under the desktop strip the lobby takes what's left of the window.
 - **MCP image posts** (#1849): one large-request slot per agent and a stricter probe on repeated keys.
+
+### Linux desktop app
+
+- The x86_64 `.deb` remains a technical preview (#1603). See the [Linux desktop tester guide](docs/desktop/linux.md) for package verification.
+- The release includes key selection and the existing per-device Linux push-to-talk backend. Global push-to-talk on COSMIC still needs the hardware acceptance run (#1385). Native X11 push-to-talk is tracked in #1388.
+- Screen-share sound is experimental. The feedback and isolation checks are still pending (#922, #1999). The package's Linux screen share continues to use the desktop portal.
 
 ## [0.1.0-alpha.21] - 2026-11-18
 
