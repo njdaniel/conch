@@ -56,7 +56,11 @@ export const UNLISTED_VERSION = 'v9.9.9-unlisted';
 
 export const WEB_DIST = join(repo, 'web', 'dist');
 
-export async function startConchd(options: { readonly web?: boolean; readonly version?: string } = {}): Promise<Disposable> {
+export async function startConchd(options: {
+  readonly web?: boolean;
+  readonly version?: string;
+  readonly maxUploadBytes?: number;
+} = {}): Promise<Disposable> {
   if (options.web === true && !existsSync(join(WEB_DIST, 'index.html'))) {
     throw new Error(`${WEB_DIST} has no browser build; run make web-build first`);
   }
@@ -70,7 +74,10 @@ export async function startConchd(options: { readonly web?: boolean; readonly ve
   const origin = `http://127.0.0.1:${String(port)}`;
   const child: ChildProcess = spawn(binary, ['serve', '--data', data, '--listen', `127.0.0.1:${String(port)}`, '--auth', 'required', ...(options.web === true ? ['--web-dir', WEB_DIST] : ['--no-web']), '--test-relax-invite-limits'], {
     stdio: 'ignore',
-    env: { PATH: process.env['PATH'] ?? '' },
+    env: {
+      PATH: process.env['PATH'] ?? '',
+      ...(options.maxUploadBytes === undefined ? {} : { CONCHD_MAX_UPLOAD_BYTES: String(options.maxUploadBytes) }),
+    },
   });
 
   const api: Disposable['api'] = async (token, method, path, body) => {

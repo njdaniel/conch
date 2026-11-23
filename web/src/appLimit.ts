@@ -6,3 +6,7 @@
 export const DESKTOP_UNAVAILABLE = 'desktop_unavailable';
 
 export const desktopUnavailableLine = 'The desktop app can’t do this yet.';
+
+// The desktop bounds the bytes it reads and passes through IPC. A server
+// can enforce a lower limit when it receives an upload.
+export const DESKTOP_UPLOAD_MAX_BYTES = 20 * 1024 * 1024;

@@ -10,6 +10,7 @@
 // main/files.ts with a stubbed dialog and a real temporary directory.
 import { chromium, expect, test, type Browser, type Page } from '@playwright/test';
 
+import { DESKTOP_UPLOAD_MAX_BYTES } from '../../../web/src/appLimit.ts';
 import { startConchd, type Disposable } from './conchd.ts';
 import { launch, livePage, type Launched } from './launch.ts';
 
@@ -47,7 +48,7 @@ test.describe('attachments, links and the clipboard in the packaged app', () => 
 
   test.beforeAll(async () => {
     test.setTimeout(240_000);
-    server = await startConchd();
+    server = await startConchd({ maxUploadBytes: 20 * 1024 * 1024 });
     app = launch({ debugPort: true });
     ({ browser, page } = await attach(app));
     await page.getByLabel('Server address').fill(server.origin);
@@ -88,6 +89,23 @@ test.describe('attachments, links and the clipboard in the packaged app', () => 
     expect(await invoke(page, 'downloadFile', 999_999)).toMatchObject({ kind: 'reply', status: 404 });
   });
 
+  test('sends a 12 MiB attachment when the server accepts it', async () => {
+    const filename = 'large-attachment.bin';
+    const message = 'a large attachment from the desktop smoke';
+    await page.getByLabel('Choose files').setInputFiles({
+      name: filename,
+      mimeType: 'application/octet-stream',
+      buffer: Buffer.alloc(12 * 1024 * 1024, 17),
+    });
+    await expect(page.getByRole('list', { name: 'Files to send' }).getByText(filename)).toBeVisible();
+    await page.getByLabel('Message #general').fill(message);
+    await page.getByRole('button', { name: 'Send', exact: true }).click();
+    await expect(page.getByRole('log', { name: 'Messages' }).getByText(message)).toBeVisible();
+    const stored = (await server.api(server.member.token, 'GET', '/v2/channels/general/messages')).body as { messages: { body: string; payload?: { data?: { file_ids?: number[] } } }[] };
+    const sent = stored.messages.find((m) => m.body === message);
+    expect(sent?.payload?.data?.file_ids).toHaveLength(1);
+  });
+
   test('refuses a save that no click of the person’s asked for, and a save that names a path', async () => {
     // The earlier tests clicked; wait out the window in which a save is allowed.
     await page.waitForTimeout(2_500);
@@ -100,7 +118,7 @@ test.describe('attachments, links and the clipboard in the packaged app', () => 
   });
 
   test('refuses an upload past the cap or with a path or URL in it, without sending it', async () => {
-    const big = Buffer.alloc(10 * 1024 * 1024 + 1).toString('base64');
+    const big = Buffer.alloc(DESKTOP_UPLOAD_MAX_BYTES + 1).toString('base64');
     expect(await invoke(page, 'uploadFile', { channel: 'general', filename: 'big.bin', mediaType: 'application/octet-stream', data: big })).toBe('rejected: refused');
     expect(await invoke(page, 'uploadFile', { channel: '../v1/credentials', filename: 'a', mediaType: 'x/y', data: '' })).toBe('rejected: refused');
     expect(await invoke(page, 'uploadFile', { url: 'https://example.com/', channel: 'general', filename: 'a', mediaType: 'x/y', data: '' })).toBe('rejected: refused');
