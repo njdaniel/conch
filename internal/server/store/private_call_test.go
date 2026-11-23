@@ -365,6 +365,170 @@ func TestPrivateCallRepeatLimitCountsUndeliveredAndExpiredInvites(t *testing.T) 
 	}
 }
 
+// ringAndCancel is one probe cycle: the caller rings, then cancels at once.
+func (f *privateCallFixture) ringAndCancel(action string) PrivateCallResult {
+	f.t.Helper()
+	out := f.invite(1, f.a, "invite-"+action)
+	if out.Code != "" {
+		return out
+	}
+	if out.Call.State != schema.PrivateCallStateRinging {
+		f.t.Fatalf("invite %s: %+v", action, out)
+	}
+	if got := f.act(out.Call, f.a, schema.PrivateCallEventCancel, "cancel-"+action); got.Call.State != schema.PrivateCallStateCancelled {
+		f.t.Fatalf("cancel %s: %+v", action, got)
+	}
+	return out
+}
+
+// ringAndRevoke rings, then blocks the caller so the next sweep ends the ring
+// as cancelled by a revocation, and lifts the block again.
+func (f *privateCallFixture) ringAndRevoke(action string) {
+	f.t.Helper()
+	ctx := context.Background()
+	out := f.invite(1, f.a, "invite-"+action)
+	if out.Call.State != schema.PrivateCallStateRinging {
+		f.t.Fatalf("invite %s: %+v", action, out)
+	}
+	if _, err := f.s.db.ExecContext(ctx, "INSERT INTO blocks VALUES (?, ?, ?)",
+		f.b.PrincipalID, f.a.PrincipalID, f.now.UnixMilli()); err != nil {
+		f.t.Fatal(err)
+	}
+	f.sweep()
+	if _, err := f.s.db.ExecContext(ctx, "DELETE FROM blocks"); err != nil {
+		f.t.Fatal(err)
+	}
+	got := f.stored(out.Call.ID)
+	if got.State != schema.PrivateCallStateCancelled || got.lastEvent != schema.PrivateCallEventRevoked {
+		f.t.Fatalf("revoked ring %s: %s by %q", action, got.State, got.lastEvent)
+	}
+}
+
+func TestPrivateCallRepeatLimitCountsCallerCancelledRings(t *testing.T) {
+	// The security review's probe of #2058: ring, cancel, wait 20 s, again.
+	f := newPrivateCallFixture(t, openTestStore(t))
+	start := f.now
+	const window = 10 * time.Minute
+	for i := 0; i < 12; i++ {
+		out := f.ringAndCancel(fmt.Sprint(i))
+		if i < 3 {
+			if !out.Created || out.Code != "" {
+				t.Fatalf("cycle %d within the limit: %+v", i, out)
+			}
+		} else {
+			// The third most recent counted attempt (cycle 0) ended at start.
+			want := window - f.now.Sub(start)
+			if out.Code != schema.ErrorCodeRateLimited || out.Call.ID != "" || out.RetryAfter != want {
+				t.Fatalf("cycle %d past the limit: %+v, want rate_limited after %s", i, out, want)
+			}
+		}
+		f.now = f.now.Add(20 * time.Second)
+	}
+	// Once the oldest counted cancel leaves the window the caller may ring again.
+	f.now = start.Add(window + time.Millisecond)
+	if out := f.invite(1, f.a, "after-window"); !out.Created || out.Call.State != schema.PrivateCallStateRinging {
+		t.Fatalf("invite after the window: %+v", out)
+	}
+}
+
+func TestPrivateCallRepeatLimitIgnoresRevokedRings(t *testing.T) {
+	f := newPrivateCallFixture(t, openTestStore(t))
+	for i := 0; i < 5; i++ {
+		f.ringAndRevoke(fmt.Sprint(i))
+		f.now = f.now.Add(time.Second)
+	}
+	if out := f.invite(1, f.a, "after-revoked"); !out.Created || out.Code != "" || out.Call.State != schema.PrivateCallStateRinging {
+		t.Fatalf("invite after five revoked rings: %+v", out)
+	}
+}
+
+func TestPrivateCallRepeatLimitCountsOutcomesTogether(t *testing.T) {
+	outcomes := map[string]func(f *privateCallFixture, n string){
+		"cancel": func(f *privateCallFixture, n string) { f.ringAndCancel(n) },
+		"decline": func(f *privateCallFixture, n string) {
+			call := f.invite(1, f.a, "invite-"+n).Call
+			if got := f.act(call, f.b, schema.PrivateCallEventDecline, "decline-"+n); got.Call.State != schema.PrivateCallStateDeclined {
+				f.t.Fatalf("decline: %+v", got)
+			}
+		},
+		"missed": func(f *privateCallFixture, n string) {
+			call := f.invite(1, f.a, "invite-"+n).Call
+			f.now = call.RingDeadline.Time()
+			f.sweep()
+			if got := f.stored(call.ID); got.State != schema.PrivateCallStateMissed {
+				f.t.Fatalf("missed: %s", got.State)
+			}
+		},
+		"unavailable": func(f *privateCallFixture, n string) {
+			ctx := context.Background()
+			if _, err := f.s.db.ExecContext(ctx, "INSERT INTO blocks VALUES (?, ?, ?)",
+				f.b.PrincipalID, f.a.PrincipalID, f.now.UnixMilli()); err != nil {
+				f.t.Fatal(err)
+			}
+			if out := f.invite(1, f.a, "invite-"+n); out.Call.State != schema.PrivateCallStateUnavailable {
+				f.t.Fatalf("unavailable: %+v", out)
+			}
+			if _, err := f.s.db.ExecContext(ctx, "DELETE FROM blocks"); err != nil {
+				f.t.Fatal(err)
+			}
+		},
+	}
+	for _, tc := range []struct {
+		name  string
+		steps []string
+		limit bool
+	}{
+		{"three cancels", []string{"cancel", "cancel", "cancel"}, true},
+		{"two cancels", []string{"cancel", "cancel"}, false},
+		{"three declines", []string{"decline", "decline", "decline"}, true},
+		{"three missed", []string{"missed", "missed", "missed"}, true},
+		{"three unavailable", []string{"unavailable", "unavailable", "unavailable"}, true},
+		{"cancel decline missed", []string{"cancel", "decline", "missed"}, true},
+		{"unavailable cancel decline", []string{"unavailable", "cancel", "decline"}, true},
+		{"missed cancel unavailable", []string{"missed", "cancel", "unavailable"}, true},
+		{"two mixed", []string{"decline", "cancel"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newPrivateCallFixture(t, openTestStore(t))
+			var first time.Time
+			for i, step := range tc.steps {
+				outcomes[step](f, fmt.Sprint(i))
+				if i == 0 {
+					first = f.now
+				}
+				f.now = f.now.Add(time.Second)
+			}
+			out := f.invite(1, f.a, "next")
+			if !tc.limit {
+				if !out.Created || out.Code != "" {
+					t.Fatalf("invite below the limit: %+v", out)
+				}
+				return
+			}
+			want := 10*time.Minute - f.now.Sub(first)
+			if out.Code != schema.ErrorCodeRateLimited || out.Call.ID != "" || out.RetryAfter != want {
+				t.Fatalf("invite at the limit: %+v, want rate_limited after %s", out, want)
+			}
+		})
+	}
+}
+
+func TestPrivateCallRepeatLimitSkipsRetriesOfRecordedInvite(t *testing.T) {
+	f := newPrivateCallFixture(t, openTestStore(t))
+	var last PrivateCallResult
+	for i := 0; i < 3; i++ {
+		last = f.ringAndCancel(fmt.Sprint(i))
+		f.now = f.now.Add(time.Second)
+	}
+	if limited := f.invite(1, f.a, "new-action"); limited.Code != schema.ErrorCodeRateLimited {
+		t.Fatalf("a new invite at the limit: %+v", limited)
+	}
+	retry := f.invite(1, f.a, "invite-2")
+	if retry.Code != "" || !retry.Replayed || retry.Call.ID != last.Call.ID {
+		t.Fatalf("retry of a recorded invite: %+v, want replay of %s", retry, last.Call.ID)
+	}
+}
+
 func TestPrivateCallReconcileAfterReopen(t *testing.T) {
 	ctx := context.Background()
 	path := newTestDBPath(t)
@@ -542,11 +706,18 @@ func TestPrivateCallHistoryPageWithTiedTimestamps(t *testing.T) {
 	ctx := context.Background()
 	seen := make(map[string]bool, schema.MaxPrivateCallHistoryPage+1)
 	for i := 0; i <= schema.MaxPrivateCallHistoryPage; i++ {
-		call := f.invite(1, f.a, fmt.Sprintf("invite%d", i)).Call
-		if got := f.act(call, f.a, schema.PrivateCallEventCancel, fmt.Sprintf("cancel%d", i)); got.Call.State != schema.PrivateCallStateCancelled {
-			t.Fatalf("cancel: %+v", got)
+		// Caller-cancelled attempts count toward the repeat-invite limit
+		// (#2112), so a hundred of them at one instant cannot be made through
+		// InvitePrivateCall. Build the cancelled rows directly: the page
+		// walk below needs only their tied created_at.
+		id := fmt.Sprintf("tied-attempt-%03d", i)
+		if _, err := f.s.db.ExecContext(ctx, `INSERT INTO private_calls
+			(id, conversation_id, caller, callee, caller_credential, state, last_event, revision, created_at, ended_at)
+			VALUES (?, 1, ?, ?, ?, 'cancelled', 'cancel', 2, ?, ?)`,
+			id, f.a.PrincipalID, f.b.PrincipalID, f.a.CredentialID, f.now.UnixMilli(), f.now.UnixMilli()); err != nil {
+			t.Fatal(err)
 		}
-		seen[call.ID] = false
+		seen[id] = false
 	}
 	cursor := ""
 	for i, count := range []int{schema.MaxPrivateCallHistoryPage, 1} {

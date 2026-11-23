@@ -166,10 +166,12 @@ In-memory token buckets per principal, as every limit in conchd is (`internal/se
 | DM messages | burst 20, then 1 per 2 s | every send, across conversations |
 | DM edits | burst 10, then 1 per 6 s; plus the channel cap on revisions per message (409 `message_edit_limit_reached`, `internal/server/message_edit.go:38`) | every edit |
 | Call invites | burst 3, then 1 per 20 s | every invite, refused or `unavailable` included |
-| Repeat invites to one callee | 3 per 10 minutes per pair | invites that ended `unavailable`, `declined` or `missed` |
+| Repeat invites to one callee | 3 per 10 minutes per pair | invites that ended `unavailable`, `declined` or `missed`, and invites the caller cancelled (`last_event` `cancel`); a ring cancelled by a revocation (`revoked`) is not the caller's act and does not count |
 | Uploads | the existing upload limits | as for channels |
 
 Message body, file size and file count are the channel limits. #2018 may tune the values with a recorded reason here.
+
+Caller-cancelled rings count toward the repeat limit (#2112): the security review of #2058 probed 12 ring-then-cancel cycles 20 s apart and all answered 201, each holding the callee's one call slot and reopening a conversation they had hidden.
 
 ## 6. Revocation bounds
 
