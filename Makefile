@@ -225,6 +225,7 @@ p3-reset:
 # Not part of `build`: conchd and conch need no Node.
 web-build: web-node
 	cd web && npm ci --no-audit && npm run build
+	node scripts/pwa-manifest-check.mjs
 
 # Copies the build into internal/web/dist, which a conchd built with
 # -tags conchweb embeds. internal/web/dist is git-ignored. Not part of `build`.
