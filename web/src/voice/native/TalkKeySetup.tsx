@@ -1,17 +1,16 @@
 // The talk and mute key setup of the desktop app (#1382, #2056). Windows
 // dispatches to WindowsTalkKeySetup (#777), with no device grant or path.
-// On Linux, in this
-// order: what a read grant on a keyboard exposes (the person accepts it before
-// any device is shown); the key or Mouse 4 pressed in this window, or picked
-// from a list; any matching device choice or access instructions; then Save.
+// On Linux, capture a key or Mouse 4 in this window as soon as setup opens.
+// Show a device choice only when needed. The device-access instructions
+// explain what a read grant exposes before showing the user any rule.
 //
-// Capture: listeners exist only between "Set talk/mute key" and the first accepted
+// Capture: listeners exist only between opening capture and the first accepted
 // key, Escape or Cancel. The event's code is turned at once into an evdev
 // number and a name; the event itself is not kept, logged or passed on. Only
 // the number and the name outlive the capture. Rule text is rendered as text
 // and copied with services.copyText; nothing here executes it.
 import { WindowsTalkKeySetup } from './WindowsTalkKeySetup';
-import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { keyboardKeys, keyForCode, keyForMouseButton, mouseKeys, type EvdevKey } from '../../platform/desktop/evdev';
 import { updatePendingWords } from './words';
 import type { VoiceKeyDevice, VoiceKeyDevicesResult, VoiceOneShotError, VoiceTalkBindingResult } from '../../platform/desktop/bridge';
@@ -92,6 +91,30 @@ function Rule({ device }: { readonly device: VoiceKeyDevice }) {
   );
 }
 
+function DeviceAccess({ devices, disclosure }: {
+  readonly devices: readonly VoiceKeyDevice[];
+  readonly disclosure: readonly string[];
+}) {
+  const [first] = devices;
+  if (first === undefined) return null;
+  return (
+    <details>
+      <summary>Device access instructions</summary>
+      <div className="talk-disclosure">
+        {disclosure.map((line) => <p key={line}>{line}</p>)}
+      </div>
+      {devices.length === 1 ? <Rule device={first} /> : (
+        devices.map((device) => (
+          <details key={device.id}>
+            <summary><bdi>{device.name}</bdi></summary>
+            <Rule device={device} />
+          </details>
+        ))
+      )}
+    </details>
+  );
+}
+
 export function TalkKeySetup({
   source,
   joined,
@@ -109,10 +132,9 @@ export function TalkKeySetup({
 }) {
   const title = binding === 'mute' ? 'Mute key' : 'Talk key';
   const [listing, setListing] = useState<VoiceKeyDevicesResult | null>(null);
-  const [accepted, setAccepted] = useState(false);
   const [deviceId, setDeviceId] = useState<string | null>(null);
   const [key, setKey] = useState<EvdevKey | null>(null);
-  const [capturing, setCapturing] = useState(false);
+  const [capturing, setCapturing] = useState(true);
   const [refused, setRefused] = useState(false);
   const [saving, setSaving] = useState(false);
   const [outcome, setOutcome] = useState<string | null>(null);
@@ -140,9 +162,10 @@ export function TalkKeySetup({
     };
   }, [load]);
 
-  // The capture: listeners exist only while capturing.
-  useEffect(() => {
-    if (!capturing) return;
+  const canCapture = capturing && listing?.ok === true && listing.platform !== 'win32';
+  // Install the listeners before the capture prompt becomes visible.
+  useLayoutEffect(() => {
+    if (!canCapture) return;
     let pendingShift: string | null = null;
     const take = (next: EvdevKey) => {
       pendingShift = null;
@@ -196,11 +219,12 @@ export function TalkKeySetup({
       window.removeEventListener('keyup', onKeyUp, true);
       window.removeEventListener('mousedown', onMouse, true);
     };
-  }, [capturing]);
+  }, [canCapture]);
 
   const devices = listing !== null && listing.ok ? listing.devices : [];
   const matching = devices.filter((d) => d.kind === key?.kind);
   const readable = matching.filter((d) => d.readable);
+  const unreadable = matching.filter((d) => !d.readable);
   const device = (readable.length === 1 ? readable[0] : readable.find((d) => d.id === deviceId)) ?? null;
   const ready = device !== null && key !== null && !saving && !capturing;
 
@@ -255,19 +279,6 @@ export function TalkKeySetup({
       ) : null}
 
       {listing !== null && listing.ok ? (
-        <div className="talk-disclosure">
-          {listing.disclosure.map((line) => (
-            <p key={line}>{line}</p>
-          ))}
-          {accepted ? null : (
-            <button type="button" className="primary" onClick={() => { setAccepted(true); setCapturing(true); }}>
-              I understand
-            </button>
-          )}
-        </div>
-      ) : null}
-
-      {accepted && listing !== null && listing.ok ? (
         <>
           <div className="talk-binding">
             <p>
@@ -297,48 +308,31 @@ export function TalkKeySetup({
             {key === null || capturing ? null : (
               <>
                 {binding === 'mute' ? <p className="hint">The talk and mute keys use the same device.</p> : null}
-                {readable.length === 1 && device !== null
-                  ? (
-                    <>
-                      <p className="hint">Using <bdi>{device.name}</bdi>.</p>
-                      {matching.length <= 1 ? null : (
-                        <details>
-                          <summary>Other matching devices</summary>
-                          {matching.filter((d) => !d.readable).map((d) => <Rule key={d.id} device={d} />)}
-                        </details>
-                      )}
-                    </>
-                  )
-                  : (
-                    <fieldset className="talk-devices">
-                      <legend>{key.kind === 'mouse' ? 'Mouse' : 'Keyboard'}</legend>
-                      {readable.length === 0 ? (
-                        <p role="status" className="hint">
-                          Conch needs access to a {key.kind} to use this binding while another app is focused.
-                        </p>
-                      ) : null}
-                      {matching.map((d) => (
-                        <div key={d.id} className="talk-device">
-                          <label>
-                            <input
-                              type="radio"
-                              name="talk-device"
-                              checked={device?.id === d.id}
-                              disabled={!d.readable || saving}
-                              onChange={() => { setDeviceId(d.id); }}
-                            />{' '}
-                            <bdi>{d.name}</bdi>{d.readable ? null : ' (not readable)'}
-                          </label>
-                          {d.readable ? null : (
-                            <details>
-                              <summary>Device access instructions</summary>
-                              <Rule device={d} />
-                            </details>
-                          )}
-                        </div>
-                      ))}
-                    </fieldset>
-                  )}
+                {readable.length === 0 ? (
+                  <p role="status" className="hint">
+                    Conch needs access to a {key.kind} to use this binding while another app is focused.
+                    A read grant lets other apps you run read that device too.
+                  </p>
+                ) : null}
+                {readable.length === 1 && device !== null ? <p className="hint">Using <bdi>{device.name}</bdi>.</p> : null}
+                {readable.length > 1 ? (
+                  <fieldset className="talk-devices">
+                    <legend>{key.kind === 'mouse' ? 'Mouse' : 'Keyboard'}</legend>
+                    {readable.map((d) => (
+                      <label key={d.id} className="talk-device">
+                        <input
+                          type="radio"
+                          name="talk-device"
+                          checked={device?.id === d.id}
+                          disabled={saving}
+                          onChange={() => { setDeviceId(d.id); }}
+                        />{' '}
+                        <bdi>{d.name}</bdi>
+                      </label>
+                    ))}
+                  </fieldset>
+                ) : null}
+                <DeviceAccess devices={unreadable} disclosure={listing.disclosure} />
                 <button type="button" disabled={saving} onClick={load}>Check again</button>
               </>
             )}
