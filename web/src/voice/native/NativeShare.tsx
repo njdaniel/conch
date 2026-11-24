@@ -15,10 +15,10 @@ import { useContext, useRef, type ReactNode } from 'react';
 import { DesktopOS } from '../../platform/os';
 import { Glyph } from '../../Icons';
 import type { Person } from '../../useLiveChannel';
-import { companionDefaultQuality, companionQualities, companionQuality, shareQualityRefusedNote } from '../connection';
-import { cautionFor, estimateWords, resolutionWords } from '../ShareQualityMenu';
+import { companionDefaultQuality, companionQualityChoices, companionQuality, shareQualityRefusedNote } from '../connection';
+import { cautionFor, estimateWords, resolutionWords, shareResolutionChoices } from '../ShareQualityMenu';
 import { qualityLabel, sharers, type Sharer } from '../presence';
-import type { VoicePresenceV2 } from '../../schema/voice';
+import type { VoicePresence } from '../../schema/voice';
 import { ShareCaptureWarning, ShareReadout, ShareView } from '../ShareView';
 import { provisionalQuality, qualityLaterNote } from '../share';
 import { nameOf } from '../VoicePanel';
@@ -53,7 +53,6 @@ export function shareDisabledReason({ joined, shown, live }: { readonly joined: 
 const shareDescription = 'native-share-why';
 const cautionId = 'native-share-caution';
 const soundWhyId = 'native-share-sound-why';
-const resolutions = [...new Set(companionQualities.map((q) => q.resolution))];
 
 // ShareSoundToggle is the standing choice for the share's sound, shown before
 // the picker and during a share (issue #1854): "Share with sound", on by
@@ -176,12 +175,14 @@ export function ShareNotes({
   const soundReason = sound?.view.unavailable;
   const soundNote = sound?.note ?? null;
   const note = share.kind === 'idle' ? shareNote(share, state.companionRefusal, state.phase === 'stopped' ? state.why : null, state.companionShareUnavailable) : null;
-  const quality = companionQuality(state.shareQuality);
-  const rates = companionQualities.filter((q) => q.resolution === quality.resolution);
+  const quality = companionQuality(state.shareQuality, state.shareQualityV3);
+  const choices = companionQualityChoices(state.shareQualityV3);
+  const resolutions = shareResolutionChoices(state.shareQualityV3).filter((resolution) => resolution !== 'auto');
+  const rates = choices.filter((q) => q.resolution === quality.resolution);
   const chooseResolution = (resolution: string) => {
-    const choices = companionQualities.filter((q) => q.resolution === resolution);
-    const next = choices.find((q) => q.frameRate === quality.frameRate)
-      ?? choices.find((q) => q.frameRate === companionDefaultQuality.frameRate);
+    const rates = choices.filter((q) => q.resolution === resolution);
+    const next = rates.find((q) => q.frameRate === quality.frameRate)
+      ?? rates.find((q) => q.frameRate === companionDefaultQuality.frameRate);
     if (next !== undefined) void client.setShareQuality(next);
   };
   const caution = cautionFor(quality);
@@ -285,7 +286,7 @@ export function NativeStreams({
   live,
 }: {
   readonly companion: Companion;
-  readonly presence: VoicePresenceV2 | null;
+  readonly presence: VoicePresence | null;
   readonly viewer: number;
   readonly people: ReadonlyMap<number, Person>;
   // The channel voice is joined in, and whether the helper is connected.

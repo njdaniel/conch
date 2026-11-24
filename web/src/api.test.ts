@@ -32,6 +32,7 @@ import {
   onReauthRequired,
   onSignedOutElsewhere,
   openSocket,
+  openVoiceSocket,
   postMessage,
   previewInvite,
   reauth,
@@ -129,6 +130,102 @@ describe('openSocket', () => {
     const result = await openSocket('ops', 0, { onOpen: () => undefined, onFrame: () => undefined, onClose: () => undefined });
     expect(result).toEqual({ ok: false, failure: 'network' });
     expect(JSON.stringify(result)).not.toContain('conch_wst_T');
+  });
+});
+
+describe('openVoiceSocket', () => {
+  it.each(['v2', 'v3'] as const)('opens presence %s after checking server support', async (version) => {
+    await signedInFrom(window.localStorage, memberToken);
+    const schema = `conch.voice_presence.${version}`;
+    const calls = serve((call) => {
+      if (call.path === '/v1/ws-tickets') {
+        return json({ ticket: 'conch_wst_T', expires_at: '2026-10-14T10:00:00Z' }, 201);
+      }
+      if (version === 'v2') return json({ code: 'invalid_request', message: 'unsupported voice presence schema' }, 400);
+      return json({ schema, channel_id: 1, configured: false, available: false, rooms: [] });
+    });
+
+    let opened: URL | undefined;
+    vi.stubGlobal('WebSocket', vi.fn(function (url: string) {
+      opened = new URL(url);
+      return { close: vi.fn() };
+    }));
+    const result = await openVoiceSocket('red team', { onOpen: vi.fn(), onFrame: vi.fn(), onClose: vi.fn() });
+    expect(result.ok).toBe(true);
+    expect(calls.map(({ path }) => path)).toEqual([
+      '/v1/channels/red%20team/voice?schema=conch.voice_presence.v3',
+      '/v1/ws-tickets',
+    ]);
+    expect(opened?.searchParams.get('schema')).toBe(schema);
+  });
+});
+
+describe('openVoiceSocket when the probe fails', () => {
+  const ticket = () => json({ ticket: 'conch_wst_T', expires_at: '2026-10-14T10:00:00Z' }, 201);
+  const v3Body = { schema: 'conch.voice_presence.v3', channel_id: 1, configured: false, available: false, rooms: [] };
+  const open = () => openVoiceSocket('red team', { onOpen: vi.fn(), onFrame: vi.fn(), onClose: vi.fn() });
+  // opened records the schema of each WebSocket upgrade.
+  const stubSocket = (opened: string[]) =>
+    vi.stubGlobal('WebSocket', vi.fn(function (url: string) {
+      opened.push(new URL(url).searchParams.get('schema') ?? '');
+      return { close: vi.fn() };
+    }));
+
+  it('selects v2 on the legacy refusal alone', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const opened: string[] = [];
+    serve((c) => (c.path === '/v1/ws-tickets' ? ticket() : json({ code: 'invalid_request', message: 'schema must name a presence document' }, 400)));
+    stubSocket(opened);
+    expect((await open()).ok).toBe(true);
+    expect(opened).toEqual(['conch.voice_presence.v2']);
+  });
+
+  it.each([
+    { name: 'network failure', answer: () => Promise.reject(new TypeError('offline')), failure: 'network' },
+    { name: '500', answer: () => json({ code: 'internal', message: 'x' }, 500), failure: 'invalid' },
+    { name: '503', answer: () => json({ code: 'unavailable', message: 'x' }, 503), failure: 'invalid' },
+    { name: '429', answer: () => json({ code: 'rate_limited', message: 'x' }, 429), failure: 'invalid' },
+    { name: '400 with another code', answer: () => json({ code: 'forbidden', message: 'x' }, 400), failure: 'invalid' },
+    { name: 'malformed v3 body', answer: () => json({ schema: 'conch.voice_presence.v3' }), failure: 'invalid' },
+  ])('does not select v2 on $name, and opens no socket', async ({ answer, failure }) => {
+    await signedInFrom(window.localStorage, memberToken);
+    const opened: string[] = [];
+    const calls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      calls.push(typeof input === 'string' ? input : input instanceof URL ? input.pathname : input.url);
+      return Promise.resolve().then(answer);
+    }));
+    stubSocket(opened);
+    const result = await open();
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.failure).toBe(failure);
+    expect(opened).toEqual([]);
+    expect(calls.some((p) => p.includes('/ws-tickets'))).toBe(false);
+  });
+
+  it('ends on v3 when a re-probe succeeds after a transient failure', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const opened: string[] = [];
+    let probes = 0;
+    serve((c) => {
+      if (c.path === '/v1/ws-tickets') return ticket();
+      probes++;
+      return probes === 1 ? json({ code: 'unavailable', message: 'x' }, 503) : json(v3Body);
+    });
+    stubSocket(opened);
+    expect((await open()).ok).toBe(false);
+    expect((await open()).ok).toBe(true);
+    expect(opened).toEqual(['conch.voice_presence.v3']);
+  });
+
+  it('takes the unauthorized path on a 401', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const opened: string[] = [];
+    serve(() => json({ code: 'unauthorized', message: 'x' }, 401));
+    stubSocket(opened);
+    expect(await open()).toEqual({ ok: false, failure: 'unauthorized' });
+    expect(opened).toEqual([]);
+    expect(hasToken()).toBe(false);
   });
 });
 

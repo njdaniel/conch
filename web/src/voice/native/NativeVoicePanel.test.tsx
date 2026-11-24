@@ -7,7 +7,7 @@ import { setSoundAudience, sounds } from '../../sounds';
 import type { NativeVoiceHelper, NativeVoiceView } from '../../platform/desktop/bridge';
 import type { NativeVoice, NativeVoiceError, NativeVoiceOutcome } from '../../platform/types';
 import type { ChannelV0 } from '../../schema/channel';
-import type { VoicePresenceV2 } from '../../schema/voice';
+import type { VoicePresence, VoicePresenceV2 } from '../../schema/voice';
 import type { SocketEvents } from '../../state/feed';
 import type { Person } from '../../useLiveChannel';
 import * as sdk from '../sdk';
@@ -485,7 +485,7 @@ describe('NativeVoicePanel', () => {
   describe('share and watch (#1582)', () => {
     function companionOf(over: Partial<VoiceState> = {}) {
       const calls: string[] = [];
-      const presences: VoicePresenceV2[] = [];
+      const presences: VoicePresence[] = [];
       const outs: number[] = [];
       const state: VoiceState = { ...initialVoice, ...over };
       const client: CompanionClient = {

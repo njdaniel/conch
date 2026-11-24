@@ -185,8 +185,9 @@ var Vocabularies = map[string][]string{
 	),
 	// The sharer's declared resolution (issue #1483): the picker's three
 	// (#1488, web/src/voice/share.ts ShareResolution), exactly.
-	"VoiceShareResolution": values(VoiceShareResolution720p, VoiceShareResolution1080p, VoiceShareResolutionSource),
-	"VoiceTransmitState":   values(VoiceTransmitStateStarted, VoiceTransmitStateStopped),
+	"VoiceShareResolution":   values(VoiceShareResolution720p, VoiceShareResolution1080p, VoiceShareResolutionSource),
+	"VoiceShareResolutionV3": values(VoiceShareV3Resolution480p, VoiceShareV3Resolution720p, VoiceShareV3Resolution1080p, VoiceShareV3Resolution1440p, VoiceShareV3ResolutionSource),
+	"VoiceTransmitState":     values(VoiceTransmitStateStarted, VoiceTransmitStateStopped),
 
 	// Roles and permissions (ADR-014, issue #1012). Permission is in catalog
 	// order, the order of Permissions. Row 12, use_camera, is ADR-015's.

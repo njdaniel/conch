@@ -10,7 +10,7 @@ import { pageHiddenOnPhone } from '../phone';
 import { platform } from '../platform';
 import type { ChannelV0 } from '../schema/channel';
 import type { SocketCloseReason } from '../schema/generated';
-import type { VoicePresenceV2 } from '../schema/voice';
+import type { VoicePresence } from '../schema/voice';
 import { Feed, type FeedStatus } from '../state/feed';
 import type { Camera } from './camera';
 import { useChannelJoin } from './channelJoin';
@@ -270,7 +270,7 @@ export type Snapshot =
   | { readonly kind: 'unreachable' }
   | { readonly kind: 'not_allowed' }
   | { readonly kind: 'gone' }
-  | { readonly kind: 'presence'; readonly presence: VoicePresenceV2 };
+  | { readonly kind: 'presence'; readonly presence: VoicePresence };
 
 // How every voice route refuses a person whose invite did not grant voice
 // (schema.ErrorCodeVoiceNotAllowed).
@@ -357,6 +357,7 @@ export function useVoice({
       // The desktop's default is its own (Q-D4-3 on #1578), so there a choice
       // is passed only if one was made.
       shareQuality: platform.nativeVoice?.companion === undefined ? api.readShareQuality() : (api.keptShareQuality() ?? undefined),
+      keepShareQuality: api.writeShareQuality,
       outputSelection: canChooseOutput(),
       output: readOutput(),
       gate: { tail: readRelease() },
@@ -365,7 +366,6 @@ export function useVoice({
   }
   const client = clientRef.current;
   const state = useSyncExternalStore(client.subscribe, client.snapshot);
-  const keptShareQuality = useRef(state.shareQuality);
   const [talkKey, setKey] = useState(readKey);
   const [capturing, setCapturing] = useState(false);
   const [snapshot, setSnapshot] = useState<Snapshot>({ kind: 'loading' });
@@ -374,7 +374,7 @@ export function useVoice({
   // presence it last gave, for the effects beside the one that owns it.
   const feedRef = useRef<Feed | null>(null);
   const feedStatus = useRef<FeedStatus | null>(null);
-  const latest = useRef<VoicePresenceV2 | null>(null);
+  const latest = useRef<VoicePresence | null>(null);
   const joinedRef = useRef<string | null>(null);
   // Whether the feed is lost and not back: the server out of reach.
   const lost = useRef(false);
@@ -416,14 +416,6 @@ export function useVoice({
   useEffect(() => {
     writeCamera(state.cameraChoice);
   }, [state.cameraChoice]);
-
-  // The share quality is a local preference, not something sent to the room.
-  // Merely opening the page writes no default; only a new choice is stored.
-  useEffect(() => {
-    if (keptShareQuality.current === state.shareQuality) return;
-    keptShareQuality.current = state.shareQuality;
-    api.writeShareQuality(state.shareQuality);
-  }, [state.shareQuality]);
 
   // Every client of the page, for leaveVoice.
   useEffect(() => {
@@ -486,7 +478,7 @@ export function useVoice({
     let live = true;
     lost.current = false;
     setSnapshot({ kind: 'loading' });
-    const show = (presence: VoicePresenceV2) => {
+    const show = (presence: VoicePresence) => {
       const audience = soundAudience;
       if (joinedRef.current !== null && audience?.allows(presence.channel_id)) {
         voiceSounds(lost.current ? null : latest.current, presence, audience.me, (sound) => { sounds.play(sound); });
@@ -698,7 +690,7 @@ export function useVoice({
     note(channel);
     client.join(channel, { audio: meterAudio });
   }, [channel, client, note]);
-  const joinShortcut = useCallback((_presence: VoicePresenceV2, audio: AudioContext | null) => {
+  const joinShortcut = useCallback((_presence: VoicePresence, audio: AudioContext | null) => {
     join(audio);
   }, [join]);
   const viewed = channels.find((candidate) => candidate.name === channel);

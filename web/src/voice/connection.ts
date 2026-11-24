@@ -79,7 +79,7 @@
 // stops it and the share with it, in words.
 import type { CameraClaimResult, ShareClaimResult, TransmitAnswer, VoiceSessionResult, VoiceViewerResult } from '../api';
 import type { CompanionEndReason, CompanionGrantError, CompanionGrantResult, CompanionPageEnd, CompanionShareUnavailable } from '../platform/desktop/bridge';
-import type { VoicePresenceV2, VoiceTransmitState } from '../schema/voice';
+import { voicePresenceV3Schema, type VoicePresence, type VoiceTransmitState } from '../schema/voice';
 import type { Clock } from '../state/feed';
 import { CameraClient, cameraOff, cameraOn, findCamera, type Camera, type CameraLoss, type CameraProfile, type CameraRoom, type CameraState } from './camera';
 import { afterDisconnect, afterRefusal, afterViewerRefusal, cameraAfter, retryDelay, type DisconnectCause, type Next } from './disconnect';
@@ -87,7 +87,7 @@ import { clampTail, defaultTail, TransmitGate, type GateMode, type GateOptions }
 import type { DiagnosticsSource } from './stats';
 import { cameraHolders, occupants, personOf, principalOf, sharers } from './presence';
 import { ReportQueue, type ReportEvent } from './reports';
-import { autoFrameRate, defaultShareQuality, idleShare, qualityLaterNote, resumeLimit, ScreenShare, type ScreenEnd, type SettledQuality, type ShareDirection, type ShareQuality, type ShareRoom, type ShareSample, type ShareState } from './share';
+import { autoFrameRate, defaultShareQuality, extendedResolution, idleShare, qualityLaterNote, resumeLimit, ScreenShare, type ScreenEnd, type SettledQuality, type ShareDirection, type ShareQuality, type ShareRoom, type ShareSample, type ShareState } from './share';
 import { record } from '../diagnostics';
 
 // The names a browser gives the failures of a microphone it was asked for
@@ -380,6 +380,7 @@ export interface VoiceState {
   readonly shareCaptureStalled: boolean;
   // The capture and top-layer caps chosen by the sharer, kept locally.
   readonly shareQuality: ShareQuality;
+  readonly shareQualityV3: boolean;
   // Which shares this page watches by publisher, which one is focused (the
   // stage's, its layer left to adaptive stream), and which of each watched
   // share's tracks have arrived (#1509). focusedShare is always one of
@@ -490,6 +491,8 @@ export interface VoiceEnv {
   readonly mode?: ModeStore;
   // The share quality chosen earlier in this browser; default is 1080p30.
   readonly shareQuality?: ShareQuality;
+  // Keep a user choice even when an older server temporarily limits the UI.
+  readonly keepShareQuality?: (quality: ShareQuality) => void;
   // Whether the speakers may be chosen, and the output chosen earlier in
   // this tab, if any (issue #660).
   readonly outputSelection?: boolean;
@@ -564,8 +567,22 @@ export const companionQualities: readonly ShareQuality[] = [
   { resolution: 'source', frameRate: 30 },
   { resolution: 'source', frameRate: 60 },
 ];
-export function companionQuality(quality: ShareQuality): ShareQuality {
-  return companionQualities.find((q) => q.resolution === quality.resolution && q.frameRate === quality.frameRate) ?? companionDefaultQuality;
+const extendedCompanionQualities: readonly ShareQuality[] = [
+  { resolution: '480p', frameRate: 15 },
+  { resolution: '480p', frameRate: 30 },
+  { resolution: '480p', frameRate: 60 },
+  ...companionQualities,
+  { resolution: '1440p', frameRate: 15 },
+  { resolution: '1440p', frameRate: 30 },
+  { resolution: '1440p', frameRate: 60 },
+];
+
+export function companionQualityChoices(v3: boolean): readonly ShareQuality[] {
+  return v3 ? extendedCompanionQualities : companionQualities;
+}
+
+export function companionQuality(quality: ShareQuality, v3 = false): ShareQuality {
+  return companionQualityChoices(v3).find((q) => q.resolution === quality.resolution && q.frameRate === quality.frameRate) ?? companionDefaultQuality;
 }
 
 // Why no grant was given, in words (CompanionGrantError). The one table: the
@@ -686,6 +703,7 @@ export const initialVoice: VoiceState = {
   share: idleShare,
   shareCaptureStalled: false,
   shareQuality: defaultShareQuality,
+  shareQualityV3: false,
   watched: new Set(),
   focusedShare: null,
   streamTracks: new Map(),
@@ -733,6 +751,7 @@ export class VoiceClient {
   private readonly gate: TransmitGate;
   private readonly reports: ReportQueue;
   private state: VoiceState = initialVoice;
+  private preferredShareQuality: ShareQuality;
   private restartingShare = false;
   private listeners = new Set<() => void>();
   private room: Room | null = null;
@@ -830,10 +849,11 @@ export class VoiceClient {
     this.now = now;
     this.processing = env.processing ?? memoryStore();
     this.modes = env.mode ?? null;
+    this.preferredShareQuality = env.shareQuality ?? (env.companion === undefined ? defaultShareQuality : companionDefaultQuality);
     this.state = {
       ...initialVoice,
       mode: this.modes?.get() ?? initialVoice.mode,
-      shareQuality: env.companion === undefined ? (env.shareQuality ?? defaultShareQuality) : companionQuality(env.shareQuality ?? companionDefaultQuality),
+      shareQuality: this.availableShareQuality(this.preferredShareQuality, false),
       ...this.chosen(env.microphone ?? null),
       outputSelection: env.outputSelection === true,
       output: env.output ?? null,
@@ -947,7 +967,7 @@ export class VoiceClient {
       companion,
       companionRefusal: null,
       companionShareUnavailable: null,
-      ...(companion ? { shareQuality: companionQuality(this.state.shareQuality) } : {}),
+      ...(companion ? { shareQuality: companionQuality(this.state.shareQuality, this.state.shareQualityV3) } : {}),
       watched: new Set(),
       focusedShare: null,
       streamTracks: new Map(),
@@ -1308,6 +1328,12 @@ export class VoiceClient {
     });
   }
 
+  private availableShareQuality(asked: ShareQuality, v3: boolean): ShareQuality {
+    if (this.env.companion !== undefined) return companionQuality(asked, v3);
+    if (!v3 && extendedResolution(asked.resolution)) return { resolution: '1080p', frameRate: asked.frameRate };
+    return asked.resolution === 'auto' ? { resolution: 'auto', frameRate: autoFrameRate } : asked;
+  }
+
   // A quality choice applies to the next picker, and to a live capture and
   // its sender without ending the publication; once the capture has it, conchd
   // is told, for the others' label (share.ts changeQuality). The local choice
@@ -1321,7 +1347,9 @@ export class VoiceClient {
     // #1772); a choice outside them, Auto included, is its 720p30 default.
     // The browser's Auto is always 30 fps (Q10 on #1614), whatever rate was
     // left on the choice.
-    const quality = this.env.companion !== undefined ? companionQuality(asked) : asked.resolution === 'auto' ? { resolution: 'auto' as const, frameRate: autoFrameRate } : asked;
+    const quality = this.availableShareQuality(asked, this.state.shareQualityV3);
+    this.preferredShareQuality = quality;
+    this.env.keepShareQuality?.(quality);
     this.set({ shareQuality: quality });
     try {
       await this.room?.setShareQuality(quality);
@@ -1570,10 +1598,14 @@ export class VoiceClient {
     this.room?.attachStream(principal, sink);
   }
 
-  // presence is each v2 document the voice socket sends: every live sharer,
+  // presence is each negotiated document the voice socket sends: every live sharer,
   // whether this person still holds their own share, and, in this person's own
   // document alone, why the server ended their last share (#1509).
-  presence(p: VoicePresenceV2): void {
+  presence(p: VoicePresence): void {
+    const v3 = p.schema === voicePresenceV3Schema;
+    if (v3 !== this.state.shareQualityV3) {
+      this.set({ shareQualityV3: v3, shareQuality: this.availableShareQuality(this.preferredShareQuality, v3) });
+    }
     const streams = sharers(p);
     const mine = streams.some((s) => s.principal === this.me);
     this.share.presence(mine ? 'me' : streams.length === 0 ? 'none' : 'other', p.share_ended);

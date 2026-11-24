@@ -47,17 +47,12 @@ export function useCompanion(source: NativeVoice | undefined): Companion | null 
       newRoom: newLiveKitRoom,
       claimShare: api.claimVoiceShare,
       stopShare: api.stopVoiceShare,
+      keepShareQuality: api.writeShareQuality,
       shareQuality: api.keptShareQuality() ?? undefined,
     });
   }
   const client = ref.current;
   const state = useSyncExternalStore(client?.subscribe ?? never, client?.snapshot ?? (() => initialVoice));
-  const kept = useRef(state.shareQuality);
-  useEffect(() => {
-    if (kept.current === state.shareQuality) return;
-    kept.current = state.shareQuality;
-    api.writeShareQuality(state.shareQuality);
-  }, [state.shareQuality]);
   useEffect(
     () => () => {
       client?.dispose();

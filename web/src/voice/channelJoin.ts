@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useLayoutEffect, useRef, type RefObject } from 'react';
 import type { ChannelV0 } from '../schema/channel';
-import type { VoicePresenceV2 } from '../schema/voice';
+import type { VoicePresence } from '../schema/voice';
 import type { Snapshot } from './useVoice';
 
 export type ChannelJoinHandler = (channel: ChannelV0) => void;
@@ -26,7 +26,7 @@ export function useChannelJoin(
   channel: ChannelV0 | undefined,
   enabled: boolean,
   snapshot: Snapshot,
-  join: (presence: VoicePresenceV2, audio: AudioContext | null) => void,
+  join: (presence: VoicePresence, audio: AudioContext | null) => void,
   openAudio?: () => AudioContext | null,
 ) {
   const handler = useContext(ChannelJoin);

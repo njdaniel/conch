@@ -65,7 +65,7 @@ import { clampTail, maxTail, releasePage, releaseStep } from './gate';
 import { keyLabel, talkKeyForMouseButton } from './keys';
 import { occupants, qualityLabel, sharers, type Occupant } from './presence';
 import { endedNote, ownPageNote, resumedNote, resumingNote, sharedNote, shortShareNote, soundNote, type ShareFrameRate, type ShareResolution } from './share';
-import { ShareQualityMenu, autoNote, cautionFor, estimateWords, resolutionWords, shareFrameRates, shareResolutions } from './ShareQualityMenu';
+import { ShareQualityMenu, autoNote, cautionFor, estimateWords, resolutionWords, shareFrameRates, shareResolutionChoices } from './ShareQualityMenu';
 import { ShareCaptureWarning, ShareReadout, ShareView } from './ShareView';
 import { nobody, type InVoice } from './useOccupancy';
 import { VoiceDiagnostics } from './VoiceDiagnostics';
@@ -1455,7 +1455,7 @@ function Options({ voice, open, sharable, about, others, cameraAllowed }: {
                 void client.setShareQuality({ ...state.shareQuality, resolution });
               }}
             >
-              {shareResolutions.map((resolution) => (
+              {shareResolutionChoices(state.shareQualityV3).map((resolution) => (
                 <option key={resolution} value={resolution}>{resolutionWords[resolution]}</option>
               ))}
             </select>
@@ -1502,7 +1502,7 @@ function ShareButton({ voice }: { readonly voice: VoiceControl }) {
         <Glyph name="screen" />
         <span className="label">Share screen</span>
       </button>
-      <ShareQualityMenu quality={state.shareQuality} onChoose={(next) => { void client.setShareQuality(next); }} />
+      <ShareQualityMenu quality={state.shareQuality} v3={state.shareQualityV3} onChoose={(next) => { void client.setShareQuality(next); }} />
     </span>
   );
   return (
