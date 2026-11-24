@@ -465,6 +465,7 @@ function shareAsk(quality: ShareQuality): { readonly width: number; readonly hei
 }
 
 const shareTops: readonly { readonly longest: number; readonly maxBitrate: number }[] = [
+  { longest: 854, maxBitrate: 2_000_000 },
   { longest: 1920, maxBitrate: 6_000_000 },
   { longest: 2560, maxBitrate: 10_000_000 },
 ];

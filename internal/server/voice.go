@@ -260,8 +260,8 @@ func (s *Server) requireVoicePermission(w http.ResponseWriter, r *http.Request, 
 // (configured and available false, no rooms) rather than failing; only a
 // caller who passed the membership check sees that.
 //
-// ?schema= names the version (voicePresenceVersion): v1 by default, v2 on
-// request, 400 for anything else, decided before the channel is looked at.
+// ?schema= names the version (voicePresenceVersion): v1 by default, v1, v2
+// or v3 on request, 400 for anything else, decided before looking up the channel.
 func (s *Server) handleVoicePresence(w http.ResponseWriter, r *http.Request) {
 	version, ok := voicePresenceVersion(r.URL.Query())
 	if !ok {

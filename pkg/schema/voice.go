@@ -71,10 +71,15 @@ const VoicePresenceSchemaV2 = "conch.voice_presence.v2"
 
 // VoicePresenceSchemaParam is the optional query parameter of
 // GET /v1/channels/{channel}/voice and GET /v1/voice/ws naming the presence
-// version the caller reads: VoicePresenceSchemaV1 or VoicePresenceSchemaV2,
-// the same string the document carries in its schema field. Absent means v1.
-// Any other value is 400 invalid_request, read before the channel, so it says
-// nothing about the channel. The occupancy document takes no parameter.
+// version the caller reads: VoicePresenceSchemaV1, VoicePresenceSchemaV2 or
+// VoicePresenceSchemaV3, the same string the document carries in its schema
+// field. Absent means v1. It is also accepted by POST
+// /v1/channels/{channel}/voice/share, where v3 enables the extended quality
+// vocabulary for the claim body and answer. Any other value, or a repeated
+// value, is 400 invalid_request. Presence routes check it before looking up
+// the channel, so the refusal says nothing about the channel. The share claim
+// checks it after the caller and session. The occupancy document takes no
+// parameter.
 const VoicePresenceSchemaParam = "schema"
 
 // Error codes returned by the voice endpoints in Error.Code. The package

@@ -1241,6 +1241,8 @@ describe('a credential replaced while a call was out', () => {
   const at = '2026-10-31T12:00:00.000Z';
   const rotated = { credential: { id: 40, principal_id: 2, label: 'browser', created_at: at, renews: true }, token: rotatedToken, revoked: 1 };
   const changing = '/v1/password/mine';
+  const probing = '/v1/channels/ops/voice?schema=conch.voice_presence.v3';
+  const voicePresence = { schema: 'conch.voice_presence.v3', channel_id: 1, configured: false, available: false, rooms: [] };
 
   interface Later {
     readonly answer: Promise<Response>;
@@ -1292,6 +1294,7 @@ describe('a credential replaced while a call was out', () => {
       if (![memberToken, rotatedToken, otherMemberToken].some((t) => c.auth === `Bearer ${t}`)) return json({}, 401);
       if (c.path === '/v1/whoami') return json(c.auth === `Bearer ${otherMemberToken}` ? otherMember : member);
       if (c.path === '/v1/ws-tickets') return json({ ticket: 'conch_wst_T', expires_at: at }, 201);
+      if (c.path === probing) return json(voicePresence);
       if (c.path === '/v1/reauth') return json({ until: '2099-10-31T12:10:00.000Z' });
       if (c.path === uploading) return json(file, 201);
       if (c.path === '/v2/files/17') return new Response(new Uint8Array([1, 2, 3]));
@@ -1382,6 +1385,48 @@ describe('a credential replaced while a call was out', () => {
     opened[0]?.onclose?.({ code: 1008, reason: revokedClose });
     opened[1]?.onclose?.({ code: 1008, reason: revokedClose });
     expect(closes).toEqual([1006, 1006, 1008]);
+  });
+
+  function openVoice() {
+    vi.stubGlobal('WebSocket', vi.fn(function () {
+      return { close: vi.fn() };
+    }));
+    return openVoiceSocket('ops', { onOpen: vi.fn(), onFrame: vi.fn(), onClose: vi.fn() });
+  }
+
+  it('holds the voice presence probe until a password change answers', async () => {
+    const server = await signedInToChange();
+    const change = holding(server, 'PUT', changing, memberToken);
+    const changed = changePassword('the old one', 'a new one');
+    await sent(server, changing);
+    const opening = openVoice();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const probesWhileHeld = auths(server, probing);
+
+    change.give(json(rotated));
+    expect((await changed).ok).toBe(true);
+    expect((await opening).ok).toBe(true);
+    expect(probesWhileHeld).toEqual([]);
+    expect(auths(server, probing)).toEqual([`Bearer ${rotatedToken}`]);
+  });
+
+  it('holds the voice ticket when a password change starts during the presence probe', async () => {
+    const server = await signedInToChange();
+    const probe = holding(server, 'GET', probing, memberToken);
+    const opening = openVoice();
+    await sent(server, probing);
+    const change = holding(server, 'PUT', changing, memberToken);
+    const changed = changePassword('the old one', 'a new one');
+    await sent(server, changing);
+    probe.give(json(voicePresence));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const ticketsWhileHeld = auths(server, '/v1/ws-tickets');
+
+    change.give(json(rotated));
+    expect((await changed).ok).toBe(true);
+    expect((await opening).ok).toBe(true);
+    expect(ticketsWhileHeld).toEqual([]);
+    expect(auths(server, '/v1/ws-tickets')).toEqual([`Bearer ${rotatedToken}`]);
   });
 
   // A 1008 that means something else (the channel lost, the session ended)

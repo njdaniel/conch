@@ -867,7 +867,12 @@ export class VoiceClient {
     this.share = new ScreenShare(
       { claim: env.claimShare, release: env.stopShare },
       (share) => {
-        this.set({ share, ...(share.kind === 'idle' || share.kind === 'stopping' || share.kind === 'resuming' ? { shareCaptureStalled: false } : {}) });
+        // An upgrade seen during the last share applies to the next one.
+        this.set({
+          share,
+          ...(share.kind === 'idle' ? { shareQuality: this.availableShareQuality(this.preferredShareQuality, this.state.shareQualityV3) } : {}),
+          ...(share.kind === 'idle' || share.kind === 'stopping' || share.kind === 'resuming' ? { shareCaptureStalled: false } : {}),
+        });
         this.settleCompanion();
       },
       env.clock,
@@ -1329,8 +1334,13 @@ export class VoiceClient {
   }
 
   private availableShareQuality(asked: ShareQuality, v3: boolean): ShareQuality {
+    // An older server's quality vocabulary is shared by both platforms.
+    // An older server has no 480p or 1440p: fall back to the nearest it has
+    // at the chosen rate (480p to 720p, so the lightest stays the lightest),
+    // and then, on the desktop, to its own choices (companionQualities: no
+    // 720p60, Q-D4-3 on #1578), so 480p60 there is the desktop's 720p30.
+    if (!v3 && extendedResolution(asked.resolution)) asked = { resolution: asked.resolution === '480p' ? '720p' : '1080p', frameRate: asked.frameRate };
     if (this.env.companion !== undefined) return companionQuality(asked, v3);
-    if (!v3 && extendedResolution(asked.resolution)) return { resolution: '1080p', frameRate: asked.frameRate };
     return asked.resolution === 'auto' ? { resolution: 'auto', frameRate: autoFrameRate } : asked;
   }
 
@@ -1344,7 +1354,8 @@ export class VoiceClient {
     // choice, not this one); the note comes back only if this one fails too.
     if (this.state.why === shareQualityRefusedNote || this.state.why === qualityLaterNote) this.set({ why: null });
     // The desktop offers companionQualities only (Q-D4-3 on #1578, widened by
-    // #1772); a choice outside them, Auto included, is its 720p30 default.
+    // #1772), with the saved rate carried over for a server fallback. Other
+    // choices outside them, Auto included, use its 720p30 default.
     // The browser's Auto is always 30 fps (Q10 on #1614), whatever rate was
     // left on the choice.
     const quality = this.availableShareQuality(asked, this.state.shareQualityV3);
@@ -1598,17 +1609,27 @@ export class VoiceClient {
     this.room?.attachStream(principal, sink);
   }
 
-  // presence is each negotiated document the voice socket sends: every live sharer,
+  // presence is each negotiated document the voice socket sends, or the read
+  // after a 1008 close: every live sharer,
   // whether this person still holds their own share, and, in this person's own
   // document alone, why the server ended their last share (#1509).
   presence(p: VoicePresence): void {
-    const v3 = p.schema === voicePresenceV3Schema;
-    if (v3 !== this.state.shareQualityV3) {
-      this.set({ shareQualityV3: v3, shareQuality: this.availableShareQuality(this.preferredShareQuality, v3) });
-    }
     const streams = sharers(p);
     const mine = streams.some((s) => s.principal === this.me);
     this.share.presence(mine ? 'me' : streams.length === 0 ? 'none' : 'other', p.share_ended);
+
+    // Keep the negotiated quality during a live share. The 1008 follow-up
+    // read uses v2 on every server, so it can reconcile the roster and claim
+    // without tracking the socket's negotiated version in both readers.
+    const v3 = p.schema === voicePresenceV3Schema;
+    const share = this.state.share.kind;
+    const active = share !== 'idle' && share !== 'stopping';
+    if (v3 !== this.state.shareQualityV3 && (v3 || !active)) {
+      this.set({
+        shareQualityV3: v3,
+        ...(active ? {} : { shareQuality: this.availableShareQuality(this.preferredShareQuality, v3) }),
+      });
+    }
     // Why this person's camera claim ended, if it did; and who else holds
     // one, whose cameras alone are received.
     this.camera.presence(p.camera_ended);

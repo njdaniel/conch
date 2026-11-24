@@ -2601,6 +2601,7 @@ describe("a share's encodings", () => {
     { what: 'a 1920-wide strip', width: 1920, height: 400, bitrate: 6_000_000, lower: [{ ...p720, width: 1280, height: 266 }] },
     // Inside both boxes: no layer would be smaller, so none.
     { what: 'a small window', width: 1000, height: 700, bitrate: 6_000_000, lower: [] },
+    { what: 'a window within the 854 px cap', width: 800, height: 600, bitrate: 2_000_000, lower: [] },
   ])('$what capture ($width x $height at 60 fps)', ({ width, height, bitrate, lower }) => {
     expect(sourceEncodings({ width, height, frameRate: 60 })).toEqual({ top: { width, height, maxBitrate: bitrate, maxFramerate: 60 }, lower });
   });

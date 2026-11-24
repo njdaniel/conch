@@ -196,6 +196,28 @@ describe('what api.ts records', () => {
     ]);
     expectClean();
   });
+
+  it('records a voice reconnect after a failed presence probe', async () => {
+    await signIn();
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(null, { status: 503 }))
+      .mockResolvedValueOnce(json({ schema: 'conch.voice_presence.v3', channel_id: 1, configured: false, available: false, rooms: [] }))
+      .mockResolvedValueOnce(json({ ticket, expires_at: '2026-10-16T10:00:00Z' }, 201));
+    vi.stubGlobal('fetch', fetch);
+    const socket = { onopen: null as (() => void) | null, close: vi.fn() };
+    vi.stubGlobal('WebSocket', vi.fn(function () {
+      return socket;
+    }));
+    const events = { onOpen: vi.fn(), onFrame: vi.fn(), onClose: vi.fn() };
+    expect((await api.openVoiceSocket(channelName, events)).ok).toBe(false);
+    expect((await api.openVoiceSocket(channelName, events)).ok).toBe(true);
+    socket.onopen?.();
+    expect(timeless().filter(({ socket }) => socket === 'voice')).toEqual([
+      { kind: 'reconnect', socket: 'voice', attempt: 1 },
+      { kind: 'socket_open', socket: 'voice' },
+    ]);
+    expectClean();
+  });
 });
 
 // The ring belongs to one sign-in: every way a session ends empties it, so the
