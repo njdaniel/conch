@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Locator, Page } from '@playwright/test';
 import { drawDesktopStrip, expect, showView, test } from '../fixtures';
-import { enter, inbound, joinVoice, type Someone } from '../people';
+import { enter, inbound, joinVoice, leaveVoice, type Someone } from '../people';
 import { dockerAvailable, startVoiceWorld, type VoiceWorld } from '../voice-world';
 
 const out = process.env['CONCH_UI_OUT'] ?? fileURLToPath(new URL('../../test-results-ui/shots', import.meta.url));
@@ -171,10 +171,8 @@ test('capture the talk and stream flows', async ({ browser }, info) => {
       }
     }
 
-    if (joined.includes('alice') && await step('alice leaves voice', async () => {
-      await voice(alice.page).getByRole('button', { name: 'Leave voice' }).click();
-      await alice.page.waitForTimeout(1500);
-    })) {
+    // leaveVoice waits for Join voice to come back, so the shot is after the leave.
+    if (joined.includes('alice') && await step('alice leaves voice', async () => { await leaveVoice(alice); })) {
       const remain = joined.filter((x) => x !== 'alice');
       await shoot('after-leave', `alice left voice; ${remain.length === 0 ? 'nobody remains' : `${remain.join(' and ')} remain`}.`, ['alice', ...remain]);
     }
