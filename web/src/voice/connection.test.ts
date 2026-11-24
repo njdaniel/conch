@@ -858,6 +858,43 @@ describe('talking', () => {
     expect([...t.client.snapshot().speaking]).toEqual([3, 9]);
   });
 
+  it('never lists you as speaking unless you are sending (UI-talk-1)', async () => {
+    const t = await joined();
+    // Not transmitting: LiveKit's local level puts p7 in the set; others stay.
+    t.rooms[0]?.events?.onSpeakers([3, 7]);
+    expect([...t.client.snapshot().speaking]).toEqual([3]);
+    t.client.press();
+    await settle();
+    expect(t.client.snapshot().transmitting).toBe(true);
+    t.rooms[0]?.events?.onSpeakers([3, 7]);
+    expect([...t.client.snapshot().speaking]).toEqual([3, 7]);
+    // Mute while still in the set: gone at once, and a late update stays clean.
+    t.client.setMuted(true);
+    expect([...t.client.snapshot().speaking]).toEqual([3]);
+    t.rooms[0]?.events?.onSpeakers([3, 7]);
+    expect([...t.client.snapshot().speaking]).toEqual([3]);
+    t.client.setMuted(false);
+    expect([...t.client.snapshot().speaking]).toEqual([3]);
+    // Deafen and release clear it too.
+    t.client.press();
+    await settle();
+    t.rooms[0]?.events?.onSpeakers([3, 7]);
+    expect([...t.client.snapshot().speaking]).toEqual([3, 7]);
+    t.client.setDeafened(true);
+    expect([...t.client.snapshot().speaking]).toEqual([3]);
+    t.client.setDeafened(false);
+    t.client.release();
+    t.clock.advance(5000);
+    await settle();
+    t.client.press();
+    await settle();
+    t.rooms[0]?.events?.onSpeakers([7]);
+    t.client.release();
+    t.clock.advance(5000);
+    await settle();
+    expect([...t.client.snapshot().speaking]).toEqual([]);
+  });
+
   it('audio does not depend on a report that never answers: the track is open throughout', async () => {
     const t = await joined(setup([okSession()], [], 0, true));
     t.client.press();

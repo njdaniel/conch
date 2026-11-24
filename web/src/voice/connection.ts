@@ -1826,7 +1826,7 @@ export class VoiceClient {
   }
 
   setMuted(muted: boolean): void {
-    this.set({ muted });
+    this.set(muted ? { muted, speaking: this.withoutMe() } : { muted });
     this.applyBlock();
   }
 
@@ -1846,7 +1846,7 @@ export class VoiceClient {
 
   setDeafened(deafened: boolean): void {
     this.room?.setDeafened(deafened);
-    this.set({ deafened });
+    this.set(deafened ? { deafened, speaking: this.withoutMe() } : { deafened });
     this.applyBlock();
   }
 
@@ -1950,7 +1950,16 @@ export class VoiceClient {
     }
     // Transmitting begins once the track is unmuted (opened), and ends here,
     // with the mute.
-    this.set(open ? { talking: true } : { talking: false, transmitting: false });
+    // Your own chip goes with it: a stale speaker set must not outlive it.
+    this.set(open ? { talking: true } : { talking: false, transmitting: false, speaking: this.withoutMe() });
+  }
+
+  // withoutMe is the speaking set without this person: they are not heard
+  // while the gate is shut (muted, deafened, released, watching or listening).
+  private withoutMe(): ReadonlySet<number> {
+    const speaking = new Set(this.state.speaking);
+    if (this.me !== null) speaking.delete(this.me);
+    return speaking;
   }
 
   // opened unmutes the track at once and queues the `started` report to go
@@ -2198,7 +2207,9 @@ export class VoiceClient {
       },
       onSpeakers: (ids) => {
         if (mine !== this.attempt) return;
-        this.set({ speaking: new Set(ids) });
+        // LiveKit reports the local participant from its own microphone
+        // level, muted track or not: you are speaking only while sending.
+        this.set({ speaking: new Set(ids.filter((id) => id !== this.me || this.state.transmitting)) });
       },
       onScreenStalled: (stalled) => {
         if (mine !== this.attempt) return;
