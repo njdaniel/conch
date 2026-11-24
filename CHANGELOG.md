@@ -8,7 +8,7 @@ release that Nick publishes.
 
 ## [Unreleased]
 
-## [0.1.0-alpha.22] - 2026-11-23
+## [0.1.0-alpha.22] - 2026-11-24
 
 This pre-release updates the server, CLI and desktop together. Reload open browser tabs after upgrading to get the new web client. **Upgrade the desktop app with the server:** a packaged desktop accepts only the server release it was built for, so an alpha.21 desktop refuses an alpha.22 server, and the reverse.
 
