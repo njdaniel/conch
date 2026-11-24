@@ -869,3 +869,50 @@ for (const trigger of ['a pending send', 'a removed message'] as const) {
     expect(after.y + after.height).toBeCloseTo((await boxOf(page.locator('.dock'), 'the voice dock')).y, 0);
   });
 }
+
+// Issue #2168: the directory is inside the Channels scroller. A private
+// channel's visually hidden label used to escape its clip at the row's
+// unscrolled position and lengthen the document.
+test('P2168 a private channel at the end of a long list adds no stray scroll', async ({ meet, secrets, world }) => {
+  const tag = `p2168-${Date.now().toString(36)}`;
+  const channel = `zz-${tag}-private`;
+  const operator = world.tokens.operator;
+  for (let i = 0; i < 32; i++) {
+    await must(world, operator, 'POST', '/v1/channels', { name: `${tag}-${String(i)}`, visibility: 'public' });
+  }
+  await must(world, operator, 'POST', '/v1/channels', { name: channel, visibility: 'private' });
+  const me = await member(world, channel, `${tag}-member`);
+  secrets.push(me.token);
+
+  const viewports = [
+    ['1215×900', { viewport: { width: 1215, height: 900 } }],
+    phoneSizes[2],
+  ] as const;
+  for (const [size, options] of viewports) {
+    const { page } = await meet(options);
+    await signIn(page, world, me.token, me.name);
+    await showView(page, 'Channels');
+    await page.getByRole('button', { name: 'Browse channels' }).click();
+
+    const column = page.locator('.channels');
+    const directory = page.getByRole('region', { name: 'Channel directory' });
+    const last = directory.locator('.directory-row').last();
+    await expect(last.getByRole('button', { name: channel, exact: true })).toBeVisible();
+    await expect(last.locator('.private-mark .vh')).toHaveText('Private');
+    const { scrolled, trailingSpace } = await column.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+      const end = element.lastElementChild;
+      if (end === null) throw new Error('the channel column is empty');
+      const padding = Number.parseFloat(getComputedStyle(element).paddingBottom);
+      return {
+        scrolled: element.scrollTop,
+        trailingSpace: element.getBoundingClientRect().bottom - end.getBoundingClientRect().bottom - padding,
+      };
+    });
+    expect(scrolled, `${size}: the channel column scrolls`).toBeGreaterThan(0);
+    expect.soft(trailingSpace, `${size}: the column ends at its content`).toBeLessThanOrEqual(1);
+    const overflow = await page.evaluate(() => document.documentElement.scrollHeight - window.innerHeight);
+    expect.soft(overflow, `${size}: the document has no scroll of its own`).toBeLessThanOrEqual(1);
+    await expect.soft(last, `${size}: the private row is still in view at the end of the column`).toBeInViewport({ ratio: 1 });
+  }
+});
