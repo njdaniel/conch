@@ -287,6 +287,34 @@ describe('the voice options sheet and the lobby', () => {
     expect(outside().hasAttribute('inert')).toBe(false);
   });
 
+  // Re-authentication over Settings (issue #2189): whichever of the two goes
+  // first, focus ends up on something usable, never the body or an inert button.
+  it('re-authentication clearing over open Settings puts focus back in Settings', () => {
+    windowOf(true);
+    const { rerender } = render(lobbyTree(<Sheet open={false} />, null));
+    fireEvent.click(screen.getByRole('button', { name: /^Settings/ }));
+    rerender(lobbyTree(<Sheet open={false} />, null, reauth));
+    (document.activeElement as HTMLElement | null)?.blur();
+    expect(document.activeElement).toBe(document.body);
+    rerender(lobbyTree(<Sheet open={false} />, null));
+    expect(screen.getByRole('dialog', { name: 'Settings' })).toBeTruthy();
+    expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Settings' }));
+  });
+
+  it('Settings closing while re-authentication is up waits, and focus goes to the Settings button when it clears', () => {
+    windowOf(true);
+    const { rerender } = render(lobbyTree(<Sheet open={false} />, null));
+    const settings = screen.getByRole('button', { name: /^Settings/ });
+    fireEvent.click(settings);
+    rerender(lobbyTree(<Sheet open={false} />, null, reauth));
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Sign out' }), { key: 'Escape' });
+    expect(screen.queryByRole('dialog', { name: 'Settings' })).toBeNull();
+    // The button is still inert behind re-authentication: nothing was focused on it.
+    expect(document.activeElement).not.toBe(settings);
+    rerender(lobbyTree(<Sheet open={false} />, null));
+    expect(document.activeElement).toBe(settings);
+  });
+
   // The sheet, as VoicePanel does, takes focus into its Close when nothing is over it.
   function Focusing() {
     const { report, behind } = useContext(VoiceSheet);

@@ -349,12 +349,16 @@ export function Lobby({
   // Focus goes back to Settings once the panel has closed: until then the
   // button is inert behind it, and cannot take focus. Unless the voice options
   // sheet is open: it is modal, the button stays inert behind it, and focus
-  // goes back into the sheet.
+  // goes back into the sheet. Re-authentication is above Settings and makes it
+  // inert: while it is up nothing here moves focus (the restore waits), and
+  // when it clears focus goes to what is next, the Settings panel if it is
+  // still open, else the button Settings was opened from.
   const settingsClosed = useRef(false);
   useEffect(() => {
     if (settingsOpen) onSettingsOpen?.();
   }, [settingsOpen, onSettingsOpen]);
   useEffect(() => {
+    if (asking) return;
     if (settingsOpen) {
       if (toJoining.current) toJoining.current = false;
       else settingsHeading.current?.focus();
@@ -364,7 +368,7 @@ export function Lobby({
       // the sheet, which takes it (VoicePanel) now that nothing is over it.
       if (!sheetModal.current) settingsButton.current?.focus();
     }
-  }, [settingsOpen]);
+  }, [settingsOpen, asking]);
   useEffect(() => {
     if (membersOver) membersBody.current?.focus();
   }, [membersOver]);

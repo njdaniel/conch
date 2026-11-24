@@ -276,6 +276,9 @@ export function VoicePanel({
     };
   }, [voice]);
 
+  // What the lobby says of the sheet (VoiceSheet), read here for the press
+  // below and for the sheet's own handling after it.
+  const { report, blocked, behind } = useContext(VoiceSheet);
   // Voice options is a panel over the page (issue #2189): Escape closes it and
   // puts focus back on its button; a press outside it closes it. Escape while
   // the talk key is being chosen only cancels that, as Change talk key says.
@@ -294,6 +297,10 @@ export function VoicePanel({
       const at = e.target;
       if (!(at instanceof Node)) return;
       if (optionsPanel.current?.contains(at) === true || optionsButton.current?.contains(at) === true) return;
+      // Settings or re-authentication is over the panel (behind): a press on
+      // them, their Close and their backdrop among them, is theirs, and the
+      // panel stays open beneath, to take focus back when they go.
+      if (behind) return;
       setOptions(false);
     };
     document.addEventListener('keydown', onKey);
@@ -304,7 +311,7 @@ export function VoicePanel({
       document.removeEventListener('mousedown', onPress);
       document.removeEventListener('focusin', onFocus);
     };
-  }, [options, voice.capturing, closeOptions]);
+  }, [options, voice.capturing, closeOptions, behind]);
 
   useEffect(() => {
     if (options || !focusBack.current) return;
@@ -323,9 +330,7 @@ export function VoicePanel({
   // covers the conversation and not the strip's controls, which stay in the tab
   // order. Re-authentication outranks the sheet: it closes it, and (blocked) it
   // stays closed.
-  const link = useContext(VoiceSheet);
-  const covered = options && !strip && inVoice && sheet && !link.blocked;
-  const { report, blocked, behind } = link;
+  const covered = options && !strip && inVoice && sheet && !blocked;
   useEffect(() => {
     if (!covered) return;
     report(true);

@@ -705,6 +705,41 @@ it('Voice options takes focus back when what was over it goes', () => {
   }
 });
 
+// Issue #2189: Settings over the open sheet. A press on its Close or its
+// backdrop is Settings' own: the outside-press handler leaves the sheet open,
+// and focus goes back into it once Settings is gone.
+it('Voice options stays open under a press while Settings or re-authentication is over it', () => {
+  const voice = control(inVoice('connected', 'c'), [], { kind: 'presence', presence });
+  const drawn = (behind: boolean) => (
+    <VoiceSheet.Provider value={{ report: () => undefined, blocked: false, behind }}>
+      <VoicePanel voice={voice} viewer={7} people={new Map()} viewed="c" onOpen={() => undefined} />
+      <div className="backdrop" data-testid="backdrop" />
+      <button type="button">Settings Close</button>
+    </VoiceSheet.Provider>
+  );
+  const top = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0, toJSON: () => ({}) });
+  const height = vi.spyOn(document.documentElement, 'clientHeight', 'get').mockReturnValue(800);
+  try {
+    const { rerender } = render(drawn(false));
+    const button = screen.getByRole('button', { name: 'Voice options' });
+    fireEvent.click(button);
+    const close = document.querySelector<HTMLElement>('.voice-options-close');
+    rerender(drawn(true));
+    close?.blur();
+    fireEvent.mouseDown(screen.getByRole('button', { name: 'Settings Close' }));
+    fireEvent.mouseDown(screen.getByTestId('backdrop'));
+    expect(screen.getByRole('button', { name: 'Voice options' }).getAttribute('aria-expanded')).toBe('true');
+    rerender(drawn(false));
+    expect(document.activeElement).toBe(close);
+    // With nothing over it, a press outside closes it as before.
+    fireEvent.mouseDown(screen.getByTestId('backdrop'));
+    expect(screen.getByRole('button', { name: 'Voice options' }).getAttribute('aria-expanded')).toBe('false');
+  } finally {
+    top.mockRestore();
+    height.mockRestore();
+  }
+});
+
 // Issue #590 (F09, F20): Hold to talk works from the keyboard while it has
 // focus, the hint says where the talk key does not work, and Leave voice
 // hands focus to Join voice instead of dropping it.
