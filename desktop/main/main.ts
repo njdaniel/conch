@@ -6,7 +6,7 @@ import { registerScheme, start } from './app.ts';
 import { requireSafeChildProcessEnv } from './child-process-env.ts';
 
 async function launch(): Promise<void> {
-  requireSafeChildProcessEnv();
+  requireSafeChildProcessEnv(app.isPackaged);
   registerScheme();
   // Windows: the AppUserModelID, before any window or notification exists.
   applyAppUserModelId(app);

@@ -228,6 +228,29 @@ test.describe('remote debugging', () => {
   });
 });
 
+// Node debug output (#2105, #2155): the installed app refuses any NODE_DEBUG
+// before anything is spawned or read, since some categories print the voice
+// helper's credentials or what conchd answers.
+test.describe('Node debug output', () => {
+  test('NODE_DEBUG is refused by the packaged app before it starts', async () => {
+    const app = launch({ env: { NODE_DEBUG: 'stream' } });
+    try {
+      const done = await Promise.race([app.exited, new Promise<null>((r) => {
+        setTimeout(() => {
+          r(null);
+        }, 15_000);
+      }),
+      ]);
+      expect(done, 'the app kept running').not.toBeNull();
+      expect(done?.code).toBe(1);
+      expect(app.output()).toContain('The installed app does not run with Node debug output');
+      expect(app.output()).not.toMatch(/STREAM \d+:/);
+    } finally {
+      await app.stop();
+    }
+  });
+});
+
 test.describe('screen capture switches', () => {
   test('--disable-features=WebRTCPipeWireCapturer is refused, so one source cannot stand in for the portal pick', async () => {
     const app = launch({ args: ['--disable-features=Other,WebRTCPipeWireCapturer'] });
