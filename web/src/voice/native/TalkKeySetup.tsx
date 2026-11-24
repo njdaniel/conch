@@ -203,7 +203,10 @@ export function TalkKeySetup({
       const found = keyForCode(e.code);
       if (found !== null) take(found);
     };
+    // A blur or any click means a held Shift no longer stands alone.
+    const onBlur = () => { pendingShift = null; };
     const onMouse = (e: MouseEvent) => {
+      pendingShift = null;
       // The first three buttons are the click itself and stay a click.
       const found = keyForMouseButton(e.button);
       if (found === null) return;
@@ -214,7 +217,9 @@ export function TalkKeySetup({
     window.addEventListener('keydown', onKey, true);
     window.addEventListener('keyup', onKeyUp, true);
     window.addEventListener('mousedown', onMouse, true);
+    window.addEventListener('blur', onBlur);
     return () => {
+      window.removeEventListener('blur', onBlur);
       window.removeEventListener('keydown', onKey, true);
       window.removeEventListener('keyup', onKeyUp, true);
       window.removeEventListener('mousedown', onMouse, true);
@@ -295,7 +300,7 @@ export function TalkKeySetup({
             {refused ? <p role="status" className="hint">{binding === 'mute' ? "That key can't be used as a mute key." : cantUse}</p> : null}
             <label>
               Or pick one{' '}
-              <select value={key?.label ?? ''} disabled={saving} onChange={(e) => { pick(e.target.value); }}>
+              <select value={key?.label ?? ''} disabled={saving} onMouseDown={() => { setCapturing(false); }} onFocus={() => { setCapturing(false); }} onChange={(e) => { pick(e.target.value); }}>
                 <option value="">Choose a key…</option>
                 {mouseKeys().map((k) => (
                   <option key={k.label} value={k.label}>{k.label}</option>
@@ -308,7 +313,13 @@ export function TalkKeySetup({
             {key === null || capturing ? null : (
               <>
                 {binding === 'mute' ? <p className="hint">The talk and mute keys use the same device.</p> : null}
-                {readable.length === 0 ? (
+                {matching.length === 0 ? (
+                  <p role="status" className="hint">
+                    No {key.kind} was found that Conch can use, so this {key.kind === 'mouse' ? 'button' : 'key'} can't be set
+                    on this machine yet. There is no device to grant access to. Connect a {key.kind} and choose Check again.
+                  </p>
+                ) : null}
+                {matching.length > 0 && readable.length === 0 ? (
                   <p role="status" className="hint">
                     Conch needs access to a {key.kind} to use this binding while another app is focused.
                     A read grant lets other apps you run read that device too.

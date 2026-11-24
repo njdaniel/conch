@@ -240,4 +240,55 @@ describe('TalkKeySetup', () => {
     expect(key.defaultPrevented).toBe(false);
     expect(screen.getByText('none chosen')).toBeTruthy();
   });
+
+  it('says no device was found, with no access line, for a key and for a mouse button', async () => {
+    await open(fake({ ok: true, devices: [mouse], disclosure }));
+    press('CapsLock');
+    expect(screen.getByText(/No keyboard was found/)).toBeTruthy();
+    expect(screen.queryByText(/Conch needs access/)).toBeNull();
+    expect(screen.queryByText('Device access instructions')).toBeNull();
+    // With no device there is nothing to save the key against.
+    expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Save' }).disabled).toBe(true);
+    cleanup();
+    await open(fake({ ok: true, devices: [kbd], disclosure }));
+    fireEvent.mouseDown(window, { button: 4 });
+    expect(screen.getByText('Mouse 5', { selector: 'bdi' })).toBeTruthy();
+    expect(screen.getByText(/No mouse was found/)).toBeTruthy();
+    expect(screen.queryByText(/Conch needs access/)).toBeNull();
+  });
+
+  it('lists each unreadable device in its own details', async () => {
+    const other = { ...locked, id: 'k4', name: 'Other locked' };
+    await open(fake({ ok: true, devices: [locked, other], disclosure }));
+    press('CapsLock');
+    fireEvent.click(screen.getByText('Device access instructions'));
+    expect(screen.getAllByText('Locked board', { selector: 'summary bdi' })).toHaveLength(1);
+    fireEvent.click(screen.getByText('Other locked', { selector: 'summary bdi' }));
+    expect(screen.getAllByRole('button', { name: 'Copy rule' })).toHaveLength(2);
+  });
+
+  it('ends capture when the select is clicked or focused', async () => {
+    await open();
+    fireEvent.mouseDown(screen.getByRole('combobox'), { button: 0 });
+    expect(screen.queryByText(/Press the key/)).toBeNull();
+    press('CapsLock');
+    expect(screen.getByText('none chosen')).toBeTruthy();
+    cleanup();
+    await open();
+    fireEvent.focus(screen.getByRole('combobox'));
+    expect(screen.queryByText(/Press the key/)).toBeNull();
+  });
+
+  it('forgets a pending Shift on window blur and on a click', async () => {
+    await open();
+    fireEvent.keyDown(window, { code: 'ShiftLeft' });
+    fireEvent.blur(window);
+    fireEvent.keyUp(window, { code: 'ShiftLeft' });
+    expect(screen.getByText('none chosen')).toBeTruthy();
+    fireEvent.keyDown(window, { code: 'ShiftLeft' });
+    fireEvent.mouseDown(window, { button: 0 });
+    fireEvent.keyUp(window, { code: 'ShiftLeft' });
+    expect(screen.getByText('none chosen')).toBeTruthy();
+    expect(screen.getByText(/Press the key/)).toBeTruthy();
+  });
 });
