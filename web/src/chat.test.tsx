@@ -2160,7 +2160,7 @@ describe('scrolling', () => {
   });
 
   // A stand-in ResizeObserver (jsdom has none) that keeps what it watches and
-  // its callback, so a test can say when the log's height has changed.
+  // its callback, so a test can say when the log's size has changed.
   class FakeObserver {
     static all: FakeObserver[] = [];
     watched: Element[] = [];
@@ -2265,6 +2265,44 @@ describe('scrolling', () => {
     expect(geo.top).toBe(100);
     fireEvent.click(jump);
     expect(geo.top).toBe(1000);
+  });
+
+  it('re-pins a reader at the end on width-only changes and leaves a scrolled-up reader in place', async () => {
+    stubObserver();
+    const socket = await openChat();
+    await connect(socket);
+    const log = screen.getByRole('log');
+    const geo = { height: 1000, top: 700, client: 300, width: 320 };
+    geometry(log, geo);
+    Object.defineProperty(log, 'clientWidth', { configurable: true, get: () => geo.width });
+    resized(log);
+    geo.top = 700;
+    fireEvent.scroll(log);
+
+    // The log narrows at the same height. Chrome's scroll anchoring sends a
+    // scroll event after the messages re-wrap and before the observer runs.
+    geo.width = 305;
+    geo.height = 1180;
+    geo.top = 720;
+    fireEvent.scroll(log);
+    resized(log);
+    expect(geo.top).toBe(1180);
+
+    // Widening also re-pins. The mock records the scrollTop assignment before
+    // the browser's normal clamping.
+    geo.width = 320;
+    geo.height = 1000;
+    geo.top = 700;
+    fireEvent.scroll(log);
+    resized(log);
+    expect(geo.top).toBe(1000);
+
+    geo.top = 200;
+    fireEvent.scroll(log);
+    geo.width = 305;
+    geo.height = 1180;
+    resized(log);
+    expect(geo.top).toBe(200);
   });
 
   it('stops watching the log when the conversation goes', async () => {
