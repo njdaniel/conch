@@ -1602,6 +1602,15 @@ label {
 }
 
 .log {
+  /* The containing block of whatever its rows position absolutely: each
+     row's visually hidden ".vh" text, a continuation row's hidden header.
+     Without it those take .log-wrap as their containing block, escape this
+     scroller's clip at their unscrolled place, and give .centre thousands of
+     pixels of empty overflow: a second scrollbar, and a wheel over the
+     composer slides it away from the dock (issue #2133). A row with menu
+     actions is positioned itself; a pending, blocked or action-less row is
+     not. */
+  position: relative;
   flex: 1;
   /* Its messages never make the column taller: it scrolls instead. */
   contain: size;

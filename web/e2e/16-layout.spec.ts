@@ -724,12 +724,9 @@ test('P1980 under the desktop app\'s strip the "Checking your sign-in" card is a
   expect(Math.abs(checking.width - form.width), `the checking card is ${String(checking.width)} px wide, the form ${String(form.width)} px`).toBeLessThanOrEqual(1);
 });
 
-test('scrolling an image-heavy desktop chat keeps the composer in place', async ({ meet, secrets, world }) => {
-  const channel = `composer-${Date.now().toString(36)}`;
-  await must(world, world.tokens.operator, 'POST', '/v0/channels', { name: channel });
-  const me = await member(world, channel, `${channel}-member`);
-  secrets.push(me.token);
-  const { page } = await meet({ viewport: { width: 1215, height: 900 } });
+// A tall solid PNG, drawn in the page: an image attachment as the image-heavy
+// chats of issue #2133 have them.
+async function tallImage(page: Page): Promise<Uint8Array<ArrayBuffer>> {
   const image = await page.evaluate(async () => {
     const canvas = document.createElement('canvas');
     canvas.width = 320;
@@ -744,7 +741,16 @@ test('scrolling an image-heavy desktop chat keeps the composer in place', async 
     if (png === null) throw new Error('no fixture image');
     return Array.from(new Uint8Array(await png.arrayBuffer()));
   });
-  const bytes = new Uint8Array(image);
+  return new Uint8Array(image);
+}
+
+test('scrolling an image-heavy desktop chat keeps the composer in place', async ({ meet, secrets, world }) => {
+  const channel = `composer-${Date.now().toString(36)}`;
+  await must(world, world.tokens.operator, 'POST', '/v0/channels', { name: channel });
+  const me = await member(world, channel, `${channel}-member`);
+  secrets.push(me.token);
+  const { page } = await meet({ viewport: { width: 1215, height: 900 } });
+  const bytes = await tallImage(page);
   for (let i = 0; i < 6; i++) {
     await attach(world, me.token, channel, `Attachment ${String(i)}`, [{ filename: `sample-${String(i)}.png`, mediaType: 'image/png', bytes }]);
   }
@@ -798,4 +804,54 @@ test('scrolling an image-heavy desktop chat keeps the composer in place', async 
       await expect(page.getByRole('textbox', { name: `Message #${channel}` })).toBeInViewport();
     }
   }
+});
+
+// Issue #2133 at a normal desktop size. A row without menu actions (here a
+// send still pending, as one is while its images upload) is not positioned,
+// so its visually hidden text took .log-wrap as its containing block and sat
+// at its unscrolled place, outside the transcript's clip: .centre grew
+// thousands of pixels of empty overflow, a second scrollbar, and a wheel over
+// the composer slid it away from the dock. .log is now that containing block.
+test('a pending send in an image-heavy chat adds no scroll to the conversation column', async ({ meet, secrets, world }) => {
+  const channel = `pending-${Date.now().toString(36)}`;
+  await must(world, world.tokens.operator, 'POST', '/v0/channels', { name: channel });
+  const me = await member(world, channel, `${channel}-member`);
+  const other = await member(world, channel, `${channel}-other`);
+  secrets.push(me.token, other.token);
+  const { page } = await meet({ viewport: { width: 1215, height: 900 } });
+  const bytes = await tallImage(page);
+  for (let i = 0; i < 6; i++) {
+    await attach(world, other.token, channel, `Attachment ${String(i)}`, [{ filename: `sample-${String(i)}.png`, mediaType: 'image/png', bytes }]);
+  }
+  await servePresence(page, world, me.token, channel, []);
+  await signIn(page, world, me.token, me.name);
+  await openChannel(page, channel);
+  await drawDesktopStrip(page);
+  const log = messages(page);
+  await expect(log.getByRole('button', { name: 'Enlarge sample-5.png' })).toBeVisible();
+
+  // Hold the send, so its row stays pending.
+  await page.route('**/v2/channels/*/messages', (route) => (route.request().method() === 'POST' ? new Promise<void>(() => undefined) : route.fallback()));
+  await page.getByRole('textbox', { name: `Message #${channel}` }).fill('still sending');
+  await page.keyboard.press('Enter');
+  await expect(log.locator('.message.pending')).toHaveCount(1);
+  await log.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+
+  const centre = page.locator('.centre');
+  const overflow = () => centre.evaluate((element) => element.scrollHeight - element.clientHeight);
+  expect(await overflow(), 'the conversation column has no scroll of its own').toBeLessThanOrEqual(1);
+
+  const composer = page.locator('.composer');
+  const before = await boxOf(composer, 'the composer before the wheel');
+  await page.mouse.move(before.x + before.width / 2, before.y + 8);
+  await page.mouse.wheel(0, 3000);
+  await page.evaluate(() => new Promise<void>((resolve) => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => { resolve(); });
+    });
+  }));
+  expect(await centre.evaluate((element) => element.scrollTop)).toBe(0);
+  const after = await boxOf(composer, 'the composer after the wheel');
+  expect(after.y).toBeCloseTo(before.y, 0);
+  expect(after.y + after.height).toBeCloseTo((await boxOf(page.locator('.dock'), 'the voice dock')).y, 0);
 });
