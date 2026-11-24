@@ -1613,9 +1613,9 @@ export class VoiceClient {
   // after a 1008 close: every live sharer,
   // whether this person still holds their own share, and, in this person's own
   // document alone, why the server ended their last share (#1509).
-  // The read uses v2 even on a v3 server. Pass the last socket's schema when
-  // replaying its version alongside a read, or null to reconcile only.
-  presence(p: VoicePresence, socketSchema: VoicePresence['schema'] | null = p.schema): void {
+  // The read uses v2 even on a v3 server. Pass the socket schema for a frame
+  // or when replaying the last socket version, and null to reconcile only.
+  presence(p: VoicePresence, socketSchema: VoicePresence['schema'] | null): void {
     const streams = sharers(p);
     const mine = streams.some((s) => s.principal === this.me);
     this.share.presence(mine ? 'me' : streams.length === 0 ? 'none' : 'other', p.share_ended);

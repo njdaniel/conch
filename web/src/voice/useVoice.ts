@@ -375,7 +375,7 @@ export function useVoice({
   // A cached read carries the last socket schema for a later join.
   const feedRef = useRef<Feed | null>(null);
   const feedStatus = useRef<FeedStatus | null>(null);
-  const latest = useRef<{ readonly presence: VoicePresence; readonly socketSchema?: VoicePresence['schema'] | null } | null>(null);
+  const latest = useRef<{ readonly presence: VoicePresence; readonly socketSchema: VoicePresence['schema'] | null } | null>(null);
   const joinedRef = useRef<string | null>(null);
   // Whether the feed is lost and not back: the server out of reach.
   const lost = useRef(false);
@@ -480,19 +480,16 @@ export function useVoice({
     lost.current = false;
     setSnapshot({ kind: 'loading' });
     let socketSchema: VoicePresence['schema'] | null = null;
-    const show = (presence: VoicePresence, source: 'socket' | 'read') => {
+    const show = (presence: VoicePresence, frameSchema: VoicePresence['schema'] | null) => {
       const audience = soundAudience;
       if (joinedRef.current !== null && audience?.allows(presence.channel_id)) {
         voiceSounds(lost.current ? null : (latest.current?.presence ?? null), presence, audience.me, (sound) => { sounds.play(sound); });
       }
-      if (source === 'socket') socketSchema = presence.schema;
-      latest.current = source === 'socket' ? { presence } : { presence, socketSchema };
+      socketSchema = frameSchema ?? socketSchema;
+      latest.current = { presence, socketSchema };
       lost.current = false;
       setSnapshot({ kind: 'presence', presence });
-      if (joinedRef.current !== null) {
-        if (source === 'socket') client.presence(presence);
-        else client.presence(presence, null);
-      }
+      if (joinedRef.current !== null) client.presence(presence, frameSchema);
     };
     const set = (kind: 'not_allowed' | 'gone') => {
       latest.current = null;
@@ -532,7 +529,7 @@ export function useVoice({
       onFrame: (data) => {
         const presence = parsePresence(data);
         if (presence === null || !live) return;
-        show(presence, 'socket');
+        show(presence, presence.schema);
       },
       onStatus: (status: FeedStatus) => {
         if (!live) return;
@@ -562,7 +559,7 @@ export function useVoice({
       void api.getVoicePresence(named()).then((result) => {
         if (!live) return;
         if (result.ok) {
-          show(result.value, 'read');
+          show(result.value, null);
           feed.retryLater();
         } else if (result.failure === 'unauthorized') onUnauthorized();
         else set(result.code === voiceNotAllowed ? 'not_allowed' : 'gone');
@@ -591,8 +588,7 @@ export function useVoice({
       setSnapshot({ kind: 'unreachable' });
     } else if (joined !== null && latest.current !== null) {
       const { presence, socketSchema } = latest.current;
-      if (socketSchema === undefined) client.presence(presence);
-      else client.presence(presence, socketSchema);
+      client.presence(presence, socketSchema);
     }
   }, [joined, client]);
 
