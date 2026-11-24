@@ -53,7 +53,7 @@ test('capture the talk and stream flows', async ({ browser }, info) => {
   const failures: Failure[] = [];
   const { loadWorld } = await import('../world');
   const vw: VoiceWorld = await startVoiceWorld(loadWorld());
-  const people: { readonly name: string; readonly size: string; readonly p: Someone }[] = [];
+  const people: { readonly name: string; size: string; readonly p: Someone }[] = [];
   let n = 0;
 
   const shoot = async (step: string, note: string, only?: readonly string[]): Promise<void> => {
@@ -89,21 +89,26 @@ test('capture the talk and stream flows', async ({ browser }, info) => {
     const carol = await enter(browser, vw, vw.carol, { context: { viewport: { width: 1215, height: 900 } } });
     // Registered before anything else can fail, so cleanup always closes her.
     people.push({ name: 'carol', size: '1215×900 desktop layout', p: carol });
-    await step('carol draws the desktop strip', async () => { await drawDesktopStrip(carol.page); });
+    // Without the strip, carol is a plain browser at 1215, and is labelled so.
+    if (!await step('carol draws the desktop strip', async () => { await drawDesktopStrip(carol.page); })) {
+      const c = people.find((x) => x.name === 'carol');
+      if (c !== undefined) c.size = '1215×900 browser (desktop strip failed)';
+    }
     const nameOf = (who: Someone): string => people.find((x) => x.p === who)?.name ?? '?';
 
     await shoot('lobby', 'Signed in, channel open, nobody in voice.');
 
+    // Each person joins on their own, so one failure doesn't stop the others,
+    // and a shot only ever names people who reached its state.
+    const joined: string[] = [];
     if (flows.has('talk') || flows.has('stream')) {
-      // Each person joins on their own, so one failure doesn't stop the
-      // others, and only those who joined are shot as in voice.
-      const joined: string[] = [];
       for (const { name, p } of people) {
         if (await step(`${name} joins voice`, async () => { await joinVoice(p, 'Join voice'); })) joined.push(name);
       }
       await shoot('in-voice-idle', `In voice (${joined.join(', ')}), push to talk, nobody talking.`, joined);
-      await step('phone chat view in voice', async () => { await showView(bob.page, 'Chat'); });
-      await shoot('phone-chat-in-voice', 'Phone on the Chat view while in voice.', ['bob']);
+      if (joined.includes('bob') && await step('phone chat view in voice', async () => { await showView(bob.page, 'Chat'); })) {
+        await shoot('phone-chat-in-voice', 'Phone on the Chat view while in voice.', ['bob']);
+      }
       await step('phone back to voice view', async () => { await showView(bob.page, 'Voice'); });
     }
 
@@ -151,9 +156,12 @@ test('capture the talk and stream flows', async ({ browser }, info) => {
             await expect.poll(async () => (await inbound(who.page)).frames, { timeout: 30_000 }).toBeGreaterThan(10);
           })) watchers.push(name);
         }
-        await shoot('watching', `alice shares; ${watchers.length === 0 ? 'nobody is watching' : `${watchers.join(' and ')} watch`}.`, ['alice', ...watchers]);
-        await step('phone chat while watching', async () => { await showView(bob.page, 'Chat'); });
-        await shoot('phone-chat-while-watching', 'Phone on the Chat view while watching a share.', ['bob']);
+        if (watchers.length > 0) {
+          await shoot('watching', `alice shares; ${watchers.join(' and ')} watch.`, ['alice', ...watchers]);
+        }
+        if (watchers.includes('bob') && await step('phone chat while watching', async () => { await showView(bob.page, 'Chat'); })) {
+          await shoot('phone-chat-while-watching', 'Phone on the Chat view while watching a share.', ['bob']);
+        }
         await step('phone back to voice while watching', async () => { await showView(bob.page, 'Voice'); });
         await step('alice stops sharing', async () => {
           await voice(alice.page).getByRole('button', { name: /^Stop shar/ }).click();
@@ -163,11 +171,13 @@ test('capture the talk and stream flows', async ({ browser }, info) => {
       }
     }
 
-    await step('alice leaves voice', async () => {
+    if (joined.includes('alice') && await step('alice leaves voice', async () => {
       await voice(alice.page).getByRole('button', { name: 'Leave voice' }).click();
       await alice.page.waitForTimeout(1500);
-    });
-    await shoot('after-leave', 'alice left voice; bob and carol remain.');
+    })) {
+      const remain = joined.filter((x) => x !== 'alice');
+      await shoot('after-leave', `alice left voice; ${remain.length === 0 ? 'nobody remains' : `${remain.join(' and ')} remain`}.`, ['alice', ...remain]);
+    }
   } finally {
     // Teardown runs whatever happened above, the manifest write included, so
     // LiveKit and conchd are never left running.
