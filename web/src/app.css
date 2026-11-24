@@ -3087,7 +3087,9 @@ label {
      lets it extend outside the dock, which has its own scrollbar. */
   position: fixed;
   inset: 0;
-  z-index: 20;
+  /* Above the phone's sticky tab bar and the Voice options panel (both 20),
+     which come later in the page and would otherwise paint over it. */
+  z-index: 21;
   display: grid;
   align-content: start;
   gap: var(--s2);
