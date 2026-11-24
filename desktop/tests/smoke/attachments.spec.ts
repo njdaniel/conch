@@ -97,13 +97,17 @@ test.describe('attachments, links and the clipboard in the packaged app', () => 
       mimeType: 'application/octet-stream',
       buffer: Buffer.alloc(12 * 1024 * 1024, 17),
     });
-    await expect(page.getByRole('list', { name: 'Files to send' }).getByText(filename)).toBeVisible();
+    await expect(page.getByRole('list', { name: 'Files to send' }).getByText(filename, { exact: true })).toBeVisible();
     await page.getByLabel('Message #general').fill(message);
     await page.getByRole('button', { name: 'Send', exact: true }).click();
     await expect(page.getByRole('log', { name: 'Messages' }).getByText(message)).toBeVisible();
-    const stored = (await server.api(server.member.token, 'GET', '/v2/channels/general/messages')).body as { messages: { body: string; payload?: { data?: { file_ids?: number[] } } }[] };
-    const sent = stored.messages.find((m) => m.body === message);
-    expect(sent?.payload?.data?.file_ids).toHaveLength(1);
+    // The message shows as sending before the server has it: poll the API.
+    await expect
+      .poll(async () => {
+        const stored = (await server.api(server.member.token, 'GET', '/v2/channels/general/messages')).body as { messages: { body: string; payload?: { data?: { file_ids?: number[] } } }[] };
+        return stored.messages.find((m) => m.body === message)?.payload?.data?.file_ids?.length;
+      }, { timeout: 30_000 })
+      .toBe(1);
   });
 
   test('refuses a save that no click of the person’s asked for, and a save that names a path', async () => {
@@ -208,6 +212,42 @@ test.describe('a link opened with the keyboard', () => {
     } finally {
       await browser.close().catch(() => undefined);
       await app.stop();
+    }
+  });
+});
+
+// A server at the default 10 MiB limit answers 413 before it reads the body of
+// a file the desktop now sends (up to 20 MiB). The answer must reach the page
+// as a 413, not as a dropped connection ("Cannot reach the server").
+test.describe('an attachment past a default-limit server', () => {
+  test('is refused with the size line, and the file stays in the draft', async () => {
+    test.setTimeout(240_000);
+    const server = await startConchd();
+    const app = launch({ debugPort: true });
+    const { browser, page: first } = await attach(app);
+    try {
+      await first.getByLabel('Server address').fill(server.origin);
+      await first.getByRole('button', { name: 'Continue' }).click();
+      const page = await livePage(browser, first);
+      await page.getByLabel('Name', { exact: true }).fill(server.member.name);
+      await page.getByLabel('Password', { exact: true }).fill(server.member.password);
+      await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+      await expect(page.getByRole('heading', { name: 'general' })).toBeVisible();
+      const filename = 'too-large-for-default.bin';
+      await page.getByLabel('Choose files').setInputFiles({
+        name: filename,
+        mimeType: 'application/octet-stream',
+        buffer: Buffer.alloc(12 * 1024 * 1024, 17),
+      });
+      await page.getByLabel('Message #general').fill('refused by a default-limit server');
+      await page.getByRole('button', { name: 'Send', exact: true }).click();
+      await expect(page.getByText(`${filename} is too large: this server takes files up to`)).toBeVisible({ timeout: 60_000 });
+      await expect(page.getByText('Cannot reach the server')).toHaveCount(0);
+      await expect(page.getByRole('list', { name: 'Files to send' }).getByText(filename, { exact: true })).toBeVisible();
+    } finally {
+      await browser.close().catch(() => undefined);
+      await app.stop();
+      await server.stop();
     }
   });
 });
