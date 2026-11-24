@@ -15,6 +15,7 @@ import {
   fileAttachmentPayload,
   forgetStored,
   getFileMeta,
+  getVoicePresence,
   hasToken,
   keptShareQuality,
   readShareQuality,
@@ -130,6 +131,15 @@ describe('openSocket', () => {
     const result = await openSocket('ops', 0, { onOpen: () => undefined, onFrame: () => undefined, onClose: () => undefined });
     expect(result).toEqual({ ok: false, failure: 'network' });
     expect(JSON.stringify(result)).not.toContain('conch_wst_T');
+  });
+});
+
+describe('getVoicePresence', () => {
+  it.each([429, 503])('preserves HTTP %i on a failed presence read', async (status) => {
+    await signedInFrom(window.localStorage, memberToken);
+    const calls = serve(() => new Response(null, { status }));
+    expect(await getVoicePresence('red team')).toEqual({ ok: false, failure: 'invalid', status });
+    expect(calls.map(({ path }) => path)).toEqual(['/v1/channels/red%20team/voice?schema=conch.voice_presence.v2']);
   });
 });
 

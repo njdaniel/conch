@@ -101,8 +101,12 @@ afterEach(() => {
 
 async function frame(p: VoicePresence) {
   await waitFor(() => { expect(sockets.length).toBeGreaterThan(0); });
+  sendFrame(p);
+}
+
+function sendFrame(p: VoicePresence) {
   act(() => {
-    const s = sockets[sockets.length - 1];
+    const s = sockets.at(-1);
     s?.events.onOpen();
     s?.events.onFrame(JSON.stringify(p));
   });
@@ -135,10 +139,7 @@ describe('usePresence', () => {
     vi.mocked(api.getVoicePresence).mockResolvedValueOnce({ ok: true, value: read });
     const { result } = hook();
     const initial: VoicePresenceV3 = { ...presence([1, '2026-01-01T00:00:00Z']), schema: voicePresenceV3Schema };
-    act(() => {
-      sockets[0]?.events.onOpen();
-      sockets[0]?.events.onFrame(JSON.stringify(initial));
-    });
+    sendFrame(initial);
 
     await closeSocket(1008);
     expect(api.getVoicePresence).toHaveBeenCalledWith('general');
@@ -156,10 +157,7 @@ describe('usePresence', () => {
   it('shows unreachable and retries when the 1008 follow-up read gets no answer', async () => {
     vi.useFakeTimers();
     const { result } = hook();
-    act(() => {
-      sockets[0]?.events.onOpen();
-      sockets[0]?.events.onFrame(JSON.stringify(presence([1, '2026-01-01T00:00:00Z'])));
-    });
+    sendFrame(presence([1, '2026-01-01T00:00:00Z']));
 
     await closeSocket(1008);
     expect(api.getVoicePresence).toHaveBeenCalledWith('general');
@@ -167,6 +165,35 @@ describe('usePresence', () => {
     // The feed is not left dead: it tries again after the backoff.
     act(() => { vi.advanceTimersByTime(firstDelay); });
     expect(sockets).toHaveLength(2);
+  });
+
+  it.each([
+    { status: 503, refusal: 403, code: 'voice_not_allowed', kind: 'not_allowed' },
+    { status: 429, refusal: 404, code: 'channel_not_found', kind: 'gone' },
+  ])('retries after a 1008 read with HTTP $status and stops on a later $refusal', async ({ status, refusal, code, kind }) => {
+    vi.useFakeTimers();
+    const read = vi.mocked(api.getVoicePresence);
+    read.mockResolvedValueOnce({ ok: false, failure: 'invalid', status });
+    const { result } = hook();
+    sendFrame(presence([1, '2026-01-01T00:00:00Z']));
+
+    await closeSocket(1008);
+    expect(read).toHaveBeenCalledWith('general');
+    expect(result.current).toEqual({ kind: 'unreachable' });
+    act(() => { vi.advanceTimersByTime(firstDelay - 1); });
+    expect(sockets).toHaveLength(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(sockets).toHaveLength(2);
+    const roster = presence([2, '2026-01-01T00:00:01Z']);
+    sendFrame(roster);
+    expect(result.current).toEqual({ kind: 'presence', presence: roster, socketSchema: roster.schema });
+
+    read.mockResolvedValueOnce({ ok: false, failure: 'invalid', status: refusal, code });
+    await closeSocket(1008);
+    expect(result.current).toEqual({ kind });
+    act(() => { vi.advanceTimersByTime(120_000); });
+    expect(sockets).toHaveLength(2);
+    expect(read).toHaveBeenCalledTimes(2);
   });
 });
 

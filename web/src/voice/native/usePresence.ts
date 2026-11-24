@@ -104,7 +104,7 @@ export function usePresence({
       },
     });
     // A 1008 close says only that the server meant it; one read says why.
-    // An answered roster or a network failure goes through the backoff.
+    // A roster or a transient failure sends the feed back through its backoff.
     const settle = () => {
       previous = null;
       if (closeReason === noLongerMember) {
@@ -119,7 +119,7 @@ export function usePresence({
           feed.retryLater();
           show(result.value);
         } else if (result.failure === 'unauthorized') unauthorized.current();
-        else if (result.failure === 'network') feed.retryLater();
+        else if (result.failure === 'network' || result.status === 429 || (result.status ?? 0) >= 500) feed.retryLater();
         else setSnapshot({ kind: result.code === voiceNotAllowed ? 'not_allowed' : 'gone' });
       });
     };
