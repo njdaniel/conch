@@ -366,7 +366,11 @@ export function Lobby({
       settingsClosed.current = false;
       // The button is inert behind the voice options sheet: focus belongs in
       // the sheet, which takes it (VoicePanel) now that nothing is over it.
-      if (!sheetModal.current) settingsButton.current?.focus();
+      // And focus the person already has somewhere usable is left alone: it
+      // moves only from the body, nothing, the closed panel or an inert subtree.
+      const at = document.activeElement;
+      const stranded = at === null || at === document.body || at.closest('[inert]') !== null || at.closest('#settings-panel') !== null;
+      if (!sheetModal.current && stranded) settingsButton.current?.focus();
     }
   }, [settingsOpen, asking]);
   useEffect(() => {

@@ -315,6 +315,21 @@ describe('the voice options sheet and the lobby', () => {
     expect(document.activeElement).toBe(settings);
   });
 
+  it('re-authentication clearing leaves usable focus the person already has', () => {
+    windowOf(true);
+    const { rerender } = render(<><input aria-label="Elsewhere" />{lobbyTree(<Sheet open={false} />, null)}</>);
+    const settings = screen.getByRole('button', { name: /^Settings/ });
+    fireEvent.click(settings);
+    const wrapped = (overlay?: ReactNode) => <><input aria-label="Elsewhere" />{lobbyTree(<Sheet open={false} />, null, overlay)}</>;
+    rerender(wrapped(reauth));
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Sign out' }), { key: 'Escape' });
+    // Focus the person has on a usable control outside the lobby.
+    screen.getByLabelText('Elsewhere').focus();
+    rerender(wrapped());
+    expect(document.activeElement).toBe(screen.getByLabelText('Elsewhere'));
+    expect(document.activeElement).not.toBe(settings);
+  });
+
   // The sheet, as VoicePanel does, takes focus into its Close when nothing is over it.
   function Focusing() {
     const { report, behind } = useContext(VoiceSheet);

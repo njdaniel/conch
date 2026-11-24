@@ -286,6 +286,10 @@ export function VoicePanel({
     if (!options) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' || e.defaultPrevented || voice.capturing) return;
+      // Settings or re-authentication is over the panel (behind): Escape is
+      // theirs, even when focus has fallen to the body and their own handler
+      // is not on its path.
+      if (behind) return;
       closeOptions();
     };
     // Focus reaching the share quality menu's button closes the panel, so the

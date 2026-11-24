@@ -708,7 +708,7 @@ it('Voice options takes focus back when what was over it goes', () => {
 // Issue #2189: Settings over the open sheet. A press on its Close or its
 // backdrop is Settings' own: the outside-press handler leaves the sheet open,
 // and focus goes back into it once Settings is gone.
-it('Voice options stays open under a press while Settings or re-authentication is over it', () => {
+it('Voice options stays open under a press, and under Escape, while Settings is over it', () => {
   const voice = control(inVoice('connected', 'c'), [], { kind: 'presence', presence });
   const drawn = (behind: boolean) => (
     <VoiceSheet.Provider value={{ report: () => undefined, blocked: false, behind }}>
@@ -728,6 +728,10 @@ it('Voice options stays open under a press while Settings or re-authentication i
     close?.blur();
     fireEvent.mouseDown(screen.getByRole('button', { name: 'Settings Close' }));
     fireEvent.mouseDown(screen.getByTestId('backdrop'));
+    expect(screen.getByRole('button', { name: 'Voice options' }).getAttribute('aria-expanded')).toBe('true');
+    // Focus fell to the body (a click on content that takes none): Escape is
+    // still Settings' and does not close the panel beneath it.
+    fireEvent.keyDown(document.body, { key: 'Escape' });
     expect(screen.getByRole('button', { name: 'Voice options' }).getAttribute('aria-expanded')).toBe('true');
     rerender(drawn(false));
     expect(document.activeElement).toBe(close);
