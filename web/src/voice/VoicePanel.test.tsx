@@ -614,6 +614,46 @@ describe('what is sent, as the strip says it', () => {
   });
 });
 
+// Issue #2189: Voice options is a panel over the page; Escape and a press
+// outside close it, and Escape puts focus back on its button.
+describe('Voice options as a panel', () => {
+  const open = () => {
+    const made = panel(inVoice('connected', 'c'), 'c');
+    const button = within(made.voice).getByRole('button', { name: 'Voice options' });
+    fireEvent.click(button);
+    expect(button.getAttribute('aria-expanded')).toBe('true');
+    return { ...made, button };
+  };
+
+  it('Escape closes it and returns focus to the Voice options button', () => {
+    const { voice, button } = open();
+    const slider = within(voice).getByRole('slider', { name: /Release delay/ });
+    slider.focus();
+    fireEvent.keyDown(slider, { key: 'Escape' });
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+    expect(voice.querySelector('#voice-options')?.hasAttribute('hidden')).toBe(true);
+    expect(document.activeElement).toBe(button);
+  });
+
+  it('a press outside closes it, and a press inside does not', () => {
+    const { voice, button } = open();
+    fireEvent.mouseDown(within(voice).getByRole('slider', { name: /Release delay/ }));
+    expect(button.getAttribute('aria-expanded')).toBe('true');
+    fireEvent.mouseDown(document.body);
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('the button still toggles it', () => {
+    const { button } = open();
+    fireEvent.mouseDown(button);
+    fireEvent.click(button);
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.mouseDown(button);
+    fireEvent.click(button);
+    expect(button.getAttribute('aria-expanded')).toBe('true');
+  });
+});
+
 // Issue #590 (F09, F20): Hold to talk works from the keyboard while it has
 // focus, the hint says where the talk key does not work, and Leave voice
 // hands focus to Join voice instead of dropping it.

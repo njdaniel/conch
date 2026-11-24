@@ -46,7 +46,7 @@ import { ModerationConfirm, useMayModerate, useMayModerateIn } from '../Moderati
 // §7.1, #1509): the people's tiles join them only with the person's choice to
 // view, and a focused stream is the main picture with every other tile in the
 // strip (design §7.4).
-import { useCallback, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent as KeyEvent, type RefObject } from 'react';
+import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as KeyEvent, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { readHideNonVideo, writeHideNonVideo } from '../api';
 import { archivedLine } from '../archived';
@@ -173,6 +173,10 @@ export function VoicePanel({
   const [hideNonVideo, setHideNonVideo] = useState(readHideNonVideo);
   const [focusShow, setFocusShow] = useState(false);
   const showVideoButton = useRef<HTMLButtonElement>(null);
+  // The Voice options button: Escape returns focus to it, and a press on it is
+  // its own toggle, not an outside press (issue #2189).
+  const optionsButton = useRef<HTMLButtonElement>(null);
+  const optionsPanel = useRef<HTMLDivElement>(null);
   // Each publisher's volume survives its tile moving or being watched again;
   // one stream's control never changes another's (voice-multi-share.md §7.1).
   const shareVolumes = useRef(new Map<number, number>());
@@ -262,6 +266,30 @@ export function VoicePanel({
       window.removeEventListener('mousedown', onMouse);
     };
   }, [voice]);
+
+  // Voice options is a panel over the page (issue #2189): Escape closes it and
+  // puts focus back on its button; a press outside it closes it. Escape while
+  // the talk key is being chosen only cancels that, as Change talk key says.
+  useEffect(() => {
+    if (!options) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.defaultPrevented || voice.capturing) return;
+      setOptions(false);
+      optionsButton.current?.focus();
+    };
+    const onPress = (e: MouseEvent) => {
+      const at = e.target;
+      if (!(at instanceof Node)) return;
+      if (optionsPanel.current?.contains(at) === true || optionsButton.current?.contains(at) === true) return;
+      setOptions(false);
+    };
+    document.addEventListener('keydown', onKey);
+    document.addEventListener('mousedown', onPress);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('mousedown', onPress);
+    };
+  }, [options, voice.capturing]);
 
   useEffect(() => {
     if (!toAbout || !options) return;
@@ -622,7 +650,7 @@ export function VoicePanel({
                     <span className="label">Show video ({cameraCount})</span>
                   </button>
                 ) : null}
-                <button type="button" className="quiet" aria-expanded={options} aria-controls="voice-options" onClick={() => { setOptions(!options); }}>
+                <button ref={optionsButton} type="button" className="quiet" aria-expanded={options} aria-controls="voice-options" onClick={() => { setOptions(!options); }}>
                   <Glyph name="options" />
                   <span className="label">Voice options</span>
                 </button>
@@ -730,7 +758,7 @@ export function VoicePanel({
         ) : null}
       </div>
 
-      {inVoice ? <Options voice={voice} open={options && !strip} sharable={sharable} about={about} others={others} cameraAllowed={cameraAllowed} /> : null}
+      {inVoice ? <Options panel={optionsPanel} voice={voice} open={options && !strip} sharable={sharable} about={about} others={others} cameraAllowed={cameraAllowed} /> : null}
       {staged === null ? null : stage === null ? staged : createPortal(staged, stage)}
     </section>
   );
@@ -1354,8 +1382,12 @@ function CameraOptions({ voice, open, cameraAllowed }: { readonly voice: VoiceCo
   );
 }
 
-// Voice options: the less used choices, out of the strip.
-function Options({ voice, open, sharable, about, others, cameraAllowed }: {
+// Voice options: the less used choices, out of the strip. A panel over the
+// page above the voice section, not a row in it (issue #2189): opening it moves
+// nothing under it. It is fixed, so the dock's own scroll does not clip it;
+// its place is the section's, set on it from the section's box.
+function Options({ panel, voice, open, sharable, about, others, cameraAllowed }: {
+  readonly panel: RefObject<HTMLDivElement | null>;
   readonly voice: VoiceControl;
   readonly open: boolean;
   readonly cameraAllowed: boolean;
@@ -1367,8 +1399,33 @@ function Options({ voice, open, sharable, about, others, cameraAllowed }: {
   readonly about: RefObject<HTMLElement | null>;
 }) {
   const { state, client, features } = voice;
+  // The panel's left, width and bottom (and so its tallest) follow the voice
+  // section's box while open: CSSOM custom properties, which the page's CSP
+  // allows where a style attribute would not.
+  useLayoutEffect(() => {
+    const el = panel.current;
+    const section = el?.parentElement;
+    if (!open || !el || !section) return;
+    const place = () => {
+      const r = section.getBoundingClientRect();
+      const view = document.documentElement.clientHeight;
+      el.style.setProperty('--vo-left', `${String(Math.max(0, r.left))}px`);
+      el.style.setProperty('--vo-width', `${String(r.width)}px`);
+      el.style.setProperty('--vo-bottom', `${String(Math.max(0, view - r.top))}px`);
+    };
+    place();
+    window.addEventListener('resize', place);
+    window.addEventListener('scroll', place, true);
+    const watch = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(place);
+    watch?.observe(section);
+    return () => {
+      window.removeEventListener('resize', place);
+      window.removeEventListener('scroll', place, true);
+      watch?.disconnect();
+    };
+  }, [open, panel]);
   return (
-    <div id="voice-options" className="voice-options" hidden={!open}>
+    <div ref={panel} id="voice-options" className="voice-options" hidden={!open}>
       <MicrophoneChoice voice={voice} />
       <CameraOptions voice={voice} open={open} cameraAllowed={cameraAllowed} />
       <SpeakersChoice voice={voice} />
