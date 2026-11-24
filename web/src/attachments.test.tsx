@@ -236,6 +236,19 @@ describe('Composer and App attachment sending', () => {
     expect(server.posts).toHaveLength(1);
   });
 
+  it('shows the desktop’s own 413 (desktop_unavailable) as the size line and keeps the file', async () => {
+    await openChat();
+    server.upload = () => json({ code: 'desktop_unavailable', message: 'The desktop app accepts files up to 20 MiB.' }, 413);
+    choose(image('huge.png'));
+    await screen.findByText('huge.png');
+    fireEvent.change(screen.getByLabelText('Message #general'), { target: { value: 'kept' } });
+    clickSend();
+    await screen.findByText('The desktop app accepts files up to 20 MiB.');
+    expect(server.posts).toHaveLength(0);
+    expect(screen.getByText('huge.png')).toBeTruthy();
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').value).toBe('kept');
+  });
+
   it('preserves caption and ready ids across an upload refusal, then retries only the failed file', async () => {
     await openChat();
     let refuseSecond = true;

@@ -16,6 +16,8 @@ import {
   parseUpload,
   plainName,
   type FilesDeps,
+  UPLOAD_TIMEOUT_FLOOR_MS,
+  uploadTimeoutMs,
 } from '../../main/files.ts';
 
 const b64 = (bytes: number[]): string => Buffer.from(bytes).toString('base64');
@@ -314,5 +316,21 @@ describe('Files.save: the save path rule', () => {
     const f = setup([meta('a.png'), bytes], () => join(tmpdir(), 'conch-no-such-dir-947', 'sub', 'x.bin'));
     expect(await f.files.save(5)).toBe('failed');
     expect(f.logs).toEqual(['conch-desktop: a file could not be saved']);
+  });
+});
+
+describe('uploadTimeoutMs', () => {
+  it('keeps the 120 s floor for small files and scales for large ones (256 kbit/s assumed)', () => {
+    expect(uploadTimeoutMs(1)).toBe(UPLOAD_TIMEOUT_FLOOR_MS);
+    expect(uploadTimeoutMs(2 * 1024 * 1024)).toBe(UPLOAD_TIMEOUT_FLOOR_MS);
+    expect(uploadTimeoutMs(MAX_UPLOAD_BYTES)).toBe(Math.ceil((MAX_UPLOAD_BYTES / 32_000) * 1000) + 30_000);
+    expect(uploadTimeoutMs(MAX_UPLOAD_BYTES)).toBeGreaterThan(600_000);
+  });
+
+  it('passes the scaled timeout to the client', async () => {
+    const { client, sent } = scripted([{ kind: 'answer', status: 201, ok: true, body: {} }]);
+    const files = new Files({ client } as unknown as FilesDeps);
+    await files.upload({ channel: 'general', filename: 'a', mediaType: OCTET_STREAM, bytes: new Uint8Array(MAX_UPLOAD_BYTES) });
+    expect(sent[0]?.timeoutMs).toBe(uploadTimeoutMs(MAX_UPLOAD_BYTES));
   });
 });

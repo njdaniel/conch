@@ -6,7 +6,7 @@
 // dialog.
 //
 // What it guarantees:
-//  - an upload is capped (MAX_UPLOAD_BYTES, the server's default limit; the
+//  - an upload is capped (MAX_UPLOAD_BYTES, the desktop limit; the
 //    server enforces its own, which may be lower), its type is reshaped to
 //    type/subtype or application/octet-stream, its name is made plain text,
 //    and main alone builds the request;
@@ -17,6 +17,7 @@
 //    and that chosen absolute path is the only place anything is written.
 //    The caller (ipc.ts) allows it only right after the person's own input.
 import type { MainLog } from './diagnostics.ts';
+import { DESKTOP_UPLOAD_MAX_BYTES } from '../../web/src/appLimit.ts';
 import { fileQuery } from '../../web/src/platform/operations.ts';
 import type { BridgeReply, DownloadReply, SaveOutcome } from '../../web/src/platform/desktop/bridge.ts';
 import { fileV1 } from '../../web/src/schema/file.ts';
@@ -26,11 +27,19 @@ import type { Client } from './api/client.ts';
 import type { Session } from './api/session.ts';
 import { paramOk } from './api/target.ts';
 
-export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+export const MAX_UPLOAD_BYTES = DESKTOP_UPLOAD_MAX_BYTES;
 export const MAX_DOWNLOAD_BYTES = 32 * 1024 * 1024;
 export const MAX_FILENAME_LENGTH = 255;
-// An upload of ten megabytes on a slow link takes longer than a request.
-const UPLOAD_TIMEOUT_MS = 120_000;
+// A file upload on a slow link takes longer than an ordinary request: the
+// timeout is at least 120 s and grows with the file, assuming a link of no
+// less than 256 kbit/s (32 000 bytes a second), plus 30 s of slack. At the
+// 20 MiB cap that is about 685 s.
+export const UPLOAD_TIMEOUT_FLOOR_MS = 120_000;
+export const UPLOAD_MIN_BYTES_PER_SECOND = 32_000;
+const UPLOAD_SLACK_MS = 30_000;
+export function uploadTimeoutMs(bytes: number): number {
+  return Math.max(UPLOAD_TIMEOUT_FLOOR_MS, Math.ceil((bytes / UPLOAD_MIN_BYTES_PER_SECOND) * 1000) + UPLOAD_SLACK_MS);
+}
 const DOWNLOAD_TIMEOUT_MS = 120_000;
 
 export const OCTET_STREAM = 'application/octet-stream';
@@ -140,7 +149,7 @@ export class Files {
       params: { channel: request.channel },
       query: fileQuery(request.filename),
       upload: { mediaType: request.mediaType, bytes: request.bytes },
-      timeoutMs: UPLOAD_TIMEOUT_MS,
+      timeoutMs: uploadTimeoutMs(request.bytes.length),
     });
     if (exchange.kind === 'none' && exchange.reason !== undefined && exchange.reason !== 'stale') {
       this.#deps.log(`conch-desktop: an upload had no answer: ${exchange.reason}`);
