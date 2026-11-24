@@ -18,18 +18,18 @@ describe('requireSafeChildProcessEnv in main.ts', () => {
   const main = code(readFileSync(join(MAIN, 'main.ts'), 'utf8'));
 
   it('is called exactly once', () => {
-    expect(main.split('requireSafeChildProcessEnv()').length - 1).toBe(1);
+    expect(main.split('requireSafeChildProcessEnv(app.isPackaged)').length - 1).toBe(1);
   });
 
   it('is the first statement of launch()', () => {
     const body = /function launch\(\)[^{]*\{([\s\S]*?)\n\}/.exec(main)?.[1] ?? '';
     expect(body).not.toBe('');
     const first = body.split('\n').map((l) => l.trim()).find((l) => l !== '');
-    expect(first).toBe('requireSafeChildProcessEnv();');
+    expect(first).toBe('requireSafeChildProcessEnv(app.isPackaged);');
   });
 
   it('runs before registerScheme(), applyAppUserModelId() and start()', () => {
-    const at = main.indexOf('requireSafeChildProcessEnv()');
+    const at = main.indexOf('requireSafeChildProcessEnv(app.isPackaged)');
     expect(at).toBeGreaterThanOrEqual(0);
     for (const later of ['registerScheme()', 'applyAppUserModelId(app)', 'start()']) {
       expect(main.indexOf(later), later).toBeGreaterThan(at);
