@@ -1040,6 +1040,7 @@ jobs:
         run: |
           ./scripts/mobile-rows-check-test.sh
           ./scripts/mobile-rows-check.sh
+          python3 ./scripts/linux-mic-capture-status-test.py
 
       # The issue-claim helper's lifecycle (#831): real local Git remotes,
       # mocked GitHub and model calls, no network.
