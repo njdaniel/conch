@@ -1602,11 +1602,27 @@ label {
 }
 
 .log {
+  /* The containing block of whatever its rows position absolutely: each
+     row's visually hidden ".vh" text, a continuation row's hidden header.
+     Without it those take .log-wrap as their containing block, escape this
+     scroller's clip at their unscrolled place, and give .centre thousands of
+     pixels of empty overflow: a second scrollbar, and a wheel over the
+     composer slides it away from the dock (issue #2133). A row with menu
+     actions is positioned itself; a pending row, or a message its author
+     removed (a tombstone has no menu), is not. */
+  position: relative;
   flex: 1;
   /* Its messages never make the column taller: it scrolls instead. */
   contain: size;
   overflow-y: auto;
   padding: var(--s2) var(--s2) var(--s3);
+}
+
+/* In a short desktop window the page can scroll to fit the dock. Keep a
+   wheel over the transcript there when it reaches either end, so a reader
+   can scroll messages without moving the composer or the rest of the page. */
+.lobby:not(.phone) .log {
+  overscroll-behavior-y: contain;
 }
 
 .log > .hint,
