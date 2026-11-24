@@ -783,6 +783,26 @@ export function Conversation({
     const message = highlightedId === null ? undefined : chat.byId.get(highlightedId);
     if (message?.thread_root_id !== undefined) setOpenThread(message.thread_root_id);
   }, [highlightedId, chat.byId]);
+  // A message link scrolls its row into view (Message's own effect): the log
+  // is no longer at the newest message, as after the unread jump. Said here,
+  // once per link, because the scroll handler ignores a scroll at a height
+  // the resize observer has not handled yet, so a log resize in the same
+  // frame (the voice dock settling, say) would otherwise put the reader back
+  // at the bottom and the linked row out of view (issue #2158). A thread
+  // reply is shown in the thread view and leaves the main log alone.
+  const jumped = useRef<number | null>(null);
+  useEffect(() => {
+    if (highlightedId === null) {
+      jumped.current = null;
+      return;
+    }
+    if (jumped.current === highlightedId) return;
+    const message = chat.byId.get(highlightedId);
+    if (message === undefined || message.thread_root_id !== undefined) return;
+    jumped.current = highlightedId;
+    atBottom.current = false;
+    onBottom(false);
+  }, [highlightedId, chat.byId, onBottom]);
   const opener = useRef<HTMLElement | null>(null);
   const threadReturn = useRef<{ readonly root: number; readonly anchor: number | null; readonly opener: HTMLElement | null } | null>(null);
   const openFrom = useCallback((id: number, from: HTMLElement) => {
