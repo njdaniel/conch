@@ -25,7 +25,8 @@ for (const [width, height, voiceStartHeight = height] of [[640, 360], [690, 540]
   const size = `${String(width)}×${String(height)}`;
   const where = voiceStartHeight === height ? `at ${size}` : `after shrinking to ${size} on Voice`;
   test(`P2171 ${where} hidden Chat adds no document scroll`, async ({ meet, world }) => {
-    const prefix = `p2171 ${size} line`;
+    // Unique per run, so the test can repeat against one community.
+    const prefix = unique(`p2171-${String(width)}x${String(height)}-${String(voiceStartHeight)}`);
     for (let i = 1; i <= 8; i += 1) {
       await post(world, world.tokens.nick, 'general', `${prefix} ${String(i)} ${'words that wrap around the line, '.repeat(12)}end`);
     }
@@ -75,7 +76,7 @@ const classicScrollbarTest = test.extend({
 });
 
 classicScrollbarTest('P2173 the log keeps following when its width changes across Voice', async ({ meet, world }) => {
-  const prefix = 'p2173 classic scrollbar line';
+  const prefix = unique('p2173-classic-scrollbar');
   for (let i = 1; i <= 12; i += 1) {
     await post(world, world.tokens.nick, 'general', `${prefix} ${String(i)} ${'words that wrap around the line, '.repeat(4)}end`);
   }
@@ -85,10 +86,10 @@ classicScrollbarTest('P2173 the log keeps following when its width changes acros
   const log = page.locator('.conversation .log');
   await expect(log.getByText(`${prefix} 12`)).toBeVisible();
   await frames(page);
+  // Scroll anchoring stays on, as in a real browser: its scroll arrives
+  // before the resize observer, so this exercises the onScroll guard as well
+  // as the observer (both halves of #2173's fix).
   const chatWidth = await log.evaluate((el) => {
-    // Let the observer do the pinning even if Chromium could anchor the
-    // last row on this run. The document scrollbar still changes naturally.
-    el.style.overflowAnchor = 'none';
     el.scrollTop = el.scrollHeight;
     return el.clientWidth;
   });
@@ -105,7 +106,7 @@ classicScrollbarTest('P2173 the log keeps following when its width changes acros
   expect(await log.evaluate((el) => el.clientWidth), 'the document scrollbar returns with Chat').toBe(chatWidth);
   expect(await log.evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop), 'the log is still at the end').toBeLessThanOrEqual(1);
 
-  const body = 'p2173 message after returning from Voice';
+  const body = unique('p2173-after-voice');
   await post(world, world.tokens.nick, 'general', body);
   await expect(log.getByText(body)).toBeVisible();
   await expectInside(page, log.getByRole('listitem').filter({ hasText: body }), log, 'the first message after returning from Voice');

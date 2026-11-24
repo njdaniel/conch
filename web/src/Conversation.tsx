@@ -1354,6 +1354,9 @@ export function Conversation({
           // onto more lines, that scroll can leave a reader more than
           // nearBottom above the end. Keep their previous at-bottom state
           // for the observer.
+          // This assumes the log's box is never animated: during a width or
+          // height transition every scroll would land at an unhandled size
+          // and a reader's own scrolling would be ignored until it ends.
           const size = sized.current;
           if (size === null || (el.clientWidth === size.width && el.clientHeight === size.height)) {
             atBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight <= nearBottom;
