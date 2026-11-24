@@ -3072,7 +3072,6 @@ label {
 }
 
 .share-chooser {
-  position: relative;
   display: inline-flex;
 }
 
@@ -3084,26 +3083,56 @@ label {
 }
 
 .share-chooser-menu:not([hidden]) {
-  position: absolute;
-  top: 100%;
-  right: 0;
-  z-index: 20;
+  /* Keep the menu usable with or without anchor positioning. Fixed positioning
+     lets it extend outside the dock, which has its own scrollbar. */
+  position: fixed;
+  inset: 0;
+  /* Above the phone's sticky tab bar and the Voice options panel (both 20),
+     which come later in the page and would otherwise paint over it. */
+  z-index: 21;
   display: grid;
+  align-content: start;
   gap: var(--s2);
+  box-sizing: border-box;
   width: max-content;
-  max-width: min(22rem, 90vw);
-  margin-top: var(--s1);
+  height: max-content;
+  max-width: min(22rem, calc(100% - 2 * var(--s2)));
+  max-height: calc(100% - 2 * var(--s2));
+  margin: auto;
   padding: var(--s2);
+  overflow: auto;
+  overscroll-behavior: contain;
   background: var(--bg);
   border: 1px solid var(--border-strong);
   border-radius: 0.5rem;
 }
 
-.voice.strip .share-chooser-menu:not([hidden]) {
-  top: auto;
-  bottom: 100%;
-  margin-top: 0;
-  margin-bottom: var(--s1);
+@supports (position-area: block-end span-all) and (position-try: most-height flip-block) {
+  .share-chooser-button {
+    anchor-name: --share-chooser-button;
+  }
+
+  /* Try the menu at its natural height on the roomier side of the button,
+     then let it fill that space and scroll if it is too tall. */
+  .share-chooser-menu:not([hidden]) {
+    inset: auto;
+    height: auto;
+    max-height: none;
+    margin: var(--s1);
+    position-anchor: --share-chooser-button;
+    position-area: block-end span-all;
+    justify-self: anchor-center;
+    position-try: most-height --share-chooser-scroll-below, flip-block, --share-chooser-scroll-above;
+  }
+
+  @position-try --share-chooser-scroll-below {
+    align-self: stretch;
+  }
+
+  @position-try --share-chooser-scroll-above {
+    position-area: block-start span-all;
+    align-self: stretch;
+  }
 }
 
 .share-chooser-menu [role='group'] {
