@@ -1,10 +1,11 @@
 // The desktop's live feeds, as the client uses them: subscriptions of the
 // bridge, with no ticket, and the client's own feed state machine on top.
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { openEventsSocket, openOccupancySocket, openSocket, openVoiceSocket } from '../../api';
+import { openEventsSocket, openOccupancySocket, openSocket, openVoiceSocket, restore } from '../../api';
 import { Feed, firstDelay, type Clock, type FeedStatus } from '../../state/feed';
 import { parsePresence, sharers } from '../../voice/presence';
 import type { ConchDesktopBridge, FeedHandlers, FeedRequest } from './bridge';
+import { credentials, signedIn } from './credentials';
 import { feedOf, sockets } from './sockets';
 
 // The client under test runs on the desktop platform, as a desktop build's
@@ -17,14 +18,24 @@ interface Subscription {
   unsubscribed: number;
 }
 
-// A bridge whose only working function is subscribe; any other call (a
-// ticket request above all) fails the test.
+// A bridge whose only working functions are subscribe, whoami (for signIn)
+// and the voice feed's presence probe, which it answers as a server older
+// than presence v3 does (400 invalid_request), so the client opens the v2
+// feed; any other call (a ticket request above all) fails the test.
 function install(): Subscription[] {
   const subscriptions: Subscription[] = [];
   const unexpected = (name: string) => () => Promise.reject(new Error(`unexpected bridge call: ${name}`));
   const bridge: ConchDesktopBridge = {
     serverAddress: unexpected('serverAddress'),
-    request: unexpected('request'),
+    request: (request) => {
+      if (request.operation === 'whoami') {
+        return Promise.resolve({ kind: 'reply', status: 200, body: { id: 2, kind: 'human', name: 'ada', role: 'member' } });
+      }
+      if (request.operation === 'voicePresence' && request.query === 'schema=conch.voice_presence.v3') {
+        return Promise.resolve({ kind: 'reply', status: 400, body: { code: 'invalid_request', message: 'schema must name a presence document this server serves, given once' } });
+      }
+      return Promise.reject(new Error(`unexpected bridge call: request ${request.operation}`));
+    },
     subscribe: (feed, handlers) => {
       const sub: Subscription = { feed, handlers, unsubscribed: 0 };
       subscriptions.push(sub);
@@ -71,7 +82,16 @@ function install(): Subscription[] {
   return subscriptions;
 }
 
+// The voice feed probes presence first, which needs a session, as in the app,
+// where it opens only after sign-in: the desktop's stand-in, pinned by restore.
+async function signIn(): Promise<void> {
+  signedIn(false);
+  expect((await restore()).ok).toBe(true);
+}
+
 afterEach(() => {
+  const held = credentials.read();
+  if (held !== null) credentials.drop(held);
   Reflect.deleteProperty(window, 'conchDesktop');
 });
 
@@ -141,6 +161,7 @@ describe('a desktop feed connection', () => {
 describe('the client on the desktop', () => {
   it('opens each feed as a subscription with its parameters, and asks for no ticket', async () => {
     const subs = install();
+    await signIn();
     for (const result of [
       await openSocket('general', 41, events()),
       await openEventsSocket('general', 9, events()),
@@ -165,6 +186,7 @@ describe('the client on the desktop', () => {
   // held back.
   it('passes the v2 presence main sends to the page, which reads it; a v1 document is not one', async () => {
     const subs = install();
+    await signIn();
     const frames: unknown[] = [];
     const result = await openVoiceSocket('general', { ...events(), onFrame: (data) => frames.push(data) });
     expect(result.ok).toBe(true);

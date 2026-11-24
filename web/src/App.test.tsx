@@ -511,7 +511,13 @@ describe('lobby', () => {
   it('says voice is not set up when the server has no LiveKit, and offers no join', async () => {
     const presence = { schema: 'conch.voice_presence.v2', channel_id: 1, configured: false, available: false, rooms: [] };
     const sockets = socketsOf();
-    serve({ ...asMember, '/v1/ws-tickets': () => json({ ticket: ticketValue, expires_at: created_at }, 201) });
+    serve({
+      ...asMember,
+      '/v1/ws-tickets': () => json({ ticket: ticketValue, expires_at: created_at }, 201),
+      // A server older than presence v3 refuses the probe, so the page opens v2.
+      '/v1/channels/general/voice?schema=conch.voice_presence.v3': () =>
+        json({ code: 'invalid_request', message: 'schema must name a presence document this server serves, given once' }, 400),
+    });
     render(<App origin={origin} />);
     signIn();
     const voice = await screen.findByRole('region', { name: 'Voice' });
