@@ -153,13 +153,20 @@ describe('usePresence', () => {
     expect(sockets).toHaveLength(2);
   });
 
-  it('shows unreachable when the 1008 follow-up read gets no answer', async () => {
+  it('shows unreachable and retries when the 1008 follow-up read gets no answer', async () => {
+    vi.useFakeTimers();
     const { result } = hook();
-    await frame(presence([1, '2026-01-01T00:00:00Z']));
+    act(() => {
+      sockets[0]?.events.onOpen();
+      sockets[0]?.events.onFrame(JSON.stringify(presence([1, '2026-01-01T00:00:00Z'])));
+    });
 
     await closeSocket(1008);
     expect(api.getVoicePresence).toHaveBeenCalledWith('general');
     expect(result.current).toEqual({ kind: 'unreachable' });
+    // The feed is not left dead: it tries again after the backoff.
+    act(() => { vi.advanceTimersByTime(firstDelay); });
+    expect(sockets).toHaveLength(2);
   });
 });
 
