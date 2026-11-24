@@ -828,8 +828,9 @@ test.describe('screen share with LiveKit', () => {
       await expect(b.page.getByRole('region', { name: 'Members list' })).toBeFocused();
       await b.page.keyboard.press('Escape');
       await expectFits(b.page, 'watching at phone width');
-      // Voice options, left open, are the Voice view's: under Chat the strip
-      // is one row (issue #1028), and the composer is on the screen while
+      // Voice options was opened, then dismissed as an outside press by the
+      // Members click (issue #2189); the options button is the Voice view's
+      // anyway: under Chat the strip is one row (issue #1028), and the composer is on the screen while
       // watching, without scrolling to it.
       await expect(voiceRegion(b.page).getByRole('button', { name: 'Voice options' })).toBeHidden();
       await expectComposerShown(b.page, 'watching at 390×844');

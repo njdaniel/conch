@@ -3257,6 +3257,9 @@ label {
   max-height: calc(100vh - var(--vo-bottom, 0px) - var(--s2));
   max-height: calc(100dvh - var(--vo-bottom, 0px) - var(--s2));
   overflow-y: auto;
+  /* At either end of its scroll, a wheel or touch does not move the page,
+     which would move the open panel. */
+  overscroll-behavior: contain;
   padding: var(--s3);
   background: var(--bg);
   border: 1px solid var(--border-strong);
@@ -3281,8 +3284,9 @@ label {
   left: 0;
   bottom: var(--vo-sheet-bottom, 0px);
   width: 100%;
-  max-height: 80vh;
-  max-height: 80dvh;
+  /* At most 80% of the window, and never more than the room above the nav. */
+  max-height: min(80vh, calc(100vh - var(--vo-sheet-bottom, 0px) - var(--s2)));
+  max-height: min(80dvh, calc(100dvh - var(--vo-sheet-bottom, 0px) - var(--s2)));
   border-radius: 0.5rem 0.5rem 0 0;
 }
 

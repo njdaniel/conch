@@ -177,10 +177,15 @@ export function VoicePanel({
   // its own toggle, not an outside press (issue #2189).
   const optionsButton = useRef<HTMLButtonElement>(null);
   const optionsPanel = useRef<HTMLDivElement>(null);
+  // Closing by keyboard puts focus back on the button once the panel is gone
+  // (the button can be inert while a sheet is open).
+  const focusBack = useRef(false);
   const closeOptions = useCallback(() => {
+    focusBack.current = true;
     setOptions(false);
-    optionsButton.current?.focus();
   }, []);
+  // Whether the open panel is a bottom sheet (set by Options from its place).
+  const [sheet, setSheet] = useState(false);
   // Each publisher's volume survives its tile moving or being watched again;
   // one stream's control never changes another's (voice-multi-share.md §7.1).
   const shareVolumes = useRef(new Map<number, number>());
@@ -280,6 +285,11 @@ export function VoicePanel({
       if (e.key !== 'Escape' || e.defaultPrevented || voice.capturing) return;
       closeOptions();
     };
+    // Focus reaching the share quality menu's button closes the panel, so the
+    // menu, which paints over it, is not drawn on top of an open panel.
+    const onFocus = (e: FocusEvent) => {
+      if (e.target instanceof Element && e.target.closest('.share-chooser') !== null) setOptions(false);
+    };
     const onPress = (e: MouseEvent) => {
       const at = e.target;
       if (!(at instanceof Node)) return;
@@ -288,11 +298,31 @@ export function VoicePanel({
     };
     document.addEventListener('keydown', onKey);
     document.addEventListener('mousedown', onPress);
+    document.addEventListener('focusin', onFocus);
     return () => {
       document.removeEventListener('keydown', onKey);
       document.removeEventListener('mousedown', onPress);
+      document.removeEventListener('focusin', onFocus);
     };
   }, [options, voice.capturing, closeOptions]);
+
+  useEffect(() => {
+    if (options || !focusBack.current) return;
+    focusBack.current = false;
+    optionsButton.current?.focus();
+  }, [options]);
+
+  // As a sheet the panel covers the strip's controls, Leave voice among them:
+  // they are inert while it is open, so the keyboard cannot reach them, and
+  // focus moves into the sheet (to its Close) when it opens, unless More about
+  // sharing is taking it to the notes. Above the strip the panel covers the
+  // conversation and not the strip's controls, which stay in the tab order.
+  const covered = options && !strip && inVoice && sheet;
+  useEffect(() => {
+    if (!covered || toAbout) return;
+    if (optionsPanel.current?.contains(document.activeElement) === true) return;
+    optionsPanel.current?.querySelector<HTMLElement>('.voice-options-close')?.focus();
+  }, [covered, toAbout]);
 
   // The talk key capture ends with the panel it was started in, by whatever
   // route the panel closes (outside press, its button, the phone's strip, or
@@ -606,7 +636,7 @@ export function VoicePanel({
           so a roster that grows, or a longer status, moves the strip's top and
           leaves the controls where they were. The phone's strip is the one
           row, of four controls (issue #1028). */}
-      <div className="voice-bar">
+      <div className="voice-bar" inert={covered}>
         {inVoice ? <BlockedVoiceMute voice={voice} others={others} /> : null}
         {strip ? null : (
           <Roster channel={rosterChannel ?? undefined} mayModerate={mayModerateRoster} roster={roster} people={people} viewer={viewer} viewerName={viewerName} elsewhere={elsewhere} speaking={speaking} volumes={inVoice ? state.volumes : noVolumes} />
@@ -692,7 +722,7 @@ export function VoicePanel({
         {strip && noPlayback ? <HearButton voice={voice} /> : null}
       </div>
 
-      <div className="voice-notes" hidden={strip}>
+      <div className="voice-notes" hidden={strip} inert={covered}>
         {state.why === null ? null : <p role="status" className="hint">{state.why}</p>}
         {state.reportNote === 'rate_limited' ? <p role="status" className="hint">Too many talk reports; slow down</p> : null}
         {state.reportNote === 'retrying' ? <p role="status" className="hint">Reporting your talking is slow; retrying</p> : null}
@@ -772,7 +802,7 @@ export function VoicePanel({
         ) : null}
       </div>
 
-      {inVoice ? <Options panel={optionsPanel} onClose={closeOptions} voice={voice} open={options && !strip} sharable={sharable} about={about} others={others} cameraAllowed={cameraAllowed} /> : null}
+      {inVoice ? <Options panel={optionsPanel} onClose={closeOptions} onSheet={setSheet} voice={voice} open={options && !strip} sharable={sharable} about={about} others={others} cameraAllowed={cameraAllowed} /> : null}
       {staged === null ? null : stage === null ? staged : createPortal(staged, stage)}
     </section>
   );
@@ -1401,10 +1431,12 @@ function CameraOptions({ voice, open, cameraAllowed }: { readonly voice: VoiceCo
 // nothing under it. It is fixed, so the dock's own scroll does not clip it;
 // its place is the section's, set on it from the section's box, or a bottom
 // sheet over the window where there is too little room above the section.
-function Options({ panel, onClose, voice, open, sharable, about, others, cameraAllowed }: {
+function Options({ panel, onClose, onSheet, voice, open, sharable, about, others, cameraAllowed }: {
   readonly panel: RefObject<HTMLDivElement | null>;
   // Closes the panel and returns focus to its button.
   readonly onClose: () => void;
+  // Says whether the panel is drawn as a bottom sheet.
+  readonly onSheet: (sheet: boolean) => void;
   readonly voice: VoiceControl;
   readonly open: boolean;
   readonly cameraAllowed: boolean;
@@ -1429,7 +1461,9 @@ function Options({ panel, onClose, voice, open, sharable, about, others, cameraA
       // Where the section's top leaves less than 40% of the window above it
       // (or is itself above the window, as a scrolled dock can leave it), the
       // panel is a bottom sheet over the window instead: always in view.
-      el.classList.toggle('sheet', r.top < view * 0.4);
+      const sheet = r.top < view * 0.4;
+      el.classList.toggle('sheet', sheet);
+      onSheet(sheet);
       // The sheet rests on the phone's navigation, which stays in reach.
       const nav = document.querySelector('.phone-nav')?.getBoundingClientRect();
       el.style.setProperty('--vo-sheet-bottom', `${String(nav === undefined ? 0 : Math.max(0, view - nav.top))}px`);
@@ -1447,7 +1481,7 @@ function Options({ panel, onClose, voice, open, sharable, about, others, cameraA
       window.removeEventListener('scroll', place, true);
       watch?.disconnect();
     };
-  }, [open, panel]);
+  }, [open, panel, onSheet]);
   return (
     <div ref={panel} id="voice-options" className="voice-options" hidden={!open}>
       {/* As a sheet the panel covers the Voice options button, so it has its
