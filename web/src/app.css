@@ -1608,8 +1608,8 @@ label {
      scroller's clip at their unscrolled place, and give .centre thousands of
      pixels of empty overflow: a second scrollbar, and a wheel over the
      composer slides it away from the dock (issue #2133). A row with menu
-     actions is positioned itself; a pending, blocked or action-less row is
-     not. */
+     actions is positioned itself; a pending row, or a message its author
+     removed (a tombstone has no menu), is not. */
   position: relative;
   flex: 1;
   /* Its messages never make the column taller: it scrolls instead. */

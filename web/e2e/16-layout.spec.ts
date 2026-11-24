@@ -9,7 +9,7 @@ import type { BrowserContextOptions, Locator, Page, WebSocketRoute } from '@play
 import { voicePresenceV2, type VoicePresenceV2 } from '../src/schema/voice';
 import { channelButton, drawDesktopStrip, expect, expectFits, mainNav, messages, openChannel, phoneSizes, showView, signIn, statusLine, test } from './fixtures';
 import { runV1 } from '../src/schema/run';
-import { attach, openSession } from './api';
+import { attach, openSession, post } from './api';
 import { call, ok, type World } from './world';
 
 const sizes: readonly (readonly [string, BrowserContextOptions])[] = [
@@ -744,7 +744,7 @@ async function tallImage(page: Page): Promise<Uint8Array<ArrayBuffer>> {
   return new Uint8Array(image);
 }
 
-test('scrolling an image-heavy desktop chat keeps the composer in place', async ({ meet, secrets, world }) => {
+test('P2133 scrolling an image-heavy desktop chat keeps the composer in place', async ({ meet, secrets, world }) => {
   const channel = `composer-${Date.now().toString(36)}`;
   await must(world, world.tokens.operator, 'POST', '/v0/channels', { name: channel });
   const me = await member(world, channel, `${channel}-member`);
@@ -806,52 +806,66 @@ test('scrolling an image-heavy desktop chat keeps the composer in place', async 
   }
 });
 
-// Issue #2133 at a normal desktop size. A row without menu actions (here a
-// send still pending, as one is while its images upload) is not positioned,
-// so its visually hidden text took .log-wrap as its containing block and sat
-// at its unscrolled place, outside the transcript's clip: .centre grew
-// thousands of pixels of empty overflow, a second scrollbar, and a wheel over
-// the composer slid it away from the dock. .log is now that containing block.
-test('a pending send in an image-heavy chat adds no scroll to the conversation column', async ({ meet, secrets, world }) => {
-  const channel = `pending-${Date.now().toString(36)}`;
-  await must(world, world.tokens.operator, 'POST', '/v0/channels', { name: channel });
-  const me = await member(world, channel, `${channel}-member`);
-  const other = await member(world, channel, `${channel}-other`);
-  secrets.push(me.token, other.token);
-  const { page } = await meet({ viewport: { width: 1215, height: 900 } });
-  const bytes = await tallImage(page);
-  for (let i = 0; i < 6; i++) {
-    await attach(world, other.token, channel, `Attachment ${String(i)}`, [{ filename: `sample-${String(i)}.png`, mediaType: 'image/png', bytes }]);
-  }
-  await servePresence(page, world, me.token, channel, []);
-  await signIn(page, world, me.token, me.name);
-  await openChannel(page, channel);
-  await drawDesktopStrip(page);
-  const log = messages(page);
-  await expect(log.getByRole('button', { name: 'Enlarge sample-5.png' })).toBeVisible();
+// Issue #2133 at a normal desktop size. A row without menu actions is not
+// positioned: a send still pending (as one is while its images upload), or a
+// message its author removed (a tombstone has no menu, and stays). Its
+// visually hidden text took .log-wrap as its containing block and sat at its
+// unscrolled place, outside the transcript's clip: .centre grew thousands of
+// pixels of empty overflow, a second scrollbar, and a wheel over the composer
+// slid it away from the dock. .log is now that containing block.
+for (const trigger of ['a pending send', 'a removed message'] as const) {
+  test(`P2133 ${trigger} in an image-heavy chat adds no scroll to the conversation column`, async ({ meet, secrets, world }) => {
+    const channel = `unpositioned-${Date.now().toString(36)}`;
+    await must(world, world.tokens.operator, 'POST', '/v0/channels', { name: channel });
+    const me = await member(world, channel, `${channel}-member`);
+    const other = await member(world, channel, `${channel}-other`);
+    secrets.push(me.token, other.token);
+    const { page } = await meet({ viewport: { width: 1215, height: 900 } });
+    const bytes = await tallImage(page);
+    for (let i = 0; i < 6; i++) {
+      await attach(world, other.token, channel, `Attachment ${String(i)}`, [{ filename: `sample-${String(i)}.png`, mediaType: 'image/png', bytes }]);
+    }
+    if (trigger === 'a removed message') {
+      // The newest row: a message its author removed.
+      const posted = await post(world, me.token, channel, 'soon removed');
+      expect((await call(world, me.token, 'DELETE', `/v2/channels/${channel}/messages/${String(posted.id)}/own`)).status).toBe(204);
+    }
+    await servePresence(page, world, me.token, channel, []);
+    await signIn(page, world, me.token, me.name);
+    await openChannel(page, channel);
+    await drawDesktopStrip(page);
+    const log = messages(page);
+    await expect(log.getByRole('button', { name: 'Enlarge sample-5.png' })).toBeVisible();
 
-  // Hold the send, so its row stays pending.
-  await page.route('**/v2/channels/*/messages', (route) => (route.request().method() === 'POST' ? new Promise<void>(() => undefined) : route.fallback()));
-  await page.getByRole('textbox', { name: `Message #${channel}` }).fill('still sending');
-  await page.keyboard.press('Enter');
-  await expect(log.locator('.message.pending')).toHaveCount(1);
-  await log.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+    if (trigger === 'a pending send') {
+      // Hold the send, so its row stays pending.
+      await page.route('**/v2/channels/*/messages', (route) => (route.request().method() === 'POST' ? new Promise<void>(() => undefined) : route.fallback()));
+      await page.getByRole('textbox', { name: `Message #${channel}` }).fill('still sending');
+      await page.keyboard.press('Enter');
+      await expect(log.locator('.message.pending')).toHaveCount(1);
+    } else {
+      await expect(log.locator('.message:not(.has-actions)')).toHaveCount(1);
+    }
+    await log.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+    // The transcript itself overflows, so the check below is not vacuous.
+    expect(await log.evaluate((element) => element.scrollHeight - element.clientHeight)).toBeGreaterThan(0);
 
-  const centre = page.locator('.centre');
-  const overflow = () => centre.evaluate((element) => element.scrollHeight - element.clientHeight);
-  expect(await overflow(), 'the conversation column has no scroll of its own').toBeLessThanOrEqual(1);
+    const centre = page.locator('.centre');
+    const overflow = () => centre.evaluate((element) => element.scrollHeight - element.clientHeight);
+    expect(await overflow(), 'the conversation column has no scroll of its own').toBeLessThanOrEqual(1);
 
-  const composer = page.locator('.composer');
-  const before = await boxOf(composer, 'the composer before the wheel');
-  await page.mouse.move(before.x + before.width / 2, before.y + 8);
-  await page.mouse.wheel(0, 3000);
-  await page.evaluate(() => new Promise<void>((resolve) => {
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => { resolve(); });
-    });
-  }));
-  expect(await centre.evaluate((element) => element.scrollTop)).toBe(0);
-  const after = await boxOf(composer, 'the composer after the wheel');
-  expect(after.y).toBeCloseTo(before.y, 0);
-  expect(after.y + after.height).toBeCloseTo((await boxOf(page.locator('.dock'), 'the voice dock')).y, 0);
-});
+    const composer = page.locator('.composer');
+    const before = await boxOf(composer, 'the composer before the wheel');
+    await page.mouse.move(before.x + before.width / 2, before.y + 8);
+    await page.mouse.wheel(0, 3000);
+    await page.evaluate(() => new Promise<void>((resolve) => {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => { resolve(); });
+      });
+    }));
+    expect(await centre.evaluate((element) => element.scrollTop)).toBe(0);
+    const after = await boxOf(composer, 'the composer after the wheel');
+    expect(after.y).toBeCloseTo(before.y, 0);
+    expect(after.y + after.height).toBeCloseTo((await boxOf(page.locator('.dock'), 'the voice dock')).y, 0);
+  });
+}
