@@ -1,6 +1,7 @@
 import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vitest/config';
+import { manifestLink } from './vite.pwa';
 
 // conchd serves the build at /app/ (conchd serve --web-dir web/dist) with
 // script-src 'self' and style-src 'self', so the build may contain no inline
@@ -18,7 +19,7 @@ export default defineConfig(({ mode }) => ({
       '#platform-selected': fileURLToPath(new URL(`./src/platform/${mode === 'desktop' ? 'desktop' : 'browser'}/index.ts`, import.meta.url)),
     },
   },
-  plugins: [react()],
+  plugins: [react(), manifestLink(mode)],
   build: {
     outDir: 'dist',
     assetsDir: 'assets',
