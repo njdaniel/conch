@@ -198,8 +198,9 @@ export interface RoomEvents {
   readonly onReconnecting: () => void;
   readonly onReconnected: () => void;
   readonly onDisconnected: (cause: DisconnectCause) => void;
-  // Principal ids of the active speakers, by the identity p<id>.
-  readonly onSpeakers: (principals: readonly number[]) => void;
+  // Principal ids of the remote active speakers, by the identity p<id>, and
+  // whether the room's own local participant is among the speakers.
+  readonly onSpeakers: (principals: readonly number[], local: boolean) => void;
   // This page's published share is gone (share.ts).
   readonly onScreenEnded: (cause: ScreenEnd) => void;
   // The held screen capture has been muted for 3 s, or has recovered.
@@ -771,6 +772,14 @@ export class VoiceClient {
   private readonly camera: CameraClient;
   // This person, from the identity of the last session.
   private me: number | null = null;
+  // The remote speakers last reported, whether the room's local participant
+  // was last reported speaking, and whether this person is transmitting. The
+  // local level is LiveKit's own and rises with the track muted, so it only
+  // counts while transmitting; it is remembered so that an update that comes
+  // just before the unmute lands is not lost.
+  private remoteSpeaking: ReadonlySet<number> = new Set();
+  private localSpeaking = false;
+  private transmittingNow = false;
   // Watches and their players are keyed by publisher. awaiting holds one
   // resume timer per watched publisher whose stream went with its renewed
   // room: that watch ends if the publisher's stream is not back by then
@@ -1775,6 +1784,9 @@ export class VoiceClient {
     // Nobody's camera is received out of voice; the next join reads presence.
     this.cameraClaims = new Set();
     this.switching = false;
+    this.remoteSpeaking = new Set();
+    this.localSpeaking = false;
+    this.transmittingNow = false;
     this.set({
       phase: 'idle',
       channel: null,
@@ -1826,7 +1838,8 @@ export class VoiceClient {
   }
 
   setMuted(muted: boolean): void {
-    this.set(muted ? { muted, speaking: this.withoutMe() } : { muted });
+    if (muted) this.localSpeaking = false;
+    this.set(muted ? { muted, speaking: this.speakingNow() } : { muted });
     this.applyBlock();
   }
 
@@ -1846,7 +1859,8 @@ export class VoiceClient {
 
   setDeafened(deafened: boolean): void {
     this.room?.setDeafened(deafened);
-    this.set(deafened ? { deafened, speaking: this.withoutMe() } : { deafened });
+    if (deafened) this.localSpeaking = false;
+    this.set(deafened ? { deafened, speaking: this.speakingNow() } : { deafened });
     this.applyBlock();
   }
 
@@ -1951,14 +1965,20 @@ export class VoiceClient {
     // Transmitting begins once the track is unmuted (opened), and ends here,
     // with the mute.
     // Your own chip goes with it: a stale speaker set must not outlive it.
-    this.set(open ? { talking: true } : { talking: false, transmitting: false, speaking: this.withoutMe() });
+    if (!open) {
+      this.localSpeaking = false;
+      this.transmittingNow = false;
+    }
+    this.set(open ? { talking: true } : { talking: false, transmitting: false, speaking: this.speakingNow() });
   }
 
-  // withoutMe is the speaking set without this person: they are not heard
-  // while the gate is shut (muted, deafened, released, watching or listening).
-  private withoutMe(): ReadonlySet<number> {
-    const speaking = new Set(this.state.speaking);
-    if (this.me !== null) speaking.delete(this.me);
+  // speakingNow is who is speaking: the remote speakers, and this person only
+  // while sending and the room reports their own local participant speaking.
+  // Not by principal: another client of the same person (a viewer, a
+  // companion) is a remote participant and counts as speaking.
+  private speakingNow(): ReadonlySet<number> {
+    const speaking = new Set(this.remoteSpeaking);
+    if (this.me !== null && this.localSpeaking && this.transmittingNow) speaking.add(this.me);
     return speaking;
   }
 
@@ -1982,7 +2002,10 @@ export class VoiceClient {
     await this.within(
       room.setSending(true).then(() => {
         this.trace('track unmuted');
-        if (talk === this.talk && edge === this.edge && room === this.room) this.set({ transmitting: true });
+        if (talk === this.talk && edge === this.edge && room === this.room) {
+          this.transmittingNow = true;
+          this.set({ transmitting: true, speaking: this.speakingNow() });
+        }
       }),
       reportWait,
     );
@@ -2075,6 +2098,9 @@ export class VoiceClient {
     this.switching = false;
     // The meter and the playback are the next room's to say: a note or a
     // button about this one's would stay up through the retry.
+    this.remoteSpeaking = new Set();
+    this.localSpeaking = false;
+    this.transmittingNow = false;
     this.set({ speaking: new Set(), level: 0, talking: false, transmitting: false, meter: true, playback: true, streamTracks: new Map(), cameraTracks: noCameraTracks, ...nothingInUse, ...this.cameraNow() });
     if (room !== null) void room.close().catch(() => undefined);
     if (companion && !fromMain) void this.endCompanion(end);
@@ -2205,11 +2231,13 @@ export class VoiceClient {
         }
         this.drop(afterDisconnect(cause), cameraAfter(cause), cause === 'room_deleted', false, { kind: 'disconnected', detail: refused ?? cause });
       },
-      onSpeakers: (ids) => {
+      onSpeakers: (ids, local) => {
         if (mine !== this.attempt) return;
         // LiveKit reports the local participant from its own microphone
         // level, muted track or not: you are speaking only while sending.
-        this.set({ speaking: new Set(ids.filter((id) => id !== this.me || this.state.transmitting)) });
+        this.remoteSpeaking = new Set(ids);
+        this.localSpeaking = local;
+        this.set({ speaking: this.speakingNow() });
       },
       onScreenStalled: (stalled) => {
         if (mine !== this.attempt) return;
