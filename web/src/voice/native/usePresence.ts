@@ -11,6 +11,10 @@ import { Feed, type FeedStatus } from '../../state/feed';
 import { parsePresence } from '../presence';
 import type { Snapshot } from '../useVoice';
 
+type NativeSnapshot =
+  | Exclude<Snapshot, { kind: 'presence' }>
+  | (Extract<Snapshot, { kind: 'presence' }> & { readonly socketSchema: VoicePresence['schema'] | null });
+
 const realClock = {
   setTimeout: (run: () => void, ms: number) => window.setTimeout(run, ms),
   clearTimeout: (handle: unknown) => {
@@ -36,8 +40,8 @@ export function usePresence({
   readonly joined: string | null;
   readonly voiceAllowed: boolean;
   readonly onUnauthorized: () => void;
-}): Snapshot {
-  const [snapshot, setSnapshot] = useState<Snapshot>({ kind: 'loading' });
+}): NativeSnapshot {
+  const [snapshot, setSnapshot] = useState<NativeSnapshot>({ kind: 'loading' });
   const unauthorized = useRef(onUnauthorized);
   unauthorized.current = onUnauthorized;
   const joinedRef = useRef(joined);
@@ -56,13 +60,15 @@ export function usePresence({
     let first = true;
     let closeReason = '';
     let previous: VoicePresence | null = null;
+    // A follow-up read can replace the roster before React delivers the frame.
+    let socketSchema: VoicePresence['schema'] | null = null;
     const show = (presence: VoicePresence) => {
       const audience = soundAudience;
       if (joinedRef.current === channel && audience?.allows(presence.channel_id)) {
         voiceSounds(previous, presence, audience.me, (sound) => { sounds.play(sound); });
       }
       previous = presence;
-      setSnapshot({ kind: 'presence', presence });
+      setSnapshot({ kind: 'presence', presence, socketSchema });
     };
     setSnapshot({ kind: 'loading' });
     const feed = new Feed({
@@ -82,6 +88,7 @@ export function usePresence({
       onFrame: (data) => {
         const presence: VoicePresence | null = parsePresence(data);
         if (presence === null || !live) return;
+        socketSchema = presence.schema;
         show(presence);
       },
       onStatus: (status: FeedStatus) => {

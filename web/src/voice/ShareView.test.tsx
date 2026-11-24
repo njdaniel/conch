@@ -196,7 +196,7 @@ function setup(claims: ShareClaimResult[] = [], features: ShareFeatures = chrome
   const seen = (p: VoicePresenceV2) => {
     snapshot = { kind: 'presence', presence: p };
     act(() => {
-      client.presence(p);
+      client.presence(p, p.schema);
     });
     view.rerender(tree());
   };

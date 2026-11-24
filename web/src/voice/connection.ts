@@ -867,7 +867,7 @@ export class VoiceClient {
     this.share = new ScreenShare(
       { claim: env.claimShare, release: env.stopShare },
       (share) => {
-        // An upgrade seen during the last share applies to the next one.
+        // A socket version change during the last share applies to the next one.
         this.set({
           share,
           ...(share.kind === 'idle' ? { shareQuality: this.availableShareQuality(this.preferredShareQuality, this.state.shareQualityV3) } : {}),
@@ -1609,22 +1609,23 @@ export class VoiceClient {
     this.room?.attachStream(principal, sink);
   }
 
-  // presence is each negotiated document the voice socket sends, or the read
+  // presence reconciles each document from the voice socket or the read
   // after a 1008 close: every live sharer,
   // whether this person still holds their own share, and, in this person's own
   // document alone, why the server ended their last share (#1509).
-  presence(p: VoicePresence): void {
+  // The read uses v2 even on a v3 server. Pass the socket schema for a frame
+  // or when replaying the last socket version, and null to reconcile only.
+  presence(p: VoicePresence, socketSchema: VoicePresence['schema'] | null): void {
     const streams = sharers(p);
     const mine = streams.some((s) => s.principal === this.me);
     this.share.presence(mine ? 'me' : streams.length === 0 ? 'none' : 'other', p.share_ended);
 
-    // Keep the negotiated quality during a live share. The 1008 follow-up
-    // read uses v2 on every server, so it can reconcile the roster and claim
-    // without tracking the socket's negotiated version in both readers.
-    const v3 = p.schema === voicePresenceV3Schema;
-    const share = this.state.share.kind;
-    const active = share !== 'idle' && share !== 'stopping';
-    if (v3 !== this.state.shareQualityV3 && (v3 || !active)) {
+    // Keep the claimed quality during a share and record the negotiated
+    // version for the next one.
+    const v3 = socketSchema === voicePresenceV3Schema;
+    if (socketSchema !== null && v3 !== this.state.shareQualityV3) {
+      const share = this.state.share.kind;
+      const active = share !== 'idle' && share !== 'stopping';
       this.set({
         shareQualityV3: v3,
         ...(active ? {} : { shareQuality: this.availableShareQuality(this.preferredShareQuality, v3) }),

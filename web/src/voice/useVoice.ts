@@ -261,8 +261,8 @@ function modeChoice(): ModeStore {
 }
 
 // What is known about the channel's voice, as the strip says it. loading is
-// before the first frame; presence is a frame on an open socket; unreachable
-// is the socket lost and not back, so the server cannot be reached;
+// before the first frame; presence is a frame or a read after the socket closes;
+// unreachable is the socket lost and not back, so the server cannot be reached;
 // not_allowed is a person whose access has no voice; gone is any other close
 // the server meant (the channel lost, which the page says elsewhere).
 export type Snapshot =
@@ -372,9 +372,10 @@ export function useVoice({
   const [features] = useState(browserFeatures);
   // The presence feed of the shown channel, what it last reported and the
   // presence it last gave, for the effects beside the one that owns it.
+  // A cached read carries the last socket schema for a later join.
   const feedRef = useRef<Feed | null>(null);
   const feedStatus = useRef<FeedStatus | null>(null);
-  const latest = useRef<VoicePresence | null>(null);
+  const latest = useRef<{ readonly presence: VoicePresence; readonly socketSchema: VoicePresence['schema'] | null } | null>(null);
   const joinedRef = useRef<string | null>(null);
   // Whether the feed is lost and not back: the server out of reach.
   const lost = useRef(false);
@@ -478,15 +479,17 @@ export function useVoice({
     let live = true;
     lost.current = false;
     setSnapshot({ kind: 'loading' });
-    const show = (presence: VoicePresence) => {
+    let socketSchema: VoicePresence['schema'] | null = null;
+    const show = (presence: VoicePresence, frameSchema: VoicePresence['schema'] | null) => {
       const audience = soundAudience;
       if (joinedRef.current !== null && audience?.allows(presence.channel_id)) {
-        voiceSounds(lost.current ? null : latest.current, presence, audience.me, (sound) => { sounds.play(sound); });
+        voiceSounds(lost.current ? null : (latest.current?.presence ?? null), presence, audience.me, (sound) => { sounds.play(sound); });
       }
-      latest.current = presence;
+      socketSchema = frameSchema ?? socketSchema;
+      latest.current = { presence, socketSchema };
       lost.current = false;
       setSnapshot({ kind: 'presence', presence });
-      if (joinedRef.current !== null) client.presence(presence);
+      if (joinedRef.current !== null) client.presence(presence, frameSchema);
     };
     const set = (kind: 'not_allowed' | 'gone') => {
       latest.current = null;
@@ -526,7 +529,7 @@ export function useVoice({
       onFrame: (data) => {
         const presence = parsePresence(data);
         if (presence === null || !live) return;
-        show(presence);
+        show(presence, presence.schema);
       },
       onStatus: (status: FeedStatus) => {
         if (!live) return;
@@ -556,7 +559,7 @@ export function useVoice({
       void api.getVoicePresence(named()).then((result) => {
         if (!live) return;
         if (result.ok) {
-          show(result.value);
+          show(result.value, null);
           feed.retryLater();
         } else if (result.failure === 'unauthorized') onUnauthorized();
         else set(result.code === voiceNotAllowed ? 'not_allowed' : 'gone');
@@ -574,15 +577,19 @@ export function useVoice({
   }, [shownKey, voiceAllowed, onUnauthorized, client]);
 
   // While in voice the client reads presence too, for the screen share. On
-  // joining it is given what the socket last said: the socket is not opened
-  // again, and says nothing more until something changes. Leaving while the
-  // socket is lost leaves a strip that says so, not the roster kept in voice.
+  // joining it is given the latest roster and the last socket schema: the
+  // socket is not opened again, and says nothing more until something changes.
+  // Leaving while the socket is lost leaves a strip that says so, not the
+  // roster kept in voice.
   useEffect(() => {
     joinedRef.current = joined;
     if (joined === null && lost.current) {
       latest.current = null;
       setSnapshot({ kind: 'unreachable' });
-    } else if (joined !== null && latest.current !== null) client.presence(latest.current);
+    } else if (joined !== null && latest.current !== null) {
+      const { presence, socketSchema } = latest.current;
+      client.presence(presence, socketSchema);
+    }
   }, [joined, client]);
 
   // Back in reach (the status line says Connected): a feed waiting out its

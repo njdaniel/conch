@@ -6,7 +6,7 @@ import { act, cleanup, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ApiResult } from '../api';
 import type { ChannelV0 } from '../schema/channel';
-import type { VoicePresenceV2 } from '../schema/voice';
+import { voicePresenceV3Schema, type VoicePresenceV2, type VoicePresenceV3 } from '../schema/voice';
 import type { FeedSocket, SocketEvents } from '../state/feed';
 
 // One presence socket the page asked for: its channel, the events it was
@@ -1079,6 +1079,30 @@ describe('presence of the channel on screen', () => {
       fake.room = () => ({});
     });
 
+    it('passes the socket schema and reconciles the 1008 follow-up read with null', async () => {
+      const read = presence([5, 7]);
+      fake.read = () => Promise.resolve({ ok: true, value: read });
+      const { result } = hook();
+      const told = vi.spyOn(result.current.client, 'presence');
+      await flush();
+      act(() => {
+        result.current.join();
+      });
+      await flush();
+      expect(result.current.state.phase).toBe('connected');
+
+      const frame: VoicePresenceV3 = { ...presence([3, 7]), schema: voicePresenceV3Schema };
+      act(() => {
+        last().events.onOpen();
+        last().events.onFrame(JSON.stringify(frame));
+      });
+      expect(told).toHaveBeenLastCalledWith(frame, voicePresenceV3Schema);
+
+      drop(1008);
+      await flush();
+      expect(told).toHaveBeenLastCalledWith(read, null);
+    });
+
     it('a 1008 voice_removed close leaves voice saying so, does not rejoin, and a deliberate join works', async () => {
       const { result } = hook();
       await flush();
@@ -1186,11 +1210,13 @@ describe('presence of the channel on screen', () => {
     expect(fake.opened).toHaveLength(1);
     expect(live()).toHaveLength(1);
     // On joining, the client has the last snapshot; and every frame after.
-    expect(told).toHaveBeenLastCalledWith(presence([3]));
+    const before = presence([3]);
+    expect(told).toHaveBeenLastCalledWith(before, before.schema);
+    const after = presence([2, 3]);
     act(() => {
-      last().events.onFrame(JSON.stringify(presence([2, 3])));
+      last().events.onFrame(JSON.stringify(after));
     });
-    expect(told).toHaveBeenLastCalledWith(presence([2, 3]));
+    expect(told).toHaveBeenLastCalledWith(after, after.schema);
     act(() => {
       result.current.leave();
     });

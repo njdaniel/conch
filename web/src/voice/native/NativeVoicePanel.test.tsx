@@ -7,7 +7,7 @@ import { setSoundAudience, sounds } from '../../sounds';
 import type { NativeVoiceHelper, NativeVoiceView } from '../../platform/desktop/bridge';
 import type { NativeVoice, NativeVoiceError, NativeVoiceOutcome } from '../../platform/types';
 import type { ChannelV0 } from '../../schema/channel';
-import type { VoicePresence, VoicePresenceV2 } from '../../schema/voice';
+import { voicePresenceV3Schema, type VoicePresence, type VoicePresenceV2, type VoicePresenceV3 } from '../../schema/voice';
 import type { SocketEvents } from '../../state/feed';
 import type { Person } from '../../useLiveChannel';
 import * as sdk from '../sdk';
@@ -98,7 +98,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-async function frame(p: VoicePresenceV2) {
+async function frame(p: VoicePresence) {
   await waitFor(() => { expect(sockets.length).toBeGreaterThan(0); });
   act(() => {
     const s = sockets[sockets.length - 1];
@@ -485,7 +485,7 @@ describe('NativeVoicePanel', () => {
   describe('share and watch (#1582)', () => {
     function companionOf(over: Partial<VoiceState> = {}) {
       const calls: string[] = [];
-      const presences: VoicePresence[] = [];
+      const presences = vi.fn<CompanionClient['presence']>();
       const outs: number[] = [];
       const state: VoiceState = { ...initialVoice, ...over };
       const client: CompanionClient = {
@@ -498,7 +498,7 @@ describe('NativeVoicePanel', () => {
         watchStream: () => undefined,
         focusShare: () => undefined,
         setShareQuality: () => Promise.resolve(),
-        presence: (p) => { presences.push(p); },
+        presence: presences,
         attachStream: () => undefined,
         readShareStats: () => Promise.resolve(null),
         diagnosticsSources: () => [],
@@ -601,16 +601,24 @@ describe('NativeVoicePanel', () => {
       const c = companionOf();
       withCompanion(new Fake(running()), c.companion);
       await frame(sharingPresence());
-      expect(c.presences.length).toBeGreaterThan(0);
+      expect(c.presences).toHaveBeenCalled();
       fireEvent.click(within(screen.getByRole('region', { name: "Ada's stream" })).getByRole('button', { name: 'Watch' }));
       expect(c.calls).toEqual(['watch general 2']);
+    });
+
+    it('passes the v3 socket schema to the companion client', async () => {
+      const c = companionOf();
+      withCompanion(new Fake(running()), c.companion);
+      const p: VoicePresenceV3 = { ...presence([1, '2026-01-01T00:00:00Z']), schema: voicePresenceV3Schema };
+      await frame(p);
+      expect(c.presences).toHaveBeenLastCalledWith(p, voicePresenceV3Schema);
     });
 
     it('draws no tiles and gives no presence out of voice', async () => {
       const c = companionOf();
       withCompanion(new Fake(idle), c.companion);
       await frame(sharingPresence());
-      expect(c.presences).toEqual([]);
+      expect(c.presences).not.toHaveBeenCalled();
       expect(screen.queryByRole('region', { name: "Ada's stream" })).toBeNull();
     });
 
