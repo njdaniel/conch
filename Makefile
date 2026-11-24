@@ -82,6 +82,7 @@ web-node:
 
 web-check: web-node
 	./scripts/web-gates-test.sh
+	./scripts/pwa-manifest-check-test.sh
 	./scripts/web-depgate.sh
 	./scripts/web-licences.sh
 	cd web && npm ci --no-audit

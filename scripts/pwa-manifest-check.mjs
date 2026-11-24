@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
-const dist = new URL('../web/dist/', import.meta.url);
+// usage: pwa-manifest-check.mjs [dist directory]   (default: web/dist)
+const dist = process.argv[2]
+  ? pathToFileURL(resolve(process.argv[2]) + '/')
+  : new URL('../web/dist/', import.meta.url);
 const html = readFileSync(new URL('index.html', dist), 'utf8');
 assert.match(html, /<link rel="manifest" href="\/app\/conch-manifest\.json"\s*\/?\s*>/);
 
@@ -12,6 +17,9 @@ assert.equal(manifest.start_url, '/app/');
 assert.equal(manifest.name, 'Conch');
 assert.equal(manifest.short_name, 'Conch');
 assert.equal(manifest.display, 'standalone');
+const colour = /^#[0-9a-f]{6}$/i;
+assert.match(manifest.theme_color, colour, 'theme_color');
+assert.match(manifest.background_color, colour, 'background_color');
 
 const signatures = new Set();
 const iconOrigin = new URL('https://conch.example/app/');
