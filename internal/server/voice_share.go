@@ -200,7 +200,10 @@ func (r *voiceRoomState) owe(principalID int64) {
 func voiceRoomPublishes(room store.VoiceRoom) bool { return room.NetID == 0 }
 
 // handleVoiceShareStart serves POST /v1/channels/{channel}/voice/share: the
-// caller claims the room's screen share.
+// caller claims a screen share in the room. With
+// ?schema=conch.voice_presence.v3 the body may name a 480p or 1440p quality
+// in addition to the legacy resolutions. Invalid or repeated schema names
+// are refused after the caller and session checks.
 //
 // The caller is checked exactly as for a session, by the same code and so in
 // the same order (voiceSessionCaller): a non-member gets the unknown-channel
@@ -208,7 +211,8 @@ func voiceRoomPublishes(room store.VoiceRoom) bool { return room.NetID == 0 }
 // then is a member told that voice is not configured. Then, as for a transmit
 // report, the credential the request came with must hold a session for the
 // channel's current room (409 voice_no_session). Only then is the room's share
-// looked at: a room that holds voiceShareCap shares is 409 voice_share_full to a caller who holds none.
+// looked at: a room that holds voiceShareCap shares is 409 voice_share_full
+// to a caller who holds none.
 func (s *Server) handleVoiceShareStart(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	channel, caller, ok := s.voiceClaimCaller(w, r)
@@ -313,9 +317,10 @@ func (s *Server) handleVoiceShareStart(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w)
 		return
 	}
-	// A claim that declared a quality is answered with it (VoiceShareV2); one
-	// that did not gets VoiceShareV1, exactly as before, so a client from
-	// before the quality never sees a field it does not know.
+	// A claim that declared a quality is answered with it (VoiceShareV3 when
+	// requested, VoiceShareV2 otherwise). A claim without a quality gets
+	// VoiceShareV1, exactly as before, so a client from before the quality
+	// never sees a field it does not know.
 	var answer interface{ Validate() error } = share
 	if quality != nil {
 		if version == schema.VoicePresenceSchemaV3 {

@@ -1329,8 +1329,10 @@ export class VoiceClient {
   }
 
   private availableShareQuality(asked: ShareQuality, v3: boolean): ShareQuality {
+    // An older server's quality vocabulary is shared by both platforms.
+    // Fall back to 1080p at the chosen rate before applying desktop limits.
+    if (!v3 && extendedResolution(asked.resolution)) asked = { resolution: '1080p', frameRate: asked.frameRate };
     if (this.env.companion !== undefined) return companionQuality(asked, v3);
-    if (!v3 && extendedResolution(asked.resolution)) return { resolution: '1080p', frameRate: asked.frameRate };
     return asked.resolution === 'auto' ? { resolution: 'auto', frameRate: autoFrameRate } : asked;
   }
 
@@ -1344,7 +1346,8 @@ export class VoiceClient {
     // choice, not this one); the note comes back only if this one fails too.
     if (this.state.why === shareQualityRefusedNote || this.state.why === qualityLaterNote) this.set({ why: null });
     // The desktop offers companionQualities only (Q-D4-3 on #1578, widened by
-    // #1772); a choice outside them, Auto included, is its 720p30 default.
+    // #1772); a choice still outside them after the server fallback, Auto
+    // included, is its 720p30 default.
     // The browser's Auto is always 30 fps (Q10 on #1614), whatever rate was
     // left on the choice.
     const quality = this.availableShareQuality(asked, this.state.shareQualityV3);
@@ -1598,12 +1601,16 @@ export class VoiceClient {
     this.room?.attachStream(principal, sink);
   }
 
-  // presence is each negotiated document the voice socket sends: every live sharer,
+  // presence is each negotiated document the voice socket sends, or the read
+  // after a 1008 close: every live sharer,
   // whether this person still holds their own share, and, in this person's own
   // document alone, why the server ended their last share (#1509).
   presence(p: VoicePresence): void {
     const v3 = p.schema === voicePresenceV3Schema;
-    if (v3 !== this.state.shareQualityV3) {
+    // Keep the negotiated quality during a live share. The 1008 follow-up
+    // read uses v2 on every server, so it can reconcile the roster and claim
+    // without tracking the socket's negotiated version in both readers.
+    if (v3 !== this.state.shareQualityV3 && (v3 || this.state.share.kind !== 'sharing')) {
       this.set({ shareQualityV3: v3, shareQuality: this.availableShareQuality(this.preferredShareQuality, v3) });
     }
     const streams = sharers(p);

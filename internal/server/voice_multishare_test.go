@@ -17,7 +17,7 @@ import (
 
 // Tests of several screen shares at once in one room (issue #1508,
 // docs/design/voice-multi-share.md §5, §9.2): the claim and its quality body,
-// the cap, the release by ?principal=, ?schema= on the two presence routes,
+// the cap, the release by ?principal=, ?schema= on presence and claims,
 // companion audio per sharer and the passes, over the scripted LiveKit with
 // the fixture's manual clock. Everything here goes through the public routes
 // or the snapshot, so it holds whatever the room's state looks like inside.
@@ -633,6 +633,34 @@ func (f *presenceFixture) mustClaimQuality(t *testing.T, who, body string) {
 	t.Helper()
 	if res := f.claimShareBody(t, who, body); res.status != http.StatusOK {
 		t.Fatalf("%s claims with %s: %d %s", who, body, res.status, res.body)
+	}
+}
+
+func TestVoiceShareClaimSchemaRefusals(t *testing.T) {
+	f, _ := newShareFixture(t)
+	f.at(1_000)
+	const path = "/v1/channels/ops/voice/share?schema="
+	tests := []struct {
+		name  string
+		value string
+	}{
+		{"empty", ""},
+		{"short name", "v3"},
+		{"unknown", "bogus"},
+		{"future version", "conch.voice_presence.v4"},
+		{"repeated same version", schema.VoicePresenceSchemaV3 + "&schema=" + schema.VoicePresenceSchemaV3},
+		{"repeated different versions", schema.VoicePresenceSchemaV2 + "&schema=" + schema.VoicePresenceSchemaV3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res := f.callREST(t, http.MethodPost, path+tt.value, f.tokens["ann"], "{}")
+			if res.status != http.StatusBadRequest || errCode(t, res.body) != "invalid_request" {
+				t.Fatalf("claim with %q: %d %s, want 400 invalid_request", tt.value, res.status, res.body)
+			}
+		})
+	}
+	if got := f.sharers(f.presenceV2(t, "ann")); len(got) != 0 {
+		t.Fatalf("refused claims changed presence: %v", got)
 	}
 }
 

@@ -2966,27 +2966,32 @@ const diagnosticOf: Record<SocketName, DiagnosticSocket> = { messages: 'messages
 const retries: Record<SocketName, number> = { messages: 0, events: 0, voice: 0, occupancy: 0, person: 0 };
 const lost: Record<SocketName, boolean> = { messages: false, events: false, voice: false, occupancy: false, person: false };
 
-// connect asks for a ticket with the credential and opens the socket that
-// `query` names, with the ticket added. The ticket is single use, so a
+type SocketQuery = Readonly<Record<string, string>>;
+
+// connect waits for any credential replacement, resolves the query (probing
+// first if needed), asks for a ticket with the credential and opens the socket
+// that the query names, with the ticket added. The ticket is single use, so a
 // reconnect calls this again. A platform that opens its sockets with the
 // credential it holds (the desktop shell's main) is asked for none. The
 // diagnostic ring is told of each open, each close with its code and each try
 // after a loss, by kind, never by address: the address holds the channel and
 // the ticket.
-async function connect(name: SocketName, id: OperationId, query: Readonly<Record<string, string>>, events: SocketEvents): Promise<ApiResult<FeedSocket>> {
+async function connect(name: SocketName, id: OperationId, query: SocketQuery | (() => Promise<ApiResult<SocketQuery>>), events: SocketEvents): Promise<ApiResult<FeedSocket>> {
   const kind = diagnosticOf[name];
   if (lost[name]) record({ kind: 'reconnect', socket: kind, attempt: ++retries[name] });
-  // Lost until it opens: a ticket refused or a socket that never opens is
-  // followed by another try.
+  // Lost until it opens: a failed probe, a ticket refused or a socket that
+  // never opens is followed by another try.
   lost[name] = true;
   await holdSockets();
+  const resolved = typeof query === 'function' ? await query() : { ok: true as const, value: query };
+  if (!resolved.ok) return resolved;
   // The credential this socket is opened with, which a replacement may end.
   const opened = current();
-  let address = query;
+  let address = resolved.value;
   if (platform.sockets.ticket) {
     const ticket = await requestTicket();
     if (!ticket.ok) return ticket;
-    address = { ...query, ticket: ticket.value.ticket };
+    address = { ...address, ticket: ticket.value.ticket };
   }
   let socket: FeedConnection;
   try {
@@ -3265,9 +3270,10 @@ export async function removeVoiceViewer(channel: string): Promise<ApiResult<null
 
 // getVoicePresence reads who is in a channel's voice, once. The page keeps
 // presence on its socket, joined or not, and reads this only to learn why
-// the server closed that socket (1008).
+// the server closed that socket (1008). Both older and newer servers serve
+// v2 for this read, and a live share keeps its negotiated quality.
 export function getVoicePresence(channel: string): Promise<ApiResult<VoicePresenceV2>> {
-  return authed(call('voicePresence', { channel }, queryOf({ schema: 'conch.voice_presence.v2' })), voicePresenceV2);
+  return authed(call('voicePresence', { channel }, queryOf({ schema: voicePresenceV2Schema })), voicePresenceV2);
 }
 
 // How a transmit report was answered. no_session is "go back to conchd" (409
@@ -3306,12 +3312,14 @@ export async function reportVoiceTransmit(channel: string, state: VoiceTransmitS
 // which probes again, so a transient failure costs one wait and never a
 // downgrade, and it cannot hammer. A 401 comes back as 'unauthorized', which
 // authed has already signed out for and the Feed reports as such.
-export async function openVoiceSocket(channel: string, events: SocketEvents): Promise<ApiResult<FeedSocket>> {
-  const probe = await authed(call('voicePresence', { channel }, queryOf({ schema: voicePresenceV3Schema })), voicePresenceV3, true);
-  if (probe.ok) return connect('voice', 'voiceSocket', { channel, schema: voicePresenceV3Schema }, events);
-  const legacy = probe.failure === 'invalid' && probe.status === 400 && probe.code === 'invalid_request';
-  if (!legacy) return probe;
-  return connect('voice', 'voiceSocket', { channel, schema: voicePresenceV2Schema }, events);
+export function openVoiceSocket(channel: string, events: SocketEvents): Promise<ApiResult<FeedSocket>> {
+  return connect('voice', 'voiceSocket', async () => {
+    const probe = await authed(call('voicePresence', { channel }, queryOf({ schema: voicePresenceV3Schema })), voicePresenceV3, true);
+    if (probe.ok) return { ok: true, value: { channel, schema: voicePresenceV3Schema } };
+    const legacy = probe.failure === 'invalid' && probe.status === 400 && probe.code === 'invalid_request';
+    if (!legacy) return probe;
+    return { ok: true, value: { channel, schema: voicePresenceV2Schema } };
+  }, events);
 }
 
 // Voice occupancy (issue #596): how many are in each channel's voice, for

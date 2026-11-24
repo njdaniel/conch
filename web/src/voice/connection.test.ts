@@ -1494,8 +1494,8 @@ const presenceWith = (sharing: number | null): VoicePresenceV2 => ({
   ],
 });
 
-it('keeps an extended share choice across v2 and v3 feeds and saves only explicit changes', async () => {
-  const quality: ShareQuality = { resolution: '1440p', frameRate: 15 };
+it.each(['browser', 'desktop'])('keeps an extended %s share choice across v2 and v3 feeds and saves only explicit changes', async (platform) => {
+  const quality: ShareQuality = { resolution: '1440p', frameRate: 60 };
   const keepShareQuality = vi.fn<(quality: ShareQuality) => void>();
   const client = new VoiceClient({
     clock: new FakeClock(),
@@ -1507,14 +1507,15 @@ it('keeps an extended share choice across v2 and v3 feeds and saves only explici
     stopShare: () => Promise.resolve(),
     shareQuality: quality,
     keepShareQuality,
+    ...(platform === 'desktop' ? { companion: nativeCompanion([], []).env } : {}),
   });
   const v2 = presenceWith(null);
   const v3 = { ...v2, schema: 'conch.voice_presence.v3' as const };
-  expect(client.snapshot().shareQuality).toEqual({ resolution: '1080p', frameRate: 15 });
+  expect(client.snapshot().shareQuality).toEqual({ resolution: '1080p', frameRate: 60 });
   client.presence(v3);
   expect(client.snapshot().shareQuality).toEqual(quality);
   client.presence(v2);
-  expect(client.snapshot().shareQuality).toEqual({ resolution: '1080p', frameRate: 15 });
+  expect(client.snapshot().shareQuality).toEqual({ resolution: '1080p', frameRate: 60 });
   client.presence(v3);
   expect(client.snapshot().shareQuality).toEqual(quality);
   expect(keepShareQuality).not.toHaveBeenCalled();
@@ -1555,6 +1556,33 @@ describe('watch only', () => {
 });
 
 describe('sharing through the client', () => {
+  it('keeps a live 1440p share and its v3 controls after a v2 presence read', async () => {
+    const t = await joined();
+    const quality = { resolution: '1440p', frameRate: 60 } as const;
+    const v2 = presenceWith(7);
+    const v3 = { ...v2, schema: 'conch.voice_presence.v3' as const };
+    t.client.presence(v3);
+    await t.client.setShareQuality(quality);
+    t.client.startShare();
+    await settle();
+    t.client.presence(v3);
+    expect(t.client.snapshot()).toMatchObject({ share: { kind: 'sharing' }, shareQualityV3: true, shareQuality: quality });
+
+    // The one-off read after a 1008 close uses v2, which labels 1440p "source".
+    const v2Read = {
+      ...v2,
+      rooms: v2.rooms.map((room) => ({
+        ...room,
+        participants: room.participants.map((p) => p.sharing === true
+          ? { ...p, share_quality: { resolution: 'source' as const, frame_rate: 60 } }
+          : p),
+      })),
+    };
+    t.client.presence(v2Read);
+    expect(t.client.snapshot()).toMatchObject({ share: { kind: 'sharing' }, shareQualityV3: true, shareQuality: quality });
+    await t.client.leave();
+  });
+
   it('claims, picks, claims again and publishes on the connected room; leaving stops it and tells conchd', async () => {
     const t = await joined();
     t.client.startShare();

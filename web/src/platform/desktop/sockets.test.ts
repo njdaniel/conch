@@ -19,10 +19,10 @@ interface Subscription {
 }
 
 // A bridge whose only working functions are subscribe, whoami (for signIn)
-// and the voice feed's presence probe, which it answers as a server older
-// than presence v3 does (400 invalid_request), so the client opens the v2
-// feed; any other call (a ticket request above all) fails the test.
-function install(): Subscription[] {
+// and the voice feed's presence probe. By default it answers as a server
+// older than presence v3 does (400 invalid_request), so the client opens
+// the v2 feed. Any other call (a ticket request above all) fails the test.
+function install(supportsV3 = false): Subscription[] {
   const subscriptions: Subscription[] = [];
   const unexpected = (name: string) => () => Promise.reject(new Error(`unexpected bridge call: ${name}`));
   const bridge: ConchDesktopBridge = {
@@ -32,6 +32,7 @@ function install(): Subscription[] {
         return Promise.resolve({ kind: 'reply', status: 200, body: { id: 2, kind: 'human', name: 'ada', role: 'member' } });
       }
       if (request.operation === 'voicePresence' && request.query === 'schema=conch.voice_presence.v3') {
+        if (supportsV3) return Promise.resolve({ kind: 'reply', status: 200, body: fixture('voice-presence-v3') });
         return Promise.resolve({ kind: 'reply', status: 400, body: { code: 'invalid_request', message: 'schema must name a presence document this server serves, given once' } });
       }
       return Promise.reject(new Error(`unexpected bridge call: request ${request.operation}`));
@@ -199,6 +200,24 @@ describe('the client on the desktop', () => {
     expect(presence).not.toBeNull();
     expect(sharers(presence).length).toBeGreaterThan(1);
     expect(parsePresence(JSON.stringify(fixture('voice-presence-v1-sharing')))).toBeNull();
+  });
+
+  it('subscribes with the v3 schema after a successful desktop probe', async () => {
+    const subs = install(true);
+    await signIn();
+    const handlers = events();
+    const result = await openVoiceSocket('general', handlers);
+    expect(result.ok).toBe(true);
+    expect(subs.map(({ feed }) => feed)).toEqual([
+      { kind: 'voice', channel: 'general', schema: 'conch.voice_presence.v3' },
+    ]);
+    const frame = JSON.stringify(fixture('voice-presence-v3'));
+    subs[0]?.handlers.onOpen();
+    subs[0]?.handlers.onFrame(frame);
+    expect(handlers.onOpen).toHaveBeenCalledOnce();
+    expect(handlers.onFrame).toHaveBeenCalledExactlyOnceWith(frame);
+    expect(parsePresence(frame)?.schema).toBe('conch.voice_presence.v3');
+    if (result.ok) result.value.close();
   });
 
   // The renderer's own reconnect, unchanged: main's 1013 (fell behind) is a
