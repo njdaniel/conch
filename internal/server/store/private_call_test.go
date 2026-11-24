@@ -381,27 +381,24 @@ func (f *privateCallFixture) ringAndCancel(action string) PrivateCallResult {
 	return out
 }
 
-// ringAndRevoke rings, then blocks the caller so the next sweep ends the ring
-// as cancelled by a revocation, and lifts the block again.
-func (f *privateCallFixture) ringAndRevoke(action string) {
+// ringAndRevoke rings as caller, lets revoke end the ring by a revocation on
+// the next sweep, and checks it is stored cancelled by "revoked".
+func (f *privateCallFixture) ringAndRevoke(caller PrivateCallActor, action string, revoke func()) PrivateCallResult {
 	f.t.Helper()
-	ctx := context.Background()
-	out := f.invite(1, f.a, "invite-"+action)
+	out := f.invite(1, caller, "invite-"+action)
+	if out.Code != "" {
+		return out
+	}
 	if out.Call.State != schema.PrivateCallStateRinging {
 		f.t.Fatalf("invite %s: %+v", action, out)
 	}
-	if _, err := f.s.db.ExecContext(ctx, "INSERT INTO blocks VALUES (?, ?, ?)",
-		f.b.PrincipalID, f.a.PrincipalID, f.now.UnixMilli()); err != nil {
-		f.t.Fatal(err)
-	}
+	revoke()
 	f.sweep()
-	if _, err := f.s.db.ExecContext(ctx, "DELETE FROM blocks"); err != nil {
-		f.t.Fatal(err)
-	}
 	got := f.stored(out.Call.ID)
 	if got.State != schema.PrivateCallStateCancelled || got.lastEvent != schema.PrivateCallEventRevoked {
 		f.t.Fatalf("revoked ring %s: %s by %q", action, got.State, got.lastEvent)
 	}
+	return out
 }
 
 func TestPrivateCallRepeatLimitCountsCallerCancelledRings(t *testing.T) {
@@ -431,14 +428,71 @@ func TestPrivateCallRepeatLimitCountsCallerCancelledRings(t *testing.T) {
 	}
 }
 
-func TestPrivateCallRepeatLimitIgnoresRevokedRings(t *testing.T) {
-	f := newPrivateCallFixture(t, openTestStore(t))
-	for i := 0; i < 5; i++ {
-		f.ringAndRevoke(fmt.Sprint(i))
-		f.now = f.now.Add(time.Second)
+// TestPrivateCallRepeatLimitCountsRevokedRings: a ring cancelled by a
+// revocation counts toward the repeat limit whoever caused the revocation.
+// The caller can cause one at will, by blocking and unblocking the callee or
+// signing out the credential that rang, and the stored attempt does not say
+// who did (the security review of #2156 measured 90 of 90 such rings
+// answered 201 in an hour when they were exempt).
+func TestPrivateCallRepeatLimitCountsRevokedRings(t *testing.T) {
+	ctx := context.Background()
+	block := func(f *privateCallFixture, owner, blocked int64) func() {
+		return func() {
+			if _, err := f.s.db.ExecContext(ctx, "INSERT INTO blocks VALUES (?, ?, ?)", owner, blocked, f.now.UnixMilli()); err != nil {
+				f.t.Fatal(err)
+			}
+			f.sweep()
+			if _, err := f.s.db.ExecContext(ctx, "DELETE FROM blocks"); err != nil {
+				f.t.Fatal(err)
+			}
+		}
 	}
-	if out := f.invite(1, f.a, "after-revoked"); !out.Created || out.Code != "" || out.Call.State != schema.PrivateCallStateRinging {
-		t.Fatalf("invite after five revoked rings: %+v", out)
+	tests := []struct {
+		name string
+		// ring returns the caller for cycle i and the revocation to apply.
+		ring func(f *privateCallFixture, i int) (PrivateCallActor, func())
+	}{
+		{"the caller blocks and unblocks the callee", func(f *privateCallFixture, _ int) (PrivateCallActor, func()) {
+			return f.a, block(f, f.a.PrincipalID, f.b.PrincipalID)
+		}},
+		{"the callee blocks and unblocks the caller", func(f *privateCallFixture, _ int) (PrivateCallActor, func()) {
+			return f.a, block(f, f.b.PrincipalID, f.a.PrincipalID)
+		}},
+		{"the caller signs out the ringing credential", func(f *privateCallFixture, i int) (PrivateCallActor, func()) {
+			// A fresh sign-in of the caller's for each ring.
+			cred, _, err := f.s.CreateCredential(ctx, "system", f.a.PrincipalID, fmt.Sprintf("signin%d", i), nil)
+			if err != nil {
+				f.t.Fatal(err)
+			}
+			if _, err := f.s.db.ExecContext(ctx, "UPDATE credentials SET self_made = 1 WHERE id = ?", cred.ID); err != nil {
+				f.t.Fatal(err)
+			}
+			caller := PrivateCallActor{PrincipalID: f.a.PrincipalID, CredentialID: cred.ID}
+			return caller, func() {
+				if err := f.s.RevokeCredential(ctx, "system", cred.ID); err != nil {
+					f.t.Fatal(err)
+				}
+			}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newPrivateCallFixture(t, openTestStore(t))
+			start := f.now
+			const window = 10 * time.Minute
+			for i := 0; i < 5; i++ {
+				caller, revoke := tt.ring(f, i)
+				out := f.ringAndRevoke(caller, fmt.Sprint(i), revoke)
+				if i < 3 {
+					if !out.Created || out.Code != "" {
+						t.Fatalf("ring %d within the limit: %+v", i, out)
+					}
+				} else if want := window - f.now.Sub(start); out.Code != schema.ErrorCodeRateLimited || out.Call.ID != "" || out.RetryAfter != want {
+					t.Fatalf("ring %d past the limit: %+v, want rate_limited after %s", i, out, want)
+				}
+				f.now = f.now.Add(20 * time.Second)
+			}
+		})
 	}
 }
 

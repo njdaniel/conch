@@ -166,12 +166,12 @@ In-memory token buckets per principal, as every limit in conchd is (`internal/se
 | DM messages | burst 20, then 1 per 2 s | every send, across conversations |
 | DM edits | burst 10, then 1 per 6 s; plus the channel cap on revisions per message (409 `message_edit_limit_reached`, `internal/server/message_edit.go:38`) | every edit |
 | Call invites | burst 3, then 1 per 20 s | every invite, refused or `unavailable` included |
-| Repeat invites to one callee | 3 per 10 minutes per pair | invites that ended `unavailable`, `declined` or `missed`, and invites the caller cancelled (`last_event` `cancel`); a ring cancelled by a revocation (`revoked`) is not the caller's act and does not count |
+| Repeat invites to one callee | 3 per 10 minutes per pair | invites that ended `unavailable`, `declined`, `missed` or `cancelled`, whether the caller cancelled or a revocation did |
 | Uploads | the existing upload limits | as for channels |
 
 Message body, file size and file count are the channel limits. #2018 may tune the values with a recorded reason here.
 
-Caller-cancelled rings count toward the repeat limit (#2112): the security review of #2058 probed 12 ring-then-cancel cycles 20 s apart and all answered 201, each holding the callee's one call slot and reopening a conversation they had hidden.
+Cancelled rings count toward the repeat limit (#2112): the security review of #2058 probed 12 ring-then-cancel cycles 20 s apart and all answered 201, each holding the callee's one call slot and reopening a conversation they had hidden. Rings cancelled by a revocation count too: the caller can revoke a ring at will (block and unblock the callee, or sign out the ringing credential), and the review of #2156 measured 90 of 90 such rings answered 201 in an hour when they were exempt. The stored attempt does not record who caused a revocation.
 
 ## 6. Revocation bounds
 

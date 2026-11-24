@@ -111,17 +111,19 @@ func (s *Store) InvitePrivateCall(ctx context.Context, conversationID int64, act
 // Count prior outcomes for this caller and conversation under the same write
 // lock as creation. Retries of a recorded action bypass this check.
 //
-// Spent on attempts that ended unavailable, declined or missed, and on those
-// the caller cancelled (state cancelled, last_event "cancel", #2112). A
-// cancelled attempt whose last_event is "revoked" was ended by a revocation,
-// which is not the caller's act, so it does not count.
+// Spent on every attempt that ended unanswered: unavailable, declined,
+// missed, and cancelled whatever cancelled it (#2112). A cancel by the caller
+// counts, and so does a ring cancelled by a revocation: the caller can cause
+// one at will (block and unblock the callee, or sign out the ringing
+// credential), and the stored row does not say who caused it, so exempting
+// revocations would reopen the ring-cancel loop. Hangups and failures after
+// an accept need the callee's answer and do not count.
 func (cmd privateCallCommand) inviteRetryAfter(ctx context.Context, tx execer, conversationID int64) (time.Duration, error) {
 	const window = 10 * time.Minute
 	var ended int64
 	err := tx.QueryRowContext(ctx, `SELECT ended_at FROM private_calls
 		WHERE conversation_id = ? AND caller = ? AND ended_at > ?
-		AND (state IN ('unavailable', 'declined', 'missed')
-			OR (state = 'cancelled' AND last_event = 'cancel'))
+		AND state IN ('unavailable', 'declined', 'missed', 'cancelled')
 		ORDER BY ended_at DESC LIMIT 1 OFFSET 2`,
 		conversationID, cmd.actor.PrincipalID, cmd.now.Add(-window).UnixMilli()).Scan(&ended)
 	if errors.Is(err, sql.ErrNoRows) {
