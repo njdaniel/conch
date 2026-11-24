@@ -185,44 +185,82 @@ test.describe('the persistent call workspace', () => {
     expect(p.watch.failed, 'requests to conchd that failed').toEqual([]);
   }
 
-  test('P2187 a watched share fits its stage at desktop and phone sizes', async ({ browser }) => {
-    // Read the layout without scrolling any of the share's controls into view.
-    const check = async (page: Page, where: string, minVideoHeight?: number) => {
-      const geometry = await shareView(page).evaluate((share) => {
+  test('P2187 a watched share fills its stage, with its controls over the picture', async ({ browser }) => {
+    // Read the layout, not pixels. The stage keeps the size it always had. In
+    // the open call view the share's controls are drawn over the picture's
+    // bottom edge, like a video player's, so the frame takes what the view
+    // leaves under the title (6rem at the least) and the video is contained
+    // in it. In the closed phone Chat stage the controls stay in a row below.
+    const check = async (page: Page, where: string, opts: { log?: boolean; open?: boolean } = {}) => {
+      const open = opts.open ?? true;
+      const g = await shareView(page).evaluate((share) => {
         const stage = share.closest('.stage');
         const frame = share.querySelector('.share-frame');
         const video = frame?.querySelector('video');
         const controls = share.querySelector('.share-controls');
-        if (stage === null || frame === null || video == null || controls === null) throw new Error('no share layout boxes');
-        const rect = (element: Element) => element.getBoundingClientRect().toJSON() as DOMRectInit;
-        const inside = (element: Element, outer: Element) => {
-          const box = element.getBoundingClientRect();
-          const boundary = outer.getBoundingClientRect();
-          return box.left >= boundary.left - 1 && box.right <= boundary.right + 1 &&
-            box.top >= boundary.top - 1 && box.bottom <= boundary.bottom + 1;
-        };
+        const title = share.querySelector('.share-title');
+        if (stage === null || frame === null || video == null || controls === null || title === null) throw new Error('no share layout boxes');
         const view = share.closest('.call-view') ?? stage;
-        const fits = (element: Element) => {
+        const rect = (element: Element) => element.getBoundingClientRect().toJSON() as DOMRectInit;
+        const within = (element: Element, outer: Element) => {
           const box = element.getBoundingClientRect();
-          return box.width > 0 && box.height > 0 && box.left >= -1 && box.top >= -1 &&
-            box.right <= window.innerWidth + 1 && box.bottom <= window.innerHeight + 1 &&
-            inside(element, stage) && inside(element, view);
+          const bounds = outer.getBoundingClientRect();
+          return box.width > 0 && box.height > 0 && box.left >= bounds.left - 1 && box.right <= bounds.right + 1 &&
+            box.top >= bounds.top - 1 && box.bottom <= bounds.bottom + 1;
         };
+        const style = getComputedStyle(view);
+        const head = view.querySelector('.call-head')?.getBoundingClientRect().height ?? 0;
+        const gap = parseFloat(style.rowGap) || 0;
+        const content = view.getBoundingClientRect().bottom - parseFloat(style.paddingBottom) - parseFloat(style.borderBottomWidth);
+        const box = controls.getBoundingClientRect();
         return {
           stage: rect(stage), view: rect(view), frame: rect(frame), video: rect(video), controls: rect(controls),
-          videoHeight: video.getBoundingClientRect().height,
+          floor: 6 * parseFloat(getComputedStyle(document.documentElement).fontSize),
           fit: getComputedStyle(video).objectFit,
-          videoFits: fits(video), controlsFit: fits(controls),
+          scrolls: view.scrollHeight > view.clientHeight + 1,
+          videoInStage: within(video, stage) && within(video, view),
+          controlsInFrame: within(controls, frame),
+          controlsInStage: within(controls, stage) && within(controls, view),
+          controlsInWindow: box.left >= -1 && box.top >= -1 && box.right <= window.innerWidth + 1 && box.bottom <= window.innerHeight + 1,
+          // Under the frame: what the view's content leaves unused.
+          slack: content - frame.getBoundingClientRect().bottom,
+          // What the stage has under the title, less the call head above it.
+          room: content - title.getBoundingClientRect().bottom - head - gap,
+          log: document.querySelector('[role="log"]')?.getBoundingClientRect().height ?? 0,
         };
       });
-      expect.soft(geometry.fit, where).toBe('contain');
-      expect.soft(geometry.video, `${where}: video fills its frame`).toEqual(geometry.frame);
-      const details = JSON.stringify(geometry);
-      expect.soft(geometry.videoFits, `${where}: video fits\n${details}`).toBe(true);
-      expect.soft(geometry.controlsFit, `${where}: controls fit\n${details}`).toBe(true);
-      if (minVideoHeight !== undefined) {
-        expect.soft(geometry.videoHeight, `${where}: video is not shrunk to fit\n${details}`).toBeGreaterThanOrEqual(minVideoHeight);
+      const details = JSON.stringify(g);
+      expect.soft(g.fit, where).toBe('contain');
+      expect.soft(g.video, `${where}: the video fills its frame\n${details}`).toEqual(g.frame);
+      expect.soft(g.frame.height, `${where}: the frame keeps its floor\n${details}`).toBeGreaterThanOrEqual(g.floor - 1);
+      expect.soft(g.videoInStage, `${where}: the video is inside the stage\n${details}`).toBe(true);
+      expect.soft(g.controlsInWindow, `${where}: the controls are inside the window\n${details}`).toBe(true);
+      if (open) {
+        expect.soft(g.scrolls, `${where}: the call view needs no scrolling\n${details}`).toBe(false);
+        expect.soft(g.controlsInFrame, `${where}: the controls are inside the frame\n${details}`).toBe(true);
+        // At its floor the frame may use the view's bottom padding (8 px);
+        // above it, it takes exactly what the view leaves.
+        const atFloor = (g.frame.height ?? 0) <= g.floor + 1;
+        expect.soft(g.slack <= 3 && g.slack >= (atFloor ? -9 : -3), `${where}: the frame fills the stage below the title\n${details}`).toBe(true);
+      } else {
+        expect.soft(g.controlsInStage, `${where}: the controls are inside the stage\n${details}`).toBe(true);
       }
+      if (opts.log === true) expect.soft(g.log, `${where}: the message log keeps its 6rem floor\n${details}`).toBeGreaterThanOrEqual(95);
+      return g;
+    };
+    // Each control takes a real pointer: a trial click checks that the point
+    // it would press is the control's own, not covered by anything else.
+    const reachable = async (page: Page, where: string) => {
+      const view = shareView(page);
+      for (const control of [
+        view.getByRole('button', { name: /^(Mute|Unmute) share$/ }),
+        view.getByRole('slider', { name: 'Share volume' }),
+        view.getByRole('button', { name: 'Full screen' }),
+        view.getByRole('button', { name: 'Stop watching' }),
+      ]) {
+        await control.click({ trial: true, timeout: 5000 });
+      }
+      expect.soft(true, where).toBe(true);
     };
 
     const people: Person[] = [];
@@ -240,21 +278,26 @@ test.describe('the persistent call workspace', () => {
       await share(a);
 
       await watching(b);
-      await check(b.page, '1215×900 under the desktop strip');
+      const strip = await check(b.page, '1215×900 under the desktop strip', { log: true });
+      // The picture takes at least 85% of what the stage has under the title.
+      expect.soft(strip.frame.height, `the picture under the strip, of ${String(strip.room)} px\n${JSON.stringify(strip)}`).toBeGreaterThanOrEqual(0.85 * strip.room);
+      await reachable(b.page, '1215×900 under the desktop strip');
       await b.page.evaluate(() => { document.querySelector('.desktop-bar')?.remove(); });
-      await b.page.setViewportSize({ width: 1440, height: 900 });
-      // Main measured a 360 px picture here, but its bottom 27 px and the
-      // whole control row fell outside the stage (about 333 px seen, no
-      // controls). Fitted, the whole picture shows at about 316 px with its
-      // controls. The floor catches a fix that shrinks the picture instead,
-      // as a 40vh cap did (243 px).
-      await check(b.page, '1440×900 browser', 300);
+      for (const [width, height] of [[1440, 900], [1920, 1080]] as const) {
+        await b.page.setViewportSize({ width, height });
+        await check(b.page, `${String(width)}×${String(height)} browser`, { log: true });
+      }
 
       await watching(c);
-      await check(c.page, '390×844 Voice');
+      for (const [width, height] of [[390, 844], [360, 740], [360, 640]] as const) {
+        await c.page.setViewportSize({ width, height });
+        await check(c.page, `${String(width)}×${String(height)} Voice`);
+        if (width === 390) await reachable(c.page, '390×844 Voice');
+      }
+      await c.page.setViewportSize({ width: 390, height: 844 });
       await showView(c.page, 'Chat');
       await expect(c.page.locator('.call-stage')).toHaveCount(1);
-      await check(c.page, '390×844 Chat');
+      await check(c.page, '390×844 Chat', { open: false });
       await expect.soft(shareView(c.page).locator('.call-enlarge')).toHaveCount(0);
     } finally {
       for (const p of people) await leave(p);

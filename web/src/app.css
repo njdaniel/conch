@@ -3357,7 +3357,8 @@ label {
 }
 
 /* Its title and controls keep their height; the picture's row gives way,
-   down to 4rem. */
+   down to 3rem. (A single share in the open call view has a 6rem floor and
+   its controls over the picture: see call-single-share.) */
 .share-view {
   display: grid;
   flex: 0 1 auto;
@@ -3685,38 +3686,86 @@ label {
   border: 0;
 }
 
-/* A single watched share gets the stage's remaining height. Keep the open
-   call's wrappers flexible; the closed call's wrappers use display: contents. */
-.call-view.call-single-share,
-.call-single-share > .call-grid,
-.call-single-share > .call-grid > .call-share,
-.call-single-share .share-view {
+/* A single watched share in the open call view fits inside the stage it is
+   given (issue #2187), like a video player: the controls are drawn over the
+   picture's bottom edge, on a dark gradient, in the grid cell the picture is
+   in, so the picture takes the view's height less only the title. The stage's
+   own size is not changed here. The chain from the view down to the share is
+   flexed so that the share is as tall as the view leaves it; the frame takes
+   what is left under the title, down to 6rem, and the video is contained in
+   it, never cropped. The controls stay in the page's tab order and always
+   shown, since a touch screen has no hover. A closed call (call-stage) and
+   the other layouts keep the controls in a row below the picture. */
+.call-view.call-single-share > .call-grid,
+.call-view.call-single-share > .call-grid > .call-share {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.call-view.call-single-share .share-view {
+  flex: 1 1 auto;
+  grid-template-rows: auto minmax(6rem, 1fr);
+  min-height: 0;
+}
+
+/* The grid keeps its width cap (40vh of 16:9), but over 560 px tall not below
+   40rem: the controls are one row over the picture, and a narrow one would
+   wrap them into two and cover it. At 560 px and under the page scrolls as a
+   document, the controls are below the picture, and the cap stands. */
+@media (min-height: 561px) {
+  .call-view.call-single-share > .call-grid {
+    max-width: max(calc(40vh * 16 / 9), 40rem);
+  }
+}
+
+/* The frame is its grid row, and its video takes the frame's height (its caps
+   above and below still apply), centred. A flex item, so no percentage needs
+   a definite height above it. */
+.call-view.call-single-share .share-frame {
   display: flex;
   flex-direction: column;
-  flex: 1 1 auto;
+  justify-content: center;
+  /* The frame and the controls share one cell, so both are placed. */
+  grid-row: 2;
+  grid-column: 1;
   min-height: 0;
 }
 
-.call-view.call-single-share > .call-grid {
-  max-width: none;
+.call-view.call-single-share .share-title {
+  grid-row: 1;
 }
 
-.call-single-share .share-view > :not(.share-frame) {
-  flex-shrink: 0;
-}
-
-/* The title and controls take their height first. Use a preferred aspect
-   ratio when the stage sizes to its content, such as in phone Chat. */
-.call-single-share .share-frame {
+.call-view.call-single-share .share-frame video {
   flex: 1 1 auto;
+  height: auto;
   min-height: 0;
-  aspect-ratio: 16 / 9;
 }
 
-.stage > :is(.call-view, .call-stage).call-single-share .share-view .share-frame video {
-  position: absolute;
-  inset: 0;
-  max-height: none;
+/* The controls are the frame's bottom edge: the same cell, above the focus
+   button and the pop-out. White on the gradient's end (85% black) is above
+   AA for text on any picture; the buttons keep their own surfaces. At 560 px
+   tall and under, the page scrolls as a document and the controls stay in a
+   row below the picture, which then has the room (the picture's width is
+   capped there, so a row over it would wrap and cover it). */
+@media (min-height: 561px) {
+  .call-view.call-single-share .share-controls {
+    grid-row: 2;
+    grid-column: 1;
+    align-self: end;
+    z-index: 2;
+    padding: var(--s2);
+    color: #ffffff;
+    background: linear-gradient(to top, rgb(0 0 0 / 85%) 55%, rgb(0 0 0 / 0%));
+    border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  }
+
+  /* One row, even on a phone: the volume slider is what gives. */
+  .call-view.call-single-share .share-controls .volume {
+    flex: 1 1 3rem;
+    min-width: 0;
+  }
 }
 
 /* A compact call is one fixed-height, docked strip. Its tiles share that row
@@ -4861,10 +4910,6 @@ button.link {
     max-height: 45dvh;
   }
 
-  .lobby.phone.view-voice .stage:has(> .call-single-share) {
-    max-height: none;
-  }
-
   .lobby.phone.view-voice .dock {
     max-height: none;
     padding: var(--s3);
@@ -4964,24 +5009,6 @@ button.link {
     background: var(--accent);
     border: 2px solid var(--surface);
     border-radius: 50%;
-  }
-}
-
-/* While watching a single share in Voice, the dock takes what its controls
-   need and scrolls if it needs more than a third of the view. Give the rest
-   of the page to the stage. A short phone keeps the document-scrolling
-   layout below. */
-@media (max-width: 699px) and (min-height: 561px) {
-  .lobby.phone.view-voice:has(.stage > .call-single-share) {
-    grid-template-rows: auto minmax(0, 1fr) fit-content(calc(100% / 3)) auto;
-  }
-
-  .lobby.phone.view-voice .centre:has(> .stage > .call-single-share) {
-    display: flex;
-  }
-
-  .lobby.phone.view-voice .stage:has(> .call-single-share) {
-    flex: 1 1 auto;
   }
 }
 
@@ -5111,10 +5138,9 @@ button.link {
 /* While watching (not compact), the centre column is a flexed column in place
    of the grid above, so that what it needs counts the stage at no more than
    300 px. The stage starts at 300 px (or its own height, if less) and takes
-   the room first, up to its own height. A single watched share can use all
-   the remaining room. The conversation never shrinks below its header,
-   the log's minimum and the composer, and takes what the stage leaves.
-   In a browser without max-content heights the grid above stays.
+   the room first, up to its own height; the conversation never shrinks below
+   its header, the log's minimum and the composer, and takes what the stage
+   leaves. In a browser without max-content heights the grid above stays.
    (The compact test is beside the :has(), not in it: :has() inside :has() is
    not valid, and drops the whole rule.) */
 @supports (max-height: max-content) {
@@ -5125,20 +5151,11 @@ button.link {
 
     .lobby:not(.phone) .centre:has(> .stage:not(:empty)):not(:has(> .stage > .call-view.compact, > .stage > .call-stage.compact)) > .stage {
       flex: 1000 1 300px;
-    }
-
-    .lobby:not(.phone) .centre:has(> .stage:not(:empty)):not(:has(> .stage > .call-view.compact, > .stage > .call-stage.compact)) > .stage:not(:has(> .call-single-share)) {
       max-height: max-content;
     }
 
     .lobby:not(.phone) .centre:has(> .stage:not(:empty)):not(:has(> .stage > .call-view.compact, > .stage > .call-stage.compact)) > .conversation {
       flex: 1 0 auto;
-    }
-
-    /* A single watched share gets more of the desktop column. Keep the
-       header and composer whole, with a scrollable space for recent chat. */
-    .lobby:not(.phone) .centre:has(> .stage > .call-single-share) .log-wrap {
-      min-height: 3rem;
     }
   }
 }

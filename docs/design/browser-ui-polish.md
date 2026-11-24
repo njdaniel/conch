@@ -81,7 +81,14 @@ height is what its header, the log's minimum and the composer measure with the
 fonts actually in use (the log has `contain: size`, so its messages never count);
 the stage gets the rest. In the watch view the title and the controls keep
 their height and the picture's row gives way, down to 3rem; with less room than
-that the stage scrolls. Nothing is a fixed reserve, so other font metrics (CI's
+that the stage scrolls. A single share in the open call view (issue #2187) is drawn like a video
+player: its controls (Mute share, Share volume, Full screen, Stop watching, and
+"Tap to play sound" when shown) are one row over the picture's bottom edge, on
+a dark gradient, always shown and in the same tab order, and the picture's
+frame takes what the view leaves under the title, down to 6rem, with the video
+contained in it. The stage's own size is unchanged. At 560 px tall and under
+(the page scrolls as a document), in a grid of several tiles, in the compact
+strip and in the closed phone Chat stage, the controls stay in a row below. Nothing is a fixed reserve, so other font metrics (CI's
 runner wraps the share controls onto two rows) move the picture, not the
 composer. The composer is on screen without scrolling at 390×844 and 360×740
 (checked in 12-screen-share, and by hand with every rem made 19 px).
