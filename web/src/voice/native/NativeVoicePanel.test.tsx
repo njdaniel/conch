@@ -169,6 +169,8 @@ describe('usePresence', () => {
 
   it.each([
     { status: 503, refusal: 403, code: 'voice_not_allowed', kind: 'not_allowed' },
+    { status: 500, refusal: 403, code: 'voice_not_allowed', kind: 'not_allowed' },
+    { status: 504, refusal: 404, code: 'channel_not_found', kind: 'gone' },
     { status: 429, refusal: 404, code: 'channel_not_found', kind: 'gone' },
   ])('retries after a 1008 read with HTTP $status and stops on a later $refusal', async ({ status, refusal, code, kind }) => {
     vi.useFakeTimers();

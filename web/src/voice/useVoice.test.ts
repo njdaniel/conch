@@ -1066,6 +1066,10 @@ describe('presence of the channel on screen', () => {
   it.each<{ name: string; answer: ApiResult<VoicePresenceV2> }>([
     { name: 'no answer', answer: { ok: false, failure: 'network' } },
     { name: 'HTTP 503', answer: { ok: false, failure: 'invalid', status: 503 } },
+    // conchd itself answers 500 on this route; 502 and 504 come from a proxy.
+    { name: 'HTTP 500', answer: { ok: false, failure: 'invalid', status: 500 } },
+    { name: 'HTTP 502', answer: { ok: false, failure: 'invalid', status: 502 } },
+    { name: 'HTTP 504', answer: { ok: false, failure: 'invalid', status: 504 } },
     { name: 'HTTP 429', answer: { ok: false, failure: 'invalid', status: 429, code: 'rate_limited' } },
   ])('backs off and retries when the 1008 follow-up read gets $name', async ({ answer }) => {
     fake.read = () => Promise.resolve(answer);
