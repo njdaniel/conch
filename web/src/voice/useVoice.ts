@@ -542,9 +542,9 @@ export function useVoice({
         else if (status === 'denied') settle();
       },
     });
-    // A 1008 close says only that the server meant it. One read says why:
-    // voice withdrawn, the channel lost, or neither (it answers), when the
-    // feed goes back through its backoff rather than retrying at once.
+    // A 1008 close says only that the server meant it. One read can tell us
+    // whether voice was withdrawn or the channel was lost. A roster or a
+    // transient failure sends the feed back through its backoff.
     const settle = () => {
       // Told it by the close itself: the channel is gone, and asking would
       // only be answered 404.
@@ -559,9 +559,12 @@ export function useVoice({
       void api.getVoicePresence(named()).then((result) => {
         if (!live) return;
         if (result.ok) {
-          show(result.value, null);
+          // retryLater reports waiting synchronously. Show the read after it
+          // so the roster stays visible during the backoff.
           feed.retryLater();
+          show(result.value, null);
         } else if (result.failure === 'unauthorized') onUnauthorized();
+        else if (result.failure === 'network' || result.status === 429 || (result.status ?? 0) >= 500) feed.retryLater();
         else set(result.code === voiceNotAllowed ? 'not_allowed' : 'gone');
       });
     };

@@ -3278,9 +3278,10 @@ export async function removeVoiceViewer(channel: string): Promise<ApiResult<null
 // getVoicePresence reads who is in a channel's voice, once. The page keeps
 // presence on its socket, joined or not, and reads this only to learn why
 // the server closed that socket (1008). Both older and newer servers serve
-// v2 for this read, and a live share keeps its negotiated quality.
+// v2 for this read, and a live share keeps its negotiated quality. The HTTP
+// status lets the caller distinguish a transient failure from a refusal.
 export function getVoicePresence(channel: string): Promise<ApiResult<VoicePresenceV2>> {
-  return authed(call('voicePresence', { channel }, queryOf({ schema: voicePresenceV2Schema })), voicePresenceV2);
+  return authed(call('voicePresence', { channel }, queryOf({ schema: voicePresenceV2Schema })), voicePresenceV2, true);
 }
 
 // How a transmit report was answered. no_session is "go back to conchd" (409
