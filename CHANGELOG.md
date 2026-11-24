@@ -31,12 +31,17 @@ This pre-release updates the server, CLI and desktop together. Reload open brows
 - **A mute key on the desktop** (#2056): set it in Voice options beside the talk key. It toggles mute in voice, does nothing outside voice, and can only mute, never unmute, while the screen is locked, during suspend or when lock status is unknown.
 - **The share says when the computer is too busy to send smoothly** (#2055), from the encoder's CPU limit, instead of silently dropping to about 1 fps. Detail mode now degrades resolution and frame rate together (`balanced`). The desktop log records fixed share and voice diagnostics, so a freeze can be diagnosed.
 - **Desktop sounds** (#1924): the optional message and call sounds now play in the desktop app too (`media-src 'self'` only).
+- **Install Conch from Chrome on Android** (#1970): the web client has an app manifest and icons, so Chrome offers to install it, and it opens in its own window. It still needs the server; nothing is cached offline. See [Install Conch from Chrome on Android](docs/pwa.md). Testing on a physical device is still pending.
+- **Desktop screen share picks resolution and frame rate separately** (#2128).
 
 ### Fixed
 - **Reply and Add reaction** are in the message context menu (#2121). Member invites explain which channel the invite grants access to (#2118), and sign-in fields work better with password managers (#2077).
 - **Linux Talk Key setup** starts by asking for the desired key or mouse button. Device instructions appear after selection when access is needed. Shift+Tab moves focus without selecting Shift (#2129).
 - **Desktop screen-share video** uses separate LiveKit publishing and subscribing connections to avoid a VP8 negotiation collision (#2055).
 - **Rust URL parsing dependency** updated for [RUSTSEC-2026-0592](https://rustsec.org/advisories/RUSTSEC-2026-0592) (#2135).
+- **Desktop attachments go up to 20 MiB, as in the browser** (#2148). A server with a lower limit says the file is too large instead of "Cannot reach the server", and a large upload gets time to finish on a slow link.
+- **Private calls: ringing and cancelling again and again hits the repeat limit** (#2112). An unanswered ring counts toward 3 per 10 minutes per pair however it ended, including when the caller cancels or a block ends it.
+- **The desktop app won't start with Node's child-process debugging turned on** (#2105), because that could print the voice helper's credentials. `NODE_V8_COVERAGE` no longer reaches the helper.
 - **The desktop's open microphone no longer chatters on room noise** (#2001): it needs 40 ms of sound to open, closes 4 dB lower than it opens, holds 800 ms between words, and fades instead of cutting. Defaults: threshold −34 dBFS (was −40), hang 800 ms (was 400). Mute still cuts at once.
 - **Choosing Open microphone during a desktop call is saved,** and choosing push-to-talk with the arrow keys works (#1993).
 - **Windows screen share** says why a connection can't be made instead of waiting forever, and Share says it isn't available yet (#1992).
@@ -48,6 +53,7 @@ This pre-release updates the server, CLI and desktop together. Reload open brows
 
 - The x86_64 `.deb` remains a technical preview (#1603). See the [Linux desktop tester guide](docs/desktop/linux.md) for package verification.
 - The release includes key selection and the existing per-device Linux push-to-talk backend. Global push-to-talk on COSMIC still needs the hardware acceptance run (#1385). Native X11 push-to-talk is tracked in #1388.
+- Linux microphone diagnostics for testers who are heard as silence while the app shows Transmitting: [the runbook](docs/desktop/linux-microphone-diagnostics.md) (#2137). The cause is still being investigated.
 - Screen-share sound stays off by default (see the note at the top) and is experimental when turned on. The feedback and isolation checks are still pending (#922, #1999). The package's Linux screen share continues to use the desktop portal.
 
 ## [0.1.0-alpha.21] - 2026-11-18
