@@ -5,7 +5,7 @@
 // the pinned LiveKit of voice-world.ts; these are not real-device tests.
 import type { Browser, BrowserContextOptions, Locator, Page } from '@playwright/test';
 import { secretLines, withoutJoinTokenInSocketRefusals, type BrowserLogEntry } from './console-lines';
-import { channelButton, expect, openChannel, showView, test } from './fixtures';
+import { channelButton, drawDesktopStrip, expect, openChannel, showView, test } from './fixtures';
 import { enter, inbound as inboundStats, joinVoice, leave, type Someone } from './people';
 import { dockerAvailable, startVoiceWorld, type Member, type VoiceWorld } from './voice-world';
 
@@ -184,6 +184,82 @@ test.describe('the persistent call workspace', () => {
     expect(p.watch.policy, 'Permissions-Policy reports').toEqual([]);
     expect(p.watch.failed, 'requests to conchd that failed').toEqual([]);
   }
+
+  test('P2187 a watched share fits its stage at desktop and phone sizes', async ({ browser }) => {
+    // Read the layout without scrolling any of the share's controls into view.
+    const check = async (page: Page, where: string, minVideoHeight?: number) => {
+      const geometry = await shareView(page).evaluate((share) => {
+        const stage = share.closest('.stage');
+        const frame = share.querySelector('.share-frame');
+        const video = frame?.querySelector('video');
+        const controls = share.querySelector('.share-controls');
+        if (stage === null || frame === null || video == null || controls === null) throw new Error('no share layout boxes');
+        const rect = (element: Element) => element.getBoundingClientRect().toJSON() as DOMRectInit;
+        const inside = (element: Element, outer: Element) => {
+          const box = element.getBoundingClientRect();
+          const boundary = outer.getBoundingClientRect();
+          return box.left >= boundary.left - 1 && box.right <= boundary.right + 1 &&
+            box.top >= boundary.top - 1 && box.bottom <= boundary.bottom + 1;
+        };
+        const view = share.closest('.call-view') ?? stage;
+        const fits = (element: Element) => {
+          const box = element.getBoundingClientRect();
+          return box.width > 0 && box.height > 0 && box.left >= -1 && box.top >= -1 &&
+            box.right <= window.innerWidth + 1 && box.bottom <= window.innerHeight + 1 &&
+            inside(element, stage) && inside(element, view);
+        };
+        return {
+          stage: rect(stage), view: rect(view), frame: rect(frame), video: rect(video), controls: rect(controls),
+          videoHeight: video.getBoundingClientRect().height,
+          fit: getComputedStyle(video).objectFit,
+          videoFits: fits(video), controlsFit: fits(controls),
+        };
+      });
+      expect.soft(geometry.fit, where).toBe('contain');
+      expect.soft(geometry.video, `${where}: video fills its frame`).toEqual(geometry.frame);
+      const details = JSON.stringify(geometry);
+      expect.soft(geometry.videoFits, `${where}: video fits\n${details}`).toBe(true);
+      expect.soft(geometry.controlsFit, `${where}: controls fit\n${details}`).toBe(true);
+      if (minVideoHeight !== undefined) {
+        expect.soft(geometry.videoHeight, `${where}: video is not shrunk to fit\n${details}`).toBeGreaterThanOrEqual(minVideoHeight);
+      }
+    };
+
+    const people: Person[] = [];
+    try {
+      const a = await person(browser, vw.alice);
+      people.push(a);
+      const b = await person(browser, vw.bob, { viewport: { width: 1215, height: 900 } });
+      people.push(b);
+      const c = await person(browser, vw.carol, { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 });
+      people.push(c);
+      await drawDesktopStrip(b.page);
+      await join(a);
+      await join(b);
+      await join(c);
+      await share(a);
+
+      await watching(b);
+      await check(b.page, '1215×900 under the desktop strip');
+      await b.page.evaluate(() => { document.querySelector('.desktop-bar')?.remove(); });
+      await b.page.setViewportSize({ width: 1440, height: 900 });
+      // Main measured a 360 px picture here, but its bottom 27 px and the
+      // whole control row fell outside the stage (about 333 px seen, no
+      // controls). Fitted, the whole picture shows at about 316 px with its
+      // controls. The floor catches a fix that shrinks the picture instead,
+      // as a 40vh cap did (243 px).
+      await check(b.page, '1440×900 browser', 300);
+
+      await watching(c);
+      await check(c.page, '390×844 Voice');
+      await showView(c.page, 'Chat');
+      await expect(c.page.locator('.call-stage')).toHaveCount(1);
+      await check(c.page, '390×844 Chat');
+      await expect.soft(shareView(c.page).locator('.call-enlarge')).toHaveCount(0);
+    } finally {
+      for (const p of people) await leave(p);
+    }
+  });
 
   test('all six call workspace scenarios', async ({ browser }) => {
     test.setTimeout(180_000);
