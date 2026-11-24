@@ -33,6 +33,7 @@ This pre-release updates the server, CLI and desktop together. Reload open brows
 - **Desktop sounds** (#1924): the optional message and call sounds now play in the desktop app too (`media-src 'self'` only).
 - **Install Conch from Chrome on Android** (#1970): the web client has an app manifest and icons, so Chrome offers to install it, and it opens in its own window. It still needs the server; nothing is cached offline. See [Install Conch from Chrome on Android](docs/pwa.md). Testing on a physical device is still pending.
 - **Desktop screen share picks resolution and frame rate separately** (#2128).
+- **480p and 1440p screen sharing** at 15, 30 or 60 fps, in the browser and the desktop app, when the server serves voice presence v3 (#1661). The client asks the server first and falls back to v2 only when an older server refuses v3. Older clients see these shares as "Source" at the declared frame rate.
 
 ### Fixed
 - **Reply and Add reaction** are in the message context menu (#2121). Member invites explain which channel the invite grants access to (#2118), and sign-in fields work better with password managers (#2077).
