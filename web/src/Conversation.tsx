@@ -194,6 +194,7 @@ function ShownMessage({
   stop = false,
   reactionNavigation = false,
   highlighted = false,
+  onJumped,
 }: {
   readonly message: MessageV2;
   readonly people: ReadonlyMap<number, Person>;
@@ -224,8 +225,12 @@ function ShownMessage({
   readonly stop?: boolean;
   readonly reactionNavigation?: boolean;
   readonly highlighted?: boolean;
+  // Told once the highlight has scrolled this row into view (issue #2158).
+  readonly onJumped?: () => void;
 }) {
   const row = useRef<HTMLLIElement>(null);
+  const jumpedNow = useRef(onJumped);
+  jumpedNow.current = onJumped;
   useLayoutEffect(() => {
     const node = row.current;
     return () => { if (node?.contains(document.activeElement) === true) node.focus(); };
@@ -264,6 +269,7 @@ function ShownMessage({
     if (!highlighted) return;
     row.current?.scrollIntoView({ block: 'center', behavior: 'instant' });
     row.current?.focus({ preventScroll: true });
+    jumpedNow.current?.();
   }, [highlighted]);
   function copy(kind: 'link' | 'text') {
     if (message.removed === true) return;
@@ -473,8 +479,9 @@ function continues(before: MessageV2 | undefined, message: MessageV2): boolean {
   return Date.parse(message.created_at) - Date.parse(before.created_at) < sameRun;
 }
 
-function ThreadView({ highlightedId, rootId, root, chat, channel, live, archived, people: known, nets, viewer, draft, onDraft, onClose, onReplySend, onRetrySend, onDismissSend, onUnauthorized, onEditLast, editorFor, notices }: {
+function ThreadView({ highlightedId, onJumped, rootId, root, chat, channel, live, archived, people: known, nets, viewer, draft, onDraft, onClose, onReplySend, onRetrySend, onDismissSend, onUnauthorized, onEditLast, editorFor, notices }: {
   readonly highlightedId: number | null;
+  readonly onJumped?: () => void;
   readonly notices: ReadonlyMap<number, string>;
   readonly onEditLast: (messages: readonly MessageV2[], composer: HTMLTextAreaElement) => boolean;
   readonly editorFor: (message: MessageV2, onSaved: (saved: MessageV2) => void) => ReactNode;
@@ -577,7 +584,7 @@ function ThreadView({ highlightedId, rootId, root, chat, channel, live, archived
         {messages.map((message, i) => (
           <Fragment key={message.id}>
             {sameLocalDay(messages[i - 1]?.created_at, message.created_at) ? null : <DayDivider at={message.created_at} />}
-            <Message highlighted={message.id === highlightedId} message={message} people={people} nets={nets} viewer={viewer} channel={channel} sent={message.id === sentMark} cont={false} onUnauthorized={onUnauthorized} notice={notices.get(message.id) ?? null} editor={editorFor(message, (saved) => { setFetched((previous) => previous.map((held) => held.id === saved.id ? saved : held)); })} />
+            <Message highlighted={message.id === highlightedId} onJumped={onJumped} message={message} people={people} nets={nets} viewer={viewer} channel={channel} sent={message.id === sentMark} cont={false} onUnauthorized={onUnauthorized} notice={notices.get(message.id) ?? null} editor={editorFor(message, (saved) => { setFetched((previous) => previous.map((held) => held.id === saved.id ? saved : held)); })} />
           </Fragment>
         ))}
         {pending.map((send, i) => <Pending key={`local-${String(send.localId)}`} send={send} after={pending[i - 1]?.at ?? messages.at(-1)?.created_at} me={me} nets={nets} viewer={viewer} onRetry={onRetrySend} onDismiss={onDismissSend} />)}
@@ -783,26 +790,21 @@ export function Conversation({
     const message = highlightedId === null ? undefined : chat.byId.get(highlightedId);
     if (message?.thread_root_id !== undefined) setOpenThread(message.thread_root_id);
   }, [highlightedId, chat.byId]);
-  // A message link scrolls its row into view (Message's own effect): the log
-  // is no longer at the newest message, as after the unread jump. Said here,
-  // once per link, because the scroll handler ignores a scroll at a height
-  // the resize observer has not handled yet, so a log resize in the same
-  // frame (the voice dock settling, say) would otherwise put the reader back
-  // at the bottom and the linked row out of view (issue #2158). A thread
-  // reply is shown in the thread view and leaves the main log alone.
-  const jumped = useRef<number | null>(null);
-  useEffect(() => {
-    if (highlightedId === null) {
-      jumped.current = null;
-      return;
-    }
-    if (jumped.current === highlightedId) return;
-    const message = chat.byId.get(highlightedId);
-    if (message === undefined || message.thread_root_id !== undefined) return;
-    jumped.current = highlightedId;
-    atBottom.current = false;
-    onBottom(false);
-  }, [highlightedId, chat.byId, onBottom]);
+  // A message link scrolls its row into view (Message's highlight effect, in
+  // the log or in a thread shown inline in it), and says so here. Whether the
+  // reader is still at the newest message is read from where the jump left
+  // the log, as onScroll would: the scroll handler ignores a scroll at a
+  // height the resize observer has not handled yet, so a log resize in the
+  // same frame (the voice dock settling, say) would otherwise act on a stale
+  // "at the bottom" and scroll the linked row out of view (issue #2158). A
+  // link to a message already at the bottom keeps the log following.
+  const settleJump = useCallback(() => {
+    const el = log.current;
+    if (el === null) return;
+    atBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight <= nearBottom;
+    onBottom(atBottom.current);
+    if (atBottom.current) setUnseen(false);
+  }, [onBottom]);
   const opener = useRef<HTMLElement | null>(null);
   const threadReturn = useRef<{ readonly root: number; readonly anchor: number | null; readonly opener: HTMLElement | null } | null>(null);
   const openFrom = useCallback((id: number, from: HTMLElement) => {
@@ -1394,6 +1396,7 @@ export function Conversation({
               ) : null}
               <Message
                 highlighted={message.id === highlightedId && message.thread_root_id === undefined}
+                onJumped={settleJump}
                 stop={message.id === stop}
                 reactionNavigation
                 replies={replyCounts.get(message.id) ?? 0}
@@ -1414,6 +1417,7 @@ export function Conversation({
                 thread={threadAnchor === null || message.id !== threadAnchor ? null : (
                   <ThreadView
                     highlightedId={highlightedId}
+                    onJumped={settleJump}
                     key={openThread}
                     rootId={openThread as number}
                     root={chat.byId.get(openThread as number)}
