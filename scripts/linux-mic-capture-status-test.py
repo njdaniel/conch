@@ -98,6 +98,15 @@ class CaptureStatus(unittest.TestCase):
         self.assertEqual(report["capture_streams"], 0)
         self.assertEqual(report["active_default_source_links"], 0)
 
+    def test_conflicting_default_records_are_unknown(self):
+        graph = fixtures()
+        graph[-1]["metadata"].append(
+            {"subject": 0, "key": "default.audio.source", "value": {"name": "absent-" + REDACTED}}
+        )
+        report = self.fixture_output(graph)
+        self.assertEqual(report["default_audio_source"], "unknown")
+        self.assertIsNone(report["active_default_source_links"])
+
     def test_rejects_unparseable_output_without_printing_it(self):
         self.assert_unavailable(f"print({REDACTED!r})")
         self.assert_unavailable("print('[null]')")

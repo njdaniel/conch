@@ -112,6 +112,8 @@ def summarize(raw, helper_pid):
         if isinstance(nodes[oid][1].get("node.name"), str)
         and nodes[oid][1]["node.name"] in defaults
     }
+    # Several conflicting default records are ambiguous, not known.
+    unambiguous = len(defaults) == 1 and len(default_nodes) == 1
     active_inputs = [output for target, output in links if target in capture]
     return {
         "helper_clients": len(clients),
@@ -119,9 +121,9 @@ def summarize(raw, helper_pid):
         "running_capture_streams": sum(nodes[oid][0].get("state") == "running" for oid in capture),
         "active_input_links": len(active_inputs),
         "active_audio_source_links": sum(oid in source_nodes for oid in active_inputs),
-        "default_audio_source": "known" if len(default_nodes) == 1 else "unknown",
+        "default_audio_source": "known" if unambiguous else "unknown",
         "active_default_source_links": (
-            sum(oid in default_nodes for oid in active_inputs) if len(default_nodes) == 1 else None
+            sum(oid in default_nodes for oid in active_inputs) if unambiguous else None
         ),
     }
 
