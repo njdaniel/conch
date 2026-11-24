@@ -13,8 +13,8 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Locator, Page } from '@playwright/test';
-import { drawDesktopStrip, showView, test } from '../fixtures';
-import { enter, joinVoice, type Someone } from '../people';
+import { drawDesktopStrip, expect, showView, test } from '../fixtures';
+import { enter, inbound, joinVoice, type Someone } from '../people';
 import { dockerAvailable, startVoiceWorld, type VoiceWorld } from '../voice-world';
 
 const out = process.env['CONCH_UI_OUT'] ?? fileURLToPath(new URL('../../test-results-ui/shots', import.meta.url));
@@ -87,16 +87,21 @@ test('capture the talk and stream flows', async ({ browser }, info) => {
     const bob = await enter(browser, vw, vw.bob, { context: { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 } });
     people.push({ name: 'bob', size: '390×844 phone', p: bob });
     const carol = await enter(browser, vw, vw.carol, { context: { viewport: { width: 1215, height: 900 } } });
-    await drawDesktopStrip(carol.page);
+    // Registered before anything else can fail, so cleanup always closes her.
     people.push({ name: 'carol', size: '1215×900 desktop layout', p: carol });
+    await step('carol draws the desktop strip', async () => { await drawDesktopStrip(carol.page); });
+    const nameOf = (who: Someone): string => people.find((x) => x.p === who)?.name ?? '?';
 
     await shoot('lobby', 'Signed in, channel open, nobody in voice.');
 
     if (flows.has('talk') || flows.has('stream')) {
-      await step('join voice', async () => {
-        for (const { p } of people) await joinVoice(p, 'Join voice');
-      });
-      await shoot('in-voice-idle', 'All three in voice, push to talk, nobody talking.');
+      // Each person joins on their own, so one failure doesn't stop the
+      // others, and only those who joined are shot as in voice.
+      const joined: string[] = [];
+      for (const { name, p } of people) {
+        if (await step(`${name} joins voice`, async () => { await joinVoice(p, 'Join voice'); })) joined.push(name);
+      }
+      await shoot('in-voice-idle', `In voice (${joined.join(', ')}), push to talk, nobody talking.`, joined);
       await step('phone chat view in voice', async () => { await showView(bob.page, 'Chat'); });
       await shoot('phone-chat-in-voice', 'Phone on the Chat view while in voice.', ['bob']);
       await step('phone back to voice view', async () => { await showView(bob.page, 'Voice'); });
@@ -114,10 +119,13 @@ test('capture the talk and stream flows', async ({ browser }, info) => {
       await shoot('muted', 'alice muted.', ['alice', 'carol']);
       await step('alice unmutes', async () => { await voice(alice.page).getByRole('button', { name: 'Unmute', exact: true }).click(); });
       for (const who of [alice, bob, carol]) {
-        const name = people.find((x) => x.p === who)?.name ?? '?';
-        if (await step(`${name} opens Voice options`, async () => { await voice(who.page).getByRole('button', { name: 'Voice options' }).click(); })) {
+        const name = nameOf(who);
+        const toggle = voice(who.page).getByRole('button', { name: 'Voice options' });
+        if (await step(`${name} opens Voice options`, async () => { await toggle.click(); })) {
           await shoot('voice-options', 'Voice options open.', [name]);
-          await step(`${name} closes Voice options`, async () => { await who.page.keyboard.press('Escape'); });
+          // Escape does not close it (finding UI-talk-2): use its toggle, as
+          // a person would, so later states are not shot with it open.
+          await step(`${name} closes Voice options`, async () => { await toggle.click(); });
         }
       }
     }
@@ -132,15 +140,18 @@ test('capture the talk and stream flows', async ({ browser }, info) => {
         await voice(alice.page).getByText(/You are sharing your screen/).waitFor({ timeout: 30_000 });
       })) {
         await shoot('sharing', 'alice shares: her own view, and the share offered to the others before they watch.');
+        // Watching means decoded frames are arriving, not only that the
+        // player is on screen (as 58-call-workspace waits).
+        const watchers: string[] = [];
         for (const who of [bob, carol]) {
-          const name = people.find((x) => x.p === who)?.name ?? '?';
-          await step(`${name} watches`, async () => {
+          const name = nameOf(who);
+          if (await step(`${name} watches`, async () => {
             await tile(who.page, 'alice').getByRole('button', { name: 'Watch' }).click({ timeout: 30_000 });
             await who.page.getByRole('region', { name: 'Shared screen' }).waitFor({ timeout: 30_000 });
-            await who.page.waitForTimeout(2500);
-          });
+            await expect.poll(async () => (await inbound(who.page)).frames, { timeout: 30_000 }).toBeGreaterThan(10);
+          })) watchers.push(name);
         }
-        await shoot('watching', 'bob and carol watch alice\'s share.');
+        await shoot('watching', `alice shares; ${watchers.length === 0 ? 'nobody is watching' : `${watchers.join(' and ')} watch`}.`, ['alice', ...watchers]);
         await step('phone chat while watching', async () => { await showView(bob.page, 'Chat'); });
         await shoot('phone-chat-while-watching', 'Phone on the Chat view while watching a share.', ['bob']);
         await step('phone back to voice while watching', async () => { await showView(bob.page, 'Voice'); });
@@ -158,8 +169,13 @@ test('capture the talk and stream flows', async ({ browser }, info) => {
     });
     await shoot('after-leave', 'alice left voice; bob and carol remain.');
   } finally {
-    writeFileSync(join(out, 'manifest.json'), `${JSON.stringify({ shots, failures }, null, 2)}\n`);
-    for (const { p } of people) await p.close().catch(() => undefined);
-    vw.stop();
+    // Teardown runs whatever happened above, the manifest write included, so
+    // LiveKit and conchd are never left running.
+    try {
+      writeFileSync(join(out, 'manifest.json'), `${JSON.stringify({ shots, failures }, null, 2)}\n`);
+    } finally {
+      for (const { p } of people) await p.close().catch(() => undefined);
+      vw.stop();
+    }
   }
 });

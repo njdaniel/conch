@@ -8,6 +8,11 @@
 import { defineConfig } from '@playwright/test';
 import base from './playwright.config';
 
+// Local only: refuse before global setup builds anything.
+if (process.env['CI'] !== undefined) {
+  throw new Error('the ui-pass capture is local only; it does not run in CI');
+}
+
 export default defineConfig({
   ...base,
   testMatch: 'ui-pass/*.ui.ts',

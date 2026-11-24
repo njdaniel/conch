@@ -31,9 +31,15 @@ The capture lives in `web/e2e/ui-pass/capture.ui.ts`, run with its own config, s
 
 ```sh
 cd web
-GOFLAGS=-buildvcs=false conch-headless npx playwright test -c playwright.ui-pass.config.ts
+# Once per checkout: the Node in web/.nvmrc, the locked dependencies and
+# Playwright's Chromium (as for `make web-e2e`; no --with-deps locally).
+nvm use && npm ci --no-audit && npx playwright install chromium
+# The capture, through the repository's own Playwright (npm run e2e).
+GOFLAGS=-buildvcs=false conch-headless npm run e2e -- -c playwright.ui-pass.config.ts
 # CONCH_UI_FLOWS=talk,stream (default)   CONCH_UI_OUT=<dir> (default web/test-results-ui/shots)
 ```
+
+The config refuses to run when `CI` is set: the capture is local only.
 
 - **Requirements:** Docker for the pinned LiveKit image, and `conch-headless`, so no window opens on Nick's screens.
 - **People:** alice in a 1440×900 desktop browser, bob on a 390×844 phone, and carol at 1215×900 with the desktop app's strip drawn.
@@ -69,12 +75,18 @@ Nick picks what to fix and in what order; he owns UX direction. Don't file or fi
 
 - **File each chosen finding** with the `issue-writer` skill. The Context names the finding ID and embeds the before screenshot (attach it to the issue or link it from the report). The acceptance criteria are what the screenshot should show after.
 - **Dispatch** with the `dispatch` skill: `web-engineer`, or codex for crisp CSS and layout fixes. Claim first.
-- **Every UI PR carries before and after screenshots** of the states it changes, from the capture: run it on main and on the branch, at the same sizes. Use the PR body or a docs/design note for a larger change, as `browser-ui-polish.md` did.
+- **Every UI PR carries before and after screenshots** of the states it changes, from the capture: run it on main and on the branch, at the same sizes, each into its own fresh directory so neither overwrites the other or leaves stale shots:
+  ```sh
+  CONCH_UI_OUT=$PWD/test-results-ui/before-<issue> ...   # on main
+  CONCH_UI_OUT=$PWD/test-results-ui/after-<issue>  ...   # on the branch
+  ```
+  Use the PR body or a docs/design note for a larger change, as `browser-ui-polish.md` did.
 
 ## 5. Gate
 
 - **Pin each layout fix with a test** that fails without it, in `web/e2e/16-layout.spec.ts` or the flow's spec. Follow the `P2133`, `P2168` and `P2171` tests: measure geometry (no stray scroll, nothing covered, still in view) and don't compare pixels.
-- **Review:** one review (codex or the Claude `reviewer`), told to check what the change could clip, cover or move elsewhere. An earlier layout PR captured an unrelated hidden element; give the reviewer the capture so it can compare.
+- **Dispatch gate first:** a worker's output goes through the `dispatch` skill's five-gate review before it's committed. What follows adds to that gate; it doesn't replace it.
+- **Review:** the PR's one review (codex or the Claude `reviewer`), told to check what the change could clip, cover or move elsewhere. An earlier layout PR captured an unrelated hidden element; give the reviewer the capture so it can compare.
 - **Merge** under the usual rules: reviewed, CI green including all web-e2e shards.
 
 ## Never
