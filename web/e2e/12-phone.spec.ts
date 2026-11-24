@@ -19,6 +19,39 @@ const longLine = (size: string) => `p467 ${size} ${'a line that goes on for a wh
 
 const unique = (label: string) => `p467-${label}-${String(Date.now())}`;
 
+// Issue #2171: parked Chat can be taller than the Voice view, especially
+// after the viewport shrinks. On return Chat uses its usual height there.
+for (const [width, height, voiceStartHeight = height] of [[640, 360], [690, 540], [390, 560], [390, 640, 844]] as const) {
+  const size = `${String(width)}×${String(height)}`;
+  const where = voiceStartHeight === height ? `at ${size}` : `after shrinking to ${size} on Voice`;
+  test(`P2171 ${where} hidden Chat adds no document scroll`, async ({ meet, world }) => {
+    const viewport = { width, height };
+    const { page } = await meet({ ...phoneSizes[2][1], viewport });
+    await signIn(page, world, world.tokens.browser, 'browser-test');
+    const chat = conversation(page);
+    const composer = page.getByLabel('Message #general');
+    await expect(composer).toBeVisible();
+    await frames(page);
+    const chatHeight = await chat.evaluate((el) => el.getBoundingClientRect().height);
+
+    if (voiceStartHeight !== height) {
+      await page.setViewportSize({ width, height: voiceStartHeight });
+      await frames(page);
+    }
+    await showView(page, 'Voice');
+    await expect(composer).toBeHidden();
+    if (voiceStartHeight !== height) await page.setViewportSize(viewport);
+    await frames(page);
+    const { scroll, inner } = await page.evaluate(() => ({ scroll: document.documentElement.scrollHeight, inner: window.innerHeight }));
+    expect(scroll, `document height ${where}`).toBeLessThanOrEqual(inner);
+
+    await showView(page, 'Chat');
+    await expect(composer).toBeVisible();
+    await frames(page);
+    expect(await chat.evaluate((el) => el.getBoundingClientRect().height), `Chat height on return ${where}`).toBe(chatHeight);
+  });
+}
+
 for (const [size, options] of phones) {
   test(`P467 at ${size} the lobby, a conversation, the account form, the report panel and the members panel fit the screen`, async ({ meet, world }) => {
     for (const body of [longWord(size), longAddress(size), longLine(size)]) await post(world, world.tokens.nick, 'general', body);

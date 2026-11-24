@@ -4770,11 +4770,11 @@ button.link {
     inset: 0;
   }
 
-  /* At the height it had under Chat (the lobby measures it while a view that
-     shows it is current), so that hiding it resizes nothing and the log keeps
-     its place, even a few pixels from its end. */
+  /* Keep the height measured under Chat so the log keeps its place, even a
+     few pixels from its end. Park it against the viewport so that height
+     cannot add document scroll, even if the window shrinks (issue #2171). */
   .lobby.phone.view-voice .conversation {
-    position: absolute;
+    position: fixed;
     top: 0;
     left: env(safe-area-inset-left);
     right: env(safe-area-inset-right);
@@ -4782,8 +4782,8 @@ button.link {
   }
 
   .lobby.phone.view-voice .centre {
-    /* Not a scroller here, so not a containing block either: the hidden
-       conversation below keeps .lobby.phone as its own (issue #2168). */
+    /* Voice scrolls in the dock or the page. The centre's hidden conversation
+       uses the viewport as its containing block (issues #2168 and #2171). */
     position: static;
     display: block;
     overflow: visible;
