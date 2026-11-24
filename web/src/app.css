@@ -4782,6 +4782,9 @@ button.link {
   }
 
   .lobby.phone.view-voice .centre {
+    /* Not a scroller here, so not a containing block either: the hidden
+       conversation below keeps .lobby.phone as its own (issue #2168). */
+    position: static;
     display: block;
     overflow: visible;
   }
