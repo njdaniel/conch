@@ -11,7 +11,7 @@ import { headingId } from './Conversation';
 import { Avatar, Glyph } from './Icons';
 import { ServerVersion, TemporaryBanner } from './ServerVersion';
 import { AddPerson, JoiningSettings, SettingsOpen, type JoiningRequest } from './joiningSettings';
-import { MicTestShown, phoneViews, ShowChat, useAppHeight, usePhone, VoiceLive, VoiceStrip, type PhoneView } from './phone';
+import { MicTestShown, phoneViews, ShowChat, useAppHeight, usePhone, VoiceLive, VoiceSheet, VoiceStrip, type PhoneView } from './phone';
 import { DesktopOS } from './platform/os';
 import type { ChannelV0 } from './schema/channel';
 import { StageHost } from './stage';
@@ -292,6 +292,14 @@ export function Lobby({
     [joiningAsks],
   );
   const asking = overlay !== undefined && overlay !== null;
+  // The voice options sheet is open (VoiceSheet): the page behind it is inert
+  // with the same attribute as Settings and re-authentication, in one
+  // expression each. Re-authentication outranks it: the sheet is told it is
+  // blocked and closes; the dock, the nav and the overlay are never made inert
+  // for the sheet.
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const voiceSheet = sheetOpen && !asking;
+  const sheetLink = useMemo(() => ({ report: setSheetOpen, blocked: asking }), [asking]);
   // Which sign-out is waiting for its yes, if one is.
   const [confirming, setConfirming] = useState<'here' | 'everywhere' | null>(null);
   const [stage, setStage] = useState<HTMLElement | null>(null);
@@ -381,8 +389,8 @@ export function Lobby({
       <div ref={lobbyEl} className={`${phone ? `lobby phone view-${view}${live ? ' in-voice' : ''}` : 'lobby'}${band === undefined ? '' : ' has-band'}`}>
         {/* While Settings is open the rest of the page is inert: the panel is
             modal, and focus cannot wander behind its backdrop. */}
-        <div className="top-group" inert={band !== undefined && (settingsOpen || asking)}>
-        <header className="topbar" inert={settingsOpen || asking}>
+        <div className="top-group" inert={band !== undefined && (settingsOpen || asking || voiceSheet)}>
+        <header className="topbar" inert={settingsOpen || asking || voiceSheet}>
           <h1 className="brand">Conch</h1>
           <div role="status" aria-label="Status" className="status">
             <Avatar id={me} name={name} />
@@ -426,7 +434,7 @@ export function Lobby({
         </header>
         {band}
         </div>
-        <div className={panelOpen ? 'areas' : 'areas side-closed'} inert={settingsOpen || asking}>
+        <div className={panelOpen ? 'areas' : 'areas side-closed'} inert={settingsOpen || asking || voiceSheet}>
           {/* The switcher's entry is above the Channels navigation, not in it: that holds channel controls only. */}
           <div className="channels">
             {channels.loaded ? (
@@ -551,7 +559,9 @@ export function Lobby({
             <MicTestShown.Provider value={!phone || view === 'voice'}>
               <VoiceStrip.Provider value={phone && view !== 'voice' ? openVoice : null}>
                 <StageHost.Provider value={stage}>
-                  <ChannelJoin.Provider value={joinVoice}>{voice}</ChannelJoin.Provider>
+                  <VoiceSheet.Provider value={sheetLink}>
+                    <ChannelJoin.Provider value={joinVoice}>{voice}</ChannelJoin.Provider>
+                  </VoiceSheet.Provider>
                 </StageHost.Provider>
               </VoiceStrip.Provider>
             </MicTestShown.Provider>

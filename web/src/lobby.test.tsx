@@ -4,11 +4,12 @@
 // voice strip or the conversation is mounted again when a panel opens or the
 // window changes width: a call or a share there carries on.
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
-import { useEffect, type ReactNode } from 'react';
+import { useContext, useEffect, type ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { windowOf } from './fakewindow';
 import { Lobby } from './Lobby';
 import { DesktopOS } from './platform/os';
+import { VoiceSheet } from './phone';
 import { initialChannels } from './state/channels';
 
 const events: string[] = [];
@@ -24,9 +25,14 @@ function Probe({ name }: { readonly name: string }) {
   return <p>{name}</p>;
 }
 
-function lobby(voice: ReactNode = <Probe name="voice" />, os: string | null = null) {
-  return render(
+function lobby(voice: ReactNode = <Probe name="voice" />, os: string | null = null, overlay?: ReactNode) {
+  return render(lobbyTree(voice, os, overlay));
+}
+
+function lobbyTree(voice: ReactNode, os: string | null, overlay?: ReactNode) {
+  return (
     <DesktopOS.Provider value={os}><Lobby
+      overlay={overlay}
       origin="http://127.0.0.1:8080"
       name="ada"
       me={2}
@@ -42,7 +48,7 @@ function lobby(voice: ReactNode = <Probe name="voice" />, os: string | null = nu
       onSignOut={() => undefined}
       onSignOutEverywhere={() => undefined}
       signOutProblem={null}
-    /></DesktopOS.Provider>,
+    /></DesktopOS.Provider>
   );
 }
 
@@ -188,5 +194,57 @@ describe('what is playing', () => {
     fireEvent.keyDown(screen.getByRole('region', { name: 'Members list' }), { key: 'Escape' });
     size.resize(true);
     expect(events).toEqual(['mount conversation', 'mount voice']);
+  });
+});
+
+// Issue #2189: the voice options sheet is modal, and the lobby owns every
+// inert: the page behind it is inert with Settings' and re-authentication's
+// own attribute, one expression each, and re-authentication outranks it.
+describe('the voice options sheet and the lobby', () => {
+  // Reports the sheet open (or not) as VoicePanel does, and shows what the lobby says back.
+  function Sheet({ open }: { readonly open: boolean }) {
+    const { report, blocked } = useContext(VoiceSheet);
+    useEffect(() => {
+      report(open);
+      return () => { report(false); };
+    }, [open, report]);
+    return <p>{blocked ? 'blocked' : 'free'}</p>;
+  }
+  const reauth = <div className="reauth-layer"><input aria-label="Password" /></div>;
+  const inert = (selector: string) => document.querySelector(selector)?.hasAttribute('inert');
+
+  it('makes the page behind an open sheet inert, and not the dock or the overlay', () => {
+    lobby(<Sheet open />);
+    expect(inert('.areas')).toBe(true);
+    expect(inert('.topbar')).toBe(true);
+    expect(inert('.dock')).toBe(false);
+  });
+
+  it('leaves the page alone while the sheet is closed', () => {
+    lobby(<Sheet open={false} />);
+    expect(inert('.areas')).toBe(false);
+  });
+
+  it('keeps the page inert through re-authentication over an open sheet, and the prompt usable', () => {
+    const { rerender } = lobby(<Sheet open />);
+    rerender(lobbyTree(<Sheet open />, null, reauth));
+    expect(screen.getByText('blocked')).toBeTruthy();
+    expect(inert('.areas')).toBe(true);
+    expect(inert('.reauth-layer')).toBe(false);
+    expect(document.querySelector('.reauth-layer')?.closest('[inert]')).toBeNull();
+    // The sheet closes in answer (it is blocked): re-authentication still holds the page.
+    rerender(lobbyTree(<Sheet open={false} />, null, reauth));
+    expect(inert('.areas')).toBe(true);
+    expect(inert('.dock')).toBe(true);
+    // Re-authentication done, the sheet closed: the page is free.
+    rerender(lobbyTree(<Sheet open={false} />, null, undefined));
+    expect(inert('.areas')).toBe(false);
+  });
+
+  it('keeps the page inert when re-authentication is dismissed while the sheet stays open', () => {
+    const { rerender } = lobby(<Sheet open />);
+    rerender(lobbyTree(<Sheet open />, null, reauth));
+    rerender(lobbyTree(<Sheet open />, null, undefined));
+    expect(inert('.areas')).toBe(true);
   });
 });

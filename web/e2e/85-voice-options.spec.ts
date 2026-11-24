@@ -197,6 +197,11 @@ test.describe('Voice options', () => {
         const panel = page.locator('#voice-options');
         await expect(panel).toBeVisible();
         await expect(panel).toHaveClass(/sheet/);
+        // The tap may have scrolled the trigger into view: the geometry is
+        // checked again with the sheet open.
+        const openTop = (await box(strip, 'the strip')).y;
+        if (height === 300) expect(openTop, `the voice section's top (${String(openTop)}) is off the window with the sheet open`).toBeLessThan(0);
+        else expect(openTop, `the voice section's top (${String(openTop)}) is under 40% with the sheet open`).toBeLessThan(height * 0.4);
         const nav = page.locator('.phone-nav');
         for (const h of [height, 240]) {
           await page.setViewportSize({ width: 390, height: h });
@@ -306,6 +311,40 @@ test.describe('Voice options', () => {
           return { inPanel: el?.closest('#voice-options') != null, visible: el instanceof HTMLElement && el.offsetParent !== null, close: el?.classList.contains('voice-options-close') === true };
         });
         expect(at, 'focus is on a visible control in the panel').toEqual({ inPanel: true, visible: true, close: false });
+      }).toPass({ timeout: 5000 });
+    } finally {
+      await p?.close();
+    }
+  });
+
+  // Watch only has no microphone or camera choices: when the sheet becomes the
+  // anchored panel, focus still lands on an enabled, drawn control (or the
+  // panel itself), never on body or a disabled radio.
+  test('P2189 in Watch only, focus is kept in the panel when the sheet becomes the anchored panel', async ({ browser }) => {
+    let p: Someone | undefined;
+    try {
+      p = await enter(browser, vw, vw.alice, { context: { viewport: { width: 390, height: 520 }, hasTouch: true, isMobile: true } });
+      const page = p.page;
+      await joinVoice(p, 'Watch only');
+      const button = voice(page).getByRole('button', { name: 'Voice options' });
+      const panel = page.locator('#voice-options');
+      await button.focus();
+      await page.keyboard.press('Enter');
+      await expect(panel).toHaveClass(/sheet/);
+      await expect(panel.getByRole('button', { name: 'Close' })).toBeFocused();
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await expect(panel).not.toHaveClass(/sheet/);
+      await expect(async () => {
+        const at = await page.evaluate(() => {
+          const el = document.activeElement;
+          return {
+            inPanel: el?.closest('#voice-options') != null,
+            enabled: el instanceof HTMLElement && !el.matches(':disabled'),
+            drawn: el instanceof HTMLElement && (el.offsetParent !== null || el.id === 'voice-options'),
+            close: el?.classList.contains('voice-options-close') === true,
+          };
+        });
+        expect(at, 'focus is on an enabled, drawn control in the panel').toEqual({ inPanel: true, enabled: true, drawn: true, close: false });
       }).toPass({ timeout: 5000 });
     } finally {
       await p?.close();

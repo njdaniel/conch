@@ -53,7 +53,7 @@ import { archivedLine } from '../archived';
 import { Avatar, Glyph } from '../Icons';
 import { IdentityMarks } from '../Identity';
 import type { ChannelV0 } from '../schema/channel';
-import { MicTestShown, onPhoneCamera, usePhone, VoiceLive, VoiceStrip } from '../phone';
+import { MicTestShown, onPhoneCamera, usePhone, VoiceLive, VoiceSheet, VoiceStrip } from '../phone';
 import { StageHost } from '../stage';
 import { MicTest } from './MicTest';
 import { cameraNote, cameraOffForYou, cameraOn, listenOnlyCamera, watchOnlyCamera } from './camera';
@@ -314,29 +314,26 @@ export function VoicePanel({
 
   // As a sheet the panel covers the strip's controls, Leave voice among them,
   // and may cover a watched share's. It is modal (role dialog, aria-modal):
-  // while it is open everything beside it and its ancestors, the strip, the
-  // stage and the rest of the page, is inert, so the keyboard cannot reach what
-  // is hidden behind it. The phone's navigation is left out, as the sheet rests
-  // on it and a tap there is a way out. Focus moves into the sheet (to its
-  // Close) when it opens, unless More about sharing is taking it to the notes.
-  // Above the strip the panel covers the conversation and not the strip's
-  // controls, which stay in the tab order.
-  const covered = options && !strip && inVoice && sheet;
+  // the strip and the notes here are inert while it is open (inert props on
+  // them), and the lobby, told through VoiceSheet, makes the rest of the page
+  // inert beside its own modals, so there is one owner of each inert. The
+  // phone's navigation is left out, as the sheet rests on it and a tap there is
+  // a way out. Focus moves into the sheet (to its Close) when it opens, unless
+  // More about sharing is taking it to the notes. Above the strip the panel
+  // covers the conversation and not the strip's controls, which stay in the tab
+  // order. Re-authentication outranks the sheet: it closes it, and (blocked) it
+  // stays closed.
+  const link = useContext(VoiceSheet);
+  const covered = options && !strip && inVoice && sheet && !link.blocked;
+  const { report, blocked } = link;
   useEffect(() => {
-    const el = optionsPanel.current;
-    if (!covered || el === null) return;
-    const marked: Element[] = [];
-    for (let node: Element = el; node !== document.body && node.parentElement !== null; node = node.parentElement) {
-      for (const sibling of Array.from(node.parentElement.children)) {
-        if (sibling === node || sibling.hasAttribute('inert') || sibling.matches('.phone-nav')) continue;
-        sibling.setAttribute('inert', '');
-        marked.push(sibling);
-      }
-    }
-    return () => {
-      for (const m of marked) m.removeAttribute('inert');
-    };
-  }, [covered]);
+    if (!covered) return;
+    report(true);
+    return () => { report(false); };
+  }, [covered, report]);
+  useEffect(() => {
+    if (blocked && options) setOptions(false);
+  }, [blocked, options]);
   useEffect(() => {
     if (!covered || toAbout) return;
     if (optionsPanel.current?.contains(document.activeElement) === true) return;
@@ -349,7 +346,11 @@ export function VoicePanel({
     if (wasCovered.current && !covered && options) {
       const at = document.activeElement;
       if (at === null || at === document.body || at.classList.contains('voice-options-close')) {
-        optionsPanel.current?.querySelector<HTMLElement>('select, input, button:not(.voice-options-close)')?.focus();
+        // The first control that is enabled and drawn, else the panel itself
+        // (Watch only has few of them).
+        const controls = optionsPanel.current?.querySelectorAll<HTMLElement>('select:not(:disabled), input:not(:disabled), button:not(:disabled):not(.voice-options-close)') ?? [];
+        const first = Array.from(controls).find((c) => c.offsetParent !== null);
+        (first ?? optionsPanel.current)?.focus();
       }
     }
     wasCovered.current = covered;
@@ -667,7 +668,7 @@ export function VoicePanel({
           so a roster that grows, or a longer status, moves the strip's top and
           leaves the controls where they were. The phone's strip is the one
           row, of four controls (issue #1028). */}
-      <div className="voice-bar">
+      <div className="voice-bar" inert={covered}>
         {inVoice ? <BlockedVoiceMute voice={voice} others={others} /> : null}
         {strip ? null : (
           <Roster channel={rosterChannel ?? undefined} mayModerate={mayModerateRoster} roster={roster} people={people} viewer={viewer} viewerName={viewerName} elsewhere={elsewhere} speaking={speaking} volumes={inVoice ? state.volumes : noVolumes} />
@@ -753,7 +754,7 @@ export function VoicePanel({
         {strip && noPlayback ? <HearButton voice={voice} /> : null}
       </div>
 
-      <div className="voice-notes" hidden={strip}>
+      <div className="voice-notes" hidden={strip} inert={covered}>
         {state.why === null ? null : <p role="status" className="hint">{state.why}</p>}
         {state.reportNote === 'rate_limited' ? <p role="status" className="hint">Too many talk reports; slow down</p> : null}
         {state.reportNote === 'retrying' ? <p role="status" className="hint">Reporting your talking is slow; retrying</p> : null}
@@ -1521,6 +1522,7 @@ function Options({ panel, onClose, sheet, onSheet, voice, open, sharable, about,
       id="voice-options"
       className="voice-options"
       hidden={!open}
+      tabIndex={-1}
       role={sheet ? 'dialog' : undefined}
       aria-modal={sheet ? true : undefined}
       aria-label={sheet ? 'Voice options' : undefined}

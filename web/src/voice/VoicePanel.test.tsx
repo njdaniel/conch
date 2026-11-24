@@ -12,7 +12,7 @@ import { FakeClock } from './fakes';
 import { ownPageNote, soundNote, type ShareFeatures, type ShareQuality } from './share';
 import { ShareQualityMenu, sourceSixtyNote } from './ShareQualityMenu';
 import { useState } from 'react';
-import { MicTestShown, VoiceLive, VoiceStrip } from '../phone';
+import { MicTestShown, VoiceLive, VoiceSheet, VoiceStrip } from '../phone';
 import type { Snapshot, VoiceControl } from './useVoice';
 import { followsNote, hearLabel, meterNote, meterStripNote, missingNote, noOtherOutputs, noOutputChoice, processingLabel, processingOffNote, processingUseNote, reportedNote, stoppedFor, thresholdHint, VoicePanel } from './VoicePanel';
 
@@ -652,6 +652,23 @@ describe('Voice options as a panel', () => {
     fireEvent.click(button);
     expect(button.getAttribute('aria-expanded')).toBe('true');
   });
+});
+
+// Issue #2189: re-authentication outranks the sheet; the lobby says so
+// (blocked), and Voice options closes and stays closed.
+it('Voice options closes when re-authentication blocks it', () => {
+  const voice = control(inVoice('connected', 'c'), [], { kind: 'presence', presence });
+  const drawn = (blocked: boolean) => (
+    <VoiceSheet.Provider value={{ report: () => undefined, blocked }}>
+      <VoicePanel voice={voice} viewer={7} people={new Map()} viewed="c" onOpen={() => undefined} />
+    </VoiceSheet.Provider>
+  );
+  const { rerender } = render(drawn(false));
+  const button = screen.getByRole('button', { name: 'Voice options' });
+  fireEvent.click(button);
+  expect(button.getAttribute('aria-expanded')).toBe('true');
+  rerender(drawn(true));
+  expect(screen.getByRole('button', { name: 'Voice options' }).getAttribute('aria-expanded')).toBe('false');
 });
 
 // Issue #590 (F09, F20): Hold to talk works from the keyboard while it has
