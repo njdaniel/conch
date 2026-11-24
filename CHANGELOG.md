@@ -42,6 +42,7 @@ This pre-release updates the server, CLI and desktop together. Reload open brows
 - **Linux Talk Key setup** starts by asking for the desired key or mouse button. Device instructions appear after selection when access is needed. Shift+Tab moves focus without selecting Shift (#2129).
 - **Desktop screen-share video** uses separate LiveKit publishing and subscribing connections to avoid a VP8 negotiation collision (#2055). The 20-minute share on physical devices is still to be run.
 - **The message box no longer floats above a blank band** in a busy desktop chat (#2133): a pending send or a removed message gave the conversation column a second scrollbar.
+- **A message link keeps the linked message in view** when the voice dock settles at the same moment, including links to thread replies (#2158).
 - **Rust URL parsing dependency** updated for [RUSTSEC-2026-0592](https://rustsec.org/advisories/RUSTSEC-2026-0592) (#2135).
 - **The desktop app sends attachments up to 20 MiB** (#2148), when the server allows that. The server's own limit still defaults to 10 MiB (`--max-upload-bytes`). A server with a lower limit now says the file is too large instead of "Cannot reach the server", and a large upload gets time to finish on a slow link.
 - **Private calls: ringing and cancelling again and again hits the repeat limit** (#2112). An unanswered ring counts toward the caller's 3 per 10 minutes toward the same person, however it ended, including when the caller cancels or a block ends it.
