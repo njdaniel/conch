@@ -119,7 +119,10 @@ test.describe('Voice options', () => {
       const before = await box(strip, 'the strip');
       await strip.getByRole('button', { name: 'Voice options' }).click();
       await expect(panel).toBeVisible();
-      const scrollBefore = await page.evaluate(() => window.scrollY);
+      // Opening moved nothing under it.
+      await expect(async () => {
+        expect(await box(strip, 'the strip')).toEqual(before);
+      }).toPass({ timeout: 3000 });
       const room = await panel.evaluate((el) => ({ client: el.clientHeight, content: el.scrollHeight }));
       expect(room.content, 'the content is taller than the panel').toBeGreaterThan(room.client);
       // The last control in the panel is reached by scrolling the panel, and works.
@@ -131,11 +134,21 @@ test.describe('Voice options', () => {
       await expect.poll(() => panel.evaluate((el) => el.scrollTop + el.clientHeight >= el.scrollHeight - 1)).toBe(true);
       expect(await panel.evaluate((el) => el.scrollTop), 'the panel scrolled').toBeGreaterThan(0);
       // At the panel's end a further wheel gesture does not chain into the
-      // page, which would move the open panel.
+      // page, which would move the open panel. The page is first put where it
+      // can scroll down, or the check would pass for want of room to move.
+      await page.evaluate(() => {
+        window.scrollTo(0, 0);
+      });
+      const room2 = await page.evaluate(() => document.documentElement.scrollHeight - window.innerHeight - window.scrollY);
+      expect(room2, 'the page has room to scroll down').toBeGreaterThan(20);
+      await expect.poll(() => panel.evaluate((el) => el.scrollTop + el.clientHeight >= el.scrollHeight - 1)).toBe(true);
+      const scrolledTo = await page.evaluate(() => window.scrollY);
       const placed = await box(panel, 'the panel');
+      const over2 = await box(panel, 'the panel');
+      await page.mouse.move(over2.x + over2.width / 2, over2.y + over2.height / 2);
       await page.mouse.wheel(0, 3000);
       await page.waitForTimeout(300);
-      expect(await page.evaluate(() => window.scrollY), 'a second wheel at the end moved the page').toBe(scrollBefore);
+      expect(await page.evaluate(() => window.scrollY), 'a second wheel at the end moved the page').toBe(scrolledTo);
       expect(await box(panel, 'the panel'), 'a second wheel at the end moved the panel').toEqual(placed);
       const lb = await box(last, 'the last control');
       const pb = await box(panel, 'the panel');
@@ -150,8 +163,7 @@ test.describe('Voice options', () => {
       } else {
         await last.click();
       }
-      expect(await page.evaluate(() => window.scrollY), 'the page did not scroll').toBe(scrollBefore);
-      expect(await box(strip, 'the strip')).toEqual(before);
+      expect(await page.evaluate(() => window.scrollY), 'the page did not scroll').toBe(scrolledTo);
     } finally {
       await p?.close();
     }
@@ -159,81 +171,102 @@ test.describe('Voice options', () => {
 
   // On a phone the section has little room above it, and a scrolled page can
   // leave its top off the window: the panel is then a sheet over the window,
-  // resting on the nav, and a control in it is in view and usable, in a window
-  // as short as 240 px too.
-  test('P2189 on a phone the panel is a sheet in the window above the nav and usable', async ({ browser }) => {
-    let p: Someone | undefined;
-    try {
-      p = await enter(browser, vw, vw.alice, { context: { viewport: { width: 390, height: 520 }, hasTouch: true, isMobile: true } });
-      const page = p.page;
-      await joinVoice(p, 'Join voice');
-      const strip = voice(page);
-      const button = strip.getByRole('button', { name: 'Voice options' });
-      await button.scrollIntoViewIfNeeded();
-      await page.evaluate(() => {
-        window.scrollTo(0, document.documentElement.scrollHeight);
-      });
-      // The case is the sheet's: the section's top is off the window or under
-      // 40% of it.
-      const top = (await box(strip, 'the strip')).y;
-      expect(top, `the voice section's top (${String(top)}) is under 40% of the window`).toBeLessThan(520 * 0.4);
-      await button.tap();
-      const panel = page.locator('#voice-options');
-      await expect(panel).toBeVisible();
-      await expect(panel).toHaveClass(/sheet/);
-      const nav = page.locator('.phone-nav');
-      for (const height of [520, 240]) {
+  // resting on the nav, and a control in it is in view and usable. Two cases:
+  // the top under 40% of the window but visible, and the top off the window
+  // (asserted as the sheet opens). Then the window shrinks to 240 px.
+  for (const [where, height] of [['its top visible but under 40%', 520], ['its top off the window', 300]] as const) {
+    test(`P2189 on a phone the panel is a sheet in the window above the nav and usable, ${where}`, async ({ browser }) => {
+      let p: Someone | undefined;
+      try {
+        p = await enter(browser, vw, vw.alice, { context: { viewport: { width: 390, height }, hasTouch: true, isMobile: true } });
+        const page = p.page;
+        await joinVoice(p, 'Join voice');
+        const strip = voice(page);
+        const button = strip.getByRole('button', { name: 'Voice options' });
+        await button.scrollIntoViewIfNeeded();
+        await page.evaluate(() => {
+          window.scrollTo(0, document.documentElement.scrollHeight);
+        });
+        const top = (await box(strip, 'the strip')).y;
+        if (height === 300) expect(top, `the voice section's top (${String(top)}) is off the window as the sheet opens`).toBeLessThan(0);
+        else {
+          expect(top, `the voice section's top (${String(top)}) is on the window`).toBeGreaterThanOrEqual(0);
+          expect(top, `the voice section's top (${String(top)}) is under 40% of the window`).toBeLessThan(height * 0.4);
+        }
+        await button.tap();
+        const panel = page.locator('#voice-options');
+        await expect(panel).toBeVisible();
+        await expect(panel).toHaveClass(/sheet/);
+        const nav = page.locator('.phone-nav');
+        for (const h of [height, 240]) {
+          await page.setViewportSize({ width: 390, height: h });
+          await expect(async () => {
+            const b = await box(panel, 'the panel');
+            const n = await box(nav, 'the nav');
+            expect(b.x).toBeGreaterThanOrEqual(0);
+            expect(b.y, `${String(h)} px window: the sheet's top`).toBeGreaterThanOrEqual(-0.5);
+            expect(b.x + b.width).toBeLessThanOrEqual(390.5);
+            expect(b.y + b.height, `${String(h)} px window: the sheet's bottom is on the nav's top`).toBeLessThanOrEqual(n.y + 0.5);
+            expect(b.height, 'a sheet is at most about 80% of the window').toBeLessThanOrEqual(h * 0.8 + 1);
+          }).toPass({ timeout: 5000 });
+        }
         await page.setViewportSize({ width: 390, height });
-        await expect(async () => {
-          const b = await box(panel, 'the panel');
-          const n = await box(nav, 'the nav');
-          expect(b.x).toBeGreaterThanOrEqual(0);
-          expect(b.y, `${String(height)} px window: the sheet's top`).toBeGreaterThanOrEqual(-0.5);
-          expect(b.x + b.width).toBeLessThanOrEqual(390.5);
-          expect(b.y + b.height, `${String(height)} px window: the sheet's bottom is on the nav's top`).toBeLessThanOrEqual(n.y + 0.5);
-          expect(b.height, 'a sheet is at most about 80% of the window').toBeLessThanOrEqual(height * 0.8 + 1);
-        }).toPass({ timeout: 5000 });
+        const open = panel.getByRole('radio', { name: 'Open microphone' });
+        await open.scrollIntoViewIfNeeded();
+        await open.tap();
+        await expect(open).toBeChecked();
+      } finally {
+        await p?.close();
       }
-      await page.setViewportSize({ width: 390, height: 520 });
-      const open = panel.getByRole('radio', { name: 'Open microphone' });
-      await open.scrollIntoViewIfNeeded();
-      await open.tap();
-      await expect(open).toBeChecked();
-    } finally {
-      await p?.close();
-    }
-  });
+    });
+  }
 
-  // Opened by the keyboard as a sheet, the panel takes focus, and the strip's
-  // controls under it, Leave voice among them, are out of the tab order until
-  // it closes; focus then returns to the Voice options button. (Above the
-  // strip the panel covers the conversation, not the strip's controls, so
-  // they stay reachable.)
-  test('P2189 a sheet opened by keyboard keeps focus off the controls it covers', async ({ browser }) => {
+  // Opened by the keyboard as a sheet, the panel is modal: it takes focus, and
+  // everything behind it, the strip (Leave voice among it), a watched share's
+  // controls and the rest of the page, is out of the tab order until it
+  // closes, in both directions; only the phone's nav, which the sheet rests
+  // on, stays reachable. Focus then returns to the Voice options button.
+  // (Above the strip the panel covers the conversation, not the strip's
+  // controls, so they stay reachable.)
+  test('P2189 a sheet opened by keyboard is modal: focus stays in it or on the nav', async ({ browser }) => {
+    let sharer: Someone | undefined;
     let p: Someone | undefined;
     try {
+      sharer = await enter(browser, vw, vw.bob, { context: { viewport: { width: 1440, height: 900 } } });
       p = await enter(browser, vw, vw.alice, { context: { viewport: { width: 390, height: 520 }, hasTouch: true, isMobile: true } });
       const page = p.page;
+      await joinVoice(sharer, 'Join voice');
       await joinVoice(p, 'Join voice');
+      await voice(sharer.page).getByRole('button', { name: 'Share screen' }).click();
+      await expect(voice(sharer.page)).toContainText('You are sharing your screen', { timeout: 30_000 });
       const strip = voice(page);
+      await page.locator('.call-share').getByRole('button', { name: 'Watch', exact: true }).tap();
+      const watched = page.getByRole('region', { name: 'Shared screen' });
+      await expect(watched).toContainText('bob · LIVE', { timeout: 30_000 });
       const button = strip.getByRole('button', { name: 'Voice options' });
       const leave = strip.getByRole('button', { name: 'Leave voice' });
       const panel = page.locator('#voice-options');
       await button.focus();
       await page.keyboard.press('Enter');
       await expect(panel).toHaveClass(/sheet/);
+      await expect(panel).toHaveAttribute('role', 'dialog');
+      await expect(panel).toHaveAttribute('aria-modal', 'true');
       await expect(panel.getByRole('button', { name: 'Close' })).toBeFocused();
+      // The share's controls are on the page, and inert.
+      await expect(watched.getByRole('button', { name: 'Stop watching' })).toBeAttached();
+      expect(await watched.evaluate((el) => el.closest('[inert]') !== null), 'the watched share is inert').toBe(true);
       const where = () => page.evaluate(() => {
         const at = document.activeElement;
-        return { inPanel: at?.closest('#voice-options') != null, inert: at?.closest('[inert]') != null, label: at?.getAttribute('aria-label') ?? at?.textContent ?? '' };
+        return {
+          allowed: at === null || at === document.body || at.closest('#voice-options, .phone-nav') !== null,
+          label: at?.getAttribute('aria-label') ?? at?.textContent ?? '',
+        };
       });
       for (const key of ['Tab', 'Shift+Tab']) {
         for (let i = 0; i < 40; i++) {
           await page.keyboard.press(key);
           const at = await where();
-          expect(at.inert, `${key} ${String(i)} reached a covered control (${at.label})`).toBe(false);
-          // Focus leaves the panel only for the page outside the strip, never for the strip's controls.
-          expect(await page.evaluate(() => document.activeElement?.closest('.voice-bar, .voice-notes') != null), `${key} ${String(i)} reached the strip`).toBe(false);
+          expect(at.allowed, `${key} ${String(i)} reached something behind the sheet (${at.label})`).toBe(true);
         }
       }
       await expect(leave).not.toBeFocused();
@@ -241,8 +274,39 @@ test.describe('Voice options', () => {
       await page.keyboard.press('Escape');
       await expect(panel).toBeHidden();
       await expect(button).toBeFocused();
+      expect(await watched.evaluate((el) => el.closest('[inert]') !== null), 'the watched share is reachable again').toBe(false);
       await page.keyboard.press('Tab');
       await expect(leave).toBeFocused();
+    } finally {
+      await p?.close();
+      await sharer?.close();
+    }
+  });
+
+  // The sheet turning into the panel above the strip (the window grows) hides
+  // its Close: focus held there moves to a visible control in the panel.
+  test('P2189 focus on the sheet\'s Close moves into the panel when the sheet becomes the anchored panel', async ({ browser }) => {
+    let p: Someone | undefined;
+    try {
+      p = await enter(browser, vw, vw.alice, { context: { viewport: { width: 390, height: 520 }, hasTouch: true, isMobile: true } });
+      const page = p.page;
+      await joinVoice(p, 'Join voice');
+      const button = voice(page).getByRole('button', { name: 'Voice options' });
+      const panel = page.locator('#voice-options');
+      await button.focus();
+      await page.keyboard.press('Enter');
+      await expect(panel).toHaveClass(/sheet/);
+      await expect(panel.getByRole('button', { name: 'Close' })).toBeFocused();
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await expect(panel).not.toHaveClass(/sheet/);
+      await expect(panel).toBeVisible();
+      await expect(async () => {
+        const at = await page.evaluate(() => {
+          const el = document.activeElement;
+          return { inPanel: el?.closest('#voice-options') != null, visible: el instanceof HTMLElement && el.offsetParent !== null, close: el?.classList.contains('voice-options-close') === true };
+        });
+        expect(at, 'focus is on a visible control in the panel').toEqual({ inPanel: true, visible: true, close: false });
+      }).toPass({ timeout: 5000 });
     } finally {
       await p?.close();
     }

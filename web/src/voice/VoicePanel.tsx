@@ -312,17 +312,48 @@ export function VoicePanel({
     optionsButton.current?.focus();
   }, [options]);
 
-  // As a sheet the panel covers the strip's controls, Leave voice among them:
-  // they are inert while it is open, so the keyboard cannot reach them, and
-  // focus moves into the sheet (to its Close) when it opens, unless More about
-  // sharing is taking it to the notes. Above the strip the panel covers the
-  // conversation and not the strip's controls, which stay in the tab order.
+  // As a sheet the panel covers the strip's controls, Leave voice among them,
+  // and may cover a watched share's. It is modal (role dialog, aria-modal):
+  // while it is open everything beside it and its ancestors, the strip, the
+  // stage and the rest of the page, is inert, so the keyboard cannot reach what
+  // is hidden behind it. The phone's navigation is left out, as the sheet rests
+  // on it and a tap there is a way out. Focus moves into the sheet (to its
+  // Close) when it opens, unless More about sharing is taking it to the notes.
+  // Above the strip the panel covers the conversation and not the strip's
+  // controls, which stay in the tab order.
   const covered = options && !strip && inVoice && sheet;
+  useEffect(() => {
+    const el = optionsPanel.current;
+    if (!covered || el === null) return;
+    const marked: Element[] = [];
+    for (let node: Element = el; node !== document.body && node.parentElement !== null; node = node.parentElement) {
+      for (const sibling of Array.from(node.parentElement.children)) {
+        if (sibling === node || sibling.hasAttribute('inert') || sibling.matches('.phone-nav')) continue;
+        sibling.setAttribute('inert', '');
+        marked.push(sibling);
+      }
+    }
+    return () => {
+      for (const m of marked) m.removeAttribute('inert');
+    };
+  }, [covered]);
   useEffect(() => {
     if (!covered || toAbout) return;
     if (optionsPanel.current?.contains(document.activeElement) === true) return;
     optionsPanel.current?.querySelector<HTMLElement>('.voice-options-close')?.focus();
   }, [covered, toAbout]);
+  // The sheet turning into the panel above the strip (a resize, a scroll)
+  // hides its Close: focus held there moves to the panel's first control.
+  const wasCovered = useRef(false);
+  useEffect(() => {
+    if (wasCovered.current && !covered && options) {
+      const at = document.activeElement;
+      if (at === null || at === document.body || at.classList.contains('voice-options-close')) {
+        optionsPanel.current?.querySelector<HTMLElement>('select, input, button:not(.voice-options-close)')?.focus();
+      }
+    }
+    wasCovered.current = covered;
+  }, [covered, options]);
 
   // The talk key capture ends with the panel it was started in, by whatever
   // route the panel closes (outside press, its button, the phone's strip, or
@@ -636,7 +667,7 @@ export function VoicePanel({
           so a roster that grows, or a longer status, moves the strip's top and
           leaves the controls where they were. The phone's strip is the one
           row, of four controls (issue #1028). */}
-      <div className="voice-bar" inert={covered}>
+      <div className="voice-bar">
         {inVoice ? <BlockedVoiceMute voice={voice} others={others} /> : null}
         {strip ? null : (
           <Roster channel={rosterChannel ?? undefined} mayModerate={mayModerateRoster} roster={roster} people={people} viewer={viewer} viewerName={viewerName} elsewhere={elsewhere} speaking={speaking} volumes={inVoice ? state.volumes : noVolumes} />
@@ -722,7 +753,7 @@ export function VoicePanel({
         {strip && noPlayback ? <HearButton voice={voice} /> : null}
       </div>
 
-      <div className="voice-notes" hidden={strip} inert={covered}>
+      <div className="voice-notes" hidden={strip}>
         {state.why === null ? null : <p role="status" className="hint">{state.why}</p>}
         {state.reportNote === 'rate_limited' ? <p role="status" className="hint">Too many talk reports; slow down</p> : null}
         {state.reportNote === 'retrying' ? <p role="status" className="hint">Reporting your talking is slow; retrying</p> : null}
@@ -802,7 +833,7 @@ export function VoicePanel({
         ) : null}
       </div>
 
-      {inVoice ? <Options panel={optionsPanel} onClose={closeOptions} onSheet={setSheet} voice={voice} open={options && !strip} sharable={sharable} about={about} others={others} cameraAllowed={cameraAllowed} /> : null}
+      {inVoice ? <Options panel={optionsPanel} onClose={closeOptions} sheet={sheet} onSheet={setSheet} voice={voice} open={options && !strip} sharable={sharable} about={about} others={others} cameraAllowed={cameraAllowed} /> : null}
       {staged === null ? null : stage === null ? staged : createPortal(staged, stage)}
     </section>
   );
@@ -1431,10 +1462,12 @@ function CameraOptions({ voice, open, cameraAllowed }: { readonly voice: VoiceCo
 // nothing under it. It is fixed, so the dock's own scroll does not clip it;
 // its place is the section's, set on it from the section's box, or a bottom
 // sheet over the window where there is too little room above the section.
-function Options({ panel, onClose, onSheet, voice, open, sharable, about, others, cameraAllowed }: {
+function Options({ panel, onClose, sheet, onSheet, voice, open, sharable, about, others, cameraAllowed }: {
   readonly panel: RefObject<HTMLDivElement | null>;
   // Closes the panel and returns focus to its button.
   readonly onClose: () => void;
+  // Whether the panel is drawn as a bottom sheet, which is a modal dialog.
+  readonly sheet: boolean;
   // Says whether the panel is drawn as a bottom sheet.
   readonly onSheet: (sheet: boolean) => void;
   readonly voice: VoiceControl;
@@ -1483,7 +1516,15 @@ function Options({ panel, onClose, onSheet, voice, open, sharable, about, others
     };
   }, [open, panel, onSheet]);
   return (
-    <div ref={panel} id="voice-options" className="voice-options" hidden={!open}>
+    <div
+      ref={panel}
+      id="voice-options"
+      className="voice-options"
+      hidden={!open}
+      role={sheet ? 'dialog' : undefined}
+      aria-modal={sheet ? true : undefined}
+      aria-label={sheet ? 'Voice options' : undefined}
+    >
       {/* As a sheet the panel covers the Voice options button, so it has its
           own way out; the style rules draw this only for the sheet. */}
       <button type="button" className="voice-options-close" onClick={onClose}>Close</button>
