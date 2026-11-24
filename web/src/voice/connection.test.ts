@@ -948,9 +948,14 @@ describe('talking', () => {
     });
     t.client.join('general');
     await settle();
+    // Cleared as soon as the join fails, through the backoff,
+    expect([...t.client.snapshot().speaking]).toEqual([]);
     t.clock.advance(5000);
     await settle();
     expect(t.client.snapshot().phase).toBe('connected');
+    // after the retry connects,
+    expect([...t.client.snapshot().speaking]).toEqual([]);
+    // and on the first press.
     t.client.press();
     await settle();
     expect(t.client.snapshot().transmitting).toBe(true);

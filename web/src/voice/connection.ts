@@ -2369,6 +2369,9 @@ export class VoiceClient {
       this.clearReconnectTimer();
       void room.close().catch(() => undefined);
       this.room = null;
+      // Whoever the failed room said was speaking is not heard now.
+      this.forgetSpeakers();
+      this.set({ speaking: new Set() });
       // A microphone that cannot be had stops: the next attempt is the
       // person's own Join voice or Watch only. Anything else is retried. The
       // device chosen not being there is said as such, and the choice is let
