@@ -92,7 +92,7 @@ test('Node previews what main reads under NODE_DEBUG=stream without the startup 
   expect(result.stderr).toMatch(/STREAM \d+:/);
 });
 
-test.each(['stream', 'net,stream', 'STREAM*'])('a development run rejects NODE_DEBUG=%s before anything is read', (debug) => {
+test.each(['stream', 'net,stream', 'STREAM*', 'undici', 'fetch', 'websocket'])('a development run rejects NODE_DEBUG=%s before anything is read', (debug) => {
   const result = streamProbe(debug, true);
   expect(result.status).toBe(1);
   expect(result.stderr).toContain('Remove NODE_DEBUG from the launch environment');
@@ -120,4 +120,18 @@ test('a packaged build starts normally with no NODE_DEBUG', () => {
   const result = probe('', true, true);
   expect(result.status).toBe(0);
   expect(JSON.parse(result.stdout)).toEqual({ coverage: false, debug: false, token: true, nonce: true });
+});
+
+// The variable itself is removed, not only refused: a child that inherits
+// main's environment does not get NODE_DEBUG back (#2155).
+test('a child that inherits the environment gets no NODE_DEBUG after the guard', () => {
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    import { spawnSync } from 'node:child_process';
+    const { requireSafeChildProcessEnv } = await import(${JSON.stringify(guard)});
+    requireSafeChildProcessEnv(false);
+    const child = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(Object.hasOwn(process.env, "NODE_DEBUG")))'], { encoding: 'utf8' });
+    process.stdout.write(child.stdout);
+  `], { env: { ...process.env, NODE_DEBUG: 'fs' }, encoding: 'utf8', timeout: 10_000 });
+  expect(result.status).toBe(0);
+  expect(result.stdout).toBe('false');
 });

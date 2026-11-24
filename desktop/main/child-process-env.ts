@@ -4,8 +4,9 @@ import { debuglog } from 'node:util';
 // itself: child_process prints each spawn's options, the voice helper's
 // environment (CONCH_TOKEN, CONCH_VOICE_ATTACH) included (#2105); stream
 // prints a preview of every chunk main reads, helper output and conchd's
-// answers included (#2155).
-const exposing = ['child_process', 'stream'] as const;
+// answers included; undici, fetch and websocket print each request's
+// address, channel names and search text in its query included (#2155).
+const exposing = ['child_process', 'stream', 'undici', 'fetch', 'websocket'] as const;
 
 // The refusals are fixed text: they name the variable, never its value.
 export const packagedRefusal =
