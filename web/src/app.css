@@ -3729,6 +3729,19 @@ label {
   grid-row: 1;
 }
 
+/* The title's readout is one line in the open call view, cut with an ellipsis
+   (the whole text is still read out): its length, and so its wrapping, depends
+   on the font, and a three-line title took the picture's floor from a phone
+   on wider fonts (the stage then scrolled). It gives way before the title's
+   own text does. */
+.call-view.call-single-share .share-title .share-readout {
+  flex: 0 1000 auto;
+  min-width: 4rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .call-view.call-single-share .share-frame video {
   flex: 1 1 auto;
   height: auto;

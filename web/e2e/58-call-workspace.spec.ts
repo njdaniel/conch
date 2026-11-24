@@ -399,6 +399,63 @@ test.describe('the persistent call workspace', () => {
     }
   });
 
+  // The hit target at the centre of each control: the control (or something in
+  // it), not the picture's focus button over the whole frame.
+  const hitTargets = (page: Page) => shareView(page).evaluate((share) => {
+    const out: { name: string; own: boolean; enlarge: boolean; row: boolean }[] = [];
+    for (const el of share.querySelectorAll<HTMLElement>('.share-controls button, .share-controls input, .share-frame .share-pip')) {
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) continue;
+      const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      out.push({
+        name: el.getAttribute('aria-label') ?? el.className,
+        own: hit !== null && el.contains(hit),
+        enlarge: hit?.closest('.call-enlarge') != null,
+        row: el.closest('.share-controls') !== null,
+      });
+    }
+    return out;
+  });
+
+  test('P2187 every control on the picture is its own hit target when shown, and the picture\'s when faded', async ({ browser }) => {
+    test.setTimeout(120_000);
+    const people: Person[] = [];
+    try {
+      const a = await person(browser, vw.alice);
+      people.push(a);
+      const b = await person(browser, vw.bob, { viewport: { width: 1440, height: 900 } });
+      people.push(b);
+      const c = await person(browser, vw.carol, { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 });
+      people.push(c);
+      await join(a);
+      await join(b);
+      await join(c);
+      await share(a);
+      await watching(b);
+      await watching(c);
+
+      for (const [p, sizes] of [[b, [[1440, 900], [800, 700]]], [c, [[390, 844], [360, 640]]]] as const) {
+        for (const [width, height] of sizes) {
+          await p.page.setViewportSize({ width, height });
+          const where = `${String(width)}×${String(height)}`;
+          await wake(p.page);
+          await expect.poll(() => controlsOpacity(p.page), { timeout: 10_000 }).toBe('1');
+          const shown = await hitTargets(p.page);
+          expect(shown.length, `${where}: the controls are there`).toBeGreaterThanOrEqual(3);
+          expect(shown.filter((t) => !t.own), `${where}: shown, each control is what a press at its centre reaches`).toEqual([]);
+          // Faded, nothing invisible in the row takes a press: it is the
+          // picture's, which a tap there also wakes the controls with (the
+          // pop-out is not in the row and stays).
+          await expect.poll(() => controlsOpacity(p.page), { timeout: 10_000 }).toBe('0');
+          const faded = await hitTargets(p.page);
+          expect(faded.filter((t) => t.row && (t.own || !t.enlarge)), `${where}: faded, a press at a control reaches the picture`).toEqual([]);
+        }
+      }
+    } finally {
+      for (const p of people) await leave(p);
+    }
+  });
+
   test('P2187 the tap to play sound is the picture\'s, the row stays one line and the waiting hint is not covered', async ({ browser }) => {
     test.setTimeout(120_000);
     const people: Person[] = [];
