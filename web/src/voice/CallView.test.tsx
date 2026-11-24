@@ -1268,6 +1268,18 @@ describe('the persistent call workspace (issue #1498)', () => {
     for (const spy of [watch, view, attachStream, attachCamera]) expect(spy).not.toHaveBeenCalled();
   });
 
+  it('hands a share its focus action only in the open call view, never in the closed one (issue #2187)', () => {
+    const client = newClient();
+    const focus: (((() => void) | undefined))[] = [];
+    const tiles: Tile[] = [
+      { principal: 9, name: 'member-2', me: false, camera: false, kind: 'share', watched: true, render: (f) => { focus.push(f); return <section>Shared screen</section>; } },
+    ];
+    const { rerender } = render(<CallView client={client} state={inVoice({ viewing: true })} tiles={tiles} hidden={0} open />);
+    expect(focus.at(-1)).toBeTypeOf('function');
+    rerender(<CallView client={client} state={inVoice({ viewing: false })} tiles={tiles} hidden={0} open={false} />);
+    expect(focus.at(-1)).toBeUndefined();
+  });
+
   it('names the voice channel, sharer and speaker in both layouts; the channel button only opens the channel', () => {
     const client = newClient();
     const opened = vi.fn();

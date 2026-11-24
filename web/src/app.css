@@ -3687,15 +3687,17 @@ label {
 }
 
 /* A single watched share in the open call view fits inside the stage it is
-   given (issue #2187), like a video player: the controls are drawn over the
-   picture's bottom edge, on a dark gradient, in the grid cell the picture is
-   in, so the picture takes the view's height less only the title. The stage's
-   own size is not changed here. The chain from the view down to the share is
-   flexed so that the share is as tall as the view leaves it; the frame takes
-   what is left under the title, down to 6rem, and the video is contained in
-   it, never cropped. The controls stay in the page's tab order and always
-   shown, since a touch screen has no hover. A closed call (call-stage) and
-   the other layouts keep the controls in a row below the picture. */
+   given (issue #2187), like a video player: the controls are icon buttons on
+   the picture's bottom edge, on a dark gradient, in the grid cell the picture
+   is in, so the picture takes the view's height less only the title. The
+   stage's own size is not changed here. The chain from the view down to the
+   share is flexed so that the share is as tall as the view leaves it; the
+   frame takes what is left under the title, down to 6rem, and the video is
+   contained in it, never cropped. The controls fade out after a few seconds
+   without a pointer on the share (ShareView adds .idle) and return on a move,
+   a tap or focus; their names are still read out. A closed call (call-stage),
+   the other layouts and a window 560 px tall and under keep the controls in a
+   row below the picture. */
 .call-view.call-single-share > .call-grid,
 .call-view.call-single-share > .call-grid > .call-share {
   display: flex;
@@ -3708,16 +3710,6 @@ label {
   flex: 1 1 auto;
   grid-template-rows: auto minmax(6rem, 1fr);
   min-height: 0;
-}
-
-/* The grid keeps its width cap (40vh of 16:9), but over 560 px tall not below
-   40rem: the controls are one row over the picture, and a narrow one would
-   wrap them into two and cover it. At 560 px and under the page scrolls as a
-   document, the controls are below the picture, and the cap stands. */
-@media (min-height: 561px) {
-  .call-view.call-single-share > .call-grid {
-    max-width: max(calc(40vh * 16 / 9), 40rem);
-  }
 }
 
 /* The frame is its grid row, and its video takes the frame's height (its caps
@@ -3744,27 +3736,144 @@ label {
 }
 
 /* The controls are the frame's bottom edge: the same cell, above the focus
-   button and the pop-out. White on the gradient's end (85% black) is above
-   AA for text on any picture; the buttons keep their own surfaces. At 560 px
-   tall and under, the page scrolls as a document and the controls stay in a
-   row below the picture, which then has the room (the picture's width is
-   capped there, so a row over it would wrap and cover it). */
+   button and the pop-out. One row of icon buttons (the names are visually
+   hidden, not removed) and the volume slider, which gives way first and is
+   dropped on a very narrow window. White on the gradient's end (85% black) is
+   above AA for text on any picture, and every icon, the slider's track and
+   its thumb are at least 3:1 against it (WCAG 1.4.11), in both themes: the
+   gradient is not themed. At 560 px tall and under, the page scrolls as a
+   document and the controls stay in a row below the picture. */
 @media (min-height: 561px) {
   .call-view.call-single-share .share-controls {
     grid-row: 2;
     grid-column: 1;
     align-self: end;
     z-index: 2;
-    padding: var(--s2);
+    flex-wrap: nowrap;
+    padding: var(--s1) var(--s2);
     color: #ffffff;
-    background: linear-gradient(to top, rgb(0 0 0 / 85%) 55%, rgb(0 0 0 / 0%));
+    background: linear-gradient(to top, rgb(0 0 0 / 85%) 60%, rgb(0 0 0 / 0%));
     border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+    transition: opacity 0.2s;
   }
 
-  /* One row, even on a phone: the volume slider is what gives. */
+  .call-view.call-single-share .share-controls .label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .call-view.call-single-share .share-controls button {
+    flex: 0 0 auto;
+    padding: 0;
+    color: #ffffff;
+    background: transparent;
+    border: 0;
+  }
+
+  .call-view.call-single-share .share-controls button:hover:not(:disabled) {
+    background: rgb(255 255 255 / 20%);
+  }
+
+  .call-view.call-single-share .share-controls button[aria-pressed='true'] {
+    background: rgb(255 255 255 / 30%);
+  }
+
+  .call-view.call-single-share .share-controls button:focus-visible,
+  .call-view.call-single-share .share-controls input:focus-visible {
+    outline: 3px solid #ffffff;
+    outline-offset: -3px;
+  }
+
   .call-view.call-single-share .share-controls .volume {
     flex: 1 1 3rem;
     min-width: 0;
+  }
+
+  /* A slider drawn for the gradient: the page's accent is dark in its light
+     theme and fell to about 2.4:1 against it. */
+  .call-view.call-single-share .share-controls input[type='range'] {
+    width: 100%;
+    min-width: 0;
+    background: transparent;
+    appearance: none;
+  }
+
+  .call-view.call-single-share .share-controls input[type='range']::-webkit-slider-runnable-track {
+    height: 4px;
+    background: rgb(255 255 255 / 75%);
+    border-radius: 2px;
+  }
+
+  .call-view.call-single-share .share-controls input[type='range']::-moz-range-track {
+    height: 4px;
+    background: rgb(255 255 255 / 75%);
+    border-radius: 2px;
+  }
+
+  .call-view.call-single-share .share-controls input[type='range']::-webkit-slider-thumb {
+    width: 16px;
+    height: 16px;
+    margin-top: -6px;
+    background: #ffffff;
+    border: 2px solid #000000;
+    border-radius: 50%;
+    appearance: none;
+  }
+
+  .call-view.call-single-share .share-controls input[type='range']::-moz-range-thumb {
+    width: 12px;
+    height: 12px;
+    background: #ffffff;
+    border: 2px solid #000000;
+    border-radius: 50%;
+  }
+
+  /* Faded: shown again by a pointer move, a tap, or focus inside (a hidden
+     control is still tabbable, so reaching one shows the row). Opacity, not
+     display, so the row is in the tab order; no pointer events, so a tap on
+     the picture under it is the picture's. */
+  .call-view.call-single-share .share-view.idle .share-controls:not(:focus-within) {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  /* The sound's tap is the picture's own, centred in what the controls' row
+     leaves of it (the row is 52 px: 3.25rem). */
+  .call-view.call-single-share .share-frame .share-tap {
+    position: absolute;
+    top: calc(50% - 1.625rem);
+    left: 50%;
+    z-index: 3;
+    translate: -50% -50%;
+    white-space: nowrap;
+  }
+
+  /* The status hint is in the middle of what the controls' row leaves of the
+     frame, never under the row; the tap sits lower when both show. */
+  .call-view.call-single-share .share-frame .hint {
+    inset: calc(50% - 1.625rem) 0 auto;
+    translate: 0 -50%;
+    text-align: center;
+  }
+
+  .call-view.call-single-share .share-frame .hint ~ .share-tap {
+    top: calc(50% + 0.125rem);
+  }
+}
+
+@media (min-height: 561px) and (max-width: 300px) {
+  .call-view.call-single-share .share-controls .volume {
+    display: none;
+  }
+}
+
+@media (min-height: 561px) and (prefers-reduced-motion: reduce) {
+  .call-view.call-single-share .share-controls {
+    transition: none;
   }
 }
 

@@ -6,7 +6,7 @@
 // (adaptive stream), so a phone gets a smaller layer than a full-screen
 // desktop, and a closed view gets none (voice-multi-share.md §8). It asks for
 // no device.
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Glyph } from '../Icons';
 import { platform } from '../platform';
 import { fullscreenVideo } from './fullscreen';
@@ -18,6 +18,9 @@ import type { SettledQuality, ShareDirection, ShareSample } from './share';
 // What the watch view needs of the client: the desktop's strip (issue #1582)
 // gives it the companion's, which is a narrower thing than the call view's.
 export type ShareViewClient = Pick<VoiceClient, 'attachStream' | 'readShareStats' | 'watchStream'>;
+
+// How long the controls over the picture stay after the last pointer move.
+export const controlsIdleMs = 3000;
 
 const cpuWarning = 'Your computer is too busy to send smoothly. Close heavy programs or choose a lower share resolution.';
 
@@ -180,6 +183,22 @@ export function ShareView({
   // The browser would not start the sound without a tap (phones' autoplay
   // rules): the view offers one.
   const [blocked, setBlocked] = useState(false);
+  // The controls drawn over the picture (single share, open call view: CSS
+  // says where) fade after IDLE_MS without a pointer on the share, and return
+  // on a pointer move or a tap. Focus inside them keeps them (CSS :focus-within).
+  const [idle, setIdle] = useState(false);
+  const idleTimer = useRef<number | null>(null);
+  const wake = useCallback(() => {
+    setIdle(false);
+    if (idleTimer.current !== null) window.clearTimeout(idleTimer.current);
+    idleTimer.current = window.setTimeout(() => { setIdle(true); }, controlsIdleMs);
+  }, []);
+  useEffect(() => {
+    wake();
+    return () => {
+      if (idleTimer.current !== null) window.clearTimeout(idleTimer.current);
+    };
+  }, [wake]);
 
   useEffect(() => {
     const v = video.current;
@@ -206,6 +225,9 @@ export function ShareView({
 
   const tracks = arrived ?? { video: false, audio: false };
   const hasSound = tracks.audio;
+  // The controls stay shown while the share is not playing: waiting for the
+  // picture or the stream, or for the tap that starts the sound.
+  const faded = idle && tracks.video && !reconnecting && !(blocked && hasSound);
   useEffect(() => {
     const a = sound.current;
     if (!hasSound || a === null) return;
@@ -242,7 +264,7 @@ export function ShareView({
   ) : null;
 
   return (
-    <section aria-label="Shared screen" className="share-view">
+    <section aria-label="Shared screen" className={faded ? 'share-view idle' : 'share-view'} onPointerMove={wake} onPointerDown={wake}>
       <p className="share-title">
         <Glyph name="screen" />
         {name} · {reconnecting ? 'Reconnecting' : 'LIVE'}{quality === null || quality === undefined ? null : <> · {quality}</>}{audio ? ' · with sound' : ''}
@@ -257,11 +279,14 @@ export function ShareView({
             #1028). The compact row scrolls rather than wraps, and the
             thumbnail is too small to carry it, so there it is in the row. */}
         {compact ? null : popOut}
+        {/* The tap that starts the sound is the picture's, centred on it; the
+            compact row keeps it among its controls. */}
+        {!compact && blocked && hasSound ? <button type="button" className="primary share-tap" onClick={tapToPlay}>Tap to play sound</button> : null}
       </div>
       <audio ref={sound} autoPlay aria-label={`${name}'s stream audio`} />
       <div className="share-controls">
         <button type="button" aria-pressed={muted} onClick={() => { setMuted(!muted); }}>
-          <Glyph name="speaker" />
+          <Glyph name={muted ? 'speakerOff' : 'speaker'} />
           <span className="label">{muted ? 'Unmute share' : 'Mute share'}</span>
         </button>
         {compact ? null : (
@@ -281,9 +306,12 @@ export function ShareView({
           </>
         )}
         {compact ? popOut : null}
-        <button type="button" onClick={() => { client.watchStream(principal, false); }}>Stop watching</button>
+        <button type="button" onClick={() => { client.watchStream(principal, false); }}>
+          <Glyph name="close" />
+          <span className="label">Stop watching</span>
+        </button>
         {onToggleLayout === undefined ? null : <button type="button" className="call-layout" aria-pressed={compact} onClick={onToggleLayout}>{compact ? 'Expand' : 'Compact'}</button>}
-        {blocked && hasSound ? <button type="button" className="primary" onClick={tapToPlay}>Tap to play sound</button> : null}
+        {compact && blocked && hasSound ? <button type="button" className="primary" onClick={tapToPlay}>Tap to play sound</button> : null}
       </div>
       {pip.failed ? <p role="status" className="hint">Picture-in-picture could not open. Try again when the picture is playing.</p> : null}
       {state.deafened && hasSound ? <p className="hint">Deafened: the share&apos;s sound is off too.</p> : null}
