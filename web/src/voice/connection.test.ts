@@ -1494,8 +1494,15 @@ const presenceWith = (sharing: number | null): VoicePresenceV2 => ({
   ],
 });
 
-it.each(['browser', 'desktop'])('keeps an extended %s share choice across v2 and v3 feeds and saves only explicit changes', async (platform) => {
-  const quality: ShareQuality = { resolution: '1440p', frameRate: 60 };
+it.each((['browser', 'desktop'] as const).flatMap((platform) => ([
+  { platform, resolution: '480p', fallback: '720p' },
+  { platform, resolution: '1440p', fallback: '1080p' },
+] as const)))('keeps a saved $resolution choice across v2 and v3 on $platform', async ({ platform, resolution, fallback }) => {
+  const quality: ShareQuality = { resolution, frameRate: 60 };
+  // An older server's nearest at the same rate; the desktop then takes its
+  // own choices, which have no 720p60, so its 480p60 is the desktop default.
+  const legacyQuality: ShareQuality = platform === 'desktop' && fallback === '720p' ? companionDefaultQuality : { resolution: fallback, frameRate: 60 };
+  const claimShare = vi.fn(() => Promise.resolve(claim));
   const keepShareQuality = vi.fn<(quality: ShareQuality) => void>();
   const client = new VoiceClient({
     clock: new FakeClock(),
@@ -1503,7 +1510,7 @@ it.each(['browser', 'desktop'])('keeps an extended %s share choice across v2 and
     createSession: () => Promise.resolve(okSession()),
     report: () => Promise.resolve('ok'),
     newRoom: () => new StubRoom(),
-    claimShare: () => Promise.resolve(claim),
+    claimShare,
     stopShare: () => Promise.resolve(),
     shareQuality: quality,
     keepShareQuality,
@@ -1511,18 +1518,36 @@ it.each(['browser', 'desktop'])('keeps an extended %s share choice across v2 and
   });
   const v2 = presenceWith(null);
   const v3 = { ...v2, schema: 'conch.voice_presence.v3' as const };
-  expect(client.snapshot().shareQuality).toEqual({ resolution: '1080p', frameRate: 60 });
+  expect(client.snapshot().shareQuality).toEqual(legacyQuality);
   client.presence(v3);
   expect(client.snapshot().shareQuality).toEqual(quality);
   client.presence(v2);
-  expect(client.snapshot().shareQuality).toEqual({ resolution: '1080p', frameRate: 60 });
+  expect(client.snapshot().shareQuality).toEqual(legacyQuality);
   client.presence(v3);
   expect(client.snapshot().shareQuality).toEqual(quality);
+  client.presence(v2);
+
+  if (platform === 'desktop') client.startCompanionShare('general');
+  else {
+    client.join('general');
+    await settle();
+    client.startShare();
+  }
+  await settle();
+  expect(claimShare).toHaveBeenCalledTimes(2);
+  expect(claimShare).toHaveBeenNthCalledWith(1, 'general', legacyQuality);
+  expect(claimShare).toHaveBeenNthCalledWith(2, 'general', legacyQuality);
+  client.presence({ ...presenceWith(7), schema: 'conch.voice_presence.v3' });
+  expect(client.snapshot()).toMatchObject({ share: { kind: 'sharing' }, shareQualityV3: true, shareQuality: legacyQuality });
+  client.stopShare();
+  await settle();
+  expect(client.snapshot()).toMatchObject({ share: { kind: 'idle' }, shareQualityV3: true, shareQuality: quality });
   expect(keepShareQuality).not.toHaveBeenCalled();
 
   const chosen = { resolution: '480p', frameRate: 15 } as const;
   await client.setShareQuality(chosen);
   expect(keepShareQuality).toHaveBeenCalledExactlyOnceWith(chosen);
+  await client.leave();
   client.dispose();
 });
 
@@ -1556,7 +1581,7 @@ describe('watch only', () => {
 });
 
 describe('sharing through the client', () => {
-  it('keeps a live 1440p share and its v3 controls after a v2 presence read', async () => {
+  it('keeps v3 quality and controls through a v2 presence read until the share ends', async () => {
     const t = await joined();
     const quality = { resolution: '1440p', frameRate: 60 } as const;
     const v2 = presenceWith(7);
@@ -1580,6 +1605,11 @@ describe('sharing through the client', () => {
     };
     t.client.presence(v2Read);
     expect(t.client.snapshot()).toMatchObject({ share: { kind: 'sharing' }, shareQualityV3: true, shareQuality: quality });
+
+    t.client.presence(presenceWith(null));
+    expect(t.client.snapshot()).toMatchObject({ share: { kind: 'stopping' }, shareQualityV3: false, shareQuality: { resolution: '1080p', frameRate: 60 } });
+    await settle();
+    expect(t.client.snapshot().share).toEqual({ kind: 'idle', ended: 'server' });
     await t.client.leave();
   });
 

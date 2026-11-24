@@ -2983,11 +2983,18 @@ async function connect(name: SocketName, id: OperationId, query: SocketQuery | (
   // never opens is followed by another try.
   lost[name] = true;
   await holdSockets();
-  const resolved = typeof query === 'function' ? await query() : { ok: true as const, value: query };
-  if (!resolved.ok) return resolved;
+  let address: SocketQuery;
+  if (typeof query === 'function') {
+    const resolved = await query();
+    if (!resolved.ok) return resolved;
+    // A credential replacement may have started while the probe was out.
+    await holdSockets();
+    address = resolved.value;
+  } else {
+    address = query;
+  }
   // The credential this socket is opened with, which a replacement may end.
   const opened = current();
-  let address = resolved.value;
   if (platform.sockets.ticket) {
     const ticket = await requestTicket();
     if (!ticket.ok) return ticket;
