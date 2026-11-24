@@ -157,14 +157,16 @@ export function NativeVoicePanel({
   const shown = joined ?? (signedIn ? channel : null);
   const snapshot = usePresence({ channel: shown, joined, voiceAllowed, onUnauthorized });
   const presence = snapshot.kind === 'presence' ? snapshot.presence : null;
+  const socketSchema = snapshot.kind === 'presence' ? snapshot.socketSchema : null;
   const named = useVoiceNames({ joined, viewed: channel, presence, people });
 
   // The companion reads the joined channel's presence for the others' streams
-  // and for why its own share ended.
+  // and for why its own share ended. Only the socket supplies the schema for
+  // its next share.
   const companionClient = companion?.client;
   useEffect(() => {
-    if (companionClient !== undefined && joined !== null && presence !== null) companionClient.presence(presence);
-  }, [companionClient, joined, presence]);
+    if (companionClient !== undefined && joined !== null && presence !== null) companionClient.presence(presence, socketSchema);
+  }, [companionClient, joined, presence, socketSchema]);
   // Out of voice, a companion that ended before the leave says nothing more
   // (issue #1992): its notice was about the voice just left.
   useEffect(() => {

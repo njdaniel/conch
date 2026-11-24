@@ -1581,7 +1581,30 @@ describe('watch only', () => {
 });
 
 describe('sharing through the client', () => {
-  it('keeps v3 quality and controls through a v2 presence read until the share ends', async () => {
+  it('claims v2 quality next after a v2 socket frame arrives while claiming', async () => {
+    const t = await joined();
+    const quality = { resolution: '1440p', frameRate: 60 } as const;
+    const v2 = presenceWith(null);
+    t.client.presence({ ...v2, schema: 'conch.voice_presence.v3' });
+    await t.client.setShareQuality(quality);
+
+    t.shareAnswers.push({ ok: false, failure: 'invalid', status: 409, code: 'voice_share_full' });
+    t.client.startShare();
+    expect(t.client.snapshot().share.kind).toBe('claiming');
+    t.client.presence(v2);
+    expect(t.client.snapshot().shareQuality).toEqual(quality);
+    await settle();
+    expect(t.client.snapshot().share.kind).toBe('idle');
+
+    t.client.startShare();
+    await settle();
+    const fallback = { resolution: '1080p', frameRate: 60 };
+    expect(t.shareQualities).toEqual([quality, fallback, fallback]);
+    expect(t.client.snapshot().shareQualityV3).toBe(false);
+    await t.client.leave();
+  });
+
+  it('keeps v3 and the claimed quality through 1008 follow-up reads', async () => {
     const t = await joined();
     const quality = { resolution: '1440p', frameRate: 60 } as const;
     const v2 = presenceWith(7);
@@ -1603,13 +1626,13 @@ describe('sharing through the client', () => {
           : p),
       })),
     };
-    t.client.presence(v2Read);
+    t.client.presence(v2Read, null);
     expect(t.client.snapshot()).toMatchObject({ share: { kind: 'sharing' }, shareQualityV3: true, shareQuality: quality });
 
-    t.client.presence(presenceWith(null));
-    expect(t.client.snapshot()).toMatchObject({ share: { kind: 'stopping' }, shareQualityV3: false, shareQuality: { resolution: '1080p', frameRate: 60 } });
+    t.client.presence(presenceWith(null), null);
+    expect(t.client.snapshot()).toMatchObject({ share: { kind: 'stopping' }, shareQualityV3: true, shareQuality: quality });
     await settle();
-    expect(t.client.snapshot().share).toEqual({ kind: 'idle', ended: 'server' });
+    expect(t.client.snapshot()).toMatchObject({ share: { kind: 'idle', ended: 'server' }, shareQualityV3: true, shareQuality: quality });
     await t.client.leave();
   });
 
