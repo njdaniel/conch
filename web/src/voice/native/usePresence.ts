@@ -104,6 +104,7 @@ export function usePresence({
       },
     });
     // A 1008 close says only that the server meant it; one read says why.
+    // An answered roster or a network failure goes through the backoff.
     const settle = () => {
       previous = null;
       if (closeReason === noLongerMember) {
@@ -113,9 +114,12 @@ export function usePresence({
       void api.getVoicePresence(channel).then((result) => {
         if (!live) return;
         if (result.ok) {
-          show(result.value);
+          // retryLater reports waiting synchronously. Show the read after it
+          // so the roster stays visible during the backoff.
           feed.retryLater();
+          show(result.value);
         } else if (result.failure === 'unauthorized') unauthorized.current();
+        else if (result.failure === 'network') feed.retryLater();
         else setSnapshot({ kind: result.code === voiceNotAllowed ? 'not_allowed' : 'gone' });
       });
     };
