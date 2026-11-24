@@ -781,9 +781,9 @@ export function Conversation({
   // changes every message's height) can put that message back.
   const view = useRef<{ readonly id: string; readonly offset: number } | null>(null);
   const shownDensity = useRef(density);
-  // The log's height as the observer below last handled it; null before it
+  // The log's size as the observer below last handled it; null before it
   // has, or without one.
-  const sized = useRef<number | null>(null);
+  const sized = useRef<{ readonly width: number; readonly height: number } | null>(null);
   const [unseen, setUnseen] = useState(false);
   const [openThread, setOpenThread] = useState<number | null>(null);
   useEffect(() => {
@@ -794,7 +794,7 @@ export function Conversation({
   // the log or in a thread shown inline in it), and says so here. Whether the
   // reader is still at the newest message is read from where the jump left
   // the log, as onScroll would: the scroll handler ignores a scroll at a
-  // height the resize observer has not handled yet, so a log resize in the
+  // size the resize observer has not handled yet, so a log resize in the
   // same frame (the voice dock settling, say) would otherwise act on a stale
   // "at the bottom" and scroll the linked row out of view (issue #2158). A
   // link to a message already at the bottom keeps the log following.
@@ -1234,17 +1234,20 @@ export function Conversation({
     if (held !== null && row !== null) el.scrollTop += row.getBoundingClientRect().top - el.getBoundingClientRect().top - held.offset;
   }, [unreadId]);
 
-  // Anything that changes the log's own height (the whisper picker, the voice
-  // strip, a share's stage) keeps a reader at the newest message there; one
-  // who has scrolled up is left where they are. Browsers without a
-  // ResizeObserver, and jsdom, keep the behaviour above alone.
+  // Changes to the log's height (the whisper picker, the voice strip, a
+  // share's stage) or width (which can re-wrap messages) keep a reader at the
+  // newest message there. A reader who has scrolled up is left where they
+  // are. Browsers without a ResizeObserver, and jsdom, keep the behaviour
+  // above alone.
   useEffect(() => {
     const el = log.current;
     if (el === null || typeof ResizeObserver !== 'function') return;
     sized.current = null;
     const watch = new ResizeObserver(() => {
-      if (el.clientHeight === sized.current) return;
-      sized.current = el.clientHeight;
+      const { clientWidth: width, clientHeight: height } = el;
+      const size = sized.current;
+      if (size !== null && width === size.width && height === size.height) return;
+      sized.current = { width, height };
       if (atBottom.current) el.scrollTop = el.scrollHeight;
     });
     watch.observe(el);
@@ -1346,13 +1349,16 @@ export function Conversation({
         {...(shown.length === 0 ? { tabIndex: 0 } : {})}
         onScroll={(event) => {
           const el = event.currentTarget;
-          // A scroll at a height the observer has not handled yet is the
-          // browser's, not the reader's: Chrome's scroll anchoring puts back
-          // a position it once clamped when the log grew (the voice strip
-          // getting shorter, say) as soon as the log gets shorter again, which
-          // leaves a reader at the newest message more than nearBottom above
-          // it. Whether they were at the bottom is kept for the observer.
-          if (sized.current === null || el.clientHeight === sized.current) {
+          // Chrome's scroll anchoring can move the log before the observer
+          // handles its new size. When the log shrinks or its messages wrap
+          // onto more lines, that scroll can leave a reader more than
+          // nearBottom above the end. Keep their previous at-bottom state
+          // for the observer.
+          // This assumes the log's box is never animated: during a width or
+          // height transition every scroll would land at an unhandled size
+          // and a reader's own scrolling would be ignored until it ends.
+          const size = sized.current;
+          if (size === null || (el.clientWidth === size.width && el.clientHeight === size.height)) {
             atBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight <= nearBottom;
             onBottom(atBottom.current);
             if (atBottom.current) setUnseen(false);

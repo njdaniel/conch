@@ -19,18 +19,25 @@ const longLine = (size: string) => `p467 ${size} ${'a line that goes on for a wh
 
 const unique = (label: string) => `p467-${label}-${String(Date.now())}`;
 
-// Issue #2171: parked Chat can be taller than the Voice view, especially
-// after the viewport shrinks. On return Chat uses its usual height there.
+// Issue #2171: parked Chat keeps its height and scroll position even if the
+// viewport shrinks on Voice. On return Chat uses its usual height there.
 for (const [width, height, voiceStartHeight = height] of [[640, 360], [690, 540], [390, 560], [390, 640, 844]] as const) {
   const size = `${String(width)}×${String(height)}`;
   const where = voiceStartHeight === height ? `at ${size}` : `after shrinking to ${size} on Voice`;
   test(`P2171 ${where} hidden Chat adds no document scroll`, async ({ meet, world }) => {
+    // Unique per run, so the test can repeat against one community.
+    const prefix = unique(`p2171-${String(width)}x${String(height)}-${String(voiceStartHeight)}`);
+    for (let i = 1; i <= 8; i += 1) {
+      await post(world, world.tokens.nick, 'general', `${prefix} ${String(i)} ${'words that wrap around the line, '.repeat(12)}end`);
+    }
     const viewport = { width, height };
     const { page } = await meet({ ...phoneSizes[2][1], viewport });
     await signIn(page, world, world.tokens.browser, 'browser-test');
-    const chat = conversation(page);
+    const chat = page.locator('.conversation');
+    const log = chat.locator('.log');
     const composer = page.getByLabel('Message #general');
     await expect(composer).toBeVisible();
+    await expect(log.getByText(`${prefix} 8`)).toBeVisible();
     await frames(page);
     const chatHeight = await chat.evaluate((el) => el.getBoundingClientRect().height);
 
@@ -38,19 +45,72 @@ for (const [width, height, voiceStartHeight = height] of [[640, 360], [690, 540]
       await page.setViewportSize({ width, height: voiceStartHeight });
       await frames(page);
     }
+    const parkedHeight = await chat.evaluate((el) => el.getBoundingClientRect().height);
+    const placed = await log.evaluate((el) => {
+      el.scrollTop = el.scrollHeight - el.clientHeight - 40;
+      return el.scrollTop;
+    });
+    expect(placed, 'the reader is scrolled up from the end').toBeGreaterThan(0);
+    await frames(page);
     await showView(page, 'Voice');
     await expect(composer).toBeHidden();
     if (voiceStartHeight !== height) await page.setViewportSize(viewport);
     await frames(page);
     const { scroll, inner } = await page.evaluate(() => ({ scroll: document.documentElement.scrollHeight, inner: window.innerHeight }));
     expect(scroll, `document height ${where}`).toBeLessThanOrEqual(inner);
+    expect(await chat.evaluate((el) => el.getBoundingClientRect().height), `parked Chat height ${where}`).toBe(parkedHeight);
+    expect(await log.evaluate((el) => el.scrollTop), `parked log scrollTop ${where}`).toBe(placed);
 
     await showView(page, 'Chat');
     await expect(composer).toBeVisible();
     await frames(page);
     expect(await chat.evaluate((el) => el.getBoundingClientRect().height), `Chat height on return ${where}`).toBe(chatHeight);
+    expect(await log.evaluate((el) => el.scrollTop), `log scrollTop on return ${where}`).toBe(placed);
   });
 }
+
+const classicScrollbarTest = test.extend({
+  launchOptions: async ({ launchOptions }, use) => {
+    await use({ ...launchOptions, ignoreDefaultArgs: ['--hide-scrollbars'] });
+  },
+});
+
+classicScrollbarTest('P2173 the log keeps following when its width changes across Voice', async ({ meet, world }) => {
+  const prefix = unique('p2173-classic-scrollbar');
+  for (let i = 1; i <= 12; i += 1) {
+    await post(world, world.tokens.nick, 'general', `${prefix} ${String(i)} ${'words that wrap around the line, '.repeat(4)}end`);
+  }
+  const { page } = await meet({ viewport: { width: 320, height: 480 } });
+  await signIn(page, world, world.tokens.browser, 'browser-test');
+  const composer = page.getByLabel('Message #general');
+  const log = page.locator('.conversation .log');
+  await expect(log.getByText(`${prefix} 12`)).toBeVisible();
+  await frames(page);
+  // Scroll anchoring stays on, as in a real browser: its scroll arrives
+  // before the resize observer, so this exercises the onScroll guard as well
+  // as the observer (both halves of #2173's fix).
+  const chatWidth = await log.evaluate((el) => {
+    el.scrollTop = el.scrollHeight;
+    return el.clientWidth;
+  });
+  await frames(page);
+
+  await showView(page, 'Voice');
+  await expect(composer).toBeHidden();
+  await frames(page);
+  expect(await log.evaluate((el) => el.clientWidth), 'the log widens when Voice loses the document scrollbar').toBeGreaterThan(chatWidth);
+
+  await showView(page, 'Chat');
+  await expect(composer).toBeVisible();
+  await frames(page);
+  expect(await log.evaluate((el) => el.clientWidth), 'the document scrollbar returns with Chat').toBe(chatWidth);
+  expect(await log.evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop), 'the log is still at the end').toBeLessThanOrEqual(1);
+
+  const body = unique('p2173-after-voice');
+  await post(world, world.tokens.nick, 'general', body);
+  await expect(log.getByText(body)).toBeVisible();
+  await expectInside(page, log.getByRole('listitem').filter({ hasText: body }), log, 'the first message after returning from Voice');
+});
 
 for (const [size, options] of phones) {
   test(`P467 at ${size} the lobby, a conversation, the account form, the report panel and the members panel fit the screen`, async ({ meet, world }) => {

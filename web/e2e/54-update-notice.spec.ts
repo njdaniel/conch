@@ -45,7 +45,7 @@ for (const [size, options] of sizes) {
 }
 
 // The same on the phone's Voice view (#2168's review): the conversation is
-// parked out of sight there, against the lobby; the notice must not push the
+// parked out of sight there, against the viewport; the notice must not push the
 // document past the window.
 for (const [size, options] of sizes.slice(0, 2)) {
   test(`P1534 at ${size} the reload notice arriving on Voice adds no document scroll`, async ({ meet, world }) => {

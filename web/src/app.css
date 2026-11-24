@@ -4528,8 +4528,8 @@ button.link {
     height: calc(var(--app-height, 100dvh) - var(--notice-h, 0px));
     grid-template-rows: auto minmax(0, 1fr) auto auto;
     box-sizing: border-box;
-    /* The hidden conversation is laid out behind the Voice view at the
-       lobby's size; whatever its parts measure, it must not widen the page. */
+    /* The hidden conversation is parked against the viewport with its last
+       Chat height. Clip horizontal overflow from the lobby's contents. */
     overflow-x: clip;
   }
 
