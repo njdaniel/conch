@@ -10,17 +10,19 @@ release that Nick publishes.
 
 ## [0.1.0-alpha.22] - 2026-11-23
 
-This pre-release updates the server, CLI and desktop together. Reload open browser tabs after upgrading to get the new web client.
+This pre-release updates the server, CLI and desktop together. Reload open browser tabs after upgrading to get the new web client. **Upgrade the desktop app with the server:** a packaged desktop accepts only the server release it was built for, so an alpha.21 desktop refuses an alpha.22 server, and the reverse.
 
 **Back up each server before upgrading from alpha.21.** The database moves from migration 49 to 55. Rolling back to alpha.21 restores the pre-upgrade snapshot. See [Upgrade and rollback](docs/deploy.md#11-upgrading-and-rolling-back).
 
+**Members sign in again to use direct messages.** The DM and private-call routes accept only a credential the person made for themselves (#2042). Credentials from before the upgrade aren't recorded that way, so they're refused there until the member signs in again. Everything else keeps working with them.
+
 **Linux share sound is off by default again** (#1999). In alpha.21 it was on, and it captured the call itself: the other person heard their own voice through a screen share. Until the leak is fixed and the L-S6 echo test (#922) passes, a Linux share is silent unless the desktop is started with `CONCH_LINUX_SHARE_AUDIO=1`. **alpha.21 Linux desktop testers: don't share with sound,** or start the app with `CONCH_LINUX_SHARE_AUDIO=0`.
 
-**Upgrade `conch` together with the server.** Authors can now remove their own messages (#1828). The new tombstone ("This message was removed by its author.") makes an older `conch` TUI or CLI drop its events connection and reconnect on every author removal, and label the message "removed by a moderator". History is unaffected.
+**Upgrade `conch` together with the server.** Authors can now remove their own messages (#1828). The new tombstone ("This message was removed by its author.") makes an alpha.21 `conch` TUI drop its events connection and reconnect on every author removal, and label the message "removed by a moderator". `conch tail` shows the server's text. History is unaffected.
 
 **Desktop voice enables echo cancellation and noise suppression by default** (#186, #2002). `audio.echo_cancellation = false` in `voice.toml` turns it off. The standalone helper and the TUI keep it off unless the file turns it on. Physical room and speaker validation is pending.
 
-**The Windows installer is in the release** as an unsigned preview (#1991, #1996): `Conch-<version>-unsigned-preview-setup.exe`. Windows SmartScreen warns on first run. Screen sharing from Windows says it isn't available yet; watching a share works.
+**The Windows installer is in the release** as an unsigned preview (#1991, #1996): `Conch-<version>-unsigned-preview-setup.exe`. Windows SmartScreen may warn on first run. Screen sharing from Windows says it isn't available yet; watching a share works.
 
 ### Added
 - **Calendar dates in message history** (#2119) and **double-click a voice channel to join** (#2120) in the web and desktop clients.
@@ -38,10 +40,11 @@ This pre-release updates the server, CLI and desktop together. Reload open brows
 ### Fixed
 - **Reply and Add reaction** are in the message context menu (#2121). Member invites explain which channel the invite grants access to (#2118), and sign-in fields work better with password managers (#2077).
 - **Linux Talk Key setup** starts by asking for the desired key or mouse button. Device instructions appear after selection when access is needed. Shift+Tab moves focus without selecting Shift (#2129).
-- **Desktop screen-share video** uses separate LiveKit publishing and subscribing connections to avoid a VP8 negotiation collision (#2055).
+- **Desktop screen-share video** uses separate LiveKit publishing and subscribing connections to avoid a VP8 negotiation collision (#2055). The 20-minute share on physical devices is still to be run.
+- **The message box no longer floats above a blank band** in a busy desktop chat (#2133): a pending send or a removed message gave the conversation column a second scrollbar.
 - **Rust URL parsing dependency** updated for [RUSTSEC-2026-0592](https://rustsec.org/advisories/RUSTSEC-2026-0592) (#2135).
-- **Desktop attachments go up to 20 MiB, as in the browser** (#2148). A server with a lower limit says the file is too large instead of "Cannot reach the server", and a large upload gets time to finish on a slow link.
-- **Private calls: ringing and cancelling again and again hits the repeat limit** (#2112). An unanswered ring counts toward 3 per 10 minutes per pair however it ended, including when the caller cancels or a block ends it.
+- **The desktop app sends attachments up to 20 MiB** (#2148), when the server allows that. The server's own limit still defaults to 10 MiB (`--max-upload-bytes`). A server with a lower limit now says the file is too large instead of "Cannot reach the server", and a large upload gets time to finish on a slow link.
+- **Private calls: ringing and cancelling again and again hits the repeat limit** (#2112). An unanswered ring counts toward the caller's 3 per 10 minutes toward the same person, however it ended, including when the caller cancels or a block ends it.
 - **The desktop app won't start with Node's child-process debugging turned on** (#2105), because that could print the voice helper's credentials. `NODE_V8_COVERAGE` no longer reaches the helper.
 - **The desktop's open microphone no longer chatters on room noise** (#2001): it needs 40 ms of sound to open, closes 4 dB lower than it opens, holds 800 ms between words, and fades instead of cutting. Defaults: threshold −34 dBFS (was −40), hang 800 ms (was 400). Mute still cuts at once.
 - **Choosing Open microphone during a desktop call is saved,** and choosing push-to-talk with the arrow keys works (#1993).
