@@ -921,6 +921,42 @@ describe('talking', () => {
     expect([...t.client.snapshot().speaking]).toEqual([7]);
   });
 
+  it('a reconnect forgets the speakers the room reported before it', async () => {
+    const t = await joined();
+    // Your own level while the gate is shut, and someone else, before the drop.
+    t.rooms[0]?.events?.onSpeakers([3], true);
+    expect([...t.client.snapshot().speaking]).toEqual([3]);
+    t.rooms[0]?.events?.onReconnecting();
+    expect([...t.client.snapshot().speaking]).toEqual([]);
+    t.rooms[0]?.events?.onReconnected();
+    await settle();
+    t.client.press();
+    await settle();
+    expect(t.client.snapshot().transmitting).toBe(true);
+    // No fresh update yet: nobody is shown speaking from the old room.
+    expect([...t.client.snapshot().speaking]).toEqual([]);
+  });
+
+  it('a room that failed to connect does not lend its speakers to the retry', async () => {
+    const t = setup([okSession(), okSession()], [], 0, false, (room, index) => {
+      if (index !== 0) return;
+      room.connect = (_u, _t, _n, _p, events) => {
+        room.events = events;
+        events.onSpeakers([3], true);
+        return Promise.reject(new Error('unreachable'));
+      };
+    });
+    t.client.join('general');
+    await settle();
+    t.clock.advance(5000);
+    await settle();
+    expect(t.client.snapshot().phase).toBe('connected');
+    t.client.press();
+    await settle();
+    expect(t.client.snapshot().transmitting).toBe(true);
+    expect([...t.client.snapshot().speaking]).toEqual([]);
+  });
+
   it('audio does not depend on a report that never answers: the track is open throughout', async () => {
     const t = await joined(setup([okSession()], [], 0, true));
     t.client.press();

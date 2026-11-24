@@ -1784,9 +1784,7 @@ export class VoiceClient {
     // Nobody's camera is received out of voice; the next join reads presence.
     this.cameraClaims = new Set();
     this.switching = false;
-    this.remoteSpeaking = new Set();
-    this.localSpeaking = false;
-    this.transmittingNow = false;
+    this.forgetSpeakers();
     this.set({
       phase: 'idle',
       channel: null,
@@ -1972,6 +1970,15 @@ export class VoiceClient {
     this.set(open ? { talking: true } : { talking: false, transmitting: false, speaking: this.speakingNow() });
   }
 
+  // forgetSpeakers drops what the last room said about who was speaking: a
+  // room left, dropped, reconnecting or replaced must not lend its speakers
+  // to the next press.
+  private forgetSpeakers(): void {
+    this.remoteSpeaking = new Set();
+    this.localSpeaking = false;
+    this.transmittingNow = false;
+  }
+
   // speakingNow is who is speaking: the remote speakers, and this person only
   // while sending and the room reports their own local participant speaking.
   // Not by principal: another client of the same person (a viewer, a
@@ -2098,9 +2105,7 @@ export class VoiceClient {
     this.switching = false;
     // The meter and the playback are the next room's to say: a note or a
     // button about this one's would stay up through the retry.
-    this.remoteSpeaking = new Set();
-    this.localSpeaking = false;
-    this.transmittingNow = false;
+    this.forgetSpeakers();
     this.set({ speaking: new Set(), level: 0, talking: false, transmitting: false, meter: true, playback: true, streamTracks: new Map(), cameraTracks: noCameraTracks, ...nothingInUse, ...this.cameraNow() });
     if (room !== null) void room.close().catch(() => undefined);
     if (companion && !fromMain) void this.endCompanion(end);
@@ -2194,6 +2199,8 @@ export class VoiceClient {
     this.me = this.state.companion ? personOf(session.value.identity) : principalOf(session.value.identity.replace(/\.view$/, ''));
     const room = this.env.newRoom();
     this.room = room;
+    // A room that failed after reporting speakers must not lend them to this one.
+    this.forgetSpeakers();
     if (this.state.companion) room.setCompanion?.(true);
     // A companion's connection refused by the CSP is said as such to main
     // (issue #1992), from the connect until it is made or has failed.
@@ -2201,7 +2208,9 @@ export class VoiceClient {
     const events: RoomEvents = {
       onReconnecting: () => {
         if (mine !== this.attempt) return;
-        this.set({ phase: 'reconnecting' });
+        // Nobody is heard while reconnecting; the resumed room reports afresh.
+        this.forgetSpeakers();
+        this.set({ phase: 'reconnecting', speaking: new Set() });
         this.applyBlock();
         // A signal-only resume that escalates to a full restart reports
         // Reconnecting again: the limit runs from the first of them.
