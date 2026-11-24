@@ -775,6 +775,9 @@ label {
 }
 
 .channels {
+  /* Keep the directory's private labels and the channel list's live
+     announcement inside this scroller's clip (issue #2168). */
+  position: relative;
   padding: var(--s4) var(--s3);
   border-right: 1px solid var(--border);
 }
@@ -981,6 +984,9 @@ label {
 }
 
 .centre {
+  /* On a phone with the stage open, the conversation heading is visually
+     hidden and must scroll with the column. */
+  position: relative;
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -1015,6 +1021,8 @@ label {
 }
 
 .dock {
+  /* The voice strip and roster have absolutely positioned hidden labels. */
+  position: relative;
   max-height: 50vh;
   overflow-y: auto;
   padding: var(--s2) var(--s4);
@@ -3308,6 +3316,8 @@ label {
 }
 
 .stage {
+  /* The closed call view uses display: contents around its live announcement. */
+  position: relative;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -3423,6 +3433,8 @@ label {
    picture is contained, never cropped. The grid's columns and rows are
    gridOf's, as classes. */
 .call-view {
+  /* Keep the live announcement inside the open call's own scroller. */
+  position: relative;
   display: flex;
   flex: 0 1 auto;
   flex-direction: column;
@@ -3744,6 +3756,8 @@ body:has(.call-view.compact, .call-stage.compact) .dock {
 }
 
 .compact .share-controls {
+  /* Keep the row's hidden labels inside its horizontal scroller. */
+  position: relative;
   flex-wrap: nowrap;
   overflow-x: auto;
   padding-top: 0;
@@ -6210,6 +6224,8 @@ button.link {
 }
 
 .switcher-list {
+  /* A private result's hidden label scrolls with its row. */
+  position: relative;
   overflow-y: auto;
   min-height: 0;
 }
