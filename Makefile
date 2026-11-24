@@ -53,6 +53,7 @@ invisible-check:
 	./scripts/ci-docs-only-test.sh
 	./scripts/mobile-rows-check-test.sh
 	./scripts/mobile-rows-check.sh
+	python3 ./scripts/linux-mic-capture-status-test.py
 
 # The Rust voice client under voice/ (ADR-006): fmt, clippy, tests, the
 # dependency gate and cargo-deny, with the pinned toolchain. Fetch that once
