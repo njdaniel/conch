@@ -543,7 +543,8 @@ export const reportWait = 1000;
 
 // What the desktop offers for a share (Q-D4-3 on #1578, lifted by Nick on
 // 2026-11-11, #1772): 720p30, the default, 1080p30, 1080p60 and Source at 30
-// and 60 fps. #1584 still measures the real numbers and may hide a choice
+// and 60 fps. Each resolution also offers 15 fps (#2128). #1584 still measures
+// the real numbers and may hide a choice
 // again; the sharer's Sending line (the browser's ShareReadout, fed from the
 // companion's own publication stats) says what is actually sent. Any other
 // choice is taken as the default, Auto (issue #1659) among them: the desktop
@@ -554,9 +555,12 @@ export const companionDefaultQuality: ShareQuality = { resolution: '720p', frame
 // What a live capture that cannot take a quality change says (setShareQuality).
 export const shareQualityRefusedNote = 'The share quality could not be changed on this capture.';
 export const companionQualities: readonly ShareQuality[] = [
+  { resolution: '720p', frameRate: 15 },
   companionDefaultQuality,
+  { resolution: '1080p', frameRate: 15 },
   { resolution: '1080p', frameRate: 30 },
   { resolution: '1080p', frameRate: 60 },
+  { resolution: 'source', frameRate: 15 },
   { resolution: 'source', frameRate: 30 },
   { resolution: 'source', frameRate: 60 },
 ];

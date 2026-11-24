@@ -291,14 +291,6 @@ export function shareNote(share: ShareState, refusal: CompanionGrantError | null
   return endedNote(share.ended);
 }
 
-// What each of the desktop's quality choices is called (Q-D4-3, #1772), by
-// resolution and frame rate; the estimate beside it and the Source at 60 fps
-// caution are the browser's (ShareQualityMenu).
-export function shareQualityWords(quality: { readonly resolution: string; readonly frameRate: number }): string {
-  const resolution = quality.resolution === 'source' ? 'Source (up to 4K)' : quality.resolution;
-  return `${resolution}, ${String(quality.frameRate)} fps`;
-}
-
 export function indicatorWords(channel: string): string {
   return `Sharing your screen in #${channel}`;
 }
