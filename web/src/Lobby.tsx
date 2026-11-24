@@ -11,6 +11,7 @@ import { headingId } from './Conversation';
 import { Avatar, Glyph } from './Icons';
 import { ServerVersion, TemporaryBanner } from './ServerVersion';
 import { AddPerson, JoiningSettings, SettingsOpen, type JoiningRequest } from './joiningSettings';
+import { setPageModal } from './pageModal';
 import { MicTestShown, phoneViews, ShowChat, useAppHeight, usePhone, VoiceLive, VoiceSheet, VoiceStrip, type PhoneView } from './phone';
 import { DesktopOS } from './platform/os';
 import type { ChannelV0 } from './schema/channel';
@@ -299,7 +300,23 @@ export function Lobby({
   // for the sheet.
   const [sheetOpen, setSheetOpen] = useState(false);
   const voiceSheet = sheetOpen && !asking;
-  const sheetLink = useMemo(() => ({ report: setSheetOpen, blocked: asking }), [asking]);
+  // Settings or re-authentication is up over the sheet: told to it as behind,
+  // so it takes focus back when the modal over it goes.
+  const sheetLink = useMemo(() => ({ report: setSheetOpen, blocked: asking, behind: settingsOpen || asking }), [asking, settingsOpen]);
+  // What the lobby does not draw but the page does (the desktop strip, the
+  // update notices) is inert for the same modals: said here, once, to them.
+  const modalNow = settingsOpen || asking || voiceSheet;
+  useEffect(() => {
+    setPageModal(modalNow);
+    return () => {
+      setPageModal(false);
+    };
+  }, [modalNow]);
+  // Whether the sheet is the modal that is left when Settings closes.
+  const sheetModal = useRef(false);
+  useEffect(() => {
+    sheetModal.current = voiceSheet;
+  }, [voiceSheet]);
   // Which sign-out is waiting for its yes, if one is.
   const [confirming, setConfirming] = useState<'here' | 'everywhere' | null>(null);
   const [stage, setStage] = useState<HTMLElement | null>(null);
@@ -330,7 +347,9 @@ export function Lobby({
     };
   }, []);
   // Focus goes back to Settings once the panel has closed: until then the
-  // button is inert behind it, and cannot take focus.
+  // button is inert behind it, and cannot take focus. Unless the voice options
+  // sheet is open: it is modal, the button stays inert behind it, and focus
+  // goes back into the sheet.
   const settingsClosed = useRef(false);
   useEffect(() => {
     if (settingsOpen) onSettingsOpen?.();
@@ -341,7 +360,9 @@ export function Lobby({
       else settingsHeading.current?.focus();
     } else if (settingsClosed.current) {
       settingsClosed.current = false;
-      settingsButton.current?.focus();
+      // The button is inert behind the voice options sheet: focus belongs in
+      // the sheet, which takes it (VoicePanel) now that nothing is over it.
+      if (!sheetModal.current) settingsButton.current?.focus();
     }
   }, [settingsOpen]);
   useEffect(() => {

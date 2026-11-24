@@ -5258,6 +5258,11 @@ button.link {
   white-space: nowrap;
 }
 
+/* Wraps what the desktop strip opens below it, to be inert in one place. */
+.page-scope {
+  display: contents;
+}
+
 /* The desktop app's server list and the strip over the client (issue #945). */
 .desktop-bar {
   display: flex;

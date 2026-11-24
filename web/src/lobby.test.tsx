@@ -4,12 +4,13 @@
 // voice strip or the conversation is mounted again when a panel opens or the
 // window changes width: a call or a share there carries on.
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
-import { useContext, useEffect, type ReactNode } from 'react';
+import { useContext, useEffect, useRef, type ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { windowOf } from './fakewindow';
 import { Lobby } from './Lobby';
 import { DesktopOS } from './platform/os';
 import { VoiceSheet } from './phone';
+import { usePageModal } from './pageModal';
 import { initialChannels } from './state/channels';
 
 const events: string[] = [];
@@ -246,5 +247,68 @@ describe('the voice options sheet and the lobby', () => {
     rerender(lobbyTree(<Sheet open />, null, reauth));
     rerender(lobbyTree(<Sheet open />, null, undefined));
     expect(inert('.areas')).toBe(true);
+  });
+
+  // What the page draws outside the lobby (the desktop strip, the update
+  // notices) reads the lobby's one answer, pageModal.
+  function Outside() {
+    return <button type="button" inert={usePageModal()}>Servers</button>;
+  }
+  const outside = () => screen.getByRole('button', { name: 'Servers', hidden: true });
+  const withOutside = (voice: ReactNode, overlay?: ReactNode) => (
+    <>
+      <Outside />
+      {lobbyTree(voice, null, overlay)}
+    </>
+  );
+
+  it('makes what is outside the lobby inert for the sheet, Settings and re-authentication', () => {
+    windowOf(true);
+    const { rerender } = render(withOutside(<Sheet open={false} />));
+    expect(outside().hasAttribute('inert')).toBe(false);
+    rerender(withOutside(<Sheet open />));
+    expect(outside().hasAttribute('inert')).toBe(true);
+    rerender(withOutside(<Sheet open={false} />));
+    expect(outside().hasAttribute('inert')).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: /^Settings/ }));
+    expect(outside().hasAttribute('inert')).toBe(true);
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Settings' })).getByRole('button', { name: 'Close' }));
+    expect(outside().hasAttribute('inert')).toBe(false);
+    rerender(withOutside(<Sheet open={false} />, reauth));
+    expect(outside().hasAttribute('inert')).toBe(true);
+    rerender(withOutside(<Sheet open={false} />));
+    expect(outside().hasAttribute('inert')).toBe(false);
+  });
+
+  it('clears it when the lobby goes', () => {
+    const { rerender } = render(withOutside(<Sheet open />));
+    expect(outside().hasAttribute('inert')).toBe(true);
+    rerender(<Outside />);
+    expect(outside().hasAttribute('inert')).toBe(false);
+  });
+
+  // The sheet, as VoicePanel does, takes focus into its Close when nothing is over it.
+  function Focusing() {
+    const { report, behind } = useContext(VoiceSheet);
+    const close = useRef<HTMLButtonElement>(null);
+    useEffect(() => {
+      report(true);
+      return () => { report(false); };
+    }, [report]);
+    useEffect(() => {
+      if (!behind) close.current?.focus();
+    }, [behind]);
+    return <button ref={close} type="button">Close sheet</button>;
+  }
+
+  it('gives focus to the sheet, not the inert Settings button, when Settings closes over it', () => {
+    windowOf(true);
+    lobby(<Focusing />);
+    const settings = screen.getByRole('button', { name: /^Settings/ });
+    fireEvent.click(settings);
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Sign out' }), { key: 'Escape' });
+    expect(screen.queryByRole('dialog', { name: 'Settings' })).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Close sheet' }));
+    expect(document.activeElement).not.toBe(settings);
   });
 });

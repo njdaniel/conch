@@ -3,6 +3,7 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DesktopUpdateBridge, InstalledView, NativeVoiceView } from '../bridge';
+import { setPageModal } from '../../../pageModal';
 import { UpdateNotice } from './UpdateNotice';
 
 function install(first: InstalledView, voice?: NativeVoiceView): { push: (view: InstalledView) => void; restart: ReturnType<typeof vi.fn> } {
@@ -85,5 +86,21 @@ describe('UpdateNotice', () => {
     install({ updated: true, version: '0.1.0-alpha.18' }, { status: 'idle', generation: 1, channel: null, retryable: false });
     render(<UpdateNotice />);
     expect(await screen.findByText('Conch was updated to 0.1.0-alpha.18. Restart when you’re ready.')).toBeTruthy();
+  });
+
+  // Issue #2189: behind a modal of the lobby the Restart button is out of reach.
+  it('is inert behind a modal of the lobby', async () => {
+    install({ updated: true, version: '1.2.3' });
+    render(<UpdateNotice />);
+    const notice = await screen.findByRole('status');
+    expect(notice.hasAttribute('inert')).toBe(false);
+    act(() => {
+      setPageModal(true);
+    });
+    expect(notice.hasAttribute('inert')).toBe(true);
+    act(() => {
+      setPageModal(false);
+    });
+    expect(notice.hasAttribute('inert')).toBe(false);
   });
 });

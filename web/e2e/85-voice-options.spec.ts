@@ -323,9 +323,23 @@ test.describe('Voice options', () => {
   test('P2189 in Watch only, focus is kept in the panel when the sheet becomes the anchored panel', async ({ browser }) => {
     let p: Someone | undefined;
     try {
-      p = await enter(browser, vw, vw.alice, { context: { viewport: { width: 390, height: 520 }, hasTouch: true, isMobile: true } });
+      // Output selection is forced off, as LiveKit's supportsSetSinkId says it
+      // when the audio element has no setSinkId: Chromium offers it, so the
+      // Speakers picker would be an enabled control ahead of the disabled
+      // microphone radios and this would not be the disabled-control case.
+      p = await enter(browser, vw, vw.alice, {
+        context: { viewport: { width: 390, height: 520 }, hasTouch: true, isMobile: true },
+        before: async (page) => {
+          await page.addInitScript(() => {
+            Reflect.deleteProperty(HTMLMediaElement.prototype, 'setSinkId');
+          });
+        },
+      });
       const page = p.page;
       await joinVoice(p, 'Watch only');
+      await voice(page).getByRole('button', { name: 'Voice options' }).click();
+      await expect(page.locator('#voice-options').getByLabel('Speakers')).toHaveCount(0);
+      await page.keyboard.press('Escape');
       const button = voice(page).getByRole('button', { name: 'Voice options' });
       const panel = page.locator('#voice-options');
       await button.focus();

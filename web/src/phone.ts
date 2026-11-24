@@ -26,12 +26,15 @@ export const VoiceStrip = createContext<(() => void) | null>(null);
 // it reports when it is open, so the lobby makes what it covers inert beside
 // its own modals (Settings, re-authentication), as one owner of every inert.
 // Blocked is the lobby saying a higher modal, re-authentication, is up: the
-// sheet closes and stays closed.
+// sheet closes and stays closed. Behind is the lobby saying Settings or
+// re-authentication is up over the sheet: while it is, the sheet is inert and
+// holds no focus; when it goes, the sheet takes focus back.
 export interface VoiceSheetLink {
   readonly report: (open: boolean) => void;
   readonly blocked: boolean;
+  readonly behind: boolean;
 }
-export const VoiceSheet = createContext<VoiceSheetLink>({ report: () => undefined, blocked: false });
+export const VoiceSheet = createContext<VoiceSheetLink>({ report: () => undefined, blocked: false, behind: false });
 
 // Opens the conversation from somewhere in the channels column that opened a
 // channel itself (the directory's Join, issue #991): on a phone, back to Chat

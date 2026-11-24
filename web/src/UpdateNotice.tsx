@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import * as api from './api';
+import { usePageModal } from './pageModal';
 
 export const updateText = 'Conch was updated. Reload to get the new version.';
 
@@ -14,6 +15,8 @@ export const updateCheckInterval = 5 * 60_000;
 // fails says nothing and leaves the baseline alone.
 export function UpdateNotice({ reload = () => { window.location.reload(); } }: { readonly reload?: () => void } = {}) {
   const [updated, setUpdated] = useState(false);
+  // Behind a modal of the lobby the notice is inert (pageModal).
+  const modal = usePageModal();
   useEffect(() => {
     let live = true;
     let baseline: string | null = null;
@@ -55,7 +58,7 @@ export function UpdateNotice({ reload = () => { window.location.reload(); } }: {
   }, [updated]);
   if (!updated) return null;
   return (
-    <div ref={box} role="status" className="banner update-notice">
+    <div ref={box} role="status" className="banner update-notice" inert={modal}>
       <p>{updateText}</p>
       <button type="button" onClick={reload}>
         Reload

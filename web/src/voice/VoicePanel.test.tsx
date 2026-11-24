@@ -659,7 +659,7 @@ describe('Voice options as a panel', () => {
 it('Voice options closes when re-authentication blocks it', () => {
   const voice = control(inVoice('connected', 'c'), [], { kind: 'presence', presence });
   const drawn = (blocked: boolean) => (
-    <VoiceSheet.Provider value={{ report: () => undefined, blocked }}>
+    <VoiceSheet.Provider value={{ report: () => undefined, blocked, behind: blocked }}>
       <VoicePanel voice={voice} viewer={7} people={new Map()} viewed="c" onOpen={() => undefined} />
     </VoiceSheet.Provider>
   );
@@ -669,6 +669,40 @@ it('Voice options closes when re-authentication blocks it', () => {
   expect(button.getAttribute('aria-expanded')).toBe('true');
   rerender(drawn(true));
   expect(screen.getByRole('button', { name: 'Voice options' }).getAttribute('aria-expanded')).toBe('false');
+  // Re-authentication done: it stays closed until it is opened again.
+  rerender(drawn(false));
+  expect(screen.getByRole('button', { name: 'Voice options' }).getAttribute('aria-expanded')).toBe('false');
+  expect(document.querySelector('#voice-options')?.hasAttribute('hidden')).toBe(true);
+});
+
+// Issue #2189: Settings opened over the sheet makes the dock inert and the
+// sheet loses focus; when Settings closes (behind goes) focus is given back to
+// the sheet's Close, not left on the body.
+it('Voice options takes focus back when what was over it goes', () => {
+  const voice = control(inVoice('connected', 'c'), [], { kind: 'presence', presence });
+  const drawn = (behind: boolean) => (
+    <VoiceSheet.Provider value={{ report: () => undefined, blocked: false, behind }}>
+      <VoicePanel voice={voice} viewer={7} people={new Map()} viewed="c" onOpen={() => undefined} />
+    </VoiceSheet.Provider>
+  );
+  // jsdom has no layout: the panel is a sheet where the section's top is above 40% of the window.
+  const top = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0, toJSON: () => ({}) });
+  const height = vi.spyOn(document.documentElement, 'clientHeight', 'get').mockReturnValue(800);
+  try {
+    const { rerender } = render(drawn(false));
+    fireEvent.click(screen.getByRole('button', { name: 'Voice options' }));
+    const close = document.querySelector<HTMLElement>('.voice-options-close');
+    expect(document.activeElement).toBe(close);
+    rerender(drawn(true));
+    // The dock went inert and took the focus with it.
+    close?.blur();
+    expect(document.activeElement).toBe(document.body);
+    rerender(drawn(false));
+    expect(document.activeElement).toBe(close);
+  } finally {
+    top.mockRestore();
+    height.mockRestore();
+  }
 });
 
 // Issue #590 (F09, F20): Hold to talk works from the keyboard while it has

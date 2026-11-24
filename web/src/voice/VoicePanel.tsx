@@ -325,7 +325,7 @@ export function VoicePanel({
   // stays closed.
   const link = useContext(VoiceSheet);
   const covered = options && !strip && inVoice && sheet && !link.blocked;
-  const { report, blocked } = link;
+  const { report, blocked, behind } = link;
   useEffect(() => {
     if (!covered) return;
     report(true);
@@ -335,10 +335,12 @@ export function VoicePanel({
     if (blocked && options) setOptions(false);
   }, [blocked, options]);
   useEffect(() => {
-    if (!covered || toAbout) return;
+    if (!covered || toAbout || behind) return;
     if (optionsPanel.current?.contains(document.activeElement) === true) return;
     optionsPanel.current?.querySelector<HTMLElement>('.voice-options-close')?.focus();
-  }, [covered, toAbout]);
+    // Behind: Settings was opened over the sheet and has closed again, and the
+    // focus the sheet lost to the dock's inert is given back to it.
+  }, [covered, toAbout, behind]);
   // The sheet turning into the panel above the strip (a resize, a scroll)
   // hides its Close: focus held there moves to the panel's first control.
   const wasCovered = useRef(false);
