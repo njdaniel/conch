@@ -3264,6 +3264,28 @@ label {
   box-shadow: 0 -4px 16px rgb(0 0 0 / 0.25);
 }
 
+.voice-options-close {
+  display: none;
+}
+
+.voice-options.sheet .voice-options-close {
+  display: block;
+  flex-basis: auto;
+  margin-left: auto;
+}
+
+.voice-options.sheet:not([hidden]) {
+  /* A bottom sheet over the window, for where the section has too little room
+     above it (a phone's Voice view, a dock scrolled past its top). It rests on
+     the phone's navigation, which stays in reach. */
+  left: 0;
+  bottom: var(--vo-sheet-bottom, 0px);
+  width: 100%;
+  max-height: 80vh;
+  max-height: 80dvh;
+  border-radius: 0.5rem 0.5rem 0 0;
+}
+
 .voice-options:not([hidden]),
 .voice-diagnostics:not([hidden]) {
   display: flex;
@@ -4369,7 +4391,8 @@ button.link {
     padding: var(--s2) var(--s2) 0;
   }
 
-  /* Voice options open scroll inside the strip rather than take the screen. */
+  /* Voice options is a panel over the page (issue #2189), so it takes no
+     room here; the dock itself is held to a short share of the screen. */
   .dock {
     max-height: 40vh;
     padding: var(--s2);
@@ -5013,8 +5036,8 @@ button.link {
     min-height: 12rem;
   }
 
-  /* The dock keeps its half of the window (Voice options open can be taller
-     than the window), scrolling inside itself, except on a phone. */
+  /* The dock keeps its half of the window, scrolling inside itself, except on
+     a phone. Voice options is a panel over the page, not part of the dock. */
   .lobby.phone .dock {
     max-height: none;
   }

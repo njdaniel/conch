@@ -199,8 +199,15 @@ test.describe('choosing the microphone', () => {
   }
 
   // holdTalk holds the talk key on a page, with focus away from any field.
+  // The click on the heading is a press outside Voice options, which closes
+  // it (issue #2189); a panel that was open is opened again for the test.
   async function holdTalk(page: Page): Promise<void> {
+    const options = voiceRegion(page).getByRole('button', { name: 'Voice options' });
+    const wasOpen = (await options.getAttribute('aria-expanded')) === 'true';
+    // The open panel can cover the heading, so it is closed to click there.
+    if (wasOpen) await options.click();
     await page.getByRole('heading', { name: 'Conch' }).click();
+    if (wasOpen) await options.click();
     await page.keyboard.down('Backquote');
   }
 

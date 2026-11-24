@@ -764,6 +764,27 @@ describe('talk-key capture', () => {
     return { setTalkKey, capture };
   };
 
+  // Issue #2189: the capture ends with the panel, by whatever route it closes,
+  // and Escape during a capture cancels only the capture.
+  it('ends the capture when the panel closes by a press outside, or by its button', () => {
+    const { capture } = capturing();
+    fireEvent.mouseDown(document.body);
+    expect(capture).toHaveBeenCalledWith(false);
+    capture.mockClear();
+    fireEvent.click(screen.getByRole('button', { name: 'Voice options' }));
+    expect(capture).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Voice options' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Voice options' }));
+    expect(capture).toHaveBeenCalledWith(false);
+  });
+
+  it('Escape during a capture cancels the capture and leaves the panel open', () => {
+    const { capture } = capturing();
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Press a key or Mouse 4/5 (Escape cancels)' }), { code: 'Escape', key: 'Escape' });
+    expect(capture).toHaveBeenCalledWith(false);
+    expect(screen.getByRole('button', { name: 'Voice options' }).getAttribute('aria-expanded')).toBe('true');
+  });
+
   it.each([
     [3, 'Mouse4'],
     [4, 'Mouse5'],
