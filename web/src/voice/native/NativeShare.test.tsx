@@ -298,6 +298,18 @@ describe('the desktop quality choices', () => {
     expect(t.calls).toEqual([`quality ${expected}`]);
   });
 
+  it.each([false, true])('offers the new resolutions only with v3 support (%s)', (shareQualityV3) => {
+    const t = fake({ shareQualityV3, shareQuality: { resolution: '1080p', frameRate: 15 } });
+    strip(t.companion);
+    const resolution = screen.getByLabelText<HTMLSelectElement>('Resolution');
+    const newOptions = within(resolution).queryAllByRole('option', { name: /^(480p|1440p)/ });
+    expect(newOptions).toHaveLength(shareQualityV3 ? 2 : 0);
+    if (shareQualityV3) {
+      fireEvent.change(resolution, { target: { value: '1440p' } });
+      expect(t.calls).toEqual(['quality 1440p15']);
+    }
+  });
+
   it('shows the 4K60 caution for Source at 60 fps and for no other choice', () => {
     for (const q of companionQualities) {
       const view = strip(fake({ shareQuality: q }).companion);

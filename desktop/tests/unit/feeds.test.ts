@@ -39,6 +39,7 @@ const HEARTBEAT = fixture('heartbeat-v1');
 // document is not one of its frames.
 const PRESENCE = fixture('voice-presence-v2');
 const PRESENCE_V1 = fixture('voice-presence-v1');
+const PRESENCE_V3 = fixture('voice-presence-v3');
 const OCCUPANCY = fixture('voice-occupancy-v1');
 const ROSTER = fixture('session-roster-v1');
 
@@ -221,6 +222,9 @@ describe('what the renderer may ask for', () => {
     [{ kind: 'events', channel: 'general', session: -2 }, null],
     [{ kind: 'voice' }, null],
     [{ kind: 'voice', channel: 7 }, null],
+    [{ kind: 'voice', channel: 'general', schema: 'conch.voice_presence.v3' }, { kind: 'voice', channel: 'general', schema: 'conch.voice_presence.v3' }],
+    [{ kind: 'voice', channel: 'general', schema: 'conch.voice_presence.v4' }, null],
+    [{ kind: 'occupancy', schema: 'conch.voice_presence.v3' }, null],
     [{ kind: 'voice', channel: 'a\u0000b' }, null],
     [{ kind: 'occupancy', ticket: 'x' }, null],
     [{ kind: 'occupancy', url: 'wss://evil.example/' }, null],
@@ -235,9 +239,8 @@ describe('what the renderer may ask for', () => {
   it('is turned into the feed’s fixed route on the selected origin, with a query main builds', () => {
     expect(feedUrl('http://127.0.0.1:8080', messages)).toBe('ws://127.0.0.1:8080/v2/ws?channel=general&after=4&heartbeat=1');
     expect(feedUrl('https://chat.example', { kind: 'events', channel: 'a b&c=d', session: 9 })).toBe('wss://chat.example/v1/events/ws?channel=a+b%26c%3Dd&session=9');
-    // The voice feed always asks for v2 presence, which is what the web
-    // client reads.
     expect(feedUrl('https://chat.example', { kind: 'voice', channel: 'general' })).toBe('wss://chat.example/v1/voice/ws?channel=general&schema=conch.voice_presence.v2');
+    expect(feedUrl('https://chat.example', { kind: 'voice', channel: 'general', schema: 'conch.voice_presence.v3' })).toBe('wss://chat.example/v1/voice/ws?channel=general&schema=conch.voice_presence.v3');
     expect(feedUrl('https://chat.example', occupancy)).toBe('wss://chat.example/v1/voice/occupancy/ws');
   });
 });
@@ -295,6 +298,22 @@ describe('the voice feed', () => {
 });
 
 describe('frames', () => {
+  it('delivers v3 presence only to a subscription that requested it', () => {
+    const r = rig();
+    expect(r.feeds.subscribe(1, 1, { kind: 'voice', channel: 'general', schema: 'conch.voice_presence.v3' })).toBe(true);
+    const socket = r.sockets[0];
+    expect(new URL(socket?.url ?? '').searchParams.get('schema')).toBe('conch.voice_presence.v3');
+    socket?.on.open();
+    socket?.on.frame(PRESENCE);
+    expect(r.feeds.invalid).toBe(1);
+    socket?.on.frame(PRESENCE_V3);
+    expect(r.events).toEqual([
+      [1, { id: 1, type: 'open' }],
+      [1, { id: 1, type: 'frames', frames: [PRESENCE_V3] }],
+    ]);
+    expect(validFrame('voice', PRESENCE_V3)).toBe(false);
+  });
+
   it.each<[FeedRequest['kind'], string, boolean]>([
     ['messages', MESSAGE, true],
     ['messages', HEARTBEAT, true],

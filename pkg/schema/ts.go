@@ -257,6 +257,10 @@ var TSTypes = []TSType{
 	{Value: VoiceParticipantV2{}},
 	{Value: VoicePresenceRoomV2{}},
 	{Value: VoicePresenceV2{}, Family: "voice-presence-v2", Schema: VoicePresenceSchemaV2},
+	{Value: VoiceShareQualityV3{}},
+	{Value: VoiceParticipantV3{}},
+	{Value: VoicePresenceRoomV3{}},
+	{Value: VoicePresenceV3{}, Family: "voice-presence-v3", Schema: VoicePresenceSchemaV3},
 	{Value: VoiceTransmitReportV1{}, Family: "voice-transmit-report-v1"},
 	// Companion and viewer participants (issue #933).
 	{Value: VoiceCompanionRequestV1{}, Family: "voice-companion-request-v1"},
@@ -272,6 +276,8 @@ var TSTypes = []TSType{
 	{Value: VoiceShareRequestV1{}, Family: "voice-share-request-v1"},
 	{Value: VoiceShareV1{}, Family: "voice-share-v1"},
 	{Value: VoiceShareV2{}, Family: "voice-share-v2"},
+	{Value: VoiceShareRequestV2{}, Family: "voice-share-request-v2"},
+	{Value: VoiceShareV3{}, Family: "voice-share-v3"},
 	// The camera claim (ADR-015, issue #1238): the page may publish a camera
 	// while conchd holds it. Presence says who has one (VoiceParticipant).
 	{Value: VoiceCameraV1{}, Family: "voice-camera-v1"},
@@ -819,8 +825,9 @@ var TSVocabularyModes = map[string]TSVocabularyMode{
 	// the picker's closed vocabulary; a new value is a new version of
 	// presence, as a new end reason is, and the page sends only what its
 	// picker offers.
-	"VoiceShareResolution": TSStrict,
-	"VoiceTransmitState":   TSStrict,
+	"VoiceShareResolution":   TSStrict,
+	"VoiceShareResolutionV3": TSStrict,
+	"VoiceTransmitState":     TSStrict,
 
 	// Strict: written by the page itself in a problem report (issue #446);
 	// the server validates what it is sent, and the page sends only what it

@@ -34,7 +34,9 @@ describe('the share quality kept in local preferences', () => {
 
 describe('the chosen capture and encodings', () => {
   it.each([
+    { quality: { resolution: '480p', frameRate: 15 }, width: 854, height: 480, hint: 'detail' },
     { quality: { resolution: '720p', frameRate: 15 }, width: 1280, height: 720, hint: 'detail' },
+    { quality: { resolution: '1440p', frameRate: 30 }, width: 2560, height: 1440, hint: 'motion' },
     { quality: { resolution: '1080p', frameRate: 30 }, width: 1920, height: 1080, hint: 'motion' },
     { quality: { resolution: 'source', frameRate: 60 }, width: 3840, height: 2160, hint: 'motion' },
   ] as const)('caps $quality.resolution at $quality.frameRate fps and uses $hint', ({ quality, width, height, hint }) => {

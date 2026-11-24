@@ -151,7 +151,18 @@ describe('what api.ts records', () => {
 
   it('records sockets by what they carry: opens, closes with their codes, and the tries after a loss', async () => {
     await signIn();
-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(json({ ticket, expires_at: '2026-10-16T10:00:00Z' }, 201))));
+    // Every call gets a ticket, except the voice feed's presence probe, which a
+    // current server answers with a v3 document, so the v3 feed opens.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) =>
+        Promise.resolve(
+          String(input instanceof Request ? input.url : input).includes('schema=conch.voice_presence.v3')
+            ? json({ schema: 'conch.voice_presence.v3', channel_id: 1, configured: false, available: false, rooms: [] })
+            : json({ ticket, expires_at: '2026-10-16T10:00:00Z' }, 201),
+        ),
+      ),
+    );
     const sockets: { url: string; onopen: (() => void) | null; onclose: ((e: { code: number; reason: string }) => void) | null }[] = [];
     vi.stubGlobal(
       'WebSocket',
