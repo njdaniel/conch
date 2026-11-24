@@ -1,6 +1,6 @@
 // The desktop voice strip (issue #1376, D3-5 of #771), driven by a fake native
 // voice and a fake presence socket: no helper, no browser engine, no network.
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../../api';
 import { setSoundAudience, sounds } from '../../sounds';
@@ -8,12 +8,13 @@ import type { NativeVoiceHelper, NativeVoiceView } from '../../platform/desktop/
 import type { NativeVoice, NativeVoiceError, NativeVoiceOutcome } from '../../platform/types';
 import type { ChannelV0 } from '../../schema/channel';
 import { voicePresenceV3Schema, type VoicePresence, type VoicePresenceV2, type VoicePresenceV3 } from '../../schema/voice';
-import type { SocketEvents } from '../../state/feed';
+import { firstDelay, type SocketEvents } from '../../state/feed';
 import type { Person } from '../../useLiveChannel';
 import * as sdk from '../sdk';
 import { confirmWithin, duplicateWarning, NativeVoicePanel } from './NativeVoicePanel';
 import { initialVoice, type VoiceState } from '../connection';
 import type { Companion, CompanionClient } from './useCompanion';
+import { usePresence } from './usePresence';
 import { shareDisabledWords, silentShareBefore, statusWords, words } from './words';
 
 const idle: NativeVoiceView = { status: 'idle', generation: 0, channel: null, retryable: false };
@@ -89,7 +90,7 @@ beforeEach(() => {
     sockets.push({ channel, events });
     return Promise.resolve({ ok: true, value: { close: () => undefined } });
   });
-  vi.spyOn(api, 'getVoicePresence').mockResolvedValue({ ok: false, failure: 'unreachable' } as never);
+  vi.spyOn(api, 'getVoicePresence').mockResolvedValue({ ok: false, failure: 'network' });
 });
 afterEach(() => {
   cleanup();
@@ -107,6 +108,13 @@ async function frame(p: VoicePresence) {
   });
 }
 
+async function closeSocket(code: number, reason?: string) {
+  await act(async () => {
+    sockets.at(-1)?.events.onClose(code, reason);
+    await Promise.resolve();
+  });
+}
+
 const channels: ChannelV0[] = [];
 const people: ReadonlyMap<number, Person> = new Map([[2, { name: 'Ada' } as Person]]);
 
@@ -117,6 +125,43 @@ function strip(fake: Fake, channel: string | null = 'general', binding?: string,
   const r = render(ui(channel));
   return { ...r, show: (ch: string | null) => { r.rerender(ui(ch)); } };
 }
+
+describe('usePresence', () => {
+  const hook = () => renderHook(() => usePresence({ channel: 'general', joined: null, voiceAllowed: true, onUnauthorized: vi.fn() }));
+
+  it('keeps the 1008 follow-up roster through the retry wait', async () => {
+    vi.useFakeTimers();
+    const read = presence([2, '2026-01-01T00:00:01Z']);
+    vi.mocked(api.getVoicePresence).mockResolvedValueOnce({ ok: true, value: read });
+    const { result } = hook();
+    const initial: VoicePresenceV3 = { ...presence([1, '2026-01-01T00:00:00Z']), schema: voicePresenceV3Schema };
+    act(() => {
+      sockets[0]?.events.onOpen();
+      sockets[0]?.events.onFrame(JSON.stringify(initial));
+    });
+
+    await closeSocket(1008);
+    expect(api.getVoicePresence).toHaveBeenCalledWith('general');
+    const snapshot = { kind: 'presence', presence: read, socketSchema: voicePresenceV3Schema };
+    expect(result.current).toEqual(snapshot);
+
+    act(() => { vi.advanceTimersByTime(firstDelay - 1); });
+    expect(sockets).toHaveLength(1);
+    expect(result.current).toEqual(snapshot);
+
+    act(() => { vi.advanceTimersByTime(1); });
+    expect(sockets).toHaveLength(2);
+  });
+
+  it('shows unreachable when the 1008 follow-up read gets no answer', async () => {
+    const { result } = hook();
+    await frame(presence([1, '2026-01-01T00:00:00Z']));
+
+    await closeSocket(1008);
+    expect(api.getVoicePresence).toHaveBeenCalledWith('general');
+    expect(result.current).toEqual({ kind: 'unreachable' });
+  });
+});
 
 describe('NativeVoicePanel', () => {
   it('plays remote join, leave and share cues once, with no initial or reconnect backlog', async () => {
@@ -197,8 +242,10 @@ describe('NativeVoicePanel', () => {
     const s = strip(fake);
     await frame(presence([1, '2026-01-01T00:00:00Z']));
     fake.set({ status: 'ended', generation: 1, channel: 'general', retryable: false, problem: 'voice_removed', helper: helper({ phase: 'failed', reason: 'voice_removed', capture: 'off', blocked: ['not_connected'] }) });
-    await frame(presence());
+    vi.mocked(api.getVoicePresence).mockResolvedValueOnce({ ok: true, value: presence([2, '2026-01-01T00:00:01Z']) });
+    await closeSocket(1008, 'voice_removed');
     expect(screen.getByText('voice ended: you were removed from voice')).toBeTruthy();
+    expect(within(screen.getByRole('list')).getByText('Ada')).toBeTruthy();
     expect(screen.getByText(/Not in voice/)).toBeTruthy();
     expect(screen.queryByText(/internal error/)).toBeNull();
     expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
