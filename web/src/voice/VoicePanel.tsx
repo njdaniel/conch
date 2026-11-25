@@ -769,11 +769,14 @@ export function VoicePanel({
   // cap can refuse a new claim now (voice-multi-share.md §5.1, #1509). Before a
   // share the strip keeps one line, with full notes in Voice options (#600).
   const { features } = voice;
-  const shareLine = !state.listenOnly && features.canShare && state.share.kind === 'idle';
+  // A viewer is listen only from the first frame. Use the join's viewer flag
+  // for the row's status and help before the grant confirms it (#2210).
+  const listenOnly = state.viewer || state.listenOnly;
+  const shareLine = !listenOnly && features.canShare && state.share.kind === 'idle';
   const sharable = shareLine;
   // What About talking and sharing would show: the talk-key line, the sharing
   // line. With neither there is nothing to disclose, and no button.
-  const talkLine = state.mode === 'ptt' && !state.listenOnly && !state.watchOnly && !coarse;
+  const talkLine = state.mode === 'ptt' && !listenOnly && !state.watchOnly && !coarse;
   const hasHelp = talkLine || shareLine;
   // Everyone else in the room joined, whose volumes Voice options sets.
   const others = roster.filter((o) => o.principal !== viewer).map((o) => ({ principal: o.principal, name: nameOf(people, o.principal, viewer) }));
@@ -809,7 +812,7 @@ export function VoicePanel({
                 {where}
               </p>
               {/* Not in voice, "Microphone off" is the hint below, said once. */}
-              {inVoice ? <VoiceStatus state={state} /> : null}
+              {inVoice ? <VoiceStatus state={listenOnly === state.listenOnly ? state : { ...state, listenOnly }} /> : null}
             </div>
           )}
 

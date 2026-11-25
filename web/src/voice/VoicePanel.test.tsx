@@ -1647,6 +1647,21 @@ describe('what the strip says is true', () => {
       expect(alone.calls).toEqual(['watch only']);
     });
 
+    it('keeps the voice row buttons in the same order from connecting to connected as a viewer (#2210)', () => {
+      const { voice, redraw } = panel(initialVoice, 'c', room(one(7)));
+      const buttons = () => Array.from(voice.querySelectorAll('.voice-controls button'), (button) =>
+        button.getAttribute('aria-label') ?? button.textContent.trim());
+      // The join sets viewer before the grant confirms the session is listen only.
+      const connecting = { ...inVoice('connecting', 'c'), watchOnly: true, viewer: true };
+      redraw(connecting);
+      const first = buttons();
+      const firstStatus = voice.querySelector('.voice-sub')?.textContent;
+      redraw({ ...connecting, phase: 'connected', listenOnly: true });
+      expect(buttons()).toEqual(first);
+      expect(first).toEqual(['Hold to talk', 'Open mic', 'Mute', 'Deafen', 'Voice options', 'Leave voice']);
+      expect(voice.querySelector('.voice-sub')?.textContent).toBe(firstStatus);
+    });
+
     it('says so on a page another device took over', () => {
       const why = 'Another device took over your place in this voice room';
       const { voice } = panel({ ...initialVoice, phase: 'stopped', why }, 'c', room(one(7)));
