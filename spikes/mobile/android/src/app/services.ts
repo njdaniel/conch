@@ -86,6 +86,12 @@ export const controller = new VoiceController({
       onCameras: (tracks) => {
         cameraStore.set(tracks);
       },
+      onDroppedTimeout: () => {
+        diagnostics.add('voice', 'a dropped connection was still reconnecting at the limit (#1972)');
+      },
+      onUnknownEngine: () => {
+        diagnostics.add('voice', 'the LiveKit SDK is not the version app/engine.ts knows: a dropped connection waits out its limit (#1972)');
+      },
     }),
   clock,
   random: Math.random,

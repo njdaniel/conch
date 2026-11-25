@@ -1,6 +1,7 @@
 // The room, on @livekit/react-native 3.1.0 and livekit-client 2.22.3: the
 // RoomPort of controller.ts. This is the only file that imports the SDK's room
-// (and logging.ts the SDK's loggers); the logic never sees it.
+// (and logging.ts the SDK's loggers, engine.ts the internals of its engine);
+// the logic never sees it.
 //
 // What it follows from the browser's web/src/voice/sdk.ts:
 //  - nothing is subscribed but by choice: wanted() (logic/subscribe.ts) says
@@ -30,11 +31,13 @@ import {
   createLocalAudioTrack,
 } from 'livekit-client';
 import type { DisconnectCause } from '../logic/disconnect';
+import { Connection, type Retired } from '../logic/dropped';
 import { publishMicrophone, type Mutable } from '../logic/mic';
 import type { TrackKind, TrackSource } from '../logic/subscribe';
 import { LiveKitCamera } from './camera/capture';
 import { noCameras, principalOf, wantTrack, type CameraWants } from './camera/policy';
 import type { RoomEvents, RoomPort } from './controller';
+import { droppedEngine, engineKnown, goneEngine, type RoomEngine } from './engine';
 
 const audioOptions: AndroidAudioTypeOptions = {
   // The Kotlin module owns focus (see the header).
@@ -95,6 +98,12 @@ export interface LiveKitRoomOptions {
   readonly onMicrophone: (track: LocalAudioTrack | null) => void;
   // The cameras received, by principal, whenever they change.
   readonly onCameras: (tracks: ReadonlyMap<number, RemoteVideoTrack>) => void;
+  // A dropped connection's engine was still reconnecting at droppedLimit
+  // (logic/dropped.ts); for the diagnostics.
+  readonly onDroppedTimeout?: () => void;
+  // The SDK's engine is not the shape app/engine.ts was written for (an SDK
+  // upgrade): every drop waits out the limit. For the diagnostics.
+  readonly onUnknownEngine?: () => void;
 }
 
 export class LiveKitRoom implements RoomPort {
@@ -105,6 +114,9 @@ export class LiveKitRoom implements RoomPort {
   private wantSending = false;
   private deafened = false;
   private closed = false;
+  // The order of this room's connect and its retirement (logic/dropped.ts).
+  private readonly connection = new Connection();
+  private retired: Promise<Retired> | null = null;
   private events: RoomEvents | null = null;
   readonly camera: LiveKitCamera;
   private wants: CameraWants = noCameras;
@@ -117,7 +129,6 @@ export class LiveKitRoom implements RoomPort {
 
   async connect(url: string, token: string, publish: boolean, events: RoomEvents): Promise<void> {
     this.events = events;
-    await startAudio();
     const room = this.room;
     room
       .on(RoomEvent.Reconnecting, events.onReconnecting)
@@ -144,9 +155,16 @@ export class LiveKitRoom implements RoomPort {
         if (participant !== room.localParticipant || pub.source !== Track.Source.Microphone || this.wantSending) return;
         void this.publication?.mute().catch(() => undefined);
       });
+    // The audio session first. A room retired meanwhile never starts the
+    // SDK's connect (it would join on a token its replacement now uses), and
+    // its retirement waits while that connect is in flight (#1972).
     // Autosubscribe is off: tracks are asked for by wanted().
-    await room.connect(url, token, { autoSubscribe: false });
-    if (this.closed) return;
+    const joined = await this.connection.connect(
+      startAudio,
+      () => room.connect(url, token, { autoSubscribe: false }),
+      stopAudio,
+    );
+    if (!joined || this.closed) return;
     this.subscribeAll();
     if (!publish) return;
     await this.publishMic();
@@ -209,8 +227,25 @@ export class LiveKitRoom implements RoomPort {
     }
   }
 
-  async disconnect(): Promise<void> {
+  // disconnect resolves once this connection is gone for good: the engine is
+  // sealed (it can start no connection of its own), the room is disconnected,
+  // and the engine is closed with no attempt still in flight, the room's first
+  // connect included (logic/dropped.ts, #1972). Or at droppedLimit, counted
+  // from the call, whatever step is still pending; it then says so, and its
+  // engine lingers under guard. The controller waits for it before it opens
+  // another connection. Once only: a second call has the first's answer.
+  disconnect(): Promise<Retired> {
+    this.retired ??= this.retire();
+    return this.retired;
+  }
+
+  private async retire(): Promise<Retired> {
     this.closed = true;
+    // Taken before the room lets it go: Room.disconnect clears room.engine,
+    // and a room that has already reported a disconnect returns early
+    // without touching an engine whose restart may still be running.
+    const engine: RoomEngine | undefined = this.room.engine;
+    if (engine !== undefined && !engineKnown(engine)) this.options.onUnknownEngine?.();
     this.camera.close();
     this.cameras.clear();
     this.options.onCameras(new Map());
@@ -218,12 +253,23 @@ export class LiveKitRoom implements RoomPort {
     const track = this.track;
     this.track = null;
     this.publication = null;
-    try {
-      await this.room.disconnect(true);
-    } finally {
-      track?.stop();
-      await stopAudio().catch(() => undefined);
-    }
+    const retired = await this.connection.retire(engine === undefined ? goneEngine : droppedEngine(engine), {
+      wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+      now: Date.now,
+      teardown: async () => {
+        try {
+          await this.room.disconnect(true);
+        } finally {
+          track?.stop();
+          await stopAudio().catch(() => undefined);
+        }
+      },
+    });
+    // Again, in case the teardown was still pending at the limit: the
+    // microphone stops whatever the SDK is doing (stop is idempotent).
+    track?.stop();
+    if (!retired.settled) this.options.onDroppedTimeout?.();
+    return retired;
   }
 
   private volume(track: RemoteTrack): void {
