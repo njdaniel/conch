@@ -249,10 +249,10 @@ export interface ShareSink {
   readonly audio: HTMLAudioElement;
 }
 
-// What the client needs of one LiveKit room connection.
 // What a capture is of, as the browser reports it (displaySurface).
 export type ShareSurface = 'monitor' | 'window' | 'browser';
 
+// What the client needs of one LiveKit room connection.
 export interface Room extends ShareRoom, CameraRoom {
   // The dock reads these track-scoped sources only while diagnostics is open.
   diagnosticsSources?: () => readonly DiagnosticsSource[];
@@ -1550,12 +1550,14 @@ export class VoiceClient {
     this.room?.attachSelf(el);
   }
 
-  // attachShareSelf plays the sharer's own screen into the preview, on this
-  // connection and every one after it (#2197).
+  // shareSurface says what this page's screen capture is of, for the sharer's
+  // title (#2197), or null when there is none or the browser does not say.
   shareSurface(): ShareSurface | null {
     return this.room?.shareSurface() ?? null;
   }
 
+  // attachShareSelf plays the sharer's own screen into the preview, on this
+  // connection and every one after it (#2197).
   attachShareSelf(el: HTMLVideoElement | null): void {
     this.shareSelfView = el;
     this.room?.attachShareSelf(el);

@@ -118,10 +118,14 @@ title and the controls, picture contained, never cropped. The tile is no taller
 than the title and row of buttons it had without a picture, so the page and the
 call view scroll no more than before, alone, beside a camera or beside another
 share, at every window size checked in 58-call-workspace (1440×900, 1215×900
-under the strip, 1366×768, 1280×720, 390×844 and 360×640). The title stays "You ·
-LIVE · quality". Its controls are Stop sharing and **Hide preview** / **Show
-preview** in the same row (an icon, named the same, on a narrow window and in the
-compact strip, so the row does not wrap); none of a watched share's (Mute, Share
+under the strip, 1366×768, 1280×720, 390×844 and 360×640). The title says what is
+shared, from the capture's displaySurface: "You · LIVE · your entire screen", "· a
+window" or "· a tab", then the quality, on one line cut with an ellipsis (the full
+text is its title); the word is left out when the browser does not say. Its
+controls are Stop sharing and **Hide preview** / **Show preview** in the same row
+(an eye or a crossed eye, named the same, whenever the tile is narrower than
+23rem, by a container query, and in the compact strip, so the row does not
+wrap); none of a watched share's (Mute, Share
 volume, Full screen, Pop out, Tap to play sound) applies to one's own share, and
 nothing fades or wakes. The share's sound is never played back to the sharer.
 Hiding removes the picture and leaves the tile as it was before the preview

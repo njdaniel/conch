@@ -11,7 +11,7 @@ import { headingId } from './Conversation';
 import { Avatar, Glyph } from './Icons';
 import { ServerVersion, TemporaryBanner } from './ServerVersion';
 import { AddPerson, JoiningSettings, SettingsOpen, type JoiningRequest } from './joiningSettings';
-import { OverlayReport, setPageModal } from './pageModal';
+import { DrawerOver, LeaveDrawer, OverlayReport, setPageModal } from './pageModal';
 import { MicTestShown, phoneViews, ShowChat, useAppHeight, usePhone, VoiceLive, VoiceSheet, VoiceStrip, type PhoneView } from './phone';
 import { DesktopOS } from './platform/os';
 import type { ChannelV0 } from './schema/channel';
@@ -293,6 +293,11 @@ export function Lobby({
     [joiningAsks],
   );
   const asking = overlay !== undefined && overlay !== null;
+  // The members panel is drawn over the page below the wide breakpoint, with a
+  // backdrop, and then it is a modal drawer like Settings: focus goes into it,
+  // the rest of the page is inert, and focus goes back to Members after. As a
+  // side column (wide) it is none of that.
+  const membersOver = panelOpen && !wideNow;
   // The voice options sheet is open (VoiceSheet): the page behind it is inert
   // with the same attribute as Settings and re-authentication, in one
   // expression each. Re-authentication outranks it: the sheet is told it is
@@ -308,11 +313,11 @@ export function Lobby({
   }, []);
   // Settings, re-authentication or one of those is up over the sheet: told to
   // it as behind, so it takes focus back when the modal over it goes.
-  const behind = settingsOpen || asking || overlays > 0;
+  const behind = settingsOpen || asking || membersOver || overlays > 0;
   const sheetLink = useMemo(() => ({ report: setSheetOpen, blocked: asking, behind }), [asking, behind]);
   // What the lobby does not draw but the page does (the desktop strip, the
   // update notices) is inert for the same modals: said here, once, to them.
-  const modalNow = settingsOpen || asking || voiceSheet;
+  const modalNow = settingsOpen || asking || voiceSheet || membersOver;
   useEffect(() => {
     setPageModal(modalNow);
     return () => {
@@ -332,10 +337,6 @@ export function Lobby({
   const membersBody = useRef<HTMLDivElement>(null);
   const settingsButton = useRef<HTMLButtonElement>(null);
   const settingsHeading = useRef<HTMLHeadingElement>(null);
-  // The members panel is drawn over the page below the wide breakpoint, and
-  // then behaves as one: focus goes into it, and back to Members after.
-  const membersOver = panelOpen && !wideNow;
-
   // The question takes focus on its safe answer, so Enter keeps the account.
   useEffect(() => {
     if (confirming !== null) cancel.current?.focus();
@@ -380,9 +381,90 @@ export function Lobby({
       if (!sheetModal.current && stranded) settingsButton.current?.focus();
     }
   }, [settingsOpen, asking]);
+  // Focus goes back to Members once the panel has closed: until then the
+  // button is inert behind it, and cannot take focus.
+  const membersClosed = useRef(false);
+  // The drawer was closed by an action that shows something in the centre
+  // (LeaveDrawer): focus goes there, not to Members.
+  const toCentre = useRef(false);
+  const centre = useRef<HTMLElement>(null);
+  // What the focus recovery below reads, as of the last render.
+  const over = useRef({ over: false, blocked: false });
+  over.current = { over: membersOver, blocked: settingsOpen || asking || overlays > 0 };
+  // While the drawer is modal and nothing is over it, focus that ends up
+  // nowhere usable (the body, nothing, a subtree that is inert) comes back to
+  // the drawer: a row that remounted under focus, re-authentication that went
+  // away. Usable focus, and a modal of another kind, are left alone.
+  const recoverFocus = useCallback(() => {
+    if (!over.current.over || over.current.blocked) return;
+    const at = document.activeElement;
+    if (at !== null && at !== document.body && at.closest('[inert]') === null) return;
+    membersBody.current?.focus();
+  }, []);
+  // The channel the drawer was opened on, by id: a rename keeps it. A channel
+  // shown that the list does not hold (yet) is no change; none shown is null.
+  const shownChannel = channels.selected === null ? null : (channels.channels.find((c) => c.name === channels.selected)?.id ?? undefined);
+  const openedOn = useRef<number | null>(null);
+  const wasOver = useRef(false);
   useEffect(() => {
-    if (membersOver) membersBody.current?.focus();
-  }, [membersOver]);
+    const entered = membersOver && !wasOver.current;
+    wasOver.current = membersOver;
+    if (entered) {
+      openedOn.current = shownChannel ?? null;
+      membersBody.current?.focus();
+    } else if (membersOver) recoverFocus();
+    else if (membersClosed.current) {
+      membersClosed.current = false;
+      membersButton.current?.focus();
+    } else if (toCentre.current) {
+      toCentre.current = false;
+      // The heading of what the action showed, else the conversation's.
+      (centre.current?.querySelector<HTMLElement>('[data-centre-target]') ?? document.getElementById(headingId))?.focus();
+    }
+  }, [membersOver, asking, recoverFocus]);
+  // A row that remounts under focus drops it with no event to hear.
+  useEffect(() => {
+    const body = membersBody.current;
+    if (!membersOver || body === null || typeof MutationObserver === 'undefined') return;
+    // One task later, and only if focus is still nowhere: the browser's own
+    // Tab (out of a row's menu, say) moves it first, and it is not ours to take.
+    let later = 0;
+    const watch = new MutationObserver(() => {
+      window.clearTimeout(later);
+      later = window.setTimeout(recoverFocus, 0);
+    });
+    watch.observe(body, { childList: true, subtree: true });
+    return () => {
+      window.clearTimeout(later);
+      watch.disconnect();
+    };
+  }, [membersOver, recoverFocus]);
+  // Another channel (or none) is shown than the one the drawer was opened on:
+  // it closes rather than stay over a page it has made inert. Only a change
+  // after the opening counts: a shown channel that was still settling when the
+  // drawer opened (none, then the first one) is taken as the one it opened on,
+  // and showing the same channel again changes nothing. The wide side column
+  // stays open across channels.
+  useEffect(() => {
+    if (!over.current.over) return;
+    if (shownChannel === undefined) return;
+    if (openedOn.current === null) {
+      openedOn.current = shownChannel;
+      return;
+    }
+    if (shownChannel === openedOn.current) return;
+    const at = document.activeElement;
+    if (at === null || at === document.body || membersBody.current?.contains(at) === true) membersClosed.current = true;
+    setPanelOpen(false);
+  }, [shownChannel]);
+  const leaveDrawer = useCallback(() => {
+    if (!over.current.over) return;
+    toCentre.current = true;
+    setPanelOpen(false);
+    // On a phone the centre is the Chat view's: the other views hide it, and
+    // what is shown there could not take focus.
+    if (phone) setView('chat');
+  }, [phone]);
   // Arriving (signing in, or a sign-in restored on reload) leaves focus on
   // the page's body, where the next Tab starts from the top: the first time a
   // conversation is shown, focus goes to its heading (issue #590). Only then:
@@ -409,7 +491,35 @@ export function Lobby({
   }
   function closeMembers() {
     setPanelOpen(false);
-    membersButton.current?.focus();
+    membersClosed.current = true;
+  }
+  // Everything behind the drawn-over members panel is inert, so Tab past its
+  // last control would leave the page for the browser's own chrome: it wraps
+  // instead, first to last and last to first, as in any modal dialog. A key
+  // something inside has already used (a menu, the profile card) is left alone.
+  function onMembersKey(event: KeyboardEvent) {
+    if (event.key === 'Escape') {
+      onEscape(closeMembers)(event);
+      return;
+    }
+    if (event.key !== 'Tab' || event.defaultPrevented) return;
+    const body = membersBody.current;
+    if (body === null) return;
+    const stops = [body, ...body.querySelectorAll<HTMLElement>('a[href], button, input, select, textarea, summary, [tabindex]')].filter(
+      (el) => el.tabIndex >= 0 && !el.matches(':disabled') && el.closest('[hidden], [inert]') === null,
+    );
+    const first = stops[0];
+    const last = stops[stops.length - 1];
+    if (first === undefined || last === undefined) return;
+    // In an open row menu, the menu's own ⋯ button is the stop: Tab from it
+    // closes the menu, and the page goes on from the button, not from an item.
+    const focused = document.activeElement;
+    const menu = focused?.closest('[role="menu"]') ?? null;
+    const at = menu === null || !body.contains(menu) ? focused : (menu.parentElement?.querySelector('[aria-haspopup="menu"]') ?? focused);
+    if (event.shiftKey ? at === first : at === last) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    }
   }
   // Escape closes the panel focus is in, and the panel's button gets focus.
   const onEscape = (close: () => void) => (event: KeyboardEvent) => {
@@ -426,8 +536,8 @@ export function Lobby({
       <div ref={lobbyEl} className={`${phone ? `lobby phone view-${view}${live ? ' in-voice' : ''}` : 'lobby'}${band === undefined ? '' : ' has-band'}`}>
         {/* While Settings is open the rest of the page is inert: the panel is
             modal, and focus cannot wander behind its backdrop. */}
-        <div className="top-group" inert={band !== undefined && (settingsOpen || asking || voiceSheet)}>
-        <header className="topbar" inert={settingsOpen || asking || voiceSheet}>
+        <div className="top-group" inert={band !== undefined && (settingsOpen || asking || voiceSheet || membersOver)}>
+        <header className="topbar" inert={settingsOpen || asking || voiceSheet || membersOver}>
           <h1 className="brand">Conch</h1>
           <div role="status" aria-label="Status" className="status">
             <Avatar id={me} name={name} />
@@ -438,7 +548,7 @@ export function Lobby({
           </div>
           <div className="topbar-actions">
             {notificationCenter}
-            {invites}
+            <DrawerOver.Provider value={membersOver}>{invites}</DrawerOver.Provider>
             <button
               ref={membersButton}
               type="button"
@@ -471,9 +581,11 @@ export function Lobby({
         </header>
         {band}
         </div>
+        {/* The areas hold the members panel, which stays live while it is drawn over
+            the page: every other part of them is inert then, one by one. */}
         <div className={panelOpen ? 'areas' : 'areas side-closed'} inert={settingsOpen || asking || voiceSheet}>
           {/* The switcher's entry is above the Channels navigation, not in it: that holds channel controls only. */}
-          <div className="channels">
+          <div className="channels" inert={membersOver}>
             {channels.loaded ? (
             <ChannelNav
               channels={inVisualOrder}
@@ -556,7 +668,7 @@ export function Lobby({
           </nav>
             {channels.loaded && visit === undefined && channels.channels.length > 0 ? <GroupsPanel controls={arranged} /> : null}
           </div>
-          <main className="centre">
+          <main ref={centre} className="centre" inert={membersOver}>
             <div ref={setStage} className="stage" />
             <section ref={conversationEl} aria-label="Conversation" className="conversation">
               {temporary === true ? <TemporaryBanner /> : null}
@@ -578,7 +690,10 @@ export function Lobby({
               tabIndex={panelOpen ? 0 : undefined}
               aria-label="Members list"
               role="region"
-              onKeyDown={membersOver ? onEscape(closeMembers) : undefined}
+              onKeyDown={membersOver ? onMembersKey : undefined}
+              onBlur={membersOver ? (event) => {
+                if (event.relatedTarget === null) window.setTimeout(recoverFocus, 0);
+              } : undefined}
             >
               {membersOver ? (
                 <button type="button" className="icon-button close" onClick={closeMembers}>
@@ -586,12 +701,12 @@ export function Lobby({
                   <span className="label">Close</span>
                 </button>
               ) : null}
-              {panel}
+              <LeaveDrawer.Provider value={leaveDrawer}>{panel}</LeaveDrawer.Provider>
             </div>
           </aside>
           {membersOver ? <div className="backdrop" onClick={closeMembers} /> : null}
         </div>
-        <div ref={dock} className="dock" inert={settingsOpen || asking}>
+        <div ref={dock} className="dock" inert={settingsOpen || asking || membersOver}>
           <VoiceLive.Provider value={setLive}>
             <MicTestShown.Provider value={!phone || view === 'voice'}>
               <VoiceStrip.Provider value={phone && view !== 'voice' ? openVoice : null}>
@@ -605,7 +720,7 @@ export function Lobby({
           </VoiceLive.Provider>
         </div>
         {phone ? (
-          <nav aria-label="Main navigation" className="phone-nav" inert={settingsOpen || asking}>
+          <nav aria-label="Main navigation" className="phone-nav" inert={settingsOpen || asking || membersOver}>
             {phoneViews.map(({ view: v, label }) => (
               <button
                 key={v}

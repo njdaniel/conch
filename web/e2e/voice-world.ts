@@ -241,7 +241,10 @@ room:
     const log = openSync(logPath, 'a');
     server = spawn(
       bin,
-      ['serve', '--listen', '127.0.0.1:0', '--web-dir', join(repoRoot, 'web', 'dist'), '--data', data, '--livekit-url', livekitOrigin],
+      // Relaxed invite limits, as the shared server has (global-setup.ts): every
+      // sign-in reads /v1/join from 127.0.0.1, and a spec that signs many people
+      // in would otherwise run the per-address preview budget dry (issue #2207).
+      ['serve', '--listen', '127.0.0.1:0', '--web-dir', join(repoRoot, 'web', 'dist'), '--data', data, '--livekit-url', livekitOrigin, '--test-relax-invite-limits'],
       { cwd: dir, env: { ...baseEnv, CONCHD_LIVEKIT_API_KEY: key, CONCHD_LIVEKIT_API_SECRET: secret }, stdio: ['ignore', log, log] },
     );
     closeSync(log);

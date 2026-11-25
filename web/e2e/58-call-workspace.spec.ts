@@ -1055,6 +1055,9 @@ test.describe('the persistent call workspace', () => {
       // Hide preview takes the video away, and Show preview brings it back, on
       // the same capture.
       const own = ownStage(a.page);
+      // The title says what is shared, from the real capture's displaySurface
+      // (#2197): Chromium's fake device reports one of the three kinds.
+      await expect(own.locator('.share-title')).toContainText(/You · LIVE · (your entire screen|a window|a tab)/);
       await own.getByRole('button', { name: 'Hide preview of your screen' }).click();
       await expect(preview(a.page)).toHaveCount(0);
       await expect(own.getByRole('button', { name: 'Show preview of your screen' })).toHaveText('Show preview');

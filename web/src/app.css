@@ -3125,7 +3125,7 @@ label {
   box-sizing: border-box;
   width: max-content;
   height: max-content;
-  max-width: min(22rem, calc(100% - 2 * var(--s2)));
+  max-width: min(26rem, calc(100% - 2 * var(--s2)));
   max-height: calc(100% - 2 * var(--s2));
   margin: auto;
   padding: var(--s2);
@@ -3177,10 +3177,52 @@ label {
   text-align: left;
 }
 
+.share-chooser .share-chooser-menu button[role^='menuitem'] {
+  /* Every row reserves the leading slot the checkmark fills, so choosing an
+     option changes no row's width or height (#2194). The extra class outweighs
+     the phone's .voice-controls button:not(.talk) padding. */
+  position: relative;
+  padding-inline-start: 1.75rem;
+}
+
 .share-chooser-menu button[aria-checked='true'] {
   border-color: var(--accent);
   color: var(--accent);
-  font-weight: 600;
+}
+
+/* The checkmark is the cue that survives forced colors, where the accent
+   becomes a system colour and the rows differ by colour alone. The empty alt
+   text keeps the glyph out of the accessible name; aria-checked is the
+   semantics. */
+.share-chooser-menu button[aria-checked='true']::before {
+  content: '✓' / '';
+  position: absolute;
+  inset-inline-start: 0.625rem;
+  inset-block: 0;
+  display: flex;
+  align-items: center;
+  line-height: 1;
+}
+
+@media (forced-colors: active) {
+  .share-chooser-menu button[aria-checked='true']::before {
+    color: ButtonText;
+  }
+}
+
+.share-chooser-menu .share-chooser-notes {
+  display: grid;
+}
+
+/* The Auto note and the caution share one cell, so the slot keeps the height of
+   the longer text whichever applies (#2194). */
+.share-chooser-menu .share-chooser-notes > p {
+  grid-area: 1 / 1;
+  margin: 0;
+}
+
+.share-chooser-menu .share-chooser-notes > p[aria-hidden='true'] {
+  visibility: hidden;
 }
 
 .share-chooser-menu .item-hint {
