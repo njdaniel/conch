@@ -1126,6 +1126,24 @@ describe('the SDK adapter', () => {
     expect(state.calls.filter((c) => c === 'republish-mute')).toHaveLength(1);
   });
 
+  it('reports the local participant apart from the remote speakers (UI-talk-1)', async () => {
+    const seen: [readonly number[], boolean][] = [];
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', true, { ...events, onSpeakers: (ids, local) => void seen.push([ids, local]) });
+    const speakers = state.handlers.get('as');
+    const local = state.room?.localParticipant;
+    speakers?.([local, { identity: 'p3' }]);
+    // Another client of the same person, p7 here, is remote and counts; the
+    // local participant is told apart by being the room's own, not by principal.
+    speakers?.([{ identity: 'p7' }]);
+    speakers?.([{ identity: 'p7.view' }]);
+    expect(seen).toEqual([
+      [[3], true],
+      [[7], false],
+      [[], false],
+    ]);
+  });
+
   it('mutes again after a remote unmute while the gate is shut, and only then', async () => {
     const room = newLiveKitRoom();
     await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', true, events);
