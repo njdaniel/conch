@@ -2,7 +2,7 @@
 // and Watch only name the channel they join, Watch only says the room is
 // heard, and the channel voice is in is a way back to it while another is on
 // screen. Driven by a fake VoiceControl: no SDK, no network, no device.
-import { act, cleanup, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, createEvent, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ChannelV0 } from '../schema/channel';
 import type { VoicePresenceV2 } from '../schema/voice';
@@ -1149,20 +1149,33 @@ describe('the anchored Voice options panel and focus leaving it', () => {
     return { button, other, done: () => { rect.mockRestore(); height.mockRestore(); } };
   };
 
-  it('dismisses on an outside press without preventing text selection', () => {
+  it('dismisses on an outside press and preserves a delayed drag selection', async () => {
     const { button, done } = setup();
+    const selection = window.getSelection();
     try {
       const text = screen.getByText('Selectable chat text');
+      const slider = screen.getByRole('slider', { name: /Release delay/ });
+      slider.focus();
       const press = createEvent.mouseDown(text);
-      fireEvent(text, press);
+      // jsdom needs the browser's focus and selection defaults simulated.
+      act(() => {
+        if (fireEvent(text, press)) slider.blur();
+      });
       expect(press.defaultPrevented).toBe(false);
       expect(button.getAttribute('aria-expanded')).toBe('false');
+      await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 10)); });
+      fireEvent.mouseMove(text, { buttons: 1 });
+      selection?.selectAllChildren(text);
+      fireEvent.mouseUp(text);
+      expect(document.activeElement).not.toBe(button);
+      expect(selection?.toString()).toBe('Selectable chat text');
     } finally {
+      selection?.removeAllRanges();
       done();
     }
   });
 
-  it('dismisses on a press that focuses an outside input and keeps focus there', async () => {
+  it('dismisses on a press that focuses an outside input and keeps focus there', () => {
     const { button, other, done } = setup();
     try {
       screen.getByRole('slider', { name: /Release delay/ }).focus();
@@ -1170,25 +1183,49 @@ describe('the anchored Voice options panel and focus leaving it', () => {
       if (fireEvent.mouseDown(other)) other.focus();
       expect(button.getAttribute('aria-expanded')).toBe('false');
       expect(document.activeElement).toBe(other);
-      await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 0)); });
+      fireEvent.mouseUp(other);
       expect(document.activeElement).toBe(other);
     } finally {
       done();
     }
   });
 
-  it('dismisses on a press on blank space and restores focus after the press default', async () => {
+  it('restores focus on release after a press on blank space with a collapsed selection', async () => {
     const { button, done } = setup();
     try {
+      const blank = screen.getByTestId('blank-space');
       const slider = screen.getByRole('slider', { name: /Release delay/ });
       slider.focus();
       // A blank press blurs the focused control without focusing a new one.
       act(() => {
-        if (fireEvent.mouseDown(screen.getByTestId('blank-space'))) slider.blur();
+        if (fireEvent.mouseDown(blank)) slider.blur();
       });
       expect(button.getAttribute('aria-expanded')).toBe('false');
+      expect(window.getSelection()?.isCollapsed).toBe(true);
+      await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 10)); });
       expect(document.activeElement === document.body).toBe(true);
-      await waitFor(() => { expect(document.activeElement).toBe(button); });
+      fireEvent.mouseUp(blank);
+      expect(document.activeElement).toBe(button);
+    } finally {
+      done();
+    }
+  });
+
+  it('leaves focus alone when an outside press is cancelled', async () => {
+    const { button, done } = setup();
+    try {
+      const blank = screen.getByTestId('blank-space');
+      const slider = screen.getByRole('slider', { name: /Release delay/ });
+      slider.focus();
+      fireEvent.pointerDown(blank, { pointerId: 1, pointerType: 'mouse', isPrimary: true });
+      act(() => {
+        if (fireEvent.mouseDown(blank)) slider.blur();
+      });
+      expect(button.getAttribute('aria-expanded')).toBe('false');
+      fireEvent.pointerCancel(blank, { pointerId: 1, pointerType: 'mouse', isPrimary: true });
+      fireEvent.mouseUp(blank);
+      await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 10)); });
+      expect(document.activeElement === document.body).toBe(true);
     } finally {
       done();
     }

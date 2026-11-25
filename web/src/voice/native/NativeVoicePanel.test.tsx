@@ -177,21 +177,25 @@ describe('native Voice options disclosure (#2195)', () => {
     if (fireEvent.mouseDown(field)) field.focus();
     expect(toggle.getAttribute('aria-expanded')).toBe('false');
     expect(document.activeElement).toBe(field);
-    await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 0)); });
+    fireEvent.mouseUp(field);
     expect(document.activeElement).toBe(field);
   });
 
-  it('dismisses on a press on blank space and restores focus after the press default', async () => {
+  it('dismisses on a press on blank space and restores focus on the matching pointer release', async () => {
     const { toggle, retry } = await open();
     render(<div data-testid="blank-space" />);
+    const blank = screen.getByTestId('blank-space');
     retry.focus();
     // A blank press blurs the focused control without focusing a new one.
+    fireEvent.pointerDown(blank, { pointerId: 1, pointerType: 'mouse', isPrimary: true });
     act(() => {
-      if (fireEvent.mouseDown(screen.getByTestId('blank-space'))) retry.blur();
+      if (fireEvent.mouseDown(blank)) retry.blur();
     });
     expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.pointerUp(blank, { pointerId: 2, pointerType: 'touch' });
     expect(document.activeElement === document.body).toBe(true);
-    await waitFor(() => { expect(document.activeElement).toBe(toggle); });
+    fireEvent.pointerUp(blank, { pointerId: 1, pointerType: 'mouse', isPrimary: true });
+    expect(document.activeElement).toBe(toggle);
   });
 
   it('Tabs into the panel, Shift+Tabs back, and Tabs out to Leave voice', async () => {

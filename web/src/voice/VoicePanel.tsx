@@ -1482,6 +1482,9 @@ function inOtherModal(el: Element | null, panel: Element | null): boolean {
 }
 
 const tabbable = 'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])';
+// A press on a control or its label can activate it even if the browser
+// leaves focus on the body. Count programmatically focusable elements too.
+const pressControl = 'a[href], area[href], button, input, select, textarea, label, summary, iframe, audio[controls], video[controls], [tabindex], [contenteditable=""], [contenteditable="true"], [contenteditable="plaintext-only"]';
 
 function isDrawn(control: HTMLElement): boolean {
   return (control.offsetParent !== null || control.getClientRects().length > 0) && getComputedStyle(control).visibility === 'visible';
@@ -1529,11 +1532,17 @@ export function useOptionsDisclosure({ hidden, capturing = false, toAbout = fals
   // its own toggle, not an outside press (issue #2189).
   const optionsButton = useRef<HTMLButtonElement>(null);
   const optionsPanel = useRef<HTMLDivElement>(null);
-  // The toggle can be inert while a sheet is open. Restore focus after the
-  // panel closes, and for an outside press wait for the browser's default.
-  const focusBack = useRef<'dismiss' | 'outside' | null>(null);
+  // The toggle can be inert while a sheet is open. Close and Escape restore
+  // focus after the panel closes. An outside press waits for its release.
+  const focusBack = useRef(false);
+  // The release listeners outlive the open panel's dismissal listeners.
+  const outsidePress = useRef<AbortController | null>(null);
+  useLayoutEffect(() => () => { outsidePress.current?.abort(); }, []);
+  useLayoutEffect(() => {
+    if (options || hidden) outsidePress.current?.abort();
+  }, [options, hidden]);
   const closeOptions = useCallback(() => {
-    focusBack.current = 'dismiss';
+    focusBack.current = true;
     setOptions(false);
   }, []);
   // A layout change may hide the anchor or call for a modal sheet (issue
@@ -1543,7 +1552,7 @@ export function useOptionsDisclosure({ hidden, capturing = false, toAbout = fals
     // The button may be inert or covered at that moment (a modal over it): then
     // focus stays where it is.
     const button = optionsButton.current;
-    focusBack.current = optionsPanel.current?.contains(document.activeElement) === true && button !== null && button.closest('[inert]') === null ? 'dismiss' : null;
+    focusBack.current = optionsPanel.current?.contains(document.activeElement) === true && button !== null && button.closest('[inert]') === null;
     setOptions(false);
   }, []);
   // Whether the open panel is a bottom sheet (set by Options from its place).
@@ -1581,24 +1590,61 @@ export function useOptionsDisclosure({ hidden, capturing = false, toAbout = fals
       // the panel stays open beneath, and Escape from that modal returns.
       else if (!sheet && !behind && !capturing && optionsPanel.current?.contains(at) !== true && optionsButton.current?.contains(at) !== true && !inOtherModal(at, optionsPanel.current)) setOptions(false);
     };
+    // Keep the pointer identity for the compatibility mousedown. Dismissing
+    // there also keeps the usual click on touch browsers.
+    let pointerDown: PointerEvent | null = null;
+    const onPointerDown = (e: PointerEvent) => { pointerDown = e; };
     const onPress = (e: MouseEvent) => {
-      const at = e.target;
+      const { target: at, button } = e;
+      const pointerId = pointerDown?.target === at && pointerDown.button === button ? pointerDown.pointerId : undefined;
+      pointerDown = null;
       if (!(at instanceof Node)) return;
       if (optionsPanel.current?.contains(at) === true || optionsButton.current?.contains(at) === true) return;
       // Settings or re-authentication is over the panel (behind): a press on
       // them, their Close and their backdrop among them, is theirs, and the
       // panel stays open beneath, to take focus back when they go.
       if (behind) return;
-      // Let the browser set focus or start a selection, and let the click
-      // reach the pressed control. The lobby handles focus on view changes.
-      focusBack.current = 'outside';
+      // Controls get their usual focus and click. On other space, wait for
+      // release before recovering focus so a held press can turn into a
+      // text selection. The lobby handles focus on view changes.
+      const element = at instanceof Element ? at : at.parentElement;
+      if (element?.closest(pressControl) == null) {
+        outsidePress.current?.abort();
+        const pending = new AbortController();
+        outsidePress.current = pending;
+        const matchesPointer = (event: MouseEvent) => pointerId === undefined || !('pointerId' in event) || event.pointerId === pointerId;
+        const stranded = (el: EventTarget | null) => el === null || el === document.body || (el instanceof Node && optionsPanel.current?.contains(el) === true);
+        const onRelease = (event: MouseEvent) => {
+          if (event.button !== button || !matchesPointer(event) || (event.type === 'click' && event.detail === 0)) return;
+          pending.abort();
+          if (!stranded(document.activeElement) || window.getSelection()?.isCollapsed === false) return;
+          const toggle = optionsButton.current;
+          if (toggle !== null && toggle.closest('[hidden], [inert]') === null) toggle.focus();
+        };
+        const listen = { signal: pending.signal };
+        document.addEventListener('pointerup', onRelease, listen);
+        document.addEventListener('mouseup', onRelease, listen);
+        document.addEventListener('click', onRelease, listen);
+        document.addEventListener('pointercancel', (event) => {
+          if (matchesPointer(event)) pending.abort();
+        }, listen);
+        // A later press of this button means the original release was missed.
+        document.addEventListener('mousedown', (event) => {
+          if (event.button === button) pending.abort();
+        }, { ...listen, capture: true });
+        document.addEventListener('focusin', (event) => {
+          if (!stranded(event.target)) pending.abort();
+        }, listen);
+      }
       setOptions(false);
     };
     document.addEventListener('keydown', onKey);
+    document.addEventListener('pointerdown', onPointerDown, true);
     document.addEventListener('mousedown', onPress);
     document.addEventListener('focusin', onFocus);
     return () => {
       document.removeEventListener('keydown', onKey);
+      document.removeEventListener('pointerdown', onPointerDown, true);
       document.removeEventListener('mousedown', onPress);
       document.removeEventListener('focusin', onFocus);
     };
@@ -1606,22 +1652,8 @@ export function useOptionsDisclosure({ hidden, capturing = false, toAbout = fals
 
   useEffect(() => {
     if (options) return;
-    const reason = focusBack.current;
-    focusBack.current = null;
-    if (hidden || reason === null) return;
-    if (reason === 'dismiss') {
-      optionsButton.current?.focus();
-      return;
-    }
-    // After the press's default action, only recover focus from the page
-    // body or the closed panel. An input or button that took focus keeps it.
-    const timer = window.setTimeout(() => {
-      const at = document.activeElement;
-      const button = optionsButton.current;
-      if (button === null || button.closest('[hidden], [inert]') !== null) return;
-      if (at === null || at === document.body || optionsPanel.current?.contains(at) === true) button.focus();
-    }, 0);
-    return () => { window.clearTimeout(timer); };
+    if (!hidden && focusBack.current) optionsButton.current?.focus();
+    focusBack.current = false;
   }, [options, hidden]);
 
   // The sheet is modal (role dialog, aria-modal). The voice section makes
