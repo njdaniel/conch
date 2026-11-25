@@ -511,7 +511,11 @@ export function Lobby({
     const first = stops[0];
     const last = stops[stops.length - 1];
     if (first === undefined || last === undefined) return;
-    const at = document.activeElement;
+    // In an open row menu, the menu's own ⋯ button is the stop: Tab from it
+    // closes the menu, and the page goes on from the button, not from an item.
+    const focused = document.activeElement;
+    const menu = focused?.closest('[role="menu"]') ?? null;
+    const at = menu === null || !body.contains(menu) ? focused : (menu.parentElement?.querySelector('[aria-haspopup="menu"]') ?? focused);
     if (event.shiftKey ? at === first : at === last) {
       event.preventDefault();
       (event.shiftKey ? last : first).focus();

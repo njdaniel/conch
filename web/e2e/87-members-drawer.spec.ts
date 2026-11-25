@@ -17,6 +17,28 @@ const list = (page: Page) => page.getByRole('region', { name: 'Members list' });
 // inDrawer says whether focus is inside the members panel now.
 const inDrawer = (page: Page) => page.evaluate(() => document.getElementById('members-body')?.contains(document.activeElement) === true);
 
+// The drawer's stops as Lobby's Tab wrap reads them: the list itself, then the
+// controls inside it that are tabbable, shown and not inert.
+type End = 'first' | 'last';
+const drawerStop = (page: Page, end: End) => page.evaluate((which) => {
+  const body = document.getElementById('members-body');
+  if (body === null) throw new Error('no drawer');
+  const stops = [body, ...body.querySelectorAll<HTMLElement>('a[href], button, input, select, textarea, summary, [tabindex]')].filter(
+    (el) => el.tabIndex >= 0 && !el.matches(':disabled') && el.closest('[hidden], [inert]') === null,
+  );
+  const stop = which === 'first' ? stops[0] : stops[stops.length - 1];
+  if (stop === undefined) throw new Error('no stops');
+  stop.focus();
+}, end);
+const onStop = (page: Page, end: End) => page.evaluate((which) => {
+  const body = document.getElementById('members-body');
+  if (body === null) return false;
+  const stops = [body, ...body.querySelectorAll<HTMLElement>('a[href], button, input, select, textarea, summary, [tabindex]')].filter(
+    (el) => el.tabIndex >= 0 && !el.matches(':disabled') && el.closest('[hidden], [inert]') === null,
+  );
+  return document.activeElement === (which === 'first' ? stops[0] : stops[stops.length - 1]);
+}, end);
+
 for (const [name, width, height] of [
   ['phone 390×844', 390, 844],
   ['tablet 1050×800', 1050, 800],
@@ -28,29 +50,19 @@ for (const [name, width, height] of [
     await members(page).focus();
     await page.keyboard.press('Enter');
     await expect(list(page)).toBeFocused();
-    // The drawer's stops, in Tab order from the list itself, until Tab comes
-    // round to it again: focus reaches controls inside and wraps at both ends.
-    const first = await page.evaluateHandle(() => document.activeElement);
-    const stops = [first];
-    for (let i = 0; i < 200; i++) {
-      await page.keyboard.press('Tab');
-      expect(await inDrawer(page), `Tab #${String(i + 1)} left the drawer, at ${await page.evaluate(() => document.activeElement?.outerHTML.slice(0, 120) ?? 'nothing')}`).toBe(true);
-      const now = await page.evaluateHandle(() => document.activeElement);
-      if (await page.evaluate(([a, b]) => a === b, [now, first] as const)) break;
-      stops.push(now);
-    }
-    expect(stops.length, 'Tab reached a control inside the drawer').toBeGreaterThan(1);
-    expect(stops.length, 'Tab came round to the list').toBeLessThan(200);
-    // Tab from the last stop landed on the first (the loop's break), and
-    // Shift+Tab from the first lands on the last.
+    // The ends of the drawer, however many people it holds: Tab from the
+    // last stop lands on the first, Shift+Tab from the first on the last.
+    await drawerStop(page, 'last');
+    await page.keyboard.press('Tab');
+    expect(await onStop(page, 'first'), 'Tab from the last stop lands on the first').toBe(true);
     await page.keyboard.press('Shift+Tab');
-    const last = stops[stops.length - 1];
-    if (last === undefined) throw new Error('no stops');
-    expect(await page.evaluate(([a, b]) => a === b, [await page.evaluateHandle(() => document.activeElement), last] as const), 'Shift+Tab from the first stop lands on the last').toBe(true);
-    // And on, backwards, never out.
-    for (let i = 0; i < 30; i++) {
-      await page.keyboard.press('Shift+Tab');
-      expect(await inDrawer(page), `Shift+Tab #${String(i + 1)} left the drawer`).toBe(true);
+    expect(await onStop(page, 'last'), 'Shift+Tab from the first stop lands on the last').toBe(true);
+    // And on, both ways, never out.
+    for (const key of ['Tab', 'Shift+Tab']) {
+      for (let i = 0; i < 30; i++) {
+        await page.keyboard.press(key);
+        expect(await inDrawer(page), `${key} #${String(i + 1)} left the drawer, at ${await page.evaluate(() => document.activeElement?.outerHTML.slice(0, 120) ?? 'nothing')}`).toBe(true);
+      }
     }
     await page.keyboard.press('Escape');
     await expect(list(page)).toBeHidden();
@@ -133,9 +145,11 @@ async function principalId(world: Parameters<typeof call>[0], who: 'browser'): P
   return id;
 }
 
-// A row's menu is open in the drawer; the browser's own Tab leaves it, and
-// focus goes where Tab goes, inside the drawer, not to the drawer's body.
-test('P2196 tablet 1050×800: Tab and Shift+Tab out of a row menu stay in the drawer, where the browser puts them', async ({ meet, world }) => {
+// A row's menu is open in the drawer, and the browser's own Tab leaves it:
+// from a row in the middle, Tab goes to the next stop and Shift+Tab to the
+// row's ⋯, with the page still holding focus; from the drawer's last stop,
+// Tab wraps to its first and does not leave the page for the browser's chrome.
+test('P2196 tablet 1050×800: Tab and Shift+Tab out of a row menu stay in the drawer, and wrap at its last stop', async ({ meet, world }) => {
   const suffix = Date.now().toString(36).slice(-5);
   const channel = `p2196m-${suffix}`;
   const name = `q${String(Math.floor(Math.random() * 100000)).padStart(5, '0')}m`;
@@ -143,7 +157,8 @@ test('P2196 tablet 1050×800: Tab and Shift+Tab out of a row menu stay in the dr
   const id = (await ok(world, world.tokens.operator, 'POST', '/v0/principals', createPrincipalResponse, { kind: 'human', name })).principal.id;
   await ok(world, world.tokens.operator, 'POST', `/v1/principals/${String(id)}/credentials`, createCredentialResponseV1, { label: name });
   expect((await call(world, world.tokens.operator, 'PUT', `/v1/channels/${encodeURIComponent(channel)}/members/${String(id)}`)).status).toBeLessThan(300);
-  for (const key of ['Tab', 'Shift+Tab']) {
+  const hasFocus = (page: Page) => page.evaluate(() => document.hasFocus());
+  const open = async () => {
     const { page } = await meet({ viewport: { width: 1050, height: 800 } });
     await page.goto(world.appUrl);
     await (await credentialField(page)).fill(world.tokens.operator);
@@ -153,21 +168,57 @@ test('P2196 tablet 1050×800: Tab and Shift+Tab out of a row menu stay in the dr
     await openChannel(page, channel);
     await members(page).focus();
     await page.keyboard.press('Enter');
-    const more = list(page).getByRole('button', { name: `Actions for ${name}` }).first();
+    await expect(list(page)).toBeFocused();
+    return page;
+  };
+
+  for (const key of ['Tab', 'Shift+Tab']) {
+    const page = await open();
+    // The People list's row, not the Community's.
+    const more = list(page).getByRole('list', { name: /^(Online|Offline)/ }).getByRole('button', { name: `Actions for ${name}` });
     await more.focus();
+    // The stop after the button, with the menu shut: marked now.
+    await page.evaluate(() => {
+      const body = document.getElementById('members-body');
+      const at = document.activeElement;
+      if (body === null || at === null) throw new Error('no drawer');
+      const stops = [body, ...body.querySelectorAll<HTMLElement>('a[href], button, input, select, textarea, summary, [tabindex]')].filter(
+        (el) => el.tabIndex >= 0 && !el.matches(':disabled') && el.closest('[hidden], [inert]') === null,
+      );
+      stops[stops.indexOf(at as HTMLElement) + 1]?.setAttribute('data-next-stop', '');
+    });
     await page.keyboard.press('Enter');
     await expect(list(page).getByRole('menu')).toBeVisible();
     await page.keyboard.press(key);
     await expect(list(page).getByRole('menu')).toHaveCount(0);
     // Past the browser's own move and any recovery after it.
     await page.waitForTimeout(300);
+    expect(await hasFocus(page), `${key} left the page for the browser's chrome`).toBe(true);
     expect(await inDrawer(page), `${key} left the drawer`).toBe(true);
-    // Where the browser puts Shift+Tab from the removed menu is the row's
-    // button. Where it puts Tab is its own (the stop after the button, or the
-    // wrap to the drawer's first stop when its starting point fell at the end),
-    // so only that it did not leave the drawer is held, above.
     if (key === 'Shift+Tab') await expect(more).toBeFocused();
+    else expect(await page.evaluate(() => document.activeElement?.hasAttribute('data-next-stop') === true), `Tab landed on the next stop, not on ${await page.evaluate(() => document.activeElement?.outerHTML.slice(0, 140) ?? '')} (next: ${await page.evaluate(() => document.querySelector('[data-next-stop]')?.outerHTML.slice(0, 140) ?? 'gone')})`).toBe(true);
   }
+
+  // From the drawer's last stop, an operator's Community row: its ⋯ menu open.
+  const page = await open();
+  await drawerStop(page, 'last');
+  expect(await page.evaluate(() => document.activeElement?.classList.contains('more-actions') === true), 'the last stop is a row ⋯').toBe(true);
+  await page.keyboard.press('Enter');
+  await expect(list(page).getByRole('menu')).toBeVisible();
+  // Whether the page handled the Tab itself (the wrap), as seen after its
+  // handlers by a listener on the window: a Tab it left to the browser would
+  // go on to the browser's chrome in a window that has one.
+  await page.evaluate(() => {
+    window.addEventListener('keydown', (event) => {
+      if (event.key === 'Tab') Object.assign(window, { tabHandled: event.defaultPrevented });
+    });
+  });
+  await page.keyboard.press('Tab');
+  expect(await page.evaluate(() => (window as unknown as { tabHandled?: boolean }).tabHandled), 'the page wrapped the Tab itself').toBe(true);
+  await expect(list(page).getByRole('menu')).toHaveCount(0);
+  await page.waitForTimeout(300);
+  expect(await hasFocus(page), 'Tab left the page for the browser\'s chrome').toBe(true);
+  expect(await onStop(page, 'first'), 'Tab wrapped to the first stop').toBe(true);
 });
 
 // The invite panel is hidden, not closed, while the drawer is over the page:
