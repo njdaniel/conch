@@ -293,6 +293,11 @@ export function Lobby({
     [joiningAsks],
   );
   const asking = overlay !== undefined && overlay !== null;
+  // The members panel is drawn over the page below the wide breakpoint, with a
+  // backdrop, and then it is a modal drawer like Settings: focus goes into it,
+  // the rest of the page is inert, and focus goes back to Members after. As a
+  // side column (wide) it is none of that.
+  const membersOver = panelOpen && !wideNow;
   // The voice options sheet is open (VoiceSheet): the page behind it is inert
   // with the same attribute as Settings and re-authentication, in one
   // expression each. Re-authentication outranks it: the sheet is told it is
@@ -308,11 +313,11 @@ export function Lobby({
   }, []);
   // Settings, re-authentication or one of those is up over the sheet: told to
   // it as behind, so it takes focus back when the modal over it goes.
-  const behind = settingsOpen || asking || overlays > 0;
+  const behind = settingsOpen || asking || membersOver || overlays > 0;
   const sheetLink = useMemo(() => ({ report: setSheetOpen, blocked: asking, behind }), [asking, behind]);
   // What the lobby does not draw but the page does (the desktop strip, the
   // update notices) is inert for the same modals: said here, once, to them.
-  const modalNow = settingsOpen || asking || voiceSheet;
+  const modalNow = settingsOpen || asking || voiceSheet || membersOver;
   useEffect(() => {
     setPageModal(modalNow);
     return () => {
@@ -332,10 +337,6 @@ export function Lobby({
   const membersBody = useRef<HTMLDivElement>(null);
   const settingsButton = useRef<HTMLButtonElement>(null);
   const settingsHeading = useRef<HTMLHeadingElement>(null);
-  // The members panel is drawn over the page below the wide breakpoint, and
-  // then behaves as one: focus goes into it, and back to Members after.
-  const membersOver = panelOpen && !wideNow;
-
   // The question takes focus on its safe answer, so Enter keeps the account.
   useEffect(() => {
     if (confirming !== null) cancel.current?.focus();
@@ -380,8 +381,15 @@ export function Lobby({
       if (!sheetModal.current && stranded) settingsButton.current?.focus();
     }
   }, [settingsOpen, asking]);
+  // Focus goes back to Members once the panel has closed: until then the
+  // button is inert behind it, and cannot take focus.
+  const membersClosed = useRef(false);
   useEffect(() => {
     if (membersOver) membersBody.current?.focus();
+    else if (membersClosed.current) {
+      membersClosed.current = false;
+      membersButton.current?.focus();
+    }
   }, [membersOver]);
   // Arriving (signing in, or a sign-in restored on reload) leaves focus on
   // the page's body, where the next Tab starts from the top: the first time a
@@ -409,7 +417,31 @@ export function Lobby({
   }
   function closeMembers() {
     setPanelOpen(false);
-    membersButton.current?.focus();
+    membersClosed.current = true;
+  }
+  // Everything behind the drawn-over members panel is inert, so Tab past its
+  // last control would leave the page for the browser's own chrome: it wraps
+  // instead, first to last and last to first, as in any modal dialog. A key
+  // something inside has already used (a menu, the profile card) is left alone.
+  function onMembersKey(event: KeyboardEvent) {
+    if (event.key === 'Escape') {
+      onEscape(closeMembers)(event);
+      return;
+    }
+    if (event.key !== 'Tab' || event.defaultPrevented) return;
+    const body = membersBody.current;
+    if (body === null) return;
+    const stops = [body, ...body.querySelectorAll<HTMLElement>('a[href], button, input, select, textarea, summary, [tabindex]')].filter(
+      (el) => el.tabIndex >= 0 && !el.matches(':disabled') && el.closest('[hidden], [inert]') === null,
+    );
+    const first = stops[0];
+    const last = stops[stops.length - 1];
+    if (first === undefined || last === undefined) return;
+    const at = document.activeElement;
+    if (event.shiftKey ? at === first : at === last) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    }
   }
   // Escape closes the panel focus is in, and the panel's button gets focus.
   const onEscape = (close: () => void) => (event: KeyboardEvent) => {
@@ -426,8 +458,8 @@ export function Lobby({
       <div ref={lobbyEl} className={`${phone ? `lobby phone view-${view}${live ? ' in-voice' : ''}` : 'lobby'}${band === undefined ? '' : ' has-band'}`}>
         {/* While Settings is open the rest of the page is inert: the panel is
             modal, and focus cannot wander behind its backdrop. */}
-        <div className="top-group" inert={band !== undefined && (settingsOpen || asking || voiceSheet)}>
-        <header className="topbar" inert={settingsOpen || asking || voiceSheet}>
+        <div className="top-group" inert={band !== undefined && (settingsOpen || asking || voiceSheet || membersOver)}>
+        <header className="topbar" inert={settingsOpen || asking || voiceSheet || membersOver}>
           <h1 className="brand">Conch</h1>
           <div role="status" aria-label="Status" className="status">
             <Avatar id={me} name={name} />
@@ -471,9 +503,11 @@ export function Lobby({
         </header>
         {band}
         </div>
+        {/* The areas hold the members panel, which stays live while it is drawn over
+            the page: every other part of them is inert then, one by one. */}
         <div className={panelOpen ? 'areas' : 'areas side-closed'} inert={settingsOpen || asking || voiceSheet}>
           {/* The switcher's entry is above the Channels navigation, not in it: that holds channel controls only. */}
-          <div className="channels">
+          <div className="channels" inert={membersOver}>
             {channels.loaded ? (
             <ChannelNav
               channels={inVisualOrder}
@@ -556,7 +590,7 @@ export function Lobby({
           </nav>
             {channels.loaded && visit === undefined && channels.channels.length > 0 ? <GroupsPanel controls={arranged} /> : null}
           </div>
-          <main className="centre">
+          <main className="centre" inert={membersOver}>
             <div ref={setStage} className="stage" />
             <section ref={conversationEl} aria-label="Conversation" className="conversation">
               {temporary === true ? <TemporaryBanner /> : null}
@@ -578,7 +612,7 @@ export function Lobby({
               tabIndex={panelOpen ? 0 : undefined}
               aria-label="Members list"
               role="region"
-              onKeyDown={membersOver ? onEscape(closeMembers) : undefined}
+              onKeyDown={membersOver ? onMembersKey : undefined}
             >
               {membersOver ? (
                 <button type="button" className="icon-button close" onClick={closeMembers}>
@@ -591,7 +625,7 @@ export function Lobby({
           </aside>
           {membersOver ? <div className="backdrop" onClick={closeMembers} /> : null}
         </div>
-        <div ref={dock} className="dock" inert={settingsOpen || asking}>
+        <div ref={dock} className="dock" inert={settingsOpen || asking || membersOver}>
           <VoiceLive.Provider value={setLive}>
             <MicTestShown.Provider value={!phone || view === 'voice'}>
               <VoiceStrip.Provider value={phone && view !== 'voice' ? openVoice : null}>
@@ -605,7 +639,7 @@ export function Lobby({
           </VoiceLive.Provider>
         </div>
         {phone ? (
-          <nav aria-label="Main navigation" className="phone-nav" inert={settingsOpen || asking}>
+          <nav aria-label="Main navigation" className="phone-nav" inert={settingsOpen || asking || membersOver}>
             {phoneViews.map(({ view: v, label }) => (
               <button
                 key={v}

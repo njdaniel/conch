@@ -181,6 +181,109 @@ describe('Members', () => {
   });
 });
 
+// Issue #2196: below the wide breakpoint the members panel is a modal drawer
+// with a backdrop, and the lobby, the one owner of inert, makes the rest of the
+// page inert while it is over it.
+describe('Members as a modal drawer', () => {
+  const inert = (selector: string) => document.querySelector(selector)?.hasAttribute('inert');
+  const list = () => screen.getByRole('region', { name: 'Members list' });
+  function Outside() {
+    return <button type="button" inert={usePageModal()}>Servers</button>;
+  }
+  function Behind() {
+    return <p>{useContext(VoiceSheet).behind ? 'behind' : 'clear'}</p>;
+  }
+
+  it('makes the channels, conversation, topbar, dock and nav inert, and not the panel', () => {
+    windowOf(false);
+    lobby();
+    for (const s of ['.channels', '.centre', '.topbar', '.dock', '.areas']) expect(inert(s), s).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Members' }));
+    expect(inert('.channels')).toBe(true);
+    expect(inert('.centre')).toBe(true);
+    expect(inert('.topbar')).toBe(true);
+    expect(inert('.dock')).toBe(true);
+    // The panel, its close button and the backdrop are live.
+    expect(inert('.areas')).toBe(false);
+    expect(list().closest('[inert]')).toBeNull();
+    expect(document.querySelector('.backdrop')?.closest('[inert]')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Close' }).closest('[inert]')).toBeNull();
+  });
+
+  it('clears on close, and on widening', () => {
+    const size = windowOf(false);
+    lobby();
+    fireEvent.click(screen.getByRole('button', { name: 'Members' }));
+    expect(inert('.centre')).toBe(true);
+    fireEvent.keyDown(list(), { key: 'Escape' });
+    for (const s of ['.channels', '.centre', '.topbar', '.dock']) expect(inert(s), s).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Members' }));
+    expect(inert('.centre')).toBe(true);
+    size.resize(true);
+    for (const s of ['.channels', '.centre', '.topbar', '.dock', '.areas']) expect(inert(s), s).toBe(false);
+  });
+
+  it('is nothing at a wide width, where Members is a side column', () => {
+    windowOf(true);
+    lobby();
+    for (const s of ['.channels', '.centre', '.topbar', '.dock', '.areas']) expect(inert(s), s).toBe(false);
+  });
+
+  it('returns focus to the Members button on Escape, the button being inert until then', () => {
+    windowOf(false);
+    lobby();
+    const button = screen.getByRole('button', { name: 'Members' });
+    fireEvent.click(button);
+    expect(document.activeElement).toBe(list());
+    fireEvent.keyDown(list(), { key: 'Escape' });
+    expect(document.activeElement).toBe(button);
+    expect(button.closest('[inert]')).toBeNull();
+  });
+
+  it('wraps Tab and Shift+Tab inside the panel, so focus never reaches the browser chrome', () => {
+    windowOf(false);
+    lobby();
+    fireEvent.click(screen.getByRole('button', { name: 'Members' }));
+    const close = screen.getByRole('button', { name: 'Close' });
+    // The list takes focus first, then Close is the last stop.
+    fireEvent.keyDown(list(), { key: 'Tab', shiftKey: true });
+    expect(document.activeElement).toBe(close);
+    fireEvent.keyDown(close, { key: 'Tab' });
+    expect(document.activeElement).toBe(list());
+    // In the middle of the panel Tab is the browser's own.
+    expect(fireEvent.keyDown(list(), { key: 'Tab' })).toBe(true);
+  });
+
+  it('returns focus to the Members button on a click on the backdrop', () => {
+    windowOf(false);
+    lobby();
+    const button = screen.getByRole('button', { name: 'Members' });
+    fireEvent.click(button);
+    fireEvent.click(document.querySelector('.backdrop') as Element);
+    expect(screen.queryByRole('region', { name: 'Members list' })).toBeNull();
+    expect(document.activeElement).toBe(button);
+  });
+
+  it('says to the page outside the lobby that a modal is up, and to the sheet that it is behind', () => {
+    windowOf(false);
+    render(
+      <>
+        <Outside />
+        {lobbyTree(<Behind />, null)}
+      </>,
+    );
+    const outside = () => screen.getByRole('button', { name: 'Servers', hidden: true });
+    expect(outside().hasAttribute('inert')).toBe(false);
+    expect(screen.getByText('clear')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Members' }));
+    expect(outside().hasAttribute('inert')).toBe(true);
+    expect(screen.getByText('behind')).toBeTruthy();
+    fireEvent.keyDown(list(), { key: 'Escape' });
+    expect(outside().hasAttribute('inert')).toBe(false);
+    expect(screen.getByText('clear')).toBeTruthy();
+  });
+});
+
 describe('what is playing', () => {
   it('is never mounted again when panels open and close or the window changes width', () => {
     const size = windowOf(true);

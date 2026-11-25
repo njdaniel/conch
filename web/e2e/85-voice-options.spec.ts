@@ -346,7 +346,10 @@ test.describe('Voice options', () => {
       await expect(card).toBeVisible();
       const inCard = () => page.evaluate(() => document.activeElement?.closest('.profile-card') != null);
       expect(await inCard(), 'the card keeps focus').toBe(true);
-      expect(await page.locator('[inert]').count(), 'nothing is left inert').toBe(0);
+      // Members is drawn over the page now (issue #2196): the page behind it is
+      // inert, and the card and the drawer are not.
+      expect(await page.evaluate(() => document.querySelector('.profile-card')?.closest('[inert]') ?? null), 'the card is not inert').toBeNull();
+      expect(await list.evaluate((el) => el.closest('[inert]')), 'the drawer is not inert').toBeNull();
       await page.keyboard.press('Escape');
       await expect(card).toHaveCount(0);
     } finally {
@@ -384,6 +387,10 @@ test.describe('Voice options', () => {
             await page.keyboard.press('Enter');
           }
           await expect(members).toHaveAttribute('aria-expanded', 'true');
+          // The drawer is modal (issue #2196) and the navigation inert behind
+          // it: it closes, by keyboard, before the Voice view is chosen.
+          await page.keyboard.press('Escape');
+          await expect(members).toHaveAttribute('aria-expanded', 'false');
         }
         await nav.getByRole('button', { name: 'Voice' }).focus();
         await page.keyboard.press('Enter');
