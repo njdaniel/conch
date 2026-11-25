@@ -267,6 +267,11 @@ export interface Platform {
   // client can run: the desktop shell asks which server to talk to. The
   // browser has none; it is served from its server.
   readonly Shell?: ComponentType<{ readonly children: ReactNode }>;
+  // The sign-in form's "Keep me signed in on this computer" choice and the
+  // place's storage status (issue #2077), where the place keeps sign-ins
+  // itself: the desktop shell. The browser has none; its sign-in follows the
+  // browser's own storage, and its password manager.
+  readonly SignInKeep?: ComponentType;
   readonly http: HttpTransport;
   readonly sockets: SocketTransport;
   readonly credentials: CredentialStore;

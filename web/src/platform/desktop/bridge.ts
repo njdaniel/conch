@@ -74,13 +74,27 @@ export interface ProfileView {
 
 // Whether credentials are kept across restarts. session-only: they are not,
 // and reason says why; unavailable: the store did not answer (Retry).
+// no-keyring: the desktop names a keyring, but none gave a key (there is none,
+// it is locked, or it refused), issue #2077.
 export type StorageStatus =
   | { readonly kind: 'protected' }
-  | { readonly kind: 'session-only'; readonly reason: 'unavailable' | 'insecure-backend' | 'unknown-backend' | 'unsafe-root' }
+  | { readonly kind: 'session-only'; readonly reason: 'unavailable' | 'insecure-backend' | 'no-keyring' | 'unknown-backend' | 'unsafe-root' }
   | { readonly kind: 'unavailable' };
 
 // Something the last sign-in, switch or sign-out has to tell the person.
-export type ProfileNotice = 'operator-window-only' | 'sign-in-again' | 'could-not-verify' | 'account-mismatch' | 'revocation-unconfirmed' | 'revocation-unsent' | 'teardown-slow';
+// not-kept: the keyring did not take this sign-in, so it lasts until the app
+// closes. sign-in-ended: the server no longer accepts the saved sign-in
+// (signed out elsewhere, revoked or expired), issue #2077.
+export type ProfileNotice =
+  | 'operator-window-only'
+  | 'sign-in-again'
+  | 'sign-in-ended'
+  | 'not-kept'
+  | 'could-not-verify'
+  | 'account-mismatch'
+  | 'revocation-unconfirmed'
+  | 'revocation-unsent'
+  | 'teardown-slow';
 
 // Whether the active server's release is one this app was tested with
 // (issue #946). none: no server is active. supported: it is on the list.
@@ -108,6 +122,13 @@ export interface ProfilesView {
   readonly profiles: readonly ProfileView[];
   readonly active: string | null;
   readonly storage: StorageStatus;
+  // The person's "Keep me signed in on this computer" choice for the window in
+  // force (issue #2077): true unless they turned it off. It is kept only where
+  // storage is protected, and never for an operator.
+  readonly keep: boolean;
+  // Where the help for staying signed in is, for this platform; null where
+  // there is none yet. Main names it; the page only links it.
+  readonly keepHelp: string | null;
   // profiles.json could not be read: only profilesRecover works.
   readonly recovery: boolean;
   readonly notice: ProfileNotice | null;
@@ -340,6 +361,9 @@ export interface ConchDesktopBridge {
   profileSwitch(id: string | null): Promise<boolean>;
   // Re-checks whether credentials can be kept, and keeps those held in memory.
   storageRetry(): Promise<ProfilesView>;
+  // The "Keep me signed in on this computer" choice for the window in force
+  // (issue #2077). Off keeps a member's sign-in in main's memory only.
+  profileKeep(keep: boolean): Promise<ProfilesView>;
   // Starts an empty list when profiles.json could not be read.
   profilesRecover(): Promise<ProfilesView>;
 }
@@ -683,6 +707,7 @@ export type IntegrationWhy =
   | 'portal-unasked'
   | 'secret-store-missing'
   | 'insecure-backend'
+  | 'no-keyring'
   | 'unknown-backend'
   | 'unsafe-root'
   | 'secret-store-silent'

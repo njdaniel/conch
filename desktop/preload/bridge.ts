@@ -412,6 +412,7 @@ export function createBridge(
     profileRemove: call('profileRemove'),
     profileSwitch: call('profileSwitch'),
     storageRetry: call('storageRetry'),
+    profileKeep: call('profileKeep'),
     profilesRecover: call('profilesRecover'),
     // Native voice (issue #1374). No press or release: the helper reads the
     // talk key itself.

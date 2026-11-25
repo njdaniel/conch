@@ -254,6 +254,22 @@ describe('every invocation is checked before anything else', () => {
   });
 });
 
+// The "Keep me signed in on this computer" choice (issue #2077): one boolean,
+// handed to the profiles as it is, and nothing else accepted.
+describe('profileKeep', () => {
+  it.each([true, false])('hands the choice %s to the profiles', async (keep) => {
+    const f = fixture();
+    expect((await f.ipc.invoke(f.event(), 'profileKeep', [keep])).ok).toBe(true);
+    expect(f.calls).toEqual([['profiles.setKeep', [keep]]]);
+  });
+
+  it.each([[[]], [['true']], [[1]], [[{ keep: true }]], [[true, false]], [[null]]])('refuses %j', async (args) => {
+    const f = fixture();
+    expect(await f.ipc.invoke(f.event(), 'profileKeep', args)).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toEqual([]);
+  });
+});
+
 describe('arguments', () => {
   it('refuses a name that is not a bridge function', async () => {
     const f = fixture();

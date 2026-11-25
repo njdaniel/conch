@@ -7,13 +7,18 @@
 // decision "store or session-only" and the sealing; classify.ts owns the rule,
 // files.ts the disk. It touches no IPC and no preload (D2-6 wires it).
 //
-// Rules: under any classification but `protected`, nothing is written. A
+// Rules: under any classification but `protected`, nothing is written, and on
+// Linux a ciphertext is written only if it is sealed with the keyring's key
+// (classify.ts, issue #2077): one sealed with Chromium's built-in key is
+// refused even when the classification said protected a moment before. A
 // decrypt error or corrupt file makes that one profile's credential unusable
 // and touches no other profile's file. A provider that cannot answer is a
-// retryable state, never an erase. Plain-text mode is never switched on, and
-// nothing here logs a secret, ciphertext or a path.
+// retryable state, never an erase. A Linux file sealed with the built-in key
+// (written before #2077) protects nothing: it is deleted unread, and the
+// person signs in again. Plain-text mode is never switched on, and nothing
+// here logs a secret, ciphertext or a path.
 import type { MainLog } from '../diagnostics.ts';
-import { classify, type Classification, type SafeStorageProbe } from './classify.ts';
+import { classify, linuxSeal, type Classification, type SafeStorageProbe } from './classify.ts';
 import {
   readCredential,
   removeProfile,
@@ -89,7 +94,10 @@ export function createVault(deps: VaultDeps): Vault {
   const write = (id: string, data: Uint8Array): Promise<void> =>
     writeCredential(deps.root, id, data, { syncDir: deps.syncDir });
 
-  const event = (name: NotProtected['kind'] | 'unsafe-root' | 'put-failed' | 'read-failed' | 'corrupt' | 'decrypt-failed' | 'reencrypt-failed' | 'remove-failed', profileId: string): void => {
+  const event = (
+    name: NotProtected['kind'] | 'unsafe-root' | 'no-keyring' | 'built-in-key-removed' | 'put-failed' | 'read-failed' | 'corrupt' | 'decrypt-failed' | 'reencrypt-failed' | 'remove-failed',
+    profileId: string,
+  ): void => {
     deps.log(`vault: ${name}`, { ring: true });
     deps.log(`vault: ${name} profile=${profileId}`);
   };
@@ -100,8 +108,23 @@ export function createVault(deps: VaultDeps): Vault {
       event(c.kind, profileId);
       return c;
     }
+    let sealed: Buffer;
     try {
-      await write(profileId, await deps.storage.encryptStringAsync(secret));
+      sealed = await deps.storage.encryptStringAsync(secret);
+    } catch {
+      event('put-failed', profileId);
+      return { kind: 'failed' };
+    }
+    const seal = deps.platform === 'linux' ? linuxSeal(sealed) : 'keyring';
+    if (seal !== 'keyring') {
+      // The keyring stopped giving its key between the classification and
+      // this seal (locked, or gone): never write what the built-in key, or a
+      // key this build does not know, sealed.
+      event('no-keyring', profileId);
+      return { kind: 'sessionOnly', reason: seal === 'built-in' ? 'no-keyring' : 'unknown-backend' };
+    }
+    try {
+      await write(profileId, sealed);
     } catch (err) {
       if (err instanceof UnsafeRoot) {
         // Not a transient failure: the user must fix the directory. Reported as
@@ -135,6 +158,20 @@ export function createVault(deps: VaultDeps): Vault {
       event('corrupt', profileId);
       return { kind: 'unusable' };
     }
+    if (deps.platform === 'linux' && linuxSeal(read.data) === 'built-in') {
+      // Sealed with Chromium's built-in key (by a build before #2077, on a
+      // desktop with no keyring that answered): anyone who can read the file
+      // can open it. It is never decrypted or used; it is deleted, and the
+      // person signs in again.
+      try {
+        await removeProfile(deps.root, profileId);
+      } catch {
+        event('remove-failed', profileId);
+        return { kind: 'unusable' };
+      }
+      event('built-in-key-removed', profileId);
+      return { kind: 'unusable' };
+    }
     const c = await state();
     if (c.kind !== 'protected') {
       // The file may be sealed with a key we would not trust now (a hardcoded
@@ -151,7 +188,11 @@ export function createVault(deps: VaultDeps): Vault {
     }
     if (opened.shouldReEncrypt) {
       try {
-        await write(profileId, await deps.storage.encryptStringAsync(opened.result));
+        const resealed = await deps.storage.encryptStringAsync(opened.result);
+        // The same rule as a put: on Linux only the keyring's key is written.
+        // Otherwise the old file, sealed with the keyring, stays as it is.
+        if (deps.platform === 'linux' && linuxSeal(resealed) !== 'keyring') event('no-keyring', profileId);
+        else await write(profileId, resealed);
       } catch {
         // The secret is still good; the next get tries again.
         event('reencrypt-failed', profileId);

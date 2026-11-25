@@ -79,6 +79,7 @@ const named: Record<
   profileRemove: true,
   profileSwitch: true,
   storageRetry: true,
+  profileKeep: true,
   profilesRecover: true,
   uploadFile: true,
   downloadFile: true,
@@ -158,7 +159,9 @@ describe('the preload', () => {
     expect(invoke).toHaveBeenLastCalledWith('conch:notifyClose', { tag: 't' });
     await bridge.settingsSet({ launchAtLogin: true });
     expect(invoke).toHaveBeenLastCalledWith('conch:settingsSet', { launchAtLogin: true });
-    expect(INVOKED_FUNCTIONS).toHaveLength(70);
+    await bridge.profileKeep(false);
+    expect(invoke).toHaveBeenLastCalledWith('conch:profileKeep', false);
+    expect(INVOKED_FUNCTIONS).toHaveLength(71);
   });
 
   it('rejects with a bare "refused" when main refuses, or answers anything but an envelope', async () => {

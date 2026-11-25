@@ -70,6 +70,7 @@ function install(supportsV3 = false): Subscription[] {
     profileRemove: unexpected('profileRemove'),
     profileSwitch: unexpected('profileSwitch'),
     storageRetry: unexpected('storageRetry'),
+    profileKeep: unexpected('profileKeep'),
     profilesRecover: unexpected('profilesRecover'),
     uploadFile: unexpected('uploadFile'),
     downloadFile: unexpected('downloadFile'),

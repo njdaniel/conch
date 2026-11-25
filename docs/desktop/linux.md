@@ -97,9 +97,9 @@ conch-desktop
    `localhost`.
 2. Sign in. You can add more servers later and switch between them.
 3. Where it is possible, the app keeps your sign-in on this computer, locked
-   by your desktop's password keyring. If there is no usable keyring, the app
-   says why. It then keeps your sign-in only until you close the app, and you
-   sign in again next time.
+   by your desktop's password keyring. The sign-in form has **Keep me signed
+   in on this computer**, on by default, and says beside it whether your
+   keyring can keep the sign-in. See [Staying signed in](#staying-signed-in).
 4. To talk with a key, set the talk key in the app's voice settings. The app
    shows the permission it needs and asks first. The package never sets it up
    for you.
@@ -112,6 +112,37 @@ To see what works on your computer, choose **Desktop app** in the bar at the
 top and find **What works on this desktop**. Each row says Working, Not available here, or
 Unknown, with one sentence why. **Copy this list** copies it for a problem
 report.
+
+### Staying signed in
+
+With **Keep me signed in on this computer** checked, a member's sign-in is
+kept in your desktop's password keyring (GNOME Keyring or KWallet, through the
+Secret Service). The next time Conch starts, it opens signed in, without your
+password. Conch never saves your password: it keeps the sign-in the server
+gave it, sealed by the keyring, in `~/.config/conch-desktop/vault/`.
+
+- **Signing out** deletes the kept sign-in and tells the server it is over.
+- **If the server ends it** (you signed out everywhere, an operator revoked it,
+  or it expired), the next start shows the sign-in form and says the saved
+  sign-in has ended. Sign in again.
+- **Uncheck the box** to keep the sign-in only until the app closes.
+- **Operator sign-ins are never kept.** They last for the window, and the
+  server ends them after 12 hours or an hour idle. Use a member account for
+  everyday use.
+
+The line beside the box says when the sign-in can't be kept:
+
+| The app says | What it means | What to do |
+| --- | --- | --- |
+| No system keyring is unlocked | Your desktop names a keyring, but none answered: there is none, it is locked, or it refused. | Unlock your login keyring (Passwords and Keys, or Seahorse), or set one up, then choose **Check again**. |
+| This desktop gives Conch no keyring that protects anything | Your desktop is one Chromium does not pair with a keyring (for example sway), so it would use a built-in password. | Sign in each time, or use a desktop with GNOME Keyring or KWallet. |
+| The system keyring has not answered | The keyring is slow or waiting for you to unlock it. | Unlock it, then choose **Check again**. |
+| Conch's data folder is not private to you | `~/.config/conch-desktop` can be changed by other users. | `chmod 700 ~/.config/conch-desktop`, then start Conch again. |
+
+In every one of these cases Conch keeps nothing on disk, and you sign in
+again each time it starts. To check what was kept, run
+`ls ~/.config/conch-desktop/vault/profiles/*/credential.bin`: one file per
+saved server you are signed in to.
 
 ### Open at login and the tray
 
@@ -247,7 +278,7 @@ fills in the rest.
 | Tray icon | Not tried | Needs a desktop with a tray. |
 | Notifications | Not tried | |
 | Lock and suspend | Not tried | Where the app can tell the screen locked, it mutes you, ends your screen share and hides notification text. Otherwise it says it can't tell. Suspend leaves voice and ends the share. |
-| Saved sign-ins | Not tried | Needs a working password keyring. Without one, sign-ins last until the app closes. |
+| Saved sign-ins | Not tried | Needs an unlocked password keyring. Without one, sign-ins last until the app closes. See [Staying signed in](#staying-signed-in). |
 
 The app's own **What works on this desktop** list is the truth for your
 computer.

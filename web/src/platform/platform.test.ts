@@ -75,6 +75,7 @@ describe('the desktop bridge type', () => {
       profileRemove: true,
       profileSwitch: true,
       storageRetry: true,
+      profileKeep: true,
       profilesRecover: true,
       uploadFile: true,
       downloadFile: true,
@@ -84,6 +85,6 @@ describe('the desktop bridge type', () => {
       notificationSupported: true,
       onNotification: true,
     };
-    expect(Object.keys(named)).toHaveLength(37);
+    expect(Object.keys(named)).toHaveLength(38);
   });
 });

@@ -71,7 +71,7 @@ test.describe('the packaged shell', () => {
       [
         'createAccount', 'joinAsGuest', 'keepCredential', 'redeemInvite', 'redeemInviteAsGuest', 'redeemSetupToken', 'redeemSignInLink', 'request', 'restore', 'resetPassword',
         'serverAddress', 'signInWithCode', 'signInWithCredential', 'signInWithPassword', 'signOut', 'replaceCredential', 'createMemberLink', 'createSignInLink', 'totpEnroll', 'createPrincipalSignInLink', 'createPrincipalCredential', 'createHook', 'subscribe', 'uploadFile', 'downloadFile', 'saveFile',
-        'profiles', 'profileAdd', 'profileRename', 'profileRemove', 'profileSwitch', 'storageRetry', 'profilesRecover',
+        'profiles', 'profileAdd', 'profileRename', 'profileRemove', 'profileSwitch', 'storageRetry', 'profileKeep', 'profilesRecover',
         // The voice family (#1374): state, commands and its event, and no press,
         // release or transmit function.
         'voiceState', 'voiceJoin', 'voiceLeave', 'voiceRetry', 'voiceSetMute', 'voiceSetDeafen', 'voiceSetDevices', 'voiceSetTalkMode', 'onVoiceState',

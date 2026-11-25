@@ -1474,8 +1474,10 @@ jobs:
           path: ~/.cache/conch/electron
           key: desktop-electron-${{ runner.os }}-${{ hashFiles('scripts/desktop-pins.sh') }}
 
-      - name: virtual display
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends xvfb
+      # gnome-keyring gives the persistence smoke test (#2077) a real, isolated
+      # Secret Service on a private bus; without it that spec skips.
+      - name: virtual display and keyring
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends xvfb gnome-keyring dbus
 
       # The browser build must not change because the desktop shell exists:
       # web/dist is hashed before and after the desktop build, and holds no

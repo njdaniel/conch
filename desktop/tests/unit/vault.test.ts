@@ -4,10 +4,15 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { PROBE_TEXT } from '../../main/vault/classify.ts';
 import { createVault, type Vault, type VaultStorage } from '../../main/vault/vault.ts';
 
 const SECRET = 'cnch_SECRET_CANARY_7f3a9c';
-const PREFIX = 'FAKE-SEALED:';
+// What the fake seals with: Chromium's three-byte mark, then a readable body.
+// v11 is the mark of a key from the keyring (classify.ts); the seal option
+// replaces it (v10: Chromium's built-in key; anything else: unknown).
+const BODY = 'FAKE-SEALED:';
+const PREFIX = `v11${BODY}`;
 
 interface FakeOpts {
   available?: boolean | Error;
@@ -16,10 +21,18 @@ interface FakeOpts {
   reEncrypt?: boolean;
   gen?: number;
   encryptError?: Error;
+  // The three-byte mark the fake seals with (default v11, the keyring's).
+  seal?: string;
+  // The mark the classification's probe comes back with (default: seal).
+  probeSeal?: string;
+  probeError?: Error;
 }
 
 class FakeStorage implements VaultStorage {
+  // What the vault did with secrets; the classification's probes are counted
+  // apart, so that these stay the vault's own steps.
   calls: string[] = [];
+  probes = 0;
   constructor(public opts: FakeOpts = {}) {}
   isAsyncEncryptionAvailable(): Promise<boolean> {
     const a = this.opts.available ?? true;
@@ -29,20 +42,25 @@ class FakeStorage implements VaultStorage {
     return this.opts.backend ?? 'gnome_libsecret';
   }
   encryptStringAsync(plain: string): Promise<Buffer> {
+    if (plain === PROBE_TEXT) {
+      this.probes += 1;
+      if (this.opts.probeError) return Promise.reject(this.opts.probeError);
+      return Promise.resolve(Buffer.from(`${this.opts.probeSeal ?? this.opts.seal ?? 'v11'}${BODY}probe`));
+    }
     this.calls.push('encrypt');
     if (this.opts.encryptError) {
       return Promise.reject(this.opts.encryptError);
     }
-    return Promise.resolve(Buffer.from(`${PREFIX}${String(this.opts.gen ?? 1)}:${Buffer.from(plain).toString('base64')}`));
+    return Promise.resolve(Buffer.from(`${this.opts.seal ?? 'v11'}${BODY}${String(this.opts.gen ?? 1)}:${Buffer.from(plain).toString('base64')}`));
   }
   decryptStringAsync(data: Buffer): Promise<{ result: string; shouldReEncrypt: boolean }> {
     this.calls.push('decrypt');
     const s = data.toString();
-    if (this.opts.decryptError || !s.startsWith(PREFIX)) {
+    if (this.opts.decryptError || !s.slice(3).startsWith(BODY)) {
       return Promise.reject(this.opts.decryptError ?? new Error('bad data'));
     }
     return Promise.resolve({
-      result: Buffer.from(s.slice(s.indexOf(':', PREFIX.length) + 1), 'base64').toString(),
+      result: Buffer.from(s.slice(s.indexOf(':', 3 + BODY.length) + 1), 'base64').toString(),
       shouldReEncrypt: this.opts.reEncrypt ?? false,
     });
   }
@@ -126,6 +144,74 @@ describe('put and get', () => {
   });
 });
 
+// Issue #2077: on Linux a backend's name is not proof. A GNOME or COSMIC
+// desktop with no keyring that answers names gnome_libsecret and seals with
+// Chromium's built-in key (v10), which protects nothing.
+describe('the keyring seal on Linux', () => {
+  it('a backend that names a keyring but seals with the built-in key: put writes nothing and says no keyring', async () => {
+    make({ seal: 'v10' });
+    expect(await vault.classify()).toEqual({ kind: 'sessionOnly', reason: 'no-keyring' });
+    expect(await vault.put('alpha', SECRET)).toEqual({ kind: 'sessionOnly', reason: 'no-keyring' });
+    expect(await readdir(root)).toEqual([]);
+    // The secret itself was never sealed: only the public probe was.
+    expect(storage.calls).toEqual([]);
+  });
+
+  it('a keyring that stops answering between the probe and the seal: the built-in-key ciphertext is not written, the old file stays', async () => {
+    await vault.put('alpha', 'old');
+    const before = await readFile(credFile('alpha'));
+    storage.opts.seal = 'v10';
+    storage.opts.probeSeal = 'v11';
+    expect(await vault.put('alpha', SECRET)).toEqual({ kind: 'sessionOnly', reason: 'no-keyring' });
+    expect(await readFile(credFile('alpha'))).toEqual(before);
+    expect(await readdir(join(root, 'profiles', 'alpha'))).toEqual(['credential.bin']);
+    expect(logs).toContain('vault: no-keyring profile=alpha');
+  });
+
+  it('a seal mark this build does not know is not written', async () => {
+    make({ seal: 'x99', probeSeal: 'v11' });
+    expect(await vault.put('alpha', SECRET)).toEqual({ kind: 'sessionOnly', reason: 'unknown-backend' });
+    expect(await readdir(root)).toEqual([]);
+  });
+
+  it.each([
+    ['protected now', {}],
+    ['session-only now', { backend: 'basic_text' }],
+    ['no keyring now', { seal: 'v10' }],
+  ] as const)('a stored file sealed with the built-in key is deleted unread and reported unusable (%s)', async (_n, opts) => {
+    await mkdir(join(root, 'profiles', 'alpha'), { recursive: true, mode: 0o700 });
+    await writeFile(credFile('alpha'), `v10${BODY}1:${Buffer.from(SECRET).toString('base64')}`, { mode: 0o600 });
+    await mkdir(join(root, 'profiles', 'beta'), { recursive: true, mode: 0o700 });
+    await writeFile(credFile('beta'), 'v11other', { mode: 0o600 });
+    make(opts);
+    expect(await vault.get('alpha')).toEqual({ kind: 'unusable' });
+    expect(storage.calls).not.toContain('decrypt');
+    await expect(stat(join(root, 'profiles', 'alpha'))).rejects.toThrow();
+    // Another profile's file is not touched.
+    expect(await readFile(credFile('beta'), 'utf8')).toBe('v11other');
+    expect(logs).toContain('vault: built-in-key-removed profile=alpha');
+    expect(await vault.get('alpha')).toEqual({ kind: 'absent' });
+  });
+
+  it('a re-encrypt that comes back sealed with the built-in key is not written; the keyring-sealed file stays', async () => {
+    await vault.put('alpha', SECRET);
+    const before = await readFile(credFile('alpha'));
+    // The probe still says keyring; the re-seal of the secret does not.
+    make({ reEncrypt: true, seal: 'v10', probeSeal: 'v11' });
+    expect(await vault.get('alpha')).toEqual({ kind: 'found', secret: SECRET });
+    expect(await readFile(credFile('alpha'))).toEqual(before);
+    expect(logs).toContain('vault: no-keyring profile=alpha');
+  });
+
+  it('win32 and darwin are not held to the Linux marks (their own protected seals start v10 too)', async () => {
+    for (const platform of ['win32', 'darwin'] as const) {
+      make({ seal: 'v10' }, platform);
+      expect(await vault.put('alpha', SECRET)).toEqual({ kind: 'stored' });
+      expect(await vault.get('alpha')).toEqual({ kind: 'found', secret: SECRET });
+    }
+  });
+});
+
 describe('get when storage later degrades', () => {
   it('basic_text: does not decrypt and does not erase', async () => {
     await vault.put('alpha', SECRET);
@@ -172,8 +258,8 @@ describe('shouldReEncrypt', () => {
   it('a failed re-encrypt still returns the secret and keeps the file', async () => {
     await vault.put('alpha', SECRET);
     const before = await readFile(credFile('alpha'));
-    make({ reEncrypt: true });
-    storage.encryptStringAsync = () => Promise.reject(new Error('nope'));
+    // The secret's re-encrypt fails; the classification's probe still answers.
+    make({ reEncrypt: true, encryptError: new Error('nope') });
     expect(await vault.get('alpha')).toEqual({ kind: 'found', secret: SECRET });
     expect(await readFile(credFile('alpha'))).toEqual(before);
   });

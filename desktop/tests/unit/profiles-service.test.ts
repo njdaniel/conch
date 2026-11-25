@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { TeardownHooks } from '../../main/profiles/hooks.ts';
 import type { HealthResult } from '../../main/compat.ts';
-import { ProfilesService, type ProbeResult, type StoredCheck } from '../../main/profiles/service.ts';
+import { keepHelpFor, ProfilesService, type ProbeResult, type StoredCheck } from '../../main/profiles/service.ts';
 import { ProfileStore } from '../../main/profiles/store.ts';
 import { fakeFactory, fakeVault, memoryFiles, ORIGIN_A, ORIGIN_B, type FakeActivation, type FakeVault } from './profiles-support.ts';
 
@@ -465,7 +465,8 @@ describe('a stored credential is checked before a window holds it', () => {
     const { s, id } = await stored(() => ({ kind: 'rejected' }));
     await s.service.switchTo(id);
     expect(s.active().spec.token).toBeNull();
-    expect(s.service.view().notice).toBe('sign-in-again');
+    // The server's refusal is said as what it is (#2077): the saved sign-in ended.
+    expect(s.service.view().notice).toBe('sign-in-ended');
     await new Promise((r) => setTimeout(r, 10));
     expect(s.vault.secrets.has(id)).toBe(false);
   });
@@ -779,5 +780,207 @@ describe('server compatibility (issue #946)', () => {
     await s.service.switchTo(null);
     onInvalid('whoami');
     expect(s.service.view().compat.invalid).toBeNull();
+  });
+});
+
+// "Keep me signed in on this computer" (issue #2077), and what a restart finds.
+describe('keeping a sign-in across restarts', () => {
+  // A second service over the same profiles.json and vault: the app started again.
+  async function restart(s: Awaited<ReturnType<typeof setup>>, options: { verify?: (o: string, t: string) => StoredCheck } = {}) {
+    return setup({ vault: s.vault, files: s.files.text ?? undefined, ...options });
+  }
+  const noToken = (lines: readonly string[], token: string): void => {
+    for (const line of lines) expect(line).not.toContain(token);
+  };
+
+  it('is on by default: a member’s sign-in goes to the vault, and a restart opens signed in without a password', async () => {
+    const s = await setup();
+    const id = await addAndSwitch(s, ORIGIN_A);
+    expect(s.service.view().keep).toBe(true);
+    // The sign-in form links the Linux guide's section; main names it.
+    expect(s.service.view().keepHelp).toBe('https://github.com/njdaniel/conch/blob/main/docs/desktop/linux.md#staying-signed-in');
+    s.active().held = 'tok-ada';
+    expect(await s.service.signedIn(ADA)).toBe(true);
+    expect(s.vault.secrets.get(id)).toBe('tok-ada');
+    expect(s.log).toContain('log: conch-desktop: a sign-in was kept in the keyring');
+
+    const again = await restart(s);
+    expect(again.active().spec.profile?.id).toBe(id);
+    expect(again.active().spec.token).toBe('tok-ada');
+    expect(again.verified).toEqual([[ORIGIN_A, 'tok-ada']]);
+    expect(again.log).toContain('log: conch-desktop: a saved sign-in was restored');
+    noToken([...s.log, ...again.log], 'tok-ada');
+  });
+
+  it('unchecked: nothing is written, the sign-in lasts this run only, an older entry is deleted, and a restart asks again', async () => {
+    const s = await setup();
+    const id = await addAndSwitch(s, ORIGIN_A);
+    s.vault.secrets.set(id, 'tok-older');
+    expect((await s.service.setKeep(false)).keep).toBe(false);
+    s.active().held = 'tok-ada';
+    expect(await s.service.signedIn(ADA)).toBe(true);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(s.vault.secrets.has(id)).toBe(false);
+    expect(s.vault.calls).not.toContain(`put ${id}`);
+    // This run keeps it in memory: a switch away and back is still signed in.
+    await s.service.switchTo(null);
+    await s.service.switchTo(id);
+    expect(s.active().spec.token).toBe('tok-ada');
+    // The choice belongs to the window it was made in: the new one starts kept.
+    expect(s.service.view().keep).toBe(true);
+
+    const again = await restart(s);
+    expect(again.active().spec.token).toBeNull();
+    expect(again.log).toContain('log: conch-desktop: no saved sign-in for this server');
+  });
+
+  it('names help only where the platform’s guide covers staying signed in', () => {
+    expect(keepHelpFor('linux')).toMatch(/^https:\/\/github\.com\/njdaniel\/conch\/blob\/main\/docs\/desktop\/linux\.md#staying-signed-in$/);
+    expect(keepHelpFor('win32')).toBeNull();
+    expect(keepHelpFor('darwin')).toBeNull();
+  });
+
+  it('Retry never puts a sign-in the person chose not to keep', async () => {
+    const vault = fakeVault({ kind: 'sessionOnly', reason: 'no-keyring' });
+    const s = await setup({ vault });
+    const id = await addAndSwitch(s, ORIGIN_A);
+    await s.service.setKeep(false);
+    s.active().held = 'tok-ada';
+    await s.service.signedIn(ADA);
+    vault.classification = { kind: 'protected' };
+    expect((await s.service.retry()).storage).toEqual({ kind: 'protected' });
+    expect(vault.secrets.has(id)).toBe(false);
+  });
+
+  it('turned back on before the sign-in, it keeps; turned on after an unkept sign-in, it puts it then', async () => {
+    const s = await setup();
+    const id = await addAndSwitch(s, ORIGIN_A);
+    await s.service.setKeep(false);
+    expect((await s.service.setKeep(true)).keep).toBe(true);
+    s.active().held = 'tok-ada';
+    await s.service.signedIn(ADA);
+    expect(s.vault.secrets.get(id)).toBe('tok-ada');
+
+    const t = await setup();
+    const other = await addAndSwitch(t, ORIGIN_B);
+    await t.service.setKeep(false);
+    t.active().held = 'tok-grace';
+    await t.service.signedIn(GRACE);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(t.vault.secrets.has(other)).toBe(false);
+    await t.service.setKeep(true);
+    expect(t.vault.secrets.get(other)).toBe('tok-grace');
+  });
+
+  it('turned off after the sign-in was kept (a racing click), the entry comes out and nothing is copied to memory', async () => {
+    const s = await setup();
+    const id = await addAndSwitch(s, ORIGIN_A);
+    s.active().held = 'tok-ada';
+    await s.service.signedIn(ADA);
+    expect(s.vault.secrets.get(id)).toBe('tok-ada');
+    await s.service.setKeep(false);
+    expect(s.vault.secrets.has(id)).toBe(false);
+    // The window keeps its own sign-in; the profile starts signed out next time.
+    expect(s.active().token()).toBe('tok-ada');
+    await s.service.switchTo(null);
+    await s.service.switchTo(id);
+    expect(s.active().spec.token).toBeNull();
+  });
+
+  it('turned off in an operator’s window, the operator’s credential is not copied anywhere and does not outlive the window (ADR-012)', async () => {
+    const s = await setup();
+    const id = await addAndSwitch(s, ORIGIN_A);
+    s.active().held = 'tok-op';
+    await s.service.signedIn({ id: 1, name: 'op', lasting: false, guest: false });
+    await s.service.setKeep(false);
+    await s.service.setKeep(true);
+    expect(s.vault.secrets.size).toBe(0);
+    expect(s.vault.calls).not.toContain(`put ${id}`);
+    await s.service.switchTo(null);
+    await s.service.switchTo(id);
+    expect(s.active().spec.token).toBeNull();
+  });
+
+  it('turned off while a session-only sign-in is held, Retry never puts it later', async () => {
+    const vault = fakeVault({ kind: 'sessionOnly', reason: 'no-keyring' });
+    const s = await setup({ vault });
+    const id = await addAndSwitch(s, ORIGIN_A);
+    s.active().held = 'tok-ada';
+    await s.service.signedIn(ADA);
+    await s.service.setKeep(false);
+    vault.classification = { kind: 'protected' };
+    await s.service.retry();
+    expect(vault.secrets.has(id)).toBe(false);
+  });
+
+  it.each([
+    ['no keyring unlocked', { kind: 'sessionOnly', reason: 'no-keyring' }, { kind: 'session-only', reason: 'no-keyring' }, 'no-keyring'],
+    ['a keyring that protects nothing', { kind: 'sessionOnly', reason: 'insecure-backend' }, { kind: 'session-only', reason: 'insecure-backend' }, 'insecure-backend'],
+    ['a keyring that does not answer', { kind: 'temporarilyUnavailable' }, { kind: 'unavailable' }, 'temporarilyUnavailable'],
+  ] as const)('%s: nothing is written even with the choice on, the view and the log say why', async (_name, classification, storage, why) => {
+    const vault = fakeVault(classification);
+    const s = await setup({ vault });
+    const id = await addAndSwitch(s, ORIGIN_A);
+    s.active().held = 'tok-ada';
+    await s.service.signedIn(ADA);
+    expect(vault.secrets.has(id)).toBe(false);
+    expect(s.service.view().storage).toEqual(storage);
+    expect(s.log).toContain(`log: conch-desktop: a sign-in is kept until the app closes (${why})`);
+    expect((await restart(s)).active().spec.token).toBeNull();
+  });
+
+  it('an operator’s sign-in is never put, whatever the choice, and a restart asks again (ADR-012)', async () => {
+    const s = await setup();
+    const id = await addAndSwitch(s, ORIGIN_A);
+    await s.service.setKeep(true);
+    s.active().held = 'tok-op';
+    expect(await s.service.signedIn({ id: 1, name: 'op', lasting: false, guest: false })).toBe(true);
+    expect(s.vault.calls).not.toContain(`put ${id}`);
+    expect(s.vault.secrets.size).toBe(0);
+    expect(s.service.view().notice).toBe('operator-window-only');
+    expect(s.log).toContain('log: conch-desktop: an operator sign-in is kept for this window only');
+    const again = await restart(s);
+    expect(again.active().spec.token).toBeNull();
+    expect(again.log).toContain('log: conch-desktop: no saved sign-in for this server');
+  });
+
+  it('a keep the keyring did not take in time says so, and the sign-in lasts this run', async () => {
+    const vault = fakeVault();
+    vault.putGate = new Promise(() => undefined);
+    const s = await setup({ vault, vaultBoundMs: 20 });
+    const id = await addAndSwitch(s, ORIGIN_A);
+    s.active().held = 'tok-ada';
+    await s.service.signedIn(ADA);
+    expect(s.service.view().notice).toBe('not-kept');
+    expect(vault.secrets.has(id)).toBe(false);
+    expect(s.log).toContain('log: conch-desktop: a sign-in is kept until the app closes (failed)');
+  });
+
+  it('a saved sign-in the server ended (revoked, expired, signed out elsewhere) opens the sign-in with a plain notice, and is deleted', async () => {
+    const s = await setup();
+    const id = await addAndSwitch(s, ORIGIN_A);
+    s.active().held = 'tok-ada';
+    await s.service.signedIn(ADA);
+    const again = await restart(s, { verify: () => ({ kind: 'rejected' }) });
+    expect(again.active().spec.token).toBeNull();
+    expect(again.service.view().notice).toBe('sign-in-ended');
+    await new Promise((r) => setTimeout(r, 10));
+    expect(again.vault.secrets.has(id)).toBe(false);
+    expect(again.log).toContain('log: conch-desktop: the server ended a saved sign-in; it was deleted');
+    // And the next start does not find it either.
+    expect((await restart(again)).active().spec.token).toBeNull();
+  });
+
+  it('sign-out deletes the kept sign-in, and a restart asks again', async () => {
+    const s = await setup();
+    const id = await addAndSwitch(s, ORIGIN_A);
+    s.active().held = 'tok-ada';
+    await s.service.signedIn(ADA);
+    await s.service.signOut();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(s.vault.secrets.has(id)).toBe(false);
+    const again = await restart(s);
+    expect(again.active().spec.token).toBeNull();
+    expect(again.log).toContain('log: conch-desktop: no saved sign-in for this server');
   });
 });

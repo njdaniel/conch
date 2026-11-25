@@ -4,8 +4,15 @@
 // storage status, never a credential) and the changes the person asks for.
 //
 // It owns: which profile is active; where a credential lives (the vault when
-// storage is protected, main's memory when it is not); the binding of a
-// profile to the account that first signed in; and the order of sign-out.
+// storage is protected and the person kept the sign-in, main's memory when
+// not); the binding of a profile to the account that first signed in; and the
+// order of sign-out.
+//
+// "Keep me signed in on this computer" (issue #2077) is the person's choice
+// for the activation in force, on by default; it is asked of the window, never
+// stored. Unchecked, a member's sign-in lasts until the app closes, and any
+// older entry of that profile is deleted. An operator's is never kept,
+// whatever the choice (ADR-012).
 //
 // The compatibility gate of #946 is in tokenFor(), the one place a stored
 // credential is turned into a session at activation: before the vault is read
@@ -17,7 +24,7 @@ import type { CompatView, ProfileAddResult, ProfileNotice, ProfilesView, Profile
 import type { OperationId } from '../../../web/src/platform/operations.ts';
 import { parseServerAddress } from '../api/origin.ts';
 import { judge, permits, REQUIRED_FAMILIES, type CompatPolicy, type HealthResult, type Verdict } from '../compat.ts';
-import type { Classification, PutResult, Vault } from '../vault/vault.ts';
+import type { Classification, PutResult, SessionOnlyReason, Vault } from '../vault/vault.ts';
 import type { TeardownHooks } from './hooks.ts';
 import { MAX_PROFILES, type Principal, type Profile, type ProfileStore } from './store.ts';
 import { Switcher, type Account, type Activation, type OpenSpec, type SwitchReport } from './switch.ts';
@@ -75,6 +82,14 @@ export interface ProfilesDeps {
 
 export const MISMATCH = 'profile_account_mismatch';
 
+// The help for staying signed in, by main's platform (issue #2077): the page
+// shows it as a link beside the keep choice, and a click on it leaves through
+// main's link rules (links.ts) like any other. None where the platform's guide
+// does not cover it yet. The renderer's own source names no outside address.
+export function keepHelpFor(platform: string): string | null {
+  return platform === 'linux' ? 'https://github.com/njdaniel/conch/blob/main/docs/desktop/linux.md#staying-signed-in' : null;
+}
+
 function storageOf(c: Classification): StorageStatus {
   switch (c.kind) {
     case 'protected':
@@ -112,6 +127,12 @@ export class ProfilesService {
   // deleted. A stored credential of one of these is never turned back into a
   // session; removing it is tried again each time. A later kept sign-in clears it.
   readonly #signedOut = new Set<string>();
+  // Profiles whose credential in memory the person chose not to keep: Retry
+  // never puts one of these in the vault.
+  readonly #unkept = new Set<string>();
+  // The activation whose sign-in the person chose not to keep, if any. A new
+  // activation (a switch, a sign-out, a restart) starts with the default: kept.
+  #declined: Activation | null = null;
   #storage: Classification = { kind: 'temporarilyUnavailable' };
   #notice: ProfileNotice | null = null;
   // The verdict on the active profile's server, and the first required family
@@ -188,6 +209,7 @@ export class ProfilesService {
     if (!this.#switcher.isCurrent(generation)) return null;
     if (!read.done) {
       this.#storage = { kind: 'temporarilyUnavailable' };
+      this.#deps.log('conch-desktop: the keyring did not answer in time, so no saved sign-in was read', { ring: true });
       return null;
     }
     const got = read.value;
@@ -196,13 +218,19 @@ export class ProfilesService {
         this.#storage = { kind: 'protected' };
         return this.#verified(profile, got.secret, generation);
       case 'absent':
+        this.#deps.log('conch-desktop: no saved sign-in for this server', { ring: true });
         return null;
       case 'unusable':
         this.#notice = 'sign-in-again';
+        this.#deps.log('conch-desktop: a saved sign-in could not be read; sign in again', { ring: true });
         return null;
       case 'sessionOnly':
+        this.#storage = got;
+        this.#deps.log(`conch-desktop: saved sign-ins are not available here (${got.reason})`, { ring: true });
+        return null;
       case 'temporarilyUnavailable':
         this.#storage = got;
+        this.#deps.log('conch-desktop: the keyring did not answer, so no saved sign-in was read', { ring: true });
         return null;
     }
   }
@@ -250,17 +278,24 @@ export class ProfilesService {
     if (!this.#switcher.isCurrent(generation)) return null;
     if (!checked.done || checked.value.kind === 'unreachable') {
       this.#notice = 'could-not-verify';
+      this.#deps.log('conch-desktop: a saved sign-in could not be checked with the server, so it was not used', { ring: true });
       return null;
     }
     if (checked.value.kind === 'rejected') {
-      this.#notice = 'sign-in-again';
+      // Signed out elsewhere, revoked or expired: the server's answer is the
+      // last word, and the person is told so in plain words.
+      this.#notice = 'sign-in-ended';
+      this.#deps.log('conch-desktop: the server ended a saved sign-in; it was deleted', { ring: true });
       this.#signedOut.add(profile.id);
       void this.#purge(profile.id);
       return null;
     }
     const { account } = checked.value;
     const bound = profile.principal;
-    if (bound !== null && account.id === bound.id && account.lasting && !account.guest) return token;
+    if (bound !== null && account.id === bound.id && account.lasting && !account.guest) {
+      this.#deps.log('conch-desktop: a saved sign-in was restored', { ring: true });
+      return token;
+    }
     this.#deps.log('conch-desktop: a stored sign-in did not match the account it is bound to; refused', { ring: true });
     this.#deps.log(`conch-desktop: the stored sign-in of profile ${profile.id} is not the account it is bound to; refused`);
     this.#notice = 'account-mismatch';
@@ -318,6 +353,8 @@ export class ProfilesService {
       profiles: store.list().map((p) => this.#profileView(p, active)),
       active,
       storage: storageOf(this.#storage),
+      keep: this.#declined === null || this.#declined !== this.#switcher.current,
+      keepHelp: keepHelpFor(platform),
       recovery: store.corrupt,
       notice: this.#notice,
       compat: this.#compatView(),
@@ -408,6 +445,7 @@ export class ProfilesService {
       if (token !== null) revoke = this.#deps.revokeStored(profile.origin, token);
     }
     this.#held.delete(id);
+    this.#unkept.delete(id);
     await within(revoke, this.#deps.revokeBoundMs ?? REVOKE_BOUND_MS);
     this.#signedOut.add(id);
     if (!(await this.#purge(id))) return false;
@@ -455,6 +493,7 @@ export class ProfilesService {
         if (old === current) revoke = old.signOut();
         else if (token !== null && profile !== null) revoke = this.#deps.revokeStored(profile.origin, token);
         this.#held.delete(id);
+        this.#unkept.delete(id);
         // Until the entry is really gone, this profile does not start from it.
         this.#signedOut.add(id);
         void this.#purge(id);
@@ -498,24 +537,83 @@ export class ProfilesService {
     if (this.#switcher.current !== current) return true;
     if (!account.lasting) {
       this.#notice = 'operator-window-only';
+      this.#deps.log('conch-desktop: an operator sign-in is kept for this window only', { ring: true });
       return true;
     }
     if (this.#notice === 'operator-window-only') this.#notice = null;
     const token = current.token();
     // The window may have moved on while the store was written.
     if (token === null || this.#switcher.current !== current) return true;
+    if (this.#declined === current) {
+      // The person chose not to keep it: this run only, in memory, and never
+      // put by a later Retry. An older entry of this profile goes, so that
+      // the next start does not bring back what was not chosen.
+      this.#held.set(id, token);
+      this.#unkept.add(id);
+      this.#signedOut.add(id);
+      void this.#purge(id);
+      this.#deps.log('conch-desktop: a sign-in is kept until the app closes, as chosen', { ring: true });
+      return true;
+    }
+    this.#unkept.delete(id);
     const put = await this.#put(id, token);
     if (this.#switcher.current !== current) return true;
     if (put.kind === 'stored') {
       this.#storage = { kind: 'protected' };
       this.#held.delete(id);
       this.#signedOut.delete(id);
+      this.#deps.log('conch-desktop: a sign-in was kept in the keyring', { ring: true });
     } else {
       // Not kept: this run only, in memory, and said so.
       this.#held.set(id, token);
       if (put.kind === 'sessionOnly' || put.kind === 'temporarilyUnavailable') this.#storage = put;
+      // A write that failed or did not finish leaves the status as it was
+      // (the keyring answered a moment ago), so the notice says it instead.
+      if (put.kind === 'failed') this.#notice = 'not-kept';
+      const why: SessionOnlyReason | 'failed' | 'temporarilyUnavailable' = put.kind === 'sessionOnly' ? put.reason : put.kind;
+      this.#deps.log(`conch-desktop: a sign-in is kept until the app closes (${why})`, { ring: true });
     }
     return true;
+  }
+
+  // setKeep records the person's "Keep me signed in on this computer" choice
+  // for the activation in force (the sign-in form shows it beside the
+  // password). Turned back on after an unkept member sign-in, it puts that
+  // sign-in in the vault. Turned off after a sign-in was kept (a click that
+  // raced the sign-in), the entry is deleted and nothing is copied anywhere:
+  // the window keeps its own sign-in, and the profile starts signed out next
+  // time. Never moving the window's credential into main's memory here is
+  // what keeps an operator's within its window (ADR-012). Nothing is kept
+  // for no profile.
+  async setKeep(keep: boolean): Promise<ProfilesView> {
+    const current = this.#switcher.current;
+    if (current === null || current.profileId === null) return this.view();
+    const id = current.profileId;
+    if (keep) {
+      if (this.#declined === current) this.#declined = null;
+      if (this.#unkept.has(id)) {
+        this.#unkept.delete(id);
+        const token = this.#held.get(id);
+        if (token !== undefined && this.#switcher.current === current) {
+          const put = await this.#put(id, token);
+          if (put.kind === 'stored' && this.#held.get(id) === token) {
+            this.#held.delete(id);
+            this.#signedOut.delete(id);
+            this.#storage = { kind: 'protected' };
+          } else if (put.kind === 'sessionOnly' || put.kind === 'temporarilyUnavailable') this.#storage = put;
+        }
+      }
+      return this.view();
+    }
+    this.#declined = current;
+    // Already signed in and kept in the vault: the entry comes out. A
+    // credential held in memory (session-only, or already unkept) stays as it
+    // is; neither is ever put by Retry once unkept.
+    if (current.token() !== null && !this.#held.has(id)) {
+      this.#signedOut.add(id);
+      await this.#purge(id);
+    } else if (this.#held.has(id)) this.#unkept.add(id);
+    return this.view();
   }
 
   // keptCredential is signedIn for a pasted credential that has just been put
@@ -544,7 +642,7 @@ export class ProfilesService {
     this.#storage = await this.#classify();
     if (this.#storage.kind === 'protected') {
       for (const [id, token] of [...this.#held]) {
-        if (this.#held.get(id) !== token || this.#signedOut.has(id) || this.#deps.store.get(id) === undefined) continue;
+        if (this.#held.get(id) !== token || this.#signedOut.has(id) || this.#unkept.has(id) || this.#deps.store.get(id) === undefined) continue;
         const put = await this.#put(id, token);
         if (put.kind === 'stored') {
           // Only if nothing has changed it meanwhile; a sign-out in the
