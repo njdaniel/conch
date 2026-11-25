@@ -50,11 +50,11 @@ export const syntheticMicrophone = (options?: ToneOptions) => {
     },
     true,
   );
-  // The indicator: "Transmitting", as the strip says it.
+  // The indicator: "Sending" (or "Open mic: sending"), as the strip says it.
   let shown = false;
   new MutationObserver(() => {
     const text = document.querySelector('.voice-tx')?.textContent ?? '';
-    const on = text.endsWith('Transmitting') && !text.endsWith('Not transmitting');
+    const on = text === 'Sending' || text === 'Open mic: sending';
     if (on !== shown) {
       shown = on;
       (on ? w.__marks.on : w.__marks.off).push(now());

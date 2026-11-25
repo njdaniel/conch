@@ -120,7 +120,7 @@ test.describe('voice multi-share', () => {
       // 6. The first sharer stops: its tile leaves, with a note, and focus returns.
       await voice(a.page).getByRole('button', { name: 'Stop sharing' }).click();
       await expect(tile(c.page, 'alice')).toHaveCount(0, { timeout: 20_000 });
-      await expect(voice(c.page)).toContainText('alice stopped sharing.');
+      await expect(c.page.locator('.stage').getByRole('status').filter({ hasText: 'alice stopped sharing.' })).toBeVisible();
       await expect(c.page.locator('.call-grid')).not.toHaveClass(/focus/);
 
       // 7. Restart the first stream and add four headless sharers: six are live,

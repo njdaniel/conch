@@ -46,7 +46,7 @@
 //                          config leaves at their defaults). Measured: see
 //                          vanishedWithin below.
 import type { Browser, Locator, Page, WebSocketRoute } from '@playwright/test';
-import { expect, messages, say, test } from './fixtures';
+import { rosterSending, expect, messages, say, test } from './fixtures';
 import { enter, expectClean, inbound, joinVoice, leave, leaveVoice, leaveWithin, type Someone } from './people';
 import { answered, mustAnswer, noAnswer, type NoAnswer } from './livekit-admin';
 import { dockerAvailable, emptiesWithin, startVoiceWorld, type Member, type VoiceWorld } from './voice-world';
@@ -207,7 +207,7 @@ async function press(talker: Someone, listeners: readonly Someone[]): Promise<vo
   const quiet = await Promise.all(listeners.map((l) => delta(l, 1500)));
   await talker.page.keyboard.down('Backquote');
   try {
-    for (const l of listeners) await expect(roster(l.page)).toContainText(`${talker.member.name} (transmitting)`, { timeout: 15_000 });
+    for (const l of listeners) await expect(roster(l.page)).toContainText(rosterSending(talker.member.name), { timeout: 15_000 });
     const loud = await Promise.all(listeners.map((l) => delta(l, 2000)));
     listeners.forEach((l, i) => {
       expect(loud[i] ?? 0, `${l.member.name} hears ${talker.member.name}: ${String(loud[i])} B held versus ${String(quiet[i])} B quiet`).toBeGreaterThan((quiet[i] ?? 0) * 4 + 2000);
@@ -215,7 +215,7 @@ async function press(talker: Someone, listeners: readonly Someone[]): Promise<vo
   } finally {
     await talker.page.keyboard.up('Backquote');
   }
-  for (const l of listeners) await expect(roster(l.page)).not.toContainText(`${talker.member.name} (transmitting)`, { timeout: 15_000 });
+  for (const l of listeners) await expect(roster(l.page)).not.toContainText(rosterSending(talker.member.name), { timeout: 15_000 });
 }
 
 test.describe('voice recovery', () => {
@@ -368,7 +368,7 @@ test.describe('voice recovery', () => {
         await a.page.getByRole('heading', { name: 'Conch' }).click();
         await a.page.keyboard.down('Backquote');
         try {
-          await expect(roster(a.page)).toContainText('alice (transmitting)', { timeout: 15_000 });
+          await expect(roster(a.page)).toContainText(rosterSending('alice'), { timeout: 15_000 });
           loud = await delta(c, offlineFor - 1500 > 2000 ? 2000 : offlineFor - 1500);
         } finally {
           await a.page.keyboard.up('Backquote');

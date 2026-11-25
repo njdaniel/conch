@@ -2943,6 +2943,30 @@ label {
   font-weight: 600;
 }
 
+/* The status phrase is one line, whatever the width: it never breaks
+   mid-phrase (issue #2198, UI-talk-5). The words before it wrap instead. */
+.voice-tx {
+  white-space: nowrap;
+}
+
+/* About talking and sharing: a small round "i", a disclosure for the talk key
+   and sharing notes. */
+.voice-help-button {
+  min-width: 2.25rem;
+  font-style: italic;
+  font-weight: 600;
+}
+
+/* "<name> stopped sharing." where the stage was, for a few seconds. */
+.stage-notice {
+  margin: 0 0 var(--s2);
+  padding: var(--s2) var(--s3);
+  background: var(--raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-weight: 600;
+}
+
 .chip {
   background: var(--raised);
   border: 1px solid var(--warn);

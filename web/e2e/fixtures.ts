@@ -316,3 +316,13 @@ export async function expectStateReadable(page: Page, word: string): Promise<voi
   expect(found.buttons.filter((b) => b.hit), `${word} meets a button`).toEqual([]);
   expect(found.covered, `${word} is covered`).toEqual([false, false, false]);
 }
+
+// What the voice strip's status phrase says (issue #2198, UI-talk-3), for
+// `.voice-tx`: "Sending" only while audio leaves the page, and one of the
+// "not sending" phrases otherwise (push to talk, open mic or muted).
+export const sendingText = /^(Sending|Open mic: sending)$/;
+export const notSendingText = /^(Push to talk|Open mic|Muted): not sending$/;
+
+// A roster chip saying the person sends audio: one badge, "speaking" when the
+// level says so, else "sending" (issue #2198, UI-talk-4).
+export const rosterSending = (name: string): RegExp => new RegExp(`${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\((sending|speaking)\\)`);

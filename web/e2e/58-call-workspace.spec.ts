@@ -292,8 +292,10 @@ test.describe('the persistent call workspace', () => {
       await expect(phoneStage.locator('.call-head')).toBeVisible();
       await expect(phoneStage.locator('.call-context')).toContainText('#voice-room');
       await expect(phoneStage.locator('.call-context')).toContainText('Sharing: alice');
-      await expect(phoneStage.locator('.voice-sub')).toContainText('Microphone in use');
-      await expect(phoneStage.locator('.voice-sub')).toContainText('Push to talk.');
+      // The tooltip keeps the microphone; the chip is gone (issue #2198).
+      await expect(phoneStage.locator('.voice-sub')).toHaveAttribute('title', /Microphone in use/);
+      await expect(phoneStage.locator('.voice-sub')).not.toContainText('Microphone in use');
+      await expect(phoneStage.locator('.voice-sub')).toContainText('Push to talk: not sending');
       // The header's text is on screen, not only in the DOM: every piece of
       // the context and status rows lies inside the 390 px viewport.
       const offscreen = await phoneStage.locator('.call-context > *, .voice-sub > *').evaluateAll((parts) => parts
@@ -346,7 +348,8 @@ test.describe('the persistent call workspace', () => {
       await voice(a.page).getByRole('button', { name: 'Stop sharing' }).click();
       await expect(shareView(b.page)).toHaveCount(1, { timeout: 20_000 });
       await expect(call(b.page)).toHaveClass(/compact/);
-      await expect(voice(b.page).getByText('alice stopped sharing.', { exact: true })).toBeVisible();
+      // Where the stage was, not in the strip (issue #2198, UI-stream-5).
+      await expect(b.page.locator('.stage').getByRole('status').filter({ hasText: 'alice stopped sharing.' })).toBeVisible();
       await voice(c.page).getByRole('button', { name: 'Stop sharing' }).click();
       await expect(shareView(b.page)).toHaveCount(0, { timeout: 20_000 });
       await expect(call(b.page)).toHaveCount(0);

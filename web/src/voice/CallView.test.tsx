@@ -1123,9 +1123,12 @@ describe('the phone strip with the camera (C7)', () => {
       if (!(found instanceof HTMLElement)) throw new Error('no compact phone header');
       return found;
     };
-    for (const words of ['Sharing: member-2', 'Speaking: member-1', 'Reconnecting', 'Microphone in use', 'Sending video', 'Muted.', 'Deafened (you hear no one, and you are muted).', 'Push to talk.', 'Waiting for the picture']) {
+    for (const words of ['Sharing: member-2', 'Speaking: member-1', 'Reconnecting', 'Sending video', 'Muted: not sending', 'Deafened (you hear no one, and you are muted).', 'Waiting for the picture']) {
       expect(header().textContent).toContain(words);
     }
+    // The microphone is no chip any more (issue #2198); the tooltip keeps it.
+    expect(header().textContent).not.toContain('Microphone in use');
+    expect(header().querySelector('.voice-sub')?.getAttribute('title')).toContain('Microphone in use');
     fireEvent.click(within(header()).getByRole('button', { name: '#general' }));
     expect(opened).toHaveBeenCalledExactlyOnceWith('general');
     expect(client.snapshot()).toBe(before);
@@ -1293,6 +1296,6 @@ describe('the persistent call workspace (issue #1498)', () => {
     expect(header()).toContain('#general');
     expect(header()).toContain('Sharing: member-2');
     expect(header()).toContain('Speaking: member-1');
-    expect(callRegion().querySelector('.call-head .voice-sub')?.getAttribute('title')).toBe('Microphone in use · Push to talk. Not transmitting');
+    expect(callRegion().querySelector('.call-head .voice-sub')?.getAttribute('title')).toBe('Microphone in use · Push to talk: not sending');
   });
 });

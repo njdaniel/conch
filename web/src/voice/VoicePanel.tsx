@@ -70,7 +70,7 @@ import { ShareCaptureWarning, ShareReadout, ShareView } from './ShareView';
 import { nobody, type InVoice } from './useOccupancy';
 import { VoiceDiagnostics } from './VoiceDiagnostics';
 import type { VoiceControl } from './useVoice';
-import { VoiceStatus } from './VoiceStatus';
+import { microphoneCaptured, VoiceStatus } from './VoiceStatus';
 
 // The keys that hold Hold to talk down while it has focus.
 function holdKey(e: KeyEvent): boolean {
@@ -205,6 +205,8 @@ export function VoicePanel({
   // takes focus there once they are shown (issue #600).
   const about = useRef<HTMLElement>(null);
   const [toAbout, setToAbout] = useState(false);
+  // Whether the talk key and sharing notes are open (About talking and sharing).
+  const [help, setHelp] = useState(false);
   const inVoice = state.phase !== 'idle' && state.phase !== 'stopped';
   // The open microphone has no level meter to hear with, while a connection
   // holds the microphone (as VoiceStatus's captured): said in the notes, and
@@ -714,6 +716,12 @@ export function VoicePanel({
       keepSaid={focusShow}
     />
   );
+  // "<name> stopped sharing." is shown where the stage was, for stoppedFor
+  // (issue #2198, UI-stream-5), not as small text after the help line.
+  const stoppedNotice = stopped === null || !inVoice ? null : <p role="status" className="stage-notice">{stopped.name} stopped sharing.</p>;
+  // One fragment either way, so the call view keeps its place (and its
+  // state) when the notice comes and goes.
+  const onStage = stoppedNotice === null && staged === null ? null : <>{stoppedNotice}{staged}</>;
   // How many cameras are on in the room: everyone else's claims, and the
   // person's own while their track is published.
   const cameraCount = roster.filter((o) => o.principal !== viewer && o.camera).length + (state.cameraTrack === 'published' ? 1 : 0);
@@ -779,11 +787,8 @@ export function VoicePanel({
                 {phaseLabel[state.phase]}
                 {where}
               </p>
-              {inVoice ? (
-                <VoiceStatus state={state} />
-              ) : (
-                <p className="voice-sub">Microphone off</p>
-              )}
+              {/* Not in voice, "Microphone off" is the hint below, said once. */}
+              {inVoice ? <VoiceStatus state={state} /> : null}
             </div>
           )}
 
@@ -822,6 +827,12 @@ export function VoicePanel({
                     <span className="label">Show video ({cameraCount})</span>
                   </button>
                 ) : null}
+                {/* The talk key and sharing notes are behind this disclosure,
+                    not always shown (issue #2198, UI-talk-6). Nothing is
+                    remembered: it starts closed. */}
+                <button type="button" className="quiet voice-help-button" aria-expanded={help} aria-label="About talking and sharing" onClick={() => { setHelp(!help); }}>
+                  <span aria-hidden="true">i</span>
+                </button>
                 <button ref={optionsButton} type="button" className="quiet" aria-expanded={options} aria-controls="voice-options" onKeyDown={(e) => {
                   // Tab from the button, with the anchored panel open, enters it, as
                   // if it followed the button (it follows the notes in the DOM).
@@ -894,15 +905,12 @@ export function VoicePanel({
                 {state.deafened ? 'Hold to talk sends nothing while you are deafened. Undeafen to talk.' : 'Hold to talk sends nothing while you are muted. Unmute to talk.'}
               </p>
             ) : null}
-            {state.mode === 'ptt' && !state.listenOnly && !state.watchOnly ? (
-              <p className="hint talk-key-note voice-supplemental">Talk key: {keyLabel(voice.talkKey)}. It works only while this tab has focus, and not while you are typing.</p>
+            {/* Only the notes of a disclosure are behind it; what is
+                happening (a share, why one ended) is not. */}
+            {help && state.mode === 'ptt' && !state.listenOnly && !state.watchOnly ? (
+              <p className="hint talk-key-note voice-supplemental">{talkKeyNote(voice.talkKey)}</p>
             ) : null}
-            <ShareNotes voice={voice} onMore={more} othersShare={streams.length > 0} />
-            {stopped === null ? null : (
-              <p role="status" className="hint">
-                {stopped.name} stopped sharing.
-              </p>
-            )}
+            <ShareNotes voice={voice} onMore={more} othersShare={streams.length > 0} showLine={help} />
           </>
         ) : (
           <>
@@ -945,7 +953,7 @@ export function VoicePanel({
       </div>
 
       {inVoice ? <Options panel={optionsPanel} onClose={closeOptions} onShrink={shrinkOptions} sheet={sheet} onSheet={setSheet} voice={voice} open={options && !strip} sharable={sharable} about={about} others={others} cameraAllowed={cameraAllowed} /> : null}
-      {staged === null ? null : stage === null ? staged : createPortal(staged, stage)}
+      {onStage === null ? null : stage === null ? onStage : createPortal(onStage, stage)}
     </section>
   );
 }
@@ -996,6 +1004,12 @@ function StripState({
   );
 }
 
+// talkKeyNote is the talk key and when it works: the notes' line, and the
+// description of Hold to talk.
+function talkKeyNote(key: string): string {
+  return `Talk key: ${keyLabel(key)}. It works only while this tab has focus, and not while you are typing.`;
+}
+
 // TalkControl is Hold to talk, or, with the open microphone, its level: the
 // one way to talk, in the strip and in the Voice view alike.
 function TalkControl({ voice, silenced }: { readonly voice: VoiceControl; readonly silenced: boolean }) {
@@ -1012,36 +1026,42 @@ function TalkControl({ voice, silenced }: { readonly voice: VoiceControl; readon
     );
   }
   return (
-    <button
-      type="button"
-      className="talk"
-      aria-pressed={state.talking}
-      disabled={state.listenOnly || state.watchOnly}
-      // Muted or deafened it stays pressable (a press reaches the gate, which
-      // is shut and sends nothing), but it looks off and says why in the note
-      // below (UX-07).
-      aria-disabled={silenced ? true : undefined}
-      aria-describedby={silenced ? 'voice-talk-why' : undefined}
-      onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); client.press(); }}
-      onPointerUp={() => { client.release(); }}
-      onPointerCancel={() => { client.release(); }}
-      // The keyboard holds it as a pointer does (issue #590): a held key
-      // repeats, and only its first press counts. Focus moving away lets go,
-      // as a lost pointer does.
-      onKeyDown={(e) => {
-        if (!holdKey(e) || e.repeat) return;
-        e.preventDefault();
-        client.press();
-      }}
-      onKeyUp={(e) => {
-        if (holdKey(e)) client.release();
-      }}
-      onBlur={() => { client.release(); }}
-      onContextMenu={(e) => { e.preventDefault(); }}
-    >
-      <Glyph name="mic" />
-      Hold to talk
-    </button>
+    <>
+      <button
+        type="button"
+        className="talk"
+        aria-pressed={state.talking}
+        disabled={state.listenOnly || state.watchOnly}
+        // Muted or deafened it stays pressable (a press reaches the gate, which
+        // is shut and sends nothing), but it looks off and says why in the note
+        // below (UX-07).
+        aria-disabled={silenced ? true : undefined}
+        title={`Talk key: ${keyLabel(voice.talkKey)}`}
+        aria-describedby={silenced ? 'voice-talk-why voice-talk-key' : 'voice-talk-key'}
+        onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); client.press(); }}
+        onPointerUp={() => { client.release(); }}
+        onPointerCancel={() => { client.release(); }}
+        // The keyboard holds it as a pointer does (issue #590): a held key
+        // repeats, and only its first press counts. Focus moving away lets go,
+        // as a lost pointer does.
+        onKeyDown={(e) => {
+          if (!holdKey(e) || e.repeat) return;
+          e.preventDefault();
+          client.press();
+        }}
+        onKeyUp={(e) => {
+          if (holdKey(e)) client.release();
+        }}
+        onBlur={() => { client.release(); }}
+        onContextMenu={(e) => { e.preventDefault(); }}
+      >
+        <Glyph name="mic" />
+        Hold to talk
+      </button>
+    {/* The talk key is in the button's description as well as its title,
+        whether or not the notes behind About talking and sharing are open. */}
+    <span id="voice-talk-key" hidden>{talkKeyNote(voice.talkKey)}</span>
+    </>
   );
 }
 
@@ -1178,8 +1198,10 @@ export function Roster({ channel, mayModerate: standing, roster, people, viewer,
             <span className="who">{nameOf(people, o.principal, viewer, elsewhere, viewerName)}</span>
             <IdentityMarks kind={people.get(o.principal)?.kind} only={['agent']} />
             {!mayModerate || channel === undefined ? null : <button type="button" aria-label={`Remove ${nameOf(people, o.principal, viewer, false, viewerName)} from voice`} onClick={(event) => { kickOpener.current = event.currentTarget; setKick({ id: o.principal, name: nameOf(people, o.principal, viewer, false, viewerName) }); }}>Remove from voice</button>}
-            {o.transmitting ? <Tag text="transmitting" /> : null}
-            {speaking.has(o.principal) ? <Tag text="speaking" /> : null}
+            {/* One badge for sending audio (issue #2198, UI-talk-4): "speaking"
+                when the level says so, else "sending"; the level is the
+                avatar's ring. */}
+            {speaking.has(o.principal) ? <Tag text="speaking" /> : o.transmitting ? <Tag text="sending" /> : null}
             {o.sharing ? <Tag text="sharing" /> : null}
             {/* Others' claims; the person's own camera is said from their
                 own track, in the strip (S5). */}
@@ -1676,6 +1698,8 @@ function Options({ panel, onClose, onShrink, sheet, onSheet, voice, open, sharab
       {/* As a sheet the panel covers the Voice options button, so it has its
           own way out; the style rules draw this only for the sheet. */}
       <button type="button" className="voice-options-close" onClick={onClose}>Close</button>
+      {/* Where the strip no longer says it (issue #2198, UI-talk-3). */}
+      {microphoneCaptured(state) ? <p className="hint">This page is using your microphone.</p> : null}
       <MicrophoneChoice voice={voice} />
       <CameraOptions voice={voice} open={open} cameraAllowed={cameraAllowed} />
       <SpeakersChoice voice={voice} />
@@ -1842,12 +1866,13 @@ function StoppedNote({ text, othersShare }: { readonly text: string; readonly ot
 // suppress that line or the picker (voice-multi-share.md §7.1, #1509).
 // A claim refused at the six-stream cap says so here; the old busy refusal and
 // its who-shares line are gone (voice-multi-share.md §4, §5.1; issue #591, F14).
-function ShareNotes({ voice, onMore, othersShare }: { readonly voice: VoiceControl; readonly onMore: () => void; readonly othersShare: boolean }) {
+function ShareNotes({ voice, onMore, othersShare, showLine = true }: { readonly voice: VoiceControl; readonly onMore: () => void; readonly othersShare: boolean; readonly showLine?: boolean }) {
   const { state, features, client } = voice;
   const share = state.share;
   if (state.listenOnly) return null;
   const inCall = state.phase !== 'idle' && state.phase !== 'stopped';
-  const line = (
+  // The one-line sharing note is behind About talking and sharing.
+  const line = !showLine ? null : (
     <p className="hint share-line voice-supplemental">
       {shortShareNote(features)}{' '}
       <button type="button" className="more" aria-controls="voice-options" onClick={onMore}>More about sharing</button>

@@ -83,7 +83,10 @@ function shortcut(initial = general, reachable = true, voiceAllowed = true) {
 describe('VoiceStatus', () => {
   it('renders the browser strip on the browser platform', () => {
     render(strip());
-    expect(screen.getByText('Microphone off')).toBeTruthy();
+    // "Microphone off" is the Watch only hint's, said once and only where
+    // joining is offered (issue #2198, UI-talk-7); this strip has no line of it.
+    expect(screen.getByRole('region', { name: 'Voice' })).toBeTruthy();
+    expect(screen.queryByText('Microphone off')).toBeNull();
   });
 
   it('renders the native strip, and builds no room, where the platform has a native voice', async () => {
@@ -91,7 +94,7 @@ describe('VoiceStatus', () => {
     Object.defineProperty(platform, 'nativeVoice', { value: nv, configurable: true });
     render(strip());
     await waitFor(() => { expect(screen.getByText('voice off')).toBeTruthy(); });
-    expect(screen.queryByText('Microphone off')).toBeNull();
+    expect(screen.queryByText(/Microphone off/)).toBeNull();
     expect(room).not.toHaveBeenCalled();
   });
 
