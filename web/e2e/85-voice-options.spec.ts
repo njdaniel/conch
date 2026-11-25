@@ -288,31 +288,94 @@ test.describe('Voice options', () => {
     }
   });
 
-  // The quick switcher (Ctrl+K) is a modal drawn into the body. Over open
-  // Voice options, the panel turning into a sheet (the window narrows) does not
-  // take focus from it, and Escape closes the switcher and not the panel.
-  test('P2189 the sheet does not take focus from the channel switcher when the window narrows', async ({ browser }) => {
+  // A sheet is modal, so it is only ever opened by a press, with nothing else
+  // open: an anchored panel that the window narrows under closes instead of
+  // becoming a sheet over whatever else is open. Focus held in it goes to the
+  // Voice options button; nothing is left inert.
+  test('P2189 an anchored panel closes when the window narrows to a phone, and nothing is left inert', async ({ browser }) => {
     let p: Someone | undefined;
     try {
       p = await enter(browser, vw, vw.alice, { context: { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true } });
       const page = p.page;
       await joinVoice(p, 'Join voice');
       await page.getByRole('navigation', { name: 'Main navigation' }).getByRole('button', { name: 'Voice' }).click();
-      await page.setViewportSize({ width: 1440, height: 900 });
+      await page.setViewportSize({ width: 1050, height: 900 });
       const options = voice(page).getByRole('button', { name: 'Voice options' });
       const panel = page.locator('#voice-options');
       await options.click();
       await expect(panel).toBeVisible();
       await expect(panel).not.toHaveClass(/sheet/);
-      await page.keyboard.press('Control+k');
-      const switcher = page.getByRole('dialog', { name: 'Find a channel' });
-      await expect(switcher).toBeVisible();
+      await panel.getByRole('slider', { name: /Release delay/ }).focus();
       await page.setViewportSize({ width: 390, height: 520 });
-      await expect(panel).toHaveClass(/sheet/);
-      await expect(switcher.getByRole('combobox')).toBeFocused();
-      await page.keyboard.press('Escape');
-      await expect(switcher).toHaveCount(0);
+      await expect(panel).toBeHidden();
+      await expect(options).toHaveAttribute('aria-expanded', 'false');
+      await expect(options).toBeFocused();
+      expect(await page.locator('[inert]').count(), 'nothing is left inert').toBe(0);
+    } finally {
+      await p?.close();
+    }
+  });
+
+  // codex's repro: with the keyboard open Members and a profile card over the
+  // anchored panel, then narrow. The panel closes, the card keeps focus,
+  // nothing is inert, and Escape closes the card.
+  test('P2189 a profile card opened over the anchored panel keeps focus when the window narrows', async ({ browser }) => {
+    let p: Someone | undefined;
+    try {
+      p = await enter(browser, vw, vw.alice, { context: { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true } });
+      const page = p.page;
+      await joinVoice(p, 'Join voice');
+      await page.getByRole('navigation', { name: 'Main navigation' }).getByRole('button', { name: 'Voice' }).click();
+      await page.setViewportSize({ width: 1050, height: 900 });
+      const options = voice(page).getByRole('button', { name: 'Voice options' });
+      const panel = page.locator('#voice-options');
+      await options.click();
       await expect(panel).toBeVisible();
+      const members = page.getByRole('button', { name: 'Members' });
+      await members.focus();
+      await page.keyboard.press('Enter');
+      const list = page.getByRole('region', { name: 'Members list' });
+      await expect(list).toBeVisible();
+      const person = list.getByRole('button', { name: new RegExp(vw.alice.name) }).first();
+      await person.focus();
+      await page.keyboard.press('Enter');
+      const card = page.locator('.profile-card');
+      await expect(card).toBeVisible();
+      await page.setViewportSize({ width: 390, height: 520 });
+      await expect(panel).toBeHidden();
+      await expect(card).toBeVisible();
+      const inCard = () => page.evaluate(() => document.activeElement?.closest('.profile-card') != null);
+      expect(await inCard(), 'the card keeps focus').toBe(true);
+      expect(await page.locator('[inert]').count(), 'nothing is left inert').toBe(0);
+      await page.keyboard.press('Escape');
+      await expect(card).toHaveCount(0);
+    } finally {
+      await p?.close();
+    }
+  });
+
+  // Over an open sheet Ctrl+K leaves the page alone (the sheet is a dialog, and
+  // the shortcuts do not run over another dialog): the sheet keeps its focus,
+  // and Escape closes the sheet with focus back on its button.
+  test('P2189 Ctrl+K does not open the switcher over an open sheet, and Escape closes the sheet', async ({ browser }) => {
+    let p: Someone | undefined;
+    try {
+      p = await enter(browser, vw, vw.alice, { context: { viewport: { width: 390, height: 520 }, hasTouch: true, isMobile: true } });
+      const page = p.page;
+      await joinVoice(p, 'Join voice');
+      const options = voice(page).getByRole('button', { name: 'Voice options' });
+      const panel = page.locator('#voice-options');
+      await options.focus();
+      await page.keyboard.press('Enter');
+      await expect(panel).toHaveClass(/sheet/);
+      const close = panel.getByRole('button', { name: 'Close' });
+      await expect(close).toBeFocused();
+      await page.keyboard.press('Control+k');
+      await expect(page.getByRole('dialog', { name: 'Find a channel' })).toHaveCount(0);
+      await expect(close).toBeFocused();
+      await page.keyboard.press('Escape');
+      await expect(panel).toBeHidden();
+      await expect(options).toBeFocused();
     } finally {
       await p?.close();
     }

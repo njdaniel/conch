@@ -184,6 +184,15 @@ export function VoicePanel({
     focusBack.current = true;
     setOptions(false);
   }, []);
+  // The window changed so that the open anchored panel would be a bottom sheet
+  // (issue #2189): it closes instead, so that a sheet, which is modal, is only
+  // ever opened by a press, with nothing else open. Through the same close as
+  // any other (the talk key capture ends with it); focus goes to the button
+  // only if it was inside the panel, and is left alone otherwise.
+  const shrinkOptions = useCallback(() => {
+    focusBack.current = optionsPanel.current?.contains(document.activeElement) === true;
+    setOptions(false);
+  }, []);
   // Whether the open panel is a bottom sheet (set by Options from its place).
   const [sheet, setSheet] = useState(false);
   // Each publisher's volume survives its tile moving or being watched again;
@@ -853,7 +862,7 @@ export function VoicePanel({
         ) : null}
       </div>
 
-      {inVoice ? <Options panel={optionsPanel} onClose={closeOptions} sheet={sheet} onSheet={setSheet} voice={voice} open={options && !strip} sharable={sharable} about={about} others={others} cameraAllowed={cameraAllowed} /> : null}
+      {inVoice ? <Options panel={optionsPanel} onClose={closeOptions} onShrink={shrinkOptions} sheet={sheet} onSheet={setSheet} voice={voice} open={options && !strip} sharable={sharable} about={about} others={others} cameraAllowed={cameraAllowed} /> : null}
       {staged === null ? null : stage === null ? staged : createPortal(staged, stage)}
     </section>
   );
@@ -1482,10 +1491,13 @@ function CameraOptions({ voice, open, cameraAllowed }: { readonly voice: VoiceCo
 // nothing under it. It is fixed, so the dock's own scroll does not clip it;
 // its place is the section's, set on it from the section's box, or a bottom
 // sheet over the window where there is too little room above the section.
-function Options({ panel, onClose, sheet, onSheet, voice, open, sharable, about, others, cameraAllowed }: {
+function Options({ panel, onClose, onShrink, sheet, onSheet, voice, open, sharable, about, others, cameraAllowed }: {
   readonly panel: RefObject<HTMLDivElement | null>;
   // Closes the panel and returns focus to its button.
   readonly onClose: () => void;
+  // Closes the panel for the window having changed under it: it was anchored
+  // and would now be a sheet.
+  readonly onShrink: () => void;
   // Whether the panel is drawn as a bottom sheet, which is a modal dialog.
   readonly sheet: boolean;
   // Says whether the panel is drawn as a bottom sheet.
@@ -1508,6 +1520,8 @@ function Options({ panel, onClose, sheet, onSheet, voice, open, sharable, about,
     const el = panel.current;
     const section = el?.parentElement;
     if (!open || !el || !section) return;
+    // Whether the panel was anchored when last placed: null until it is first.
+    let anchored: boolean | null = null;
     const place = () => {
       const r = section.getBoundingClientRect();
       const view = document.documentElement.clientHeight;
@@ -1515,6 +1529,13 @@ function Options({ panel, onClose, sheet, onSheet, voice, open, sharable, about,
       // (or is itself above the window, as a scrolled dock can leave it), the
       // panel is a bottom sheet over the window instead: always in view.
       const sheet = r.top < view * 0.4;
+      // An anchored panel does not become a sheet under what is open: it
+      // closes (a sheet that opens by a press is the one that is modal).
+      if (anchored === true && sheet) {
+        onShrink();
+        return;
+      }
+      anchored = !sheet;
       el.classList.toggle('sheet', sheet);
       onSheet(sheet);
       // The sheet rests on the phone's navigation, which stays in reach.
@@ -1534,7 +1555,7 @@ function Options({ panel, onClose, sheet, onSheet, voice, open, sharable, about,
       window.removeEventListener('scroll', place, true);
       watch?.disconnect();
     };
-  }, [open, panel, onSheet]);
+  }, [open, panel, onSheet, onShrink]);
   return (
     <div
       ref={panel}

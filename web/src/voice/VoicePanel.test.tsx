@@ -769,6 +769,48 @@ it('Voice options does not take focus from another open modal dialog', () => {
   }
 });
 
+// Issue #2189: an anchored panel the window narrows under closes, rather than
+// becoming a sheet over what else is open; a sheet is only opened by a press.
+it('an open anchored panel closes when it would become a sheet, with focus on its button if it was in it', () => {
+  const voice = control(inVoice('connected', 'c'), [], { kind: 'presence', presence });
+  let top = 700;
+  const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(() => ({ top, left: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: top, toJSON: () => ({}) }));
+  const height = vi.spyOn(document.documentElement, 'clientHeight', 'get').mockReturnValue(800);
+  try {
+    render(<VoicePanel voice={voice} viewer={7} people={new Map()} viewed="c" onOpen={() => undefined} />);
+    const button = screen.getByRole('button', { name: 'Voice options' });
+    fireEvent.click(button);
+    expect(document.querySelector('#voice-options')?.classList.contains('sheet')).toBe(false);
+    const slider = screen.getByRole('slider', { name: /Release delay/ });
+    slider.focus();
+    top = 100;
+    act(() => {
+      window.dispatchEvent(new Event('resize'));
+    });
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(button);
+    // Focus outside the panel is left alone.
+    fireEvent.click(button);
+    top = 700;
+    act(() => {
+      window.dispatchEvent(new Event('resize'));
+    });
+    const other = document.createElement('input');
+    document.body.append(other);
+    other.focus();
+    top = 100;
+    act(() => {
+      window.dispatchEvent(new Event('resize'));
+    });
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(other);
+    other.remove();
+  } finally {
+    rect.mockRestore();
+    height.mockRestore();
+  }
+});
+
 // Issue #590 (F09, F20): Hold to talk works from the keyboard while it has
 // focus, the hint says where the talk key does not work, and Leave voice
 // hands focus to Join voice instead of dropping it.
