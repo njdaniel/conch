@@ -169,6 +169,12 @@ test('P2196 tablet 1050×800: Tab and Shift+Tab out of a row menu stay in the dr
     await members(page).focus();
     await page.keyboard.press('Enter');
     await expect(list(page)).toBeFocused();
+    // The drawer's stops are final only once the channel's runs have answered:
+    // until then a "Filter runs" select sits after the row's ⋯, and is removed
+    // when this channel folds to "No agents or runs", so a stop read before
+    // that can vanish under the test (issue #2196 review).
+    await expect(list(page).getByText('No agents or runs in this channel.')).toBeVisible();
+    await expect(list(page).locator('.community-member').first()).toBeVisible();
     return page;
   };
 
