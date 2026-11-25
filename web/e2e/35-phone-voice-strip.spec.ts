@@ -397,7 +397,7 @@ test.describe('the phone voice strip with LiveKit', () => {
         // No amber chip says the microphone is in use (issue #2198); the
         // status phrase says what others hear.
         await expect(voice.getByText('Microphone in use')).toHaveCount(0);
-        await expect(voice.locator('.voice-tx')).toHaveText(/^(Push to talk|Open mic|Muted): not sending$|^(Sending|Open mic: sending)$/);
+        await expect(voice.locator('.voice-tx')).toHaveText('Push to talk: not sending');
         await voice.getByRole('button', { name: 'Deafen' }).tap();
         await expect(voice).toContainText('Deafened');
         await voice.getByRole('button', { name: 'Undeafen' }).tap();

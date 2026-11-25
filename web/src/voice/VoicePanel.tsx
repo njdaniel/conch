@@ -721,7 +721,10 @@ export function VoicePanel({
   const stoppedNotice = stopped === null || !inVoice ? null : <p role="status" className="stage-notice">{stopped.name} stopped sharing.</p>;
   // One fragment either way, so the call view keeps its place (and its
   // state) when the notice comes and goes.
-  const onStage = stoppedNotice === null && staged === null ? null : <>{stoppedNotice}{staged}</>;
+  // Where there is no stage content (a phone under Chat once its last share
+  // ends), the notice alone would make the stage non-empty and the share
+  // layout would clip the conversation's header: it is the strip's then.
+  const onStage = staged === null ? null : <>{stoppedNotice}{staged}</>;
   // How many cameras are on in the room: everyone else's claims, and the
   // person's own while their track is published.
   const cameraCount = roster.filter((o) => o.principal !== viewer && o.camera).length + (state.cameraTrack === 'published' ? 1 : 0);
@@ -754,6 +757,10 @@ export function VoicePanel({
   const { features } = voice;
   const shareLine = !state.listenOnly && features.canShare && state.share.kind === 'idle';
   const sharable = shareLine;
+  // What About talking and sharing would show: the talk-key line, the sharing
+  // line. With neither there is nothing to disclose, and no button.
+  const talkLine = state.mode === 'ptt' && !state.listenOnly && !state.watchOnly;
+  const hasHelp = talkLine || shareLine;
   // Everyone else in the room joined, whose volumes Voice options sets.
   const others = roster.filter((o) => o.principal !== viewer).map((o) => ({ principal: o.principal, name: nameOf(people, o.principal, viewer) }));
   const more = () => {
@@ -830,9 +837,11 @@ export function VoicePanel({
                 {/* The talk key and sharing notes are behind this disclosure,
                     not always shown (issue #2198, UI-talk-6). Nothing is
                     remembered: it starts closed. */}
-                <button type="button" className="quiet voice-help-button" aria-expanded={help} aria-label="About talking and sharing" onClick={() => { setHelp(!help); }}>
-                  <span aria-hidden="true">i</span>
-                </button>
+                {hasHelp ? (
+                  <button type="button" className="quiet voice-help-button" aria-expanded={help} aria-label="About talking and sharing" onClick={() => { setHelp(!help); }}>
+                    <span aria-hidden="true">i</span>
+                  </button>
+                ) : null}
                 <button ref={optionsButton} type="button" className="quiet" aria-expanded={options} aria-controls="voice-options" onKeyDown={(e) => {
                   // Tab from the button, with the anchored panel open, enters it, as
                   // if it followed the button (it follows the notes in the DOM).
@@ -907,10 +916,10 @@ export function VoicePanel({
             ) : null}
             {/* Only the notes of a disclosure are behind it; what is
                 happening (a share, why one ended) is not. */}
-            {help && state.mode === 'ptt' && !state.listenOnly && !state.watchOnly ? (
-              <p className="hint talk-key-note voice-supplemental">{talkKeyNote(voice.talkKey)}</p>
+            {help && talkLine ? (
+              <p className="hint talk-key-note">{talkKeyNote(voice.talkKey)}</p>
             ) : null}
-            <ShareNotes voice={voice} onMore={more} othersShare={streams.length > 0} showLine={help} />
+            <ShareNotes voice={voice} onMore={more} othersShare={streams.length > 0} showLine={help && shareLine} />
           </>
         ) : (
           <>
@@ -953,6 +962,7 @@ export function VoicePanel({
       </div>
 
       {inVoice ? <Options panel={optionsPanel} onClose={closeOptions} onShrink={shrinkOptions} sheet={sheet} onSheet={setSheet} voice={voice} open={options && !strip} sharable={sharable} about={about} others={others} cameraAllowed={cameraAllowed} /> : null}
+      {staged === null ? stoppedNotice : null}
       {onStage === null ? null : stage === null ? onStage : createPortal(onStage, stage)}
     </section>
   );
@@ -1010,10 +1020,19 @@ function talkKeyNote(key: string): string {
   return `Talk key: ${keyLabel(key)}. It works only while this tab has focus, and not while you are typing.`;
 }
 
+// What Hold to talk says where the session cannot send.
+const listenOnlyTalkNote = 'Hold to talk is off: this session is listen only.';
+const watchOnlyTalkNote = 'Hold to talk is off: you are in Watch only. Use microphone to talk.';
+
 // TalkControl is Hold to talk, or, with the open microphone, its level: the
 // one way to talk, in the strip and in the Voice view alike.
 function TalkControl({ voice, silenced }: { readonly voice: VoiceControl; readonly silenced: boolean }) {
   const { state, client } = voice;
+  // Without a microphone nothing can be sent: the key is not advertised, and
+  // the description says why. The reason muted is only referenced while it is
+  // drawn (the notes' #voice-talk-why), so no description points at nothing.
+  const cannot = state.listenOnly ? listenOnlyTalkNote : state.watchOnly ? watchOnlyTalkNote : null;
+  const why = silenced && cannot === null;
   if (state.mode !== 'ptt') {
     return (
       <span className="open-mic">
@@ -1036,8 +1055,8 @@ function TalkControl({ voice, silenced }: { readonly voice: VoiceControl; readon
         // is shut and sends nothing), but it looks off and says why in the note
         // below (UX-07).
         aria-disabled={silenced ? true : undefined}
-        title={`Talk key: ${keyLabel(voice.talkKey)}`}
-        aria-describedby={silenced ? 'voice-talk-why voice-talk-key' : 'voice-talk-key'}
+        title={cannot ?? `Talk key: ${keyLabel(voice.talkKey)}`}
+        aria-describedby={why ? 'voice-talk-why voice-talk-key' : 'voice-talk-key'}
         onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); client.press(); }}
         onPointerUp={() => { client.release(); }}
         onPointerCancel={() => { client.release(); }}
@@ -1060,7 +1079,7 @@ function TalkControl({ voice, silenced }: { readonly voice: VoiceControl; readon
       </button>
     {/* The talk key is in the button's description as well as its title,
         whether or not the notes behind About talking and sharing are open. */}
-    <span id="voice-talk-key" hidden>{talkKeyNote(voice.talkKey)}</span>
+    <span id="voice-talk-key" hidden>{cannot ?? talkKeyNote(voice.talkKey)}</span>
     </>
   );
 }
@@ -1873,7 +1892,7 @@ function ShareNotes({ voice, onMore, othersShare, showLine = true }: { readonly 
   const inCall = state.phase !== 'idle' && state.phase !== 'stopped';
   // The one-line sharing note is behind About talking and sharing.
   const line = !showLine ? null : (
-    <p className="hint share-line voice-supplemental">
+    <p className="hint share-line">
       {shortShareNote(features)}{' '}
       <button type="button" className="more" aria-controls="voice-options" onClick={onMore}>More about sharing</button>
     </p>

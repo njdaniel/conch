@@ -8,7 +8,7 @@
 // page says voice is not set up and asks for no device.
 import type { Browser, BrowserContextOptions, Locator, Page } from '@playwright/test';
 import type { PostMessageRequestV2 } from '../src/schema/generated';
-import { rosterSending, notSendingText, sendingText, closeAll, channelButton, chooseMicrophone, conversation, credentialField, expect, expectFits, mainNav, messages, phones, rememberPushToTalk, showView, signIn, statusLine, test } from './fixtures';
+import { rosterChip, notSendingText, sendingText, closeAll, channelButton, chooseMicrophone, conversation, credentialField, expect, expectFits, mainNav, messages, phones, rememberPushToTalk, showView, signIn, statusLine, test } from './fixtures';
 import { enter, expectClean as expectCleanPage, inbound, keepConnections } from './people';
 import { dockerAvailable, startVoiceWorld, watchPage, type Member, type VoiceWorld } from './voice-world';
 
@@ -168,12 +168,12 @@ test.describe('with LiveKit', () => {
 
       // A holds the talk key; B's audio bytes rise, and the roster shows A talking.
       await a.page.keyboard.down('Backquote');
-      await expect(voiceRegion(b.page).getByRole('list', { name: 'In voice' })).toContainText(rosterSending('alice'), { timeout: 15_000 });
+      await expect(rosterChip(voiceRegion(b.page).getByRole('list', { name: 'In voice' }), 'alice')).toHaveCount(1, { timeout: 15_000 });
       await expect(voiceRegion(a.page).locator('.voice-tx')).toHaveText(sendingText);
       const loud = await delta(b.page, 2000);
       await a.page.keyboard.up('Backquote');
       expect(loud, `bytes while A talks (${String(loud)}) versus quiet (${String(quiet)})`).toBeGreaterThan(quiet * 4 + 2000);
-      await expect(voiceRegion(b.page).getByRole('list', { name: 'In voice' })).not.toContainText(rosterSending('alice'), { timeout: 15_000 });
+      await expect(rosterChip(voiceRegion(b.page).getByRole('list', { name: 'In voice' }), 'alice')).toHaveCount(0, { timeout: 15_000 });
       const after = await delta(b.page, 2000);
       expect(after).toBeLessThan(loud / 4);
 
@@ -598,11 +598,11 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
         await page.keyboard.down(key);
         await page.keyboard.down(key);
         await expect(voice.locator('.voice-tx')).toHaveText(sendingText, { timeout: 2000 });
-        await expect(heard).toContainText(rosterSending('alice'), { timeout: 15_000 });
+        await expect(rosterChip(heard, 'alice')).toHaveCount(1, { timeout: 15_000 });
         await new Promise((r) => setTimeout(r, 1200));
         await page.keyboard.up(key);
         await expect(voice.locator('.voice-tx')).toHaveText(notSendingText);
-        await expect(heard).not.toContainText(rosterSending('alice'), { timeout: 15_000 });
+        await expect(rosterChip(heard, 'alice')).toHaveCount(0, { timeout: 15_000 });
         await expect.poll(async () => (await transmits()).slice(before), { timeout: 15_000 }).toEqual(Array<string[]>(i + 1).fill(pair).flat());
         await expect(talk).toBeFocused();
       }
@@ -616,7 +616,7 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
       await expect(talk).not.toBeFocused();
       await expect(voice.locator('.voice-tx')).toHaveText(notSendingText);
       await page.keyboard.up('Enter');
-      await expect(heard).not.toContainText(rosterSending('alice'), { timeout: 15_000 });
+      await expect(rosterChip(heard, 'alice')).toHaveCount(0, { timeout: 15_000 });
       await expect.poll(async () => (await transmits()).slice(before), { timeout: 15_000 }).toEqual(Array<string[]>(3).fill(pair).flat());
       expect((await vw.audit()).filter((e) => e.actor === actor && e.action === 'voice_transmit_unreported')).toEqual([]);
 
@@ -1300,13 +1300,13 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
       await expect(voice.getByRole('meter', { name: 'Microphone level' })).toBeVisible();
       await expect(voice.getByRole('button', { name: 'Hold to talk' })).toHaveCount(0);
       // No key is held: the tone opens the gate, and the other page says so.
-      await expect(heard).toContainText(rosterSending('opal'), { timeout: 20_000 });
+      await expect(rosterChip(heard, 'opal')).toHaveCount(1, { timeout: 20_000 });
 
       // One tap to push to talk: silent, and Hold to talk is there.
       await toggle.click();
       await expect(toggle).toHaveAttribute('aria-pressed', 'false');
       await expect(voice.getByRole('button', { name: 'Hold to talk' })).toBeVisible();
-      await expect(heard).not.toContainText(rosterSending('opal'), { timeout: 15_000 });
+      await expect(rosterChip(heard, 'opal')).toHaveCount(0, { timeout: 15_000 });
 
       // A reload and a rejoin keep it.
       await a.page.reload();
@@ -1741,7 +1741,7 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
           await expect(heard).toContainText('yan', { timeout: 15_000 });
           await a.page.getByRole('heading', { name: 'Conch' }).click();
           await a.page.keyboard.down('Backquote');
-          await expect(heard).toContainText(rosterSending('yan'), { timeout: 15_000 });
+          await expect(rosterChip(heard, 'yan')).toHaveCount(1, { timeout: 15_000 });
           await new Promise((r) => setTimeout(r, 1500));
           const released = Date.now();
           await a.page.keyboard.up('Backquote');

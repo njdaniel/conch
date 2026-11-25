@@ -35,7 +35,7 @@
 // not: real microphones, echo cancellation, speakers, other machines, or the
 // desktop helper's audio.
 import type { Page } from '@playwright/test';
-import { rosterSending, sendingText, chooseMicrophone, expect, test } from './fixtures';
+import { rosterChip, sendingText, chooseMicrophone, expect, test } from './fixtures';
 import { enter, expectClean, inbound, joinVoice, leave, type Someone } from './people';
 import { floorOf, heardBy, recordHeard, syntheticMicrophone, table, toneLevels, tracksAt, type TrackLevel } from './synthetic-mic';
 import { answered } from './livekit-admin';
@@ -158,11 +158,11 @@ test.describe('@cross @voice who hears whom', () => {
           await focus(p);
           await p.page.keyboard.down('Backquote');
           const others = people.filter((o) => o !== p);
-          for (const o of others) await expect(roster(o.page)).toContainText(rosterSending(p.member.name), { timeout: 15_000 });
+          for (const o of others) await expect(rosterChip(roster(o.page), p.member.name)).toHaveCount(1, { timeout: 15_000 });
           await expect(voiceRegion(p.page).locator('.voice-tx')).toHaveText(sendingText);
           expectOnly(await afterOnset(observe, heard), t);
           await p.page.keyboard.up('Backquote');
-          for (const o of others) await expect(roster(o.page)).not.toContainText(rosterSending(p.member.name), { timeout: 15_000 });
+          for (const o of others) await expect(rosterChip(roster(o.page), p.member.name)).toHaveCount(0, { timeout: 15_000 });
           await expectSilence();
         }
 
@@ -187,14 +187,14 @@ test.describe('@cross @voice who hears whom', () => {
         await chooseMicrophone(av, 'open');
         await expectSilence();
         expectOnly(await observe(readMs * 2), null);
-        for (const o of [bob, carol]) await expect(roster(o.page)).not.toContainText(rosterSending('alice'));
+        for (const o of [bob, carol]) await expect(rosterChip(roster(o.page), 'alice')).toHaveCount(0);
         await av.getByRole('button', { name: 'Unmute', exact: true }).click();
         await expect(av).not.toContainText('Muted: not sending');
-        for (const o of [bob, carol]) await expect(roster(o.page)).toContainText(rosterSending('alice'), { timeout: 15_000 });
+        for (const o of [bob, carol]) await expect(rosterChip(roster(o.page), 'alice')).toHaveCount(1, { timeout: 15_000 });
         expectOnly(await afterOnset(observe, heard), 0);
         // Back to push to talk: the open microphone would keep alice's tone going.
         await chooseMicrophone(av, 'push to talk');
-        for (const o of [bob, carol]) await expect(roster(o.page)).not.toContainText(rosterSending('alice'), { timeout: 15_000 });
+        for (const o of [bob, carol]) await expect(rosterChip(roster(o.page), 'alice')).toHaveCount(0, { timeout: 15_000 });
         await expectSilence();
 
         // Deafen: carol's remote audio elements are all muted, and bob and alice still hear each other.
@@ -211,7 +211,7 @@ test.describe('@cross @voice who hears whom', () => {
           await p.page.keyboard.down('Backquote');
           await expect(voiceRegion(p.page).locator('.voice-tx')).toHaveText(sendingText);
           const listener = people.find((o) => o !== p && o !== carol);
-          if (listener !== undefined) await expect(roster(listener.page)).toContainText(rosterSending(p.member.name), { timeout: 15_000 });
+          if (listener !== undefined) await expect(rosterChip(roster(listener.page), p.member.name)).toHaveCount(1, { timeout: 15_000 });
           // Carol is deaf in her elements, not in her tracks: only the other listener is read.
           expectOnly(await afterOnset(observe, heard), t, [2]);
           await p.page.keyboard.up('Backquote');

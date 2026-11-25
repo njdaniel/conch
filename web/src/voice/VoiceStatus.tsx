@@ -13,18 +13,22 @@ export function VoiceStatus({ state, showPhase = false }: { readonly state: Voic
   const captured = microphoneCaptured(state);
   const waiting = [...state.watched].some((principal) => state.streamTracks.get(principal)?.video !== true);
   const reconnecting = showPhase && state.phase === 'reconnecting';
-  // One phrase says what others hear (issue #2198, UI-talk-3). With no
-  // microphone to send from, the words that say so are the whole status.
-  const tx = state.listenOnly || state.watchOnly || state.viewer
+  // One phrase says what others hear (issue #2198, UI-talk-3). The short
+  // send phrase never breaks mid-phrase (UI-talk-5); the sentences before it
+  // (deafened, or the words for no microphone) are long and wrap as text.
+  const noMic = state.listenOnly || state.watchOnly || state.viewer;
+  const note = noMic
     ? [
-        state.muted ? 'Muted. ' : '',
-        state.deafened ? 'Deafened (you hear no one, and you are muted). ' : '',
-        state.listenOnly ? 'Listen only. ' : '',
+        state.muted ? 'Muted.' : '',
+        state.deafened ? 'Deafened (you hear no one, and you are muted).' : '',
+        state.listenOnly ? 'Listen only.' : '',
         state.viewer ? 'Watching beside your voice on another device.' : state.watchOnly ? 'Watch only: your microphone is off.' : '',
-      ].join('').trim()
+      ].filter((w) => w !== '').join(' ')
     : state.deafened
-      ? `Deafened (you hear no one, and you are muted). ${transmitLabel(state)}`
-      : transmitLabel(state);
+      ? 'Deafened (you hear no one, and you are muted).'
+      : '';
+  const phrase = noMic ? '' : transmitLabel(state);
+  const tx = [note, phrase].filter((w) => w !== '').join(' ');
   const words = showPhase
     ? [
         reconnecting ? 'Reconnecting' : '',
@@ -53,7 +57,12 @@ export function VoiceStatus({ state, showPhase = false }: { readonly state: Voic
         </>
       ) : null}
       {waiting ? <><span className="share-waiting">Waiting for the picture</span>{' '}</> : null}
-      <span className="voice-tx">{tx}</span>
+      <span className="voice-tx">
+        {/* Both spans are always there, so a longer status changes only text. */}
+        <span className="voice-tx-note">{note}</span>
+        {note !== '' && phrase !== '' ? ' ' : null}
+        <span className="voice-tx-phrase">{phrase}</span>
+      </span>
     </p>
   );
 }

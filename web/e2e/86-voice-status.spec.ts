@@ -8,6 +8,7 @@
 import type { Locator, Page } from '@playwright/test';
 import { chooseMicrophone, drawDesktopStrip, expect, showView, test } from './fixtures';
 import { enter, joinVoice, type Someone } from './people';
+import { syntheticMicrophone } from './synthetic-mic';
 import { dockerAvailable, startVoiceWorld, type VoiceWorld } from './voice-world';
 
 const voice = (page: Page) => page.getByRole('region', { name: 'Voice' });
@@ -50,7 +51,9 @@ test.describe('the voice strip status', () => {
     test(`P2198 ${name}: the status is one phrase on one line, with no microphone chip`, async ({ browser }) => {
       let p: Someone | undefined;
       try {
-        p = await enter(browser, vw, vw.alice, { context: { viewport: { width, height }, hasTouch: !desktop } });
+        // A silent microphone of its own: Chromium's fake tone is above the open
+        // microphone's level and would race the gate (Open mic: sending).
+        p = await enter(browser, vw, vw.alice, { context: { viewport: { width, height }, hasTouch: !desktop }, before: async (page) => { await page.addInitScript(syntheticMicrophone, { on: false }); } });
         const page = p.page;
         if (desktop) await drawDesktopStrip(page);
         await joinVoice(p, 'Join voice');
@@ -87,7 +90,12 @@ test.describe('the voice strip status', () => {
         await expect(about).toHaveAttribute('aria-expanded', 'true');
         await expect(strip.locator('.share-line')).toBeVisible();
         await expect(strip.getByRole('button', { name: 'Hold to talk' })).toHaveAttribute('title', /^Talk key: /);
-        await expect(page.locator('#voice-options')).toContainText('This page is using your microphone.');
+        // Said with Voice options open, where it is visible.
+        const options = strip.getByRole('button', { name: 'Voice options' });
+        if (desktop) await options.click();
+        else await options.tap();
+        await expect(page.locator('#voice-options')).toBeVisible();
+        await expect(page.locator('#voice-options').getByText('This page is using your microphone.')).toBeVisible();
       } finally {
         await p?.close();
       }
@@ -150,6 +158,107 @@ test.describe('the voice strip status', () => {
       await expect(channel).toContainText(`#${b.channel}`);
       const clipped = await call.locator('.call-context').evaluate((el) => el.scrollWidth > el.clientWidth + 1);
       expect(clipped, 'the channel name is cut short').toBe(false);
+    } finally {
+      await a?.close();
+      await b?.close();
+    }
+  });
+
+  // Round 2 (codex review of #2201): on a 390 px phone the deafened sentence
+  // and the send phrase together are wider than the strip. The sentence wraps;
+  // the short phrase stays whole, inside the strip.
+  test('P2198 deafened on a phone: the send phrase is fully visible and nothing overflows', async ({ browser }) => {
+    let p: Someone | undefined;
+    try {
+      p = await enter(browser, vw, vw.alice, { context: { viewport: { width: 390, height: 844 }, hasTouch: true } });
+      const page = p.page;
+      await joinVoice(p, 'Join voice');
+      const strip = voice(page);
+      await showView(page, 'Voice');
+      await strip.getByRole('button', { name: 'Deafen', exact: true }).tap();
+      const phrase = strip.locator('.voice-tx-phrase');
+      await expect(phrase).toHaveText('Muted: not sending');
+      await expect(strip.locator('.voice-tx-note')).toContainText('Deafened (you hear no one, and you are muted).');
+      const inside = async () => {
+        const b = await phrase.boundingBox();
+        const s = await strip.locator('.voice-state').boundingBox();
+        if (b === null || s === null) throw new Error('no box');
+        return { b, s };
+      };
+      await expect(async () => {
+        const { b, s } = await inside();
+        expect(b.x, 'the phrase starts inside the strip').toBeGreaterThanOrEqual(s.x - 0.5);
+        expect(b.x + b.width, `the phrase ends at ${String(b.x + b.width)}, the strip's text column at ${String(s.x + s.width)}`).toBeLessThanOrEqual(s.x + s.width + 0.5);
+        expect(b.x + b.width, 'the phrase is inside the window').toBeLessThanOrEqual(390);
+      }).toPass({ timeout: 5000 });
+      const overflow = await page.evaluate(() => ({ page: document.documentElement.scrollWidth - window.innerWidth, state: (() => { const el = document.querySelector('.voice-state'); return el === null ? 0 : el.scrollWidth - el.clientWidth; })() }));
+      expect(overflow.page, 'the page scrolls sideways').toBeLessThanOrEqual(0);
+      expect(overflow.state, 'the status column is clipped').toBeLessThanOrEqual(1);
+    } finally {
+      await p?.close();
+    }
+  });
+
+  // In a compact call the notes behind About talking and sharing show when it
+  // is open (aria-expanded true must mean they are there).
+  test('P2198 in a compact call, About talking and sharing shows its notes', async ({ browser }) => {
+    test.setTimeout(120_000);
+    let a: Someone | undefined;
+    let b: Someone | undefined;
+    try {
+      a = await enter(browser, vw, vw.alice, { context: { viewport: { width: 1440, height: 900 } } });
+      b = await enter(browser, vw, vw.bob, { context: { viewport: { width: 1440, height: 900 } } });
+      await joinVoice(a, 'Join voice');
+      await joinVoice(b, 'Join voice');
+      await voice(a.page).getByRole('button', { name: 'Share screen' }).click();
+      await expect(voice(a.page)).toContainText('You are sharing your screen with sound.', { timeout: 30_000 });
+      await b.page.locator('.call-share').filter({ hasText: 'alice · LIVE' }).getByRole('button', { name: 'Watch' }).click({ timeout: 30_000 });
+      await expect(b.page.getByRole('region', { name: 'Shared screen' })).toContainText('alice · LIVE');
+      await b.page.getByRole('region', { name: 'Video call' }).getByRole('button', { name: 'Compact', exact: true }).click();
+      await expect(b.page.getByRole('region', { name: 'Video call' })).toHaveClass(/compact/);
+      const about = voice(b.page).getByRole('button', { name: 'About talking and sharing' });
+      await expect(voice(b.page).locator('.voice-notes .talk-key-note')).toHaveCount(0);
+      await about.click();
+      await expect(about).toHaveAttribute('aria-expanded', 'true');
+      await expect(voice(b.page).locator('.voice-notes .talk-key-note')).toBeVisible();
+      await expect(voice(b.page).locator('.voice-notes .share-line')).toBeVisible();
+    } finally {
+      await a?.close();
+      await b?.close();
+    }
+  });
+
+  // On a phone under Chat, once the last watched share ends, the notice alone
+  // must not put the share layout over the conversation: its header (and its
+  // Search) stays whole for the five seconds.
+  test('P2198 a phone in Chat keeps the conversation header whole while the share-ended notice shows', async ({ browser }) => {
+    test.setTimeout(120_000);
+    let a: Someone | undefined;
+    let b: Someone | undefined;
+    try {
+      a = await enter(browser, vw, vw.alice, { context: { viewport: { width: 1440, height: 900 } } });
+      b = await enter(browser, vw, vw.bob, { context: { viewport: { width: 390, height: 844 }, hasTouch: true } });
+      const phone = b.page;
+      await joinVoice(a, 'Join voice');
+      await joinVoice(b, 'Join voice');
+      await voice(a.page).getByRole('button', { name: 'Share screen' }).click();
+      await expect(voice(a.page)).toContainText('You are sharing your screen with sound.', { timeout: 30_000 });
+      await showView(b.page, 'Voice');
+      await b.page.locator('.call-share').filter({ hasText: 'alice · LIVE' }).getByRole('button', { name: 'Watch' }).tap({ timeout: 30_000 });
+      await expect(b.page.getByRole('region', { name: 'Shared screen' })).toContainText('alice · LIVE');
+      await showView(b.page, 'Chat');
+      await voice(a.page).getByRole('button', { name: 'Stop sharing' }).click();
+      const notice = voice(b.page).getByRole('status').filter({ hasText: 'alice stopped sharing.' });
+      await expect(notice).toBeVisible({ timeout: 20_000 });
+      const head = b.page.locator('.conversation-body > .conv-head');
+      await expect(async () => {
+        const box = await head.boundingBox();
+        expect(box?.height ?? 0, 'the conversation header is clipped to a pixel').toBeGreaterThan(20);
+        const search = phone.locator('#channel-search-open');
+        const sb = await search.boundingBox();
+        expect(sb?.height ?? 0, 'the header\'s button is clipped').toBeGreaterThan(20);
+      }).toPass({ timeout: 4000 });
+      await expect(notice).toHaveCount(0, { timeout: 15_000 });
     } finally {
       await a?.close();
       await b?.close();

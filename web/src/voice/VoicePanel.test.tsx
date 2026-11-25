@@ -628,6 +628,73 @@ describe('what is sent, as the strip says it', () => {
     expect(talk.getAttribute('title')).toBe('Talk key: ` (backtick)');
   });
 
+  // Round 2 (codex review of #2201).
+  it('has no About talking and sharing where there is nothing to disclose, and has it where there is', () => {
+    const { voice, redraw } = panel(inVoice('connected', 'c'), 'c');
+    const about = () => within(voice).queryByRole('button', { name: 'About talking and sharing' });
+    expect(about()).not.toBeNull();
+    // Open microphone: the sharing line is still there to disclose.
+    redraw({ ...inVoice('connected', 'c'), mode: 'open' });
+    expect(about()).not.toBeNull();
+    // Listen only: no talk key and no sharing line.
+    redraw({ ...inVoice('connected', 'c'), listenOnly: true });
+    expect(about()).toBeNull();
+    // Sharing now: the talk-key line is all there is, in push to talk.
+    redraw({ ...inVoice('connected', 'c'), share: { kind: 'stopping' } });
+    expect(about()).not.toBeNull();
+    redraw({ ...inVoice('connected', 'c'), mode: 'open', share: { kind: 'stopping' } });
+    expect(about()).toBeNull();
+  });
+
+  it('opens notes that the compact call keeps: they are not the supplemental ones it hides', () => {
+    const { voice } = panel(inVoice('connected', 'c'), 'c');
+    fireEvent.click(within(voice).getByRole('button', { name: 'About talking and sharing' }));
+    for (const selector of ['.voice-notes .talk-key-note', '.voice-notes .share-line']) {
+      const note = voice.querySelector(selector);
+      expect(note, selector).not.toBeNull();
+      expect(note?.classList.contains('voice-supplemental'), selector).toBe(false);
+    }
+  });
+
+  it.each([
+    ['plain', {}, 'Talk key: ` (backtick). It works only while this tab has focus, and not while you are typing.'],
+    ['muted', { muted: true }, 'Hold to talk sends nothing while you are muted. Unmute to talk. Talk key: ` (backtick). It works only while this tab has focus, and not while you are typing.'],
+    ['listen only', { listenOnly: true }, 'Hold to talk is off: this session is listen only.'],
+    ['watch only', { watchOnly: true }, 'Hold to talk is off: you are in Watch only. Use microphone to talk.'],
+    ['watch only and muted', { watchOnly: true, muted: true }, 'Hold to talk is off: you are in Watch only. Use microphone to talk.'],
+  ] as const)('Hold to talk, %s: its description is %j, and points only at what is drawn', (_what, patch, said) => {
+    const { voice } = panel({ ...inVoice('connected', 'c'), ...patch }, 'c');
+    const talk = within(voice).getByRole('button', { name: 'Hold to talk' });
+    const ids = (talk.getAttribute('aria-describedby') ?? '').split(' ').filter((id) => id !== '');
+    expect(ids.length).toBeGreaterThan(0);
+    for (const id of ids) expect(document.getElementById(id), `#${id} is drawn`).not.toBeNull();
+    expect(ids.map((id) => document.getElementById(id)?.textContent).join(' ')).toBe(said);
+    // Where nothing can be sent the key is not advertised, in the title either.
+    if (_what.includes('only')) expect(talk.getAttribute('title')).not.toContain('Talk key');
+  });
+
+  it('shows "x stopped sharing." in the strip, and nothing in the stage, when no stage content is left', () => {
+    const stage = document.createElement('div');
+    document.body.append(stage);
+    const bob: ReadonlyMap<number, Person> = new Map([[3, { name: 'bob', kind: null }]]);
+    const sharing = (on: boolean): Snapshot => ({ kind: 'presence', presence: { ...presence, rooms: [{ participants: [{ principal_id: 3, can_publish: true, transmitting: false, joined_at: '2026-10-18T00:00:00Z', sharing: on, ...(on ? { share_started_at: '2026-10-18T00:00:00Z' } : {}) }] }] } });
+    const mount = (state: VoiceState, snapshot: Snapshot) => (
+      <StageHost.Provider value={stage}>
+        <VoiceStrip.Provider value={() => undefined}>
+          <VoicePanel voice={control(state, [], snapshot)} viewer={7} viewerName="" people={bob} viewed="c" onOpen={() => undefined} />
+        </VoiceStrip.Provider>
+      </StageHost.Provider>
+    );
+    const view = render(mount({ ...inVoice('connected', 'c'), watched: new Set([3]) }, sharing(true)));
+    view.rerender(mount({ ...inVoice('connected', 'c'), watched: new Set() }, sharing(false)));
+    const voice = screen.getByRole('region', { name: 'Voice' });
+    expect(within(voice).getByText('bob stopped sharing.').getAttribute('role')).toBe('status');
+    // The stage stays empty, so the share layout does not claim the page.
+    expect(stage.childElementCount).toBe(0);
+    view.unmount();
+    stage.remove();
+  });
+
   it('shows one badge in the roster for sending audio: speaking, else sending', () => {
     const sending = { principal_id: 3, can_publish: true, transmitting: true, joined_at: '2026-10-18T00:00:00Z' };
     const bob: ReadonlyMap<number, Person> = new Map([[3, { name: 'bob', kind: null }]]);

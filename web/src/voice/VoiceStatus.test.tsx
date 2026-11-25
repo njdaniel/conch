@@ -56,4 +56,20 @@ describe('the status phrase', () => {
     expect(view.container.querySelector('.voice-sub')?.getAttribute('title')).toBe('Microphone in use · Push to talk: not sending');
     expect(view.container.textContent).not.toContain('Microphone in use');
   });
+
+  // Round 2: only the short send phrase is nowrap; the sentences before it wrap.
+  it('keeps the long sentences apart from the short send phrase, which is its own span', () => {
+    for (const [patch, note, phrase] of [
+      [{ muted: true, deafened: true }, 'Deafened (you hear no one, and you are muted).', 'Muted: not sending'],
+      [{}, '', 'Push to talk: not sending'],
+      [{ watchOnly: true }, 'Watch only: your microphone is off.', ''],
+      [{ listenOnly: true, muted: true }, 'Muted. Listen only.', ''],
+      [{ viewer: true }, 'Watching beside your voice on another device.', ''],
+    ] as const) {
+      const view = render(<VoiceStatus state={connected(patch)} />);
+      expect(view.container.querySelector('.voice-tx-note')?.textContent, JSON.stringify(patch)).toBe(note);
+      expect(view.container.querySelector('.voice-tx-phrase')?.textContent, JSON.stringify(patch)).toBe(phrase);
+      view.unmount();
+    }
+  });
 });

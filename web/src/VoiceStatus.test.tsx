@@ -85,7 +85,9 @@ describe('VoiceStatus', () => {
     render(strip());
     // "Microphone off" is the Watch only hint's, said once and only where
     // joining is offered (issue #2198, UI-talk-7); this strip has no line of it.
-    expect(screen.getByRole('region', { name: 'Voice' })).toBeTruthy();
+    // The browser strip's own controls, which the native strip does not draw.
+    expect(screen.getByRole('button', { name: /^Join voice/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^Watch only/ })).toBeTruthy();
     expect(screen.queryByText('Microphone off')).toBeNull();
   });
 
