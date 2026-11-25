@@ -4,7 +4,10 @@
 // one inert owner), Escape closes it and focus returns to the Members button.
 // At a wide window it is a side column and focus leaves it as before.
 import type { Page } from '@playwright/test';
-import { expect, openChannel, signIn, test } from './fixtures';
+import { runV1 } from '../src/schema/run';
+import { openSession } from './api';
+import { expect, openChannel, showView, signIn, test } from './fixtures';
+import { call, ok } from './world';
 
 const members = (page: Page) => page.getByRole('button', { name: 'Members' });
 const list = (page: Page) => page.getByRole('region', { name: 'Members list' });
@@ -67,3 +70,29 @@ test('P2196 1440×900: the side column is not modal, and Shift+Tab leaves it', a
   expect(await inDrawer(page), 'Shift+Tab stayed in the side column').toBe(false);
   await expect(page.locator('body')).not.toBeFocused();
 });
+
+// Opening a run from the drawer closes it and shows the run in the centre. On a
+// phone the centre is the Chat view's: from the Voice or Channels view the
+// page goes to Chat first, so the run detail is visible and takes focus.
+for (const from of ['Voice', 'Channels'] as const) {
+  test(`P2196 phone 390×844: Open run from the drawer on the ${from} view shows the run detail in Chat, with focus`, async ({ meet, world }) => {
+    const tag = `p2196-${String(Date.now())}`;
+    const session = await openSession(world, world.tokens.worker, `${tag}-client`);
+    const started = await ok(world, world.tokens.worker, 'POST', `/v1/sessions/${String(session.id)}/runs`, runV1, { channel: 'general', task: `${tag} a task` });
+    const state = await call(world, world.tokens.worker, 'POST', `/v1/runs/${String(started.id)}/state`, { state: 'running' });
+    expect(state.status).toBeLessThan(300);
+    const { page } = await meet({ viewport: { width: 390, height: 844 }, hasTouch: true });
+    await signIn(page, world, world.tokens.browser, 'browser-test');
+    await openChannel(page, 'general');
+    await showView(page, from);
+    await members(page).focus();
+    await page.keyboard.press('Enter');
+    await list(page).getByRole('button', { name: 'Show sessions for worker-test' }).click();
+    await list(page).getByRole('button', { name: new RegExp(`^Run #${String(started.id)} · `) }).click();
+    await expect(list(page)).toBeHidden();
+    const detail = page.getByRole('article', { name: 'Run detail' });
+    await expect(detail).toBeVisible();
+    await expect(page.getByRole('navigation', { name: 'Main navigation' }).getByRole('button', { name: 'Chat' })).toHaveAttribute('aria-current', 'page');
+    await expect(detail).toBeFocused();
+  });
+}

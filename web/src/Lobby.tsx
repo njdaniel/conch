@@ -451,7 +451,10 @@ export function Lobby({
     if (!over.current.over) return;
     toCentre.current = true;
     setPanelOpen(false);
-  }, []);
+    // On a phone the centre is the Chat view's: the other views hide it, and
+    // what is shown there could not take focus.
+    if (phone) setView('chat');
+  }, [phone]);
   // Arriving (signing in, or a sign-in restored on reload) leaves focus on
   // the page's body, where the next Tab starts from the top: the first time a
   // conversation is shown, focus goes to its heading (issue #590). Only then:

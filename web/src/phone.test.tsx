@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { headingId } from './Conversation';
 import { InvitePanel } from './InvitePanel';
 import { Lobby } from './Lobby';
+import { LeaveDrawer } from './pageModal';
 import { MicTestShown, ShowChat, useAppHeight, VoiceLive, VoiceStrip } from './phone';
 import type { ChannelV0 } from './schema/channel';
 import type { ChannelsState } from './state/channels';
@@ -107,7 +108,8 @@ function lobby({
   joined = () => undefined,
   firstRun,
   newChannel,
-}: { channels?: ChannelsState; live?: boolean; onOpen?: (name: string) => void; joined?: () => void; firstRun?: ReactNode; newChannel?: ReactNode } = {}) {
+  panel = <p>Nobody</p>,
+}: { panel?: ReactNode; channels?: ChannelsState; live?: boolean; onOpen?: (name: string) => void; joined?: () => void; firstRun?: ReactNode; newChannel?: ReactNode } = {}) {
   const page = (voice: ReactNode, shown: ChannelsState = channels) => (
     <Lobby
       origin="http://127.0.0.1:8080"
@@ -119,7 +121,7 @@ function lobby({
       conversation={firstRun === undefined ? <Conversation /> : null}
       firstRun={firstRun}
       newChannel={newChannel}
-      panel={<p>Nobody</p>}
+      panel={panel}
       voice={voice}
       invites={null}
       onOpen={onOpen}
@@ -216,6 +218,23 @@ describe('opening a channel from the channels column (issue #991)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Join ideas' }));
     expect(tab('Chat').getAttribute('aria-current')).toBe('page');
     expect(document.activeElement?.id).toBe(headingId);
+  });
+
+  // Issue #2196: an action in the Members drawer that shows something in the
+  // centre takes a phone to Chat, where the centre is drawn.
+  it.each(['Voice', 'Channels'])('takes a phone from %s to Chat when the Members drawer shows something in the centre', (from) => {
+    windowOf(true);
+    function Action() {
+      const leave = useContext(LeaveDrawer);
+      return <button type="button" onClick={leave}>Open run</button>;
+    }
+    lobby({ panel: <Action /> });
+    fireEvent.click(tab(from));
+    fireEvent.click(screen.getByRole('button', { name: 'Members' }));
+    expect(tab(from).getAttribute('aria-current')).toBe('page');
+    fireEvent.click(screen.getByRole('button', { name: 'Open run' }));
+    expect(screen.queryByRole('region', { name: 'Members list' })).toBeNull();
+    expect(tab('Chat').getAttribute('aria-current')).toBe('page');
   });
 
   it('does nothing where the conversation is already beside the list', () => {
