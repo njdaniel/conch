@@ -148,6 +148,10 @@ export type ReadResult =
   | { readonly kind: 'absent' }
   | { readonly kind: 'bytes'; readonly data: Buffer }
   | { readonly kind: 'corrupt' }
+  // A regular file of ours, of a sane size, but open to group or others
+  // (issue #2217's review, R1): not read, since it cannot be trusted. A get
+  // treats it as corrupt; the start sweep deletes it unopened.
+  | { readonly kind: 'loose-mode' }
   // The root exists but is not ours, private and plain: nothing is read from it.
   | { readonly kind: 'unsafe-root' };
 
@@ -208,7 +212,10 @@ export async function readCredential(root: string, id: string, hooks: ReadHooks 
   try {
     const held = await fh.stat();
     if (!held.isFile() || held.size === 0 || held.size > MAX_FILE_BYTES) return { kind: 'corrupt' };
-    if (typeof process.getuid === 'function' && (held.uid !== process.getuid() || (held.mode & 0o077) !== 0)) return { kind: 'corrupt' };
+    if (typeof process.getuid === 'function') {
+      if (held.uid !== process.getuid()) return { kind: 'corrupt' };
+      if ((held.mode & 0o077) !== 0) return { kind: 'loose-mode' };
+    }
     // One byte more than the limit, to see a file that grew after the fstat.
     const buf = Buffer.alloc(MAX_FILE_BYTES + 1);
     let length = 0;

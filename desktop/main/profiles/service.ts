@@ -54,7 +54,9 @@ export const HEALTH_BOUND_MS = 8_000;
 // get deletes it unread later). deleted-*: deleted, and not shown ended at the
 // server, because the server did not answer /healthz with the health document
 // (unreachable), the revocation was not confirmed (unconfirmed), the file
-// could not be opened (unopened), or no saved server owns it (no-profile).
+// could not be opened (unopened), no saved server owns it (no-profile), or
+// the file was open to group or others, so it was not read whatever its seal
+// (loose-mode, issue #2217's review, R1).
 // not-deleted: not ended at the server, and it could not be deleted.
 // replaced: something replaced or deleted it before its turn. late: it did
 // not finish within its bound. not-listed: the vault could not be searched (a
@@ -68,6 +70,7 @@ export type LegacyOutcome =
   | 'deleted-unconfirmed'
   | 'deleted-unopened'
   | 'deleted-no-profile'
+  | 'deleted-loose-mode'
   | 'not-deleted'
   | 'replaced'
   | 'late'
@@ -308,6 +311,7 @@ export class ProfilesService {
     if (ended === null) return 'late';
     if (ended.kind === 'not-legacy') return 'replaced';
     if (!ended.removed) return 'not-deleted';
+    if (ended.kind === 'loose-mode') return 'deleted-loose-mode';
     if (profile === undefined) return 'deleted-no-profile';
     if (!asked.answered) return 'deleted-unreachable';
     return ended.opened ? 'deleted-unconfirmed' : 'deleted-unopened';

@@ -706,6 +706,31 @@ describe('the start sweep of entries sealed with the built-in key', () => {
     await expect(stat(join(root, 'profiles', 'alpha'))).rejects.toThrow();
   });
 
+  // Issue #2217's review, R1: a file open to group or others is listed and
+  // deleted unopened, whatever its seal, and decide is never asked.
+  it.each(['v10', 'v11'] as const)('a %s file at 0644 is listed, then deleted without being opened or decided on', async (mark) => {
+    await plant('alpha', mark === 'v10' ? legacyFile(SECRET) : `v11${BODY}1:${Buffer.from(SECRET).toString('base64')}`, 0o644);
+    await chmod(credFile('alpha'), 0o644);
+    expect(await vault.findLegacy()).toEqual(['alpha']);
+    let asked = false;
+    const decide = (): Promise<null> => {
+      asked = true;
+      return Promise.resolve(null);
+    };
+    expect(await vault.endLegacy('alpha', decide)).toEqual({ kind: 'loose-mode', removed: true });
+    expect(asked).toBe(false);
+    expect(storage.calls).toEqual([]);
+    await expect(stat(join(root, 'profiles', 'alpha'))).rejects.toThrow();
+    expect(logs).toEqual([]);
+  });
+
+  it('a 0644 file is not read by a get either', async () => {
+    await plant('alpha', legacyFile(SECRET), 0o644);
+    await chmod(credFile('alpha'), 0o644);
+    expect(await vault.get('alpha')).toEqual({ kind: 'unusable' });
+    expect(storage.calls).toEqual([]);
+  });
+
   it('a root that is not private to this user is not searched or touched', async () => {
     await plant('alpha', legacyFile(SECRET));
     await chmod(root, 0o755);

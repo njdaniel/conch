@@ -157,7 +157,8 @@ describe('reading through the opened handle', () => {
         await chmod(file(), 0o644);
       },
     });
-    expect(read).toEqual({ kind: 'corrupt' });
+    // Not read: reported as open to others (R1), with no bytes.
+    expect(read).toEqual({ kind: 'loose-mode' });
   });
 
   it('a file that grows past the limit between the check and the read is not read', async () => {
@@ -178,7 +179,7 @@ describe('reading through the opened handle', () => {
   it('a file open to group or others is not read, even when nothing changes', async () => {
     await writeCredential(root, 'alpha', Buffer.from('v10ours'));
     await chmod(file(), 0o640);
-    expect(await readCredential(root, 'alpha')).toEqual({ kind: 'corrupt' });
+    expect(await readCredential(root, 'alpha')).toEqual({ kind: 'loose-mode' });
     await chmod(file(), 0o600);
     expect(await readCredential(root, 'alpha')).toEqual({ kind: 'bytes', data: Buffer.from('v10ours') });
   });

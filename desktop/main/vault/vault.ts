@@ -99,7 +99,11 @@ export type LegacyDecide<T> = () => Promise<LegacyUse<T> | null>;
 export type LegacyEnd<T> =
   | { readonly kind: 'not-legacy' }
   | { readonly kind: 'ended'; readonly opened: false; readonly removed: boolean }
-  | { readonly kind: 'ended'; readonly opened: true; readonly used: T; readonly removed: boolean };
+  | { readonly kind: 'ended'; readonly opened: true; readonly used: T; readonly removed: boolean }
+  // The file was open to group or others (issue #2217's review, R1), so it
+  // was not read, whatever seal it had, and decide was not asked: it was
+  // deleted unopened, if removed says so.
+  | { readonly kind: 'loose-mode'; readonly removed: boolean };
 
 export interface Vault {
   classify(): Promise<Classification>;
@@ -200,7 +204,8 @@ export function createVault(deps: VaultDeps): Vault {
       event('unsafe-root', profileId);
       return { kind: 'sessionOnly', reason: 'unsafe-root' };
     }
-    if (read.kind === 'corrupt') {
+    if (read.kind === 'corrupt' || read.kind === 'loose-mode') {
+      // A file open to others is not read either (the start sweep deletes it).
       event('corrupt', profileId);
       return { kind: 'unusable' };
     }
@@ -286,6 +291,17 @@ export function createVault(deps: VaultDeps): Vault {
     } catch {
       return { kind: 'not-legacy' };
     }
+    if (read.kind === 'loose-mode') {
+      // Anyone else may have read or written it: never opened or trusted,
+      // and the server is not asked; it is deleted.
+      let removed = true;
+      try {
+        await removeProfile(deps.root, profileId);
+      } catch {
+        removed = false;
+      }
+      return { kind: 'loose-mode', removed };
+    }
     if (read.kind !== 'bytes' || linuxSeal(read.data) !== 'built-in') return { kind: 'not-legacy' };
     // Asked only now, in the turn: whatever else is asked of this profile
     // waits until the entry is ended.
@@ -342,7 +358,9 @@ export function createVault(deps: VaultDeps): Vault {
         // operation already asked of that profile has left.
         const legacy = await serial(id, async () => {
           const read = await readCredential(deps.root, id).catch(() => null);
-          return read !== null && read.kind === 'bytes' && linuxSeal(read.data) === 'built-in';
+          // A credential file open to group or others is ended too, whatever
+          // its seal (issue #2217's review, R1): it is deleted unopened.
+          return read !== null && (read.kind === 'loose-mode' || (read.kind === 'bytes' && linuxSeal(read.data) === 'built-in'));
         });
         if (legacy) found.push(id);
       }

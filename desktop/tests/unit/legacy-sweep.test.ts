@@ -4,7 +4,7 @@
 // an older build's entry first. The sweep holds the profile's vault turn from
 // before it asks the server; what is asked meanwhile runs after the entry is
 // ended: revoked when the server answers, or deleted unopened with the notice.
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -56,9 +56,10 @@ afterEach(async () => {
 
 const entry = (id: string): string => join(root, 'profiles', id, 'credential.bin');
 
-async function plantV10(id: string, token: string): Promise<void> {
+async function plantV10(id: string, token: string, mark = 'v10', mode = 0o600): Promise<void> {
   await mkdir(join(root, 'profiles', id), { recursive: true, mode: 0o700 });
-  await writeFile(entry(id), `v10FAKE:${Buffer.from(token).toString('base64')}`, { mode: 0o600 });
+  await writeFile(entry(id), `${mark}FAKE:${Buffer.from(token).toString('base64')}`, { mode });
+  await chmod(entry(id), mode);
 }
 
 // A gate: the sweep's /healthz question to B waits on it.
@@ -72,7 +73,7 @@ function gate(): { readonly wait: Promise<HealthResult>; readonly open: (h: Heal
 
 const tick = (ms = 20): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-async function setup(health: Promise<HealthResult>, options: { readonly healthBoundMs?: number } = {}) {
+async function setup(health: Promise<HealthResult>, options: { readonly healthBoundMs?: number; readonly plant?: { readonly mark: string; readonly mode: number } } = {}) {
   const log: string[] = [];
   let askedB = 0;
   const ask = (origin: string): Promise<HealthResult> => (origin === ORIGIN_B && askedB++ === 0 ? health : Promise.resolve({ kind: 'answered', version: 'v1.0.0' }));
@@ -114,12 +115,17 @@ async function setup(health: Promise<HealthResult>, options: { readonly healthBo
     },
     ...(options.healthBoundMs === undefined ? {} : { healthBoundMs: options.healthBoundMs }),
   });
-  await plantV10(B, LEGACY);
+  await plantV10(B, LEGACY, options.plant?.mark, options.plant?.mode);
   await service.start();
-  // Once the sweep has asked B (and waits on the gate), B becomes active: its
-  // old entry is not a sign-in.
-  for (let i = 0; askedB === 0 && i < 200; i++) await tick(5);
-  expect(askedB).toBe(1);
+  if (options.plant === undefined) {
+    // Once the sweep has asked B (and waits on the gate), B becomes active:
+    // its old entry is not a sign-in.
+    for (let i = 0; askedB === 0 && i < 200; i++) await tick(5);
+    expect(askedB).toBe(1);
+  } else {
+    // A file open to others is ended without asking the server.
+    await service.swept;
+  }
   await service.switchTo(B);
   const active = () => {
     const last = factory.made.at(-1);
@@ -216,5 +222,25 @@ describe('an operation asked while the sweep waits on the server (issue #2217, N
     expect(await s.vault.get(B)).toEqual({ kind: 'found', secret: 'tok-new' });
     expect(s.service.view().notice).toBe('legacy-not-ended');
     expect(s.log).toContain('log: conch-desktop: a sign-in saved by an older build (v10): deleted-unreachable');
+  });
+});
+
+// Issue #2217's review, R1: a credential file open to group or others is not
+// trusted, whatever its seal: the sweep deletes it unopened, asks no server,
+// and the profile shows the notice.
+describe('a credential file open to group or others (issue #2217, R1)', () => {
+  it.each([
+    ['sealed with the built-in key (v10)', 'v10'],
+    ['sealed with the keyring (v11)', 'v11'],
+  ] as const)('%s at 0644: deleted unopened, with the notice and no decrypt', async (_name, mark) => {
+    // The server would answer; the sweep does not ask it.
+    const s = await setup(Promise.resolve({ kind: 'answered', version: 'v1.0.0' }), { plant: { mark, mode: 0o644 } });
+    expect(s.storage.decrypts).toBe(0);
+    expect(s.revoked).toEqual([]);
+    await expect(stat(join(root, 'profiles', B))).rejects.toThrow();
+    expect(s.active().spec.token).toBeNull();
+    expect(s.service.view().notice).toBe('legacy-not-ended');
+    expect(s.log).toContain('log: conch-desktop: a sign-in saved by an older build (v10): deleted-loose-mode');
+    expect(s.log.join('\n')).not.toContain(LEGACY);
   });
 });
