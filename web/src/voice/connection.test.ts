@@ -353,6 +353,7 @@ class StubRoom implements Room {
     return Promise.reject(this.switchError);
   };
   attachSelf = (): void => undefined;
+  attachShareSelf = (): void => undefined;
   setViewing = (on: boolean): void => {
     this.viewings.push(on);
   };

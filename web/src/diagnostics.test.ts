@@ -302,6 +302,7 @@ describe('what the voice client records', () => {
       level: () => 0,
       close: () => Promise.resolve(),
       ...noCamera(),
+      attachShareSelf: () => undefined,
     });
     const client = new VoiceClient(
       {

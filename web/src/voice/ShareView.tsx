@@ -6,7 +6,7 @@
 // (adaptive stream), so a phone gets a smaller layer than a full-screen
 // desktop, and a closed view gets none (voice-multi-share.md §8). It asks for
 // no device.
-import { useCallback, useEffect, useRef, useState, type MouseEvent, type PointerEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type MouseEvent, type PointerEvent } from 'react';
 import { Glyph } from '../Icons';
 import { platform } from '../platform';
 import { fullscreenVideo } from './fullscreen';
@@ -388,6 +388,74 @@ export function ShareView({
       </div>
       {pip.failed ? <p role="status" className="hint">Picture-in-picture could not open. Try again when the picture is playing.</p> : null}
       {state.deafened && hasSound ? <p className="hint">Deafened: the share&apos;s sound is off too.</p> : null}
+    </section>
+  );
+}
+
+// Whether the sharer hides the preview of their own screen (#2197): kept for
+// this page session, in memory, not stored. One sharer tile exists at a time,
+// but it moves between the grid, the strip and the stage, which draw it again,
+// so the choice is the module's and not the tile's.
+let previewHidden = false;
+const previewListeners = new Set<() => void>();
+const setPreviewHidden = (hidden: boolean): void => {
+  previewHidden = hidden;
+  for (const listener of previewListeners) listener();
+};
+// Whether the preview is hidden now. The call view reads it too: a lone
+// preview takes the stage as a single watched share does, and a hidden one is
+// the plain tile it was.
+export function useSharePreviewHidden(): boolean {
+  return useSyncExternalStore(
+    (listener) => {
+      previewListeners.add(listener);
+      return () => { previewListeners.delete(listener); };
+    },
+    () => previewHidden,
+  );
+}
+// For tests: the page session starts again.
+export function resetSharePreview(): void {
+  setPreviewHidden(false);
+}
+
+// What the sharer's tile needs of the client.
+export type SelfShareClient = Pick<VoiceClient, 'attachShareSelf' | 'stopShare'>;
+
+// SelfShareView is the sharer's own stage (#2197): the same frame as a watched
+// share (contained, never cropped, inside the stage) holding a live preview of
+// the outgoing screen, so they can see what they are sharing. The picture is
+// the local capture, muted (the sharing sound is never played back) and with no
+// subscription or upload of its own; the client follows it through the
+// capture's stopping or replacing, so no frame is left after Stop sharing.
+// Hide preview collapses it to the title and Stop sharing. The controls are in
+// a row below the picture: none of a watched share's (mute, volume, full
+// screen, pop out) applies to one's own share, so none wakes or fades.
+export function SelfShareView({ client, quality }: {
+  readonly client: SelfShareClient;
+  // The declared quality, as in the watched title.
+  readonly quality?: string | null;
+}) {
+  const hidden = useSharePreviewHidden();
+  const video = useRef<HTMLVideoElement>(null);
+  useEffect(() => {
+    if (hidden) return;
+    client.attachShareSelf(video.current);
+    return () => { client.attachShareSelf(null); };
+  }, [client, hidden]);
+  const label = hidden ? 'Show preview' : 'Hide preview';
+  return (
+    <section aria-label="Your stream" className={`share-view${hidden ? '' : ' self'}`}>
+      <p className="share-title"><Glyph name="screen" />You · LIVE{quality === null || quality === undefined ? null : <> · {quality}</>}</p>
+      {hidden ? null : (
+        <div className="share-frame">
+          <video ref={video} aria-label="Preview of your screen" playsInline autoPlay muted />
+        </div>
+      )}
+      <div className="share-controls">
+        <button type="button" onClick={() => { client.stopShare(); }}>Stop sharing</button>
+        <button type="button" aria-label={`${label} of your screen`} onClick={() => { setPreviewHidden(!hidden); }}>{label}</button>
+      </div>
     </section>
   );
 }

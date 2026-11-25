@@ -98,6 +98,7 @@ class StubRoom implements Room {
   cameras = this.camera.cameras;
   switchCamera = this.camera.switchCamera;
   attachSelf = this.camera.attachSelf;
+  attachShareSelf = (): void => undefined;
   setViewing = this.camera.setViewing;
   setShown = this.camera.setShown;
   setCameras = this.camera.setCameras;

@@ -3855,6 +3855,14 @@ label {
   grid-row: 1;
 }
 
+/* The sharer's own preview (#2197) fills the stage as a watched share does,
+   but its controls (Stop sharing, Hide preview) stay in a row below the
+   picture, not over it: nothing there fades or wakes. The row is its own
+   third track, so the picture's row gives way to it. */
+.call-view.call-single-share .share-view.self {
+  grid-template-rows: auto minmax(6rem, 1fr) auto;
+}
+
 /* The title's readout is one line in the open call view, cut with an ellipsis
    (the whole text is still read out): its length, and so its wrapping, depends
    on the font, and a three-line title took the picture's floor from a phone
@@ -3883,7 +3891,7 @@ label {
    gradient is not themed. At 560 px tall and under, the page scrolls as a
    document and the controls stay in a row below the picture. */
 @media (min-height: 561px) {
-  .call-view.call-single-share .share-controls {
+  .call-view.call-single-share :where(.share-view:not(.self)) .share-controls {
     grid-row: 2;
     grid-column: 1;
     align-self: end;
@@ -3896,7 +3904,7 @@ label {
     transition: opacity 0.2s;
   }
 
-  .call-view.call-single-share .share-controls .label {
+  .call-view.call-single-share :where(.share-view:not(.self)) .share-controls .label {
     position: absolute;
     width: 1px;
     height: 1px;
@@ -3905,11 +3913,11 @@ label {
     white-space: nowrap;
   }
 
-  .call-view.call-single-share .share-controls .stop svg {
+  .call-view.call-single-share :where(.share-view:not(.self)) .share-controls .stop svg {
     display: inline;
   }
 
-  .call-view.call-single-share .share-controls button {
+  .call-view.call-single-share :where(.share-view:not(.self)) .share-controls button {
     flex: 0 0 auto;
     padding: 0;
     color: #ffffff;
@@ -3917,16 +3925,16 @@ label {
     border: 0;
   }
 
-  .call-view.call-single-share .share-controls button:hover:not(:disabled) {
+  .call-view.call-single-share :where(.share-view:not(.self)) .share-controls button:hover:not(:disabled) {
     background: rgb(255 255 255 / 20%);
   }
 
-  .call-view.call-single-share .share-controls button[aria-pressed='true'] {
+  .call-view.call-single-share :where(.share-view:not(.self)) .share-controls button[aria-pressed='true'] {
     background: rgb(255 255 255 / 30%);
   }
 
-  .call-view.call-single-share .share-controls button:focus-visible,
-  .call-view.call-single-share .share-controls input:focus-visible {
+  .call-view.call-single-share :where(.share-view:not(.self)) .share-controls button:focus-visible,
+  .call-view.call-single-share :where(.share-view:not(.self)) .share-controls input:focus-visible {
     /* A dark ring outside a white one: over a white picture the row's top
        edge, where the gradient is clear, still has contrast. */
     outline: 3px solid #000000;
@@ -3934,33 +3942,33 @@ label {
     box-shadow: inset 0 0 0 6px #ffffff;
   }
 
-  .call-view.call-single-share .share-controls .volume {
+  .call-view.call-single-share :where(.share-view:not(.self)) .share-controls .volume {
     flex: 1 1 3rem;
     min-width: 0;
   }
 
   /* A slider drawn for the gradient: the page's accent is dark in its light
      theme and fell to about 2.4:1 against it. */
-  .call-view.call-single-share .share-controls input[type='range'] {
+  .call-view.call-single-share :where(.share-view:not(.self)) .share-controls input[type='range'] {
     width: 100%;
     min-width: 0;
     background: transparent;
     appearance: none;
   }
 
-  .call-view.call-single-share .share-controls input[type='range']::-webkit-slider-runnable-track {
+  .call-view.call-single-share :where(.share-view:not(.self)) .share-controls input[type='range']::-webkit-slider-runnable-track {
     height: 4px;
     background: rgb(255 255 255 / 75%);
     border-radius: 2px;
   }
 
-  .call-view.call-single-share .share-controls input[type='range']::-moz-range-track {
+  .call-view.call-single-share :where(.share-view:not(.self)) .share-controls input[type='range']::-moz-range-track {
     height: 4px;
     background: rgb(255 255 255 / 75%);
     border-radius: 2px;
   }
 
-  .call-view.call-single-share .share-controls input[type='range']::-webkit-slider-thumb {
+  .call-view.call-single-share :where(.share-view:not(.self)) .share-controls input[type='range']::-webkit-slider-thumb {
     width: 16px;
     height: 16px;
     margin-top: -6px;
@@ -3970,7 +3978,7 @@ label {
     appearance: none;
   }
 
-  .call-view.call-single-share .share-controls input[type='range']::-moz-range-thumb {
+  .call-view.call-single-share :where(.share-view:not(.self)) .share-controls input[type='range']::-moz-range-thumb {
     width: 12px;
     height: 12px;
     background: #ffffff;
@@ -4016,13 +4024,13 @@ label {
 }
 
 @media (min-height: 561px) and (max-width: 300px) {
-  .call-view.call-single-share .share-controls .volume {
+  .call-view.call-single-share :where(.share-view:not(.self)) .share-controls .volume {
     display: none;
   }
 }
 
 @media (min-height: 561px) and (prefers-reduced-motion: reduce) {
-  .call-view.call-single-share .share-controls {
+  .call-view.call-single-share :where(.share-view:not(.self)) .share-controls {
     transition: none;
   }
 }

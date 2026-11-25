@@ -108,6 +108,22 @@ runner wraps the share controls onto two rows) move the picture, not the
 composer. The composer is on screen without scrolling at 390×844 and 360×740
 (checked in 12-screen-share, and by hand with every rem made 19 px).
 
+**The sharer's own stage (issue #2197).** While sharing, the sharer's tile shows
+a live preview of the outgoing screen so that they can see what they are
+sharing: the local screen-share video track (no subscription, no second capture,
+no upload) in a muted, inline `<video>`, in the same frame as a watched share
+(contained, never cropped, inside the stage; alone in the open call view it
+fills the stage as a single share does, and in a grid or the strip it is a tile).
+The title stays "You · LIVE · quality". Its controls are Stop sharing and
+**Hide preview** / **Show preview** in a row below the picture; none of a watched
+share's (Mute, Share volume, Full screen, Pop out, Tap to play sound) applies to
+one's own share, and nothing fades or wakes. The share's sound is never played
+back to the sharer. Hiding detaches the track and leaves the tile as it was
+before the preview (title and Stop sharing); the choice lasts for the page
+session, in memory, and covers every layout. The preview follows the current
+capture: it is emptied when the share stops or is replaced, so no last frame
+stays. The desktop app's own share has no browser track and shows no preview.
+
 **Media continuity.** The voice section is rendered once, in the strip, and
 never moves: panels, the members column and the window's width change classes
 only. The watch view is drawn on the stage with a React portal from that same

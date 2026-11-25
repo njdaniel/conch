@@ -192,6 +192,10 @@ interface StubScreenTrack {
   sender?: StubSender;
   publishOptions?: unknown;
   stop: () => void;
+  // The elements it plays into (the sharer's preview).
+  attached: unknown[];
+  attach: (el: unknown) => unknown;
+  detach: (el?: unknown) => unknown[];
 }
 // A camera's capture, as the browser gives it and as the page wraps it.
 interface StubVideo {
@@ -301,6 +305,15 @@ vi.mock('livekit-client', () => {
     const track: StubScreenTrack = {
       source,
       stopped: 0,
+      attached: [],
+      attach: (el) => {
+        track.attached.push(el);
+        return el;
+      },
+      detach: (el) => {
+        track.attached = track.attached.filter((e) => el !== undefined && e !== el);
+        return [];
+      },
       setDegradationPreference: (preference) => {
         if (track.sender !== undefined) track.sender.parameters.degradationPreference = preference;
         return Promise.resolve();
@@ -2017,6 +2030,38 @@ describe('sharing a screen', () => {
       log.mockRestore();
       vi.useRealTimers();
     }
+  });
+
+  // The sharer's preview (#2197): the local picture alone, never the share's
+  // sound, and nothing left of it once the share is stopped.
+  it('plays the local screen picture, not its sound, into the sharer\'s preview, and lets it go on stop', async () => {
+    const room = await connected();
+    const el = document.createElement('video');
+    room.attachShareSelf(el);
+    await room.pickScreen();
+    await room.publishScreen();
+    const [picture, sound] = state.screenTracks;
+    expect(picture?.attached).toEqual([el]);
+    expect(sound?.attached).toEqual([]);
+    await room.stopScreen();
+    expect(picture?.attached).toEqual([]);
+    await room.close();
+  });
+
+  it('attaches a capture picked before the preview is there, and follows a replaced capture', async () => {
+    const room = await connected();
+    await room.pickScreen();
+    const first = state.screenTracks[0];
+    const el = document.createElement('video');
+    room.attachShareSelf(el);
+    expect(first?.attached).toEqual([el]);
+    await room.pickScreen();
+    const second = state.screenTracks[2];
+    expect(first?.attached).toEqual([]);
+    expect(second?.attached).toEqual([el]);
+    room.attachShareSelf(null);
+    expect(second?.attached).toEqual([]);
+    await room.close();
   });
 
   it('keeps the asked sender rate when capture settings report 1 fps', async () => {

@@ -60,6 +60,7 @@ import { gridOf } from './gridOf';
 import { fullscreenVideo } from './fullscreen';
 import { usePictureInPicture } from './pictureInPicture';
 import type { Occupant } from './presence';
+import { useSharePreviewHidden } from './ShareView';
 import { VoiceStatus } from './VoiceStatus';
 
 // How many tiles this view draws: camera and stream tiles share the grid cap,
@@ -390,7 +391,10 @@ export function CallView({ client, state, tiles, hidden, open, viewed = state.ch
   const focus = main !== null;
   const grid = gridOf(shown.length, narrow);
   const listClass = !open ? 'call-pass' : focus ? 'call-grid focus' : `call-grid cols-${String(grid.columns)} rows-${String(grid.rows)}`;
-  const singleShare = !compact && shown.length === 1 && shown[0]?.kind === 'share' && shown[0].watched === true;
+  // One watched share, or the sharer's own preview alone (#2197), fills the
+  // stage; the sharer's tile with its preview hidden is the plain tile.
+  const previewHidden = useSharePreviewHidden();
+  const singleShare = !compact && shown.length === 1 && shown[0]?.kind === 'share' && (shown[0].watched === true || (shown[0].me && !previewHidden));
   const viewClass = [open ? 'call-view' : 'call-stage', compact ? 'compact' : '', singleShare ? 'call-single-share' : ''].filter(Boolean).join(' ');
   const hasSelf = tiles.some((t) => t.kind !== 'share' && t.me);
   const switchable = tiles.filter((t) => t.kind === 'share' && !t.me);

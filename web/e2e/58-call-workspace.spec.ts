@@ -926,6 +926,148 @@ test.describe('the persistent call workspace', () => {
     }
   });
 
+  // The sharer's own stage (#2197): a live preview of the outgoing screen in
+  // the watched share's frame, which Hide preview collapses to the title and
+  // Stop sharing. The preview is the local capture the picker gave: the
+  // instrument keeps it, and the video must play that very track.
+  const keepCapture = async (page: Page): Promise<void> => { await page.addInitScript(() => {
+    const w = window as unknown as { __capture: MediaStream | null };
+    w.__capture = null;
+    const devices = navigator.mediaDevices;
+    const display = devices.getDisplayMedia.bind(devices);
+    devices.getDisplayMedia = async (options?: DisplayMediaStreamOptions) => {
+      const stream = await display(options);
+      w.__capture = stream;
+      return stream;
+    };
+  }); };
+  const ownStage = (page: Page) => page.getByRole('region', { name: 'Your stream' });
+  const preview = (page: Page) => ownStage(page).locator('video');
+  // The preview plays the local capture's picture, not a copy or another track.
+  const expectPlaysCapture = async (page: Page, where: string): Promise<void> => {
+    await expect.poll(() => preview(page).evaluate((video: HTMLVideoElement) => {
+      const w = window as unknown as { __capture: MediaStream | null };
+      const mine = w.__capture?.getVideoTracks()[0];
+      const shown = video.srcObject instanceof MediaStream ? video.srcObject.getVideoTracks()[0] : undefined;
+      return {
+        sameTrack: mine !== undefined && shown !== undefined && mine.id === shown.id,
+        playing: video.readyState >= 2 && !video.paused && video.videoWidth > 0,
+        muted: video.muted,
+        sound: video.srcObject instanceof MediaStream ? video.srcObject.getAudioTracks().length : -1,
+      };
+    }), { message: `${where}: the preview plays the local capture`, timeout: 30_000 }).toEqual({ sameTrack: true, playing: true, muted: true, sound: 0 });
+  };
+  // The geometry of the sharer's stage: the video inside the stage and the
+  // call view, contained, and no scrolling of the view.
+  const checkOwn = async (page: Page, where: string, expectVideo: boolean) => {
+    const g = await ownStage(page).evaluate((own) => {
+      const stage = own.closest('.stage');
+      const view = own.closest('.call-view') ?? stage;
+      const video = own.querySelector('video');
+      const frame = own.querySelector('.share-frame');
+      const controls = own.querySelector('.share-controls');
+      if (stage === null || view === null || controls === null) throw new Error('no stage layout boxes');
+      const within = (element: Element, outer: Element) => {
+        const box = element.getBoundingClientRect();
+        const bounds = outer.getBoundingClientRect();
+        return box.width > 0 && box.height > 0 && box.left >= bounds.left - 1 && box.right <= bounds.right + 1 &&
+          box.top >= bounds.top - 1 && box.bottom <= bounds.bottom + 1;
+      };
+      return {
+        hasVideo: video !== null,
+        hasFrame: frame !== null,
+        fit: video === null ? '' : getComputedStyle(video).objectFit,
+        videoInStage: video !== null && within(video, stage) && within(video, view),
+        videoHeight: video?.getBoundingClientRect().height ?? 0,
+        controlsInStage: within(controls, stage) && within(controls, view),
+        scrolls: view.scrollHeight > view.clientHeight + 1,
+      };
+    });
+    const details = JSON.stringify(g);
+    expect.soft(g.hasVideo, `${where}: the preview is ${expectVideo ? 'drawn' : 'gone'}\n${details}`).toBe(expectVideo);
+    expect.soft(g.hasFrame, `${where}: the frame is ${expectVideo ? 'drawn' : 'gone'}\n${details}`).toBe(expectVideo);
+    if (expectVideo) {
+      expect.soft(g.fit, where).toBe('contain');
+      expect.soft(g.videoInStage, `${where}: the preview is inside the stage\n${details}`).toBe(true);
+      expect.soft(g.videoHeight, `${where}: the preview has a picture's height\n${details}`).toBeGreaterThanOrEqual(80);
+    }
+    expect.soft(g.controlsInStage, `${where}: the controls are inside the stage\n${details}`).toBe(true);
+    expect.soft(g.scrolls, `${where}: the call view needs no scrolling\n${details}`).toBe(false);
+  };
+
+  test('P2197 the sharer sees a live preview of the outgoing screen, inside the stage, which can be hidden and shown', async ({ browser }) => {
+    test.setTimeout(180_000);
+    const people: Person[] = [];
+    try {
+      const a = await person(browser, vw.alice, { viewport: { width: 1440, height: 900 } }, keepCapture);
+      people.push(a);
+      await join(a);
+      await share(a);
+      await expect(ownStage(a.page)).toContainText('You · LIVE');
+      await expectPlaysCapture(a.page, '1440×900');
+      await checkOwn(a.page, '1440×900', true);
+      // No sound of the share is played back to the sharer.
+      await expect(a.page.locator('audio[aria-label$="stream audio"]')).toHaveCount(0);
+
+      // Under the desktop strip, 1215×900.
+      await a.page.setViewportSize({ width: 1215, height: 900 });
+      await drawDesktopStrip(a.page);
+      await checkOwn(a.page, '1215×900 under the desktop strip', true);
+      await a.page.evaluate(() => { document.querySelector('.desktop-bar')?.remove(); });
+
+      // 390×844 is a phone's, below.
+      // Hide preview takes the video away, and Show preview brings it back, on
+      // the same capture.
+      const own = ownStage(a.page);
+      await own.getByRole('button', { name: 'Hide preview of your screen' }).click();
+      await expect(preview(a.page)).toHaveCount(0);
+      await expect(own.getByRole('button', { name: 'Show preview of your screen' })).toHaveText('Show preview');
+      await expect(own.getByRole('button', { name: 'Stop sharing' })).toBeVisible();
+      await checkOwn(a.page, 'hidden at 1440×900', false);
+      await own.getByRole('button', { name: 'Show preview of your screen' }).click();
+      await expect(preview(a.page)).toHaveCount(1);
+      await expectPlaysCapture(a.page, 'shown again');
+      await checkOwn(a.page, 'shown again at 1440×900', true);
+
+      // The choice is the session's: hidden, it stays hidden when the stage is
+      // drawn again (a second share later).
+      await own.getByRole('button', { name: 'Hide preview of your screen' }).click();
+      await own.getByRole('button', { name: 'Stop sharing' }).click();
+      await expect(own).toHaveCount(0, { timeout: 30_000 });
+      await share(a);
+      await expect(preview(a.page)).toHaveCount(0);
+      await own.getByRole('button', { name: 'Show preview of your screen' }).click();
+      await expectPlaysCapture(a.page, 'second share');
+
+      // Stop sharing leaves no preview, and no frozen last frame, behind.
+      await own.getByRole('button', { name: 'Stop sharing' }).click();
+      await expect(own).toHaveCount(0, { timeout: 30_000 });
+      await expect(a.page.locator('video[aria-label="Preview of your screen"]')).toHaveCount(0);
+      await expectClean(a);
+    } finally {
+      for (const p of people) await leave(p);
+    }
+  });
+
+  test('P2197 the sharer\'s preview fits a phone, in Voice', async ({ browser }) => {
+    test.setTimeout(120_000);
+    const people: Person[] = [];
+    try {
+      const c = await person(browser, vw.carol, { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 }, keepCapture);
+      people.push(c);
+      await join(c);
+      await share(c);
+      await expectPlaysCapture(c.page, 'phone');
+      await checkOwn(c.page, '390×844 phone', true);
+      await ownStage(c.page).getByRole('button', { name: 'Hide preview of your screen' }).click();
+      await checkOwn(c.page, '390×844 phone, hidden', false);
+      await ownStage(c.page).getByRole('button', { name: 'Stop sharing' }).click();
+      await expect(ownStage(c.page)).toHaveCount(0, { timeout: 30_000 });
+    } finally {
+      for (const p of people) await leave(p);
+    }
+  });
+
   test('all six call workspace scenarios', async ({ browser }) => {
     test.setTimeout(180_000);
     const people: Person[] = [];

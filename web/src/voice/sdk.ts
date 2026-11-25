@@ -1092,6 +1092,10 @@ class LiveKitAdapter implements Room {
   // by sid: never subscribed again.
   private readonly refused = new Set<string>();
   private selfView: HTMLVideoElement | null = null;
+  // Where the sharer's own preview plays: the local screen picture, muted, with
+  // no sound of the share ever played back (#2197). It follows the current
+  // capture: attached when one is held, let go when it is stopped or kept.
+  private shareSelfView: HTMLVideoElement | null = null;
   // Whether the call view is shown, who presence shows holding a camera
   // claim, the camera tracks received by principal, and the element each
   // plays into.
@@ -1830,15 +1834,35 @@ class LiveKitAdapter implements Room {
     return shareSample(stats, direction, track?.sid, captured);
   }
 
+  // letGoShareSelf takes the current capture off the sharer's preview, so no
+  // last frame stays on it once the share is stopped, kept or replaced.
+  private letGoShareSelf(): void {
+    if (this.shareSelfView === null) return;
+    for (const t of this.screen) if (t.source === Track.Source.ScreenShare) t.detach(this.shareSelfView);
+  }
+
+  // attachShareSelf plays this page's own screen picture, muted, into the
+  // sharer's preview (#2197), and into none with null. Called before or after
+  // the share starts: the capture is attached when there is one.
+  attachShareSelf(el: HTMLVideoElement | null): void {
+    this.letGoShareSelf();
+    this.shareSelfView = el;
+    if (el === null) return;
+    const track = this.screen.find((t) => t.source === Track.Source.ScreenShare);
+    if (track !== undefined) track.attach(el);
+  }
+
   // holdScreen makes a capture this connection's share, picked here or kept
   // from an earlier connection.
   private holdScreen(tracks: LocalTrack[]): void {
     this.unwatchScreen?.();
     this.unwatchScreen = null;
+    this.letGoShareSelf();
     this.screen = tracks;
     this.captureEnded = false;
     const video = tracks.find((t) => t.source === Track.Source.ScreenShare);
     if (video === undefined) return;
+    if (this.shareSelfView !== null) video.attach(this.shareSelfView);
     this.unwatchScreen = watchScreenCapture(video.mediaStreamTrack, (stalled) => {
       this.events?.onScreenStalled?.(stalled);
     });
@@ -1856,6 +1880,7 @@ class LiveKitAdapter implements Room {
   keepScreen(): KeptScreen | null {
     this.unwatchScreen?.();
     this.unwatchScreen = null;
+    this.letGoShareSelf();
     const tracks = this.screen;
     this.screen = [];
     this.wakeGrant();
@@ -1973,6 +1998,7 @@ class LiveKitAdapter implements Room {
   async stopScreen(): Promise<void> {
     this.unwatchScreen?.();
     this.unwatchScreen = null;
+    this.letGoShareSelf();
     const tracks = this.screen;
     this.screen = [];
     this.wakeGrant();
@@ -2453,6 +2479,8 @@ class LiveKitAdapter implements Room {
     track?.stop();
     this.unwatchScreen?.();
     this.unwatchScreen = null;
+    this.letGoShareSelf();
+    this.shareSelfView = null;
     for (const t of this.screen) t.stop();
     this.screen = [];
     // The leave starts at once, not after the untap (issue #1764): closing the

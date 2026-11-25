@@ -66,7 +66,7 @@ import { keyLabel, talkKeyForMouseButton } from './keys';
 import { occupants, qualityLabel, sharers, type Occupant } from './presence';
 import { endedNote, ownPageNote, resumedNote, resumingNote, sharedNote, shortShareNote, soundNote, type ShareFrameRate, type ShareResolution } from './share';
 import { ShareQualityMenu, autoNote, cautionFor, estimateWords, resolutionWords, shareFrameRates, shareResolutionChoices } from './ShareQualityMenu';
-import { ShareCaptureWarning, ShareReadout, ShareView } from './ShareView';
+import { SelfShareView, ShareCaptureWarning, ShareReadout, ShareView } from './ShareView';
 import { nobody, type InVoice } from './useOccupancy';
 import { VoiceDiagnostics } from './VoiceDiagnostics';
 import type { VoiceControl } from './useVoice';
@@ -642,12 +642,7 @@ export function VoicePanel({
       watched,
       startedAt: stream.startedAt,
       render: (focus, compact, onToggleLayout) => {
-        if (me) return (
-          <section aria-label="Your stream" className="share-view">
-            <p className="share-title"><Glyph name="screen" />You · LIVE{quality === null ? null : <> · {quality}</>}</p>
-            <div className="share-controls"><button type="button" onClick={() => { client.stopShare(); }}>Stop sharing</button></div>
-          </section>
-        );
+        if (me) return <SelfShareView client={client} quality={quality} />;
         if (!watched) return (
           <section aria-label={`${name}'s stream`} className="share-view">
             <p className="share-title"><Glyph name="screen" />{name} · LIVE{quality === null ? null : <> · {quality}</>}</p>

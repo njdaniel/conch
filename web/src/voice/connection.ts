@@ -328,6 +328,10 @@ export interface Room extends ShareRoom, CameraRoom {
   cameras: () => Promise<readonly Camera[] | null>;
   switchCamera: (choice: string) => Promise<void>;
   attachSelf: (el: HTMLVideoElement | null) => void;
+  // Plays this page's own screen picture, muted, into the sharer's preview
+  // (#2197), or into none: it follows the capture, and is empty once the
+  // share is stopped.
+  attachShareSelf: (el: HTMLVideoElement | null) => void;
   // Receiving cameras: whether the call view is open (the person's choice),
   // whether the video is shown here now (setShown: false in the phone layout
   // outside the Voice view, where no camera is received), who holds a camera
@@ -801,6 +805,7 @@ export class VoiceClient {
   private cameraClaims: ReadonlySet<number> = new Set();
   private readonly cameraViews = new Map<number, HTMLVideoElement>();
   private selfView: HTMLVideoElement | null = null;
+  private shareSelfView: HTMLVideoElement | null = null;
   // Numbers the camera's operations (on, off, a switch, and every new
   // capture or stop, however it came): a switch's outcome counts only while
   // nothing newer has happened to the camera.
@@ -1537,6 +1542,13 @@ export class VoiceClient {
   attachSelf(el: HTMLVideoElement | null): void {
     this.selfView = el;
     this.room?.attachSelf(el);
+  }
+
+  // attachShareSelf plays the sharer's own screen into the preview, on this
+  // connection and every one after it (#2197).
+  attachShareSelf(el: HTMLVideoElement | null): void {
+    this.shareSelfView = el;
+    this.room?.attachShareSelf(el);
   }
 
   // refreshCameras reads the cameras the browser lists again: after the
@@ -2323,6 +2335,7 @@ export class VoiceClient {
     room.setViewing(this.state.viewing);
     room.setShown(this.videoShown);
     room.attachSelf(this.selfView);
+    room.attachShareSelf(this.shareSelfView);
     for (const [principal, el] of this.cameraViews) room.attachCamera(principal, el);
     // So is each person's volume, so that nobody is heard at full volume
     // first.
