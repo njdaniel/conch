@@ -20,7 +20,8 @@ it('captures only explicitly, ignores repeat and text, translates Mouse 5, and s
   fireEvent.keyDown(window, { code: 'KeyA', key: 'private text' });
   expect(screen.getByText('none chosen')).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: 'Set talk key' }));
-  fireEvent.keyDown(window, { code: 'KeyA', repeat: true });
+  const cancel = screen.getByRole('button', { name: 'Cancel' });
+  fireEvent.keyDown(cancel, { code: 'KeyA', repeat: true });
   expect(screen.getByText('none chosen')).toBeTruthy();
   fireEvent.mouseDown(window, { button: 0 });
   expect(screen.getByRole('button', { name: 'Cancel' })).toBeTruthy();
@@ -34,7 +35,7 @@ it('captures only explicitly, ignores repeat and text, translates Mouse 5, and s
 });
 it('cancels on blur, Escape, and a session change', () => {
   const f = setup();
-  for (const cancel of [() => fireEvent.blur(window), () => fireEvent.keyDown(window, { code: 'Escape' }), () => { f.update({ ...f.view, generation: 8 }); }]) {
+  for (const cancel of [() => fireEvent.blur(window), () => fireEvent.keyDown(screen.getByRole('button', { name: 'Cancel' }), { code: 'Escape' }), () => { f.update({ ...f.view, generation: 8 }); }]) {
     fireEvent.click(screen.getByRole('button', { name: 'Set talk key' }));
     cancel();
     fireEvent.keyDown(window, { code: 'KeyA' });

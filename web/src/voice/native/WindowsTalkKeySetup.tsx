@@ -1,5 +1,6 @@
 // Windows uses the existing config-set bridge for talk and mute keys.
-// Capture starts on request and ends on blur, Escape, a pick or a session change.
+// Capture starts on request and takes input only while focus is in setup.
+// A binding, Cancel, Escape, window blur or a session change ends capture.
 // A saved binding waits for the next join; the test reads confirmed state of
 // the active voice session and cannot open a microphone or choose a channel.
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
@@ -9,6 +10,7 @@ import { windowsKey, windowsKeys, type WindowsKey } from '../../platform/desktop
 import { useNativeVoice } from './useNativeVoice';
 import { failedWords, savedBindingWords, takeEffect } from './TalkKeySetup';
 import { pttWords, pttProblemWords } from './words';
+import { focusMayMove } from './setupFocus';
 
 export function WindowsTalkKeySetup({ source, binding = 'talk', onSaved, onDetachedSaveError, onClose }: {
   readonly source: NativeVoice;
@@ -37,19 +39,24 @@ export function WindowsTalkKeySetup({ source, binding = 'talk', onSaved, onDetac
   const canTest = view.status === 'running';
   // Transfer focus before the browser disables the active test's button.
   useLayoutEffect(() => {
-    if (!canTest && testFocused) (saving ? headingElement.current : closeButton.current)?.focus();
+    if (!canTest && testFocused && focusMayMove(section.current)) {
+      (saving ? headingElement.current : closeButton.current)?.focus();
+    }
   }, [canTest, testFocused, saving]);
   useEffect(() => {
     setCapturing(false);
     setTesting(false);
   }, [view.generation, view.channel, view.status]);
   useEffect(() => {
-    if (capturing) cancelButton.current?.focus();
-    else if (wasCapturing.current) captureButton.current?.focus();
+    if (focusMayMove(section.current)) {
+      if (capturing) cancelButton.current?.focus();
+      else if (wasCapturing.current) captureButton.current?.focus();
+    }
     wasCapturing.current = capturing;
   }, [capturing]);
   useEffect(() => {
-    if (!capturing) return;
+    const root = section.current;
+    if (!capturing || root === null) return;
     const take = (code: string) => {
       const found = windowsKey(code);
       if (found === null) { setNote(`That key can't be used as a ${binding} key.`); return; }
@@ -58,6 +65,7 @@ export function WindowsTalkKeySetup({ source, binding = 'talk', onSaved, onDetac
       setCapturing(false);
     };
     const keyboard = (event: KeyboardEvent) => {
+      if (!root.contains(document.activeElement)) return;
       event.preventDefault();
       event.stopPropagation();
       if (event.repeat || event.isComposing) return;
@@ -65,24 +73,25 @@ export function WindowsTalkKeySetup({ source, binding = 'talk', onSaved, onDetac
       else take(event.code);
     };
     const mouse = (event: MouseEvent) => {
+      if (!root.contains(document.activeElement)) return;
       if (event.button !== 3 && event.button !== 4) return;
       event.preventDefault();
       event.stopPropagation();
       take(event.button === 3 ? 'Mouse4' : 'Mouse5');
     };
     const cancel = () => { setCapturing(false); };
-    window.addEventListener('keydown', keyboard, true);
+    root.addEventListener('keydown', keyboard, true);
     window.addEventListener('mousedown', mouse, true);
     window.addEventListener('blur', cancel);
     return () => {
-      window.removeEventListener('keydown', keyboard, true);
+      root.removeEventListener('keydown', keyboard, true);
       window.removeEventListener('mousedown', mouse, true);
       window.removeEventListener('blur', cancel);
     };
   }, [binding, capturing]);
   const save = async () => {
     if (key === null || saving || capturing) return;
-    saveButton.current?.focus();
+    if (focusMayMove(section.current)) saveButton.current?.focus();
     setSaving(true);
     setNote(null);
     let result: VoiceTalkBindingResult;
@@ -101,7 +110,7 @@ export function WindowsTalkKeySetup({ source, binding = 'talk', onSaved, onDetac
       if (!result.ok) onDetachedSaveError?.(message);
       return;
     }
-    if (!result.ok && root.contains(document.activeElement)) saveButton.current?.focus();
+    if (!result.ok && focusMayMove(root)) saveButton.current?.focus();
     setNote(message);
     setSaving(false);
   };

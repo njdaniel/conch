@@ -1,11 +1,12 @@
 // The talk and mute key setup of the desktop app (#1382, #2056). Windows
 // dispatches to WindowsTalkKeySetup (#777), with no device grant or path.
-// On Linux, capture a key or Mouse 4 in this window as soon as setup opens.
+// On Linux, prepare to capture a key or Mouse 4 as soon as discovery finishes.
 // Show a device choice only when needed. The device-access instructions
 // explain what a read grant exposes before showing the user any rule.
 //
-// Capture: focus starts on the prompt. Enter and Space still activate a
-// focused button. Escape closes setup, and Tab or Cancel stops capture.
+// Capture takes input only while focus is in setup. Focus can move to the
+// prompt when capture starts. Enter and Space still activate a focused
+// button. Escape in setup closes it, and Tab or Cancel stops capture.
 // During a save, Close and Escape wait for the result.
 // The event's code is turned at once into an evdev number and a name; the
 // event itself is not kept, logged or passed on. Only the number and the name
@@ -18,6 +19,7 @@ import { updatePendingWords } from './words';
 import type { VoiceKeyDevice, VoiceKeyDevicesResult, VoiceOneShotError, VoiceTalkBindingResult } from '../../platform/desktop/bridge';
 import { platform } from '../../platform';
 import type { NativeVoice } from '../../platform/types';
+import { focusMayMove } from './setupFocus';
 
 const oneShotWords: Readonly<Record<VoiceOneShotError, string>> = {
   'not-signed-in': 'Sign in first.',
@@ -159,18 +161,12 @@ export function TalkKeySetup({
   const captureButton = useRef<HTMLButtonElement>(null);
   const saveButton = useRef<HTMLButtonElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
-  const handledOpen = useRef<number | null>(null);
   const windows = listing?.ok === true && listing.platform === 'win32';
 
-  // A launch takes focus. Replacing the loading view on Windows only recovers
-  // focus if the user has stayed in setup.
+  // Focus the first control on launch and when Windows replaces the loading view.
   useLayoutEffect(() => {
     const root = setup.current;
-    if (root === null) return;
-    const opened = handledOpen.current !== openRequest;
-    handledOpen.current = openRequest;
-    const active = document.activeElement;
-    if (windows && !opened && active !== null && active !== document.body && !root.contains(active)) return;
+    if (root === null || !focusMayMove(root)) return;
     const target = capturePrompt.current
       ?? root.querySelector<HTMLElement>('button:not(:disabled, [aria-disabled="true"]), select:not(:disabled), input:not(:disabled)')
       ?? root.querySelector<HTMLElement>('h3');
@@ -179,7 +175,7 @@ export function TalkKeySetup({
 
   const load = useCallback(() => {
     // Check again disappears while the device list reloads.
-    if (setup.current?.contains(document.activeElement)) closeButton.current?.focus();
+    if (focusMayMove(setup.current)) closeButton.current?.focus();
     setListing(null);
     const call = source.keyDevices;
     if (call === undefined) {
@@ -200,21 +196,24 @@ export function TalkKeySetup({
     };
   }, [load]);
 
-  const canCapture = capturing && listing?.ok === true && listing.platform !== 'win32';
-  // Install the listeners before the capture prompt becomes visible.
+  const captureReady = capturing && listing?.ok === true && listing.platform !== 'win32';
+  // Scope keyboard events to setup. A pending capture can resume when focus
+  // returns, and Mouse 4 can be pressed anywhere in the window while focused here.
   useLayoutEffect(() => {
-    if (!canCapture) return;
+    const root = setup.current;
+    if (!captureReady || root === null) return;
     let pendingShift: string | null = null;
     const take = (next: EvdevKey) => {
       pendingShift = null;
       // Keep focus in setup when choosing a binding removes the prompt.
-      if (document.activeElement === capturePrompt.current) captureButton.current?.focus();
+      if (document.activeElement === capturePrompt.current && focusMayMove(root)) captureButton.current?.focus();
       setKey(next);
       setRefused(false);
       setCapturing(false);
       setOutcome(null);
     };
     const onKey = (e: KeyboardEvent) => {
+      if (!root.contains(document.activeElement)) return;
       if (e.key === 'Escape' || e.code === 'Escape') {
         e.preventDefault();
         e.stopPropagation();
@@ -245,7 +244,7 @@ export function TalkKeySetup({
       else take(found);
     };
     const onKeyUp = (e: KeyboardEvent) => {
-      if (e.code !== pendingShift) return;
+      if (e.code !== pendingShift || !root.contains(document.activeElement)) return;
       const found = keyForCode(e.code);
       if (found !== null) take(found);
     };
@@ -253,6 +252,7 @@ export function TalkKeySetup({
     const onBlur = () => { pendingShift = null; };
     const onMouse = (e: MouseEvent) => {
       pendingShift = null;
+      if (!root.contains(document.activeElement)) return;
       // The first three buttons are the click itself and stay a click.
       const found = keyForMouseButton(e.button);
       if (found === null) return;
@@ -260,21 +260,23 @@ export function TalkKeySetup({
       e.stopPropagation();
       take(found);
     };
-    window.addEventListener('keydown', onKey, true);
-    window.addEventListener('keyup', onKeyUp, true);
+    root.addEventListener('keydown', onKey, true);
+    root.addEventListener('keyup', onKeyUp, true);
+    root.addEventListener('focusout', onBlur);
     window.addEventListener('mousedown', onMouse, true);
     window.addEventListener('blur', onBlur);
     return () => {
       window.removeEventListener('blur', onBlur);
-      window.removeEventListener('keydown', onKey, true);
-      window.removeEventListener('keyup', onKeyUp, true);
+      root.removeEventListener('keydown', onKey, true);
+      root.removeEventListener('keyup', onKeyUp, true);
+      root.removeEventListener('focusout', onBlur);
       window.removeEventListener('mousedown', onMouse, true);
     };
-  }, [canCapture, onClose]);
+  }, [captureReady, onClose]);
 
   useLayoutEffect(() => {
-    if (canCapture) capturePrompt.current?.focus();
-  }, [canCapture]);
+    if (captureReady && focusMayMove(setup.current)) capturePrompt.current?.focus();
+  }, [captureReady]);
 
   const devices = listing !== null && listing.ok ? listing.devices : [];
   const matching = devices.filter((d) => d.kind === key?.kind);
@@ -287,7 +289,7 @@ export function TalkKeySetup({
     if (device === null || key === null || !ready || saving) return;
     const call = source.saveTalkBinding;
     // Keep Save focusable as the other editing controls become disabled.
-    saveButton.current?.focus();
+    if (focusMayMove(setup.current)) saveButton.current?.focus();
     setSaving(true);
     setOutcome(null);
     let result: VoiceTalkBindingResult;
@@ -304,7 +306,7 @@ export function TalkKeySetup({
       if (!result.ok) onDetachedSaveError?.(message);
       return;
     }
-    if (!result.ok && root.contains(document.activeElement)) saveButton.current?.focus();
+    if (!result.ok && focusMayMove(root)) saveButton.current?.focus();
     setOutcome(message);
     setSaving(false);
   };

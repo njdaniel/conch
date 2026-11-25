@@ -31,6 +31,7 @@ import { NativeStreams, ShareButton, ShareNotes, ShareSoundMute, shareDisabledRe
 import type { Companion } from './useCompanion';
 import { useShareSound } from './useShareSound';
 import { savedBindingWords, TalkKeySetup } from './TalkKeySetup';
+import { focusMayMove } from './setupFocus';
 
 // How long the duplicate-identity warning waits for a second Join.
 export const confirmWithin = 10_000;
@@ -211,20 +212,15 @@ export function NativeVoicePanel({
   const outsideVoiceView = useContext(VoiceStrip) !== null;
   const hideOptions = outsideVoiceView || view.status === 'unavailable' || view.status === 'stopping' || actions === undefined;
   const { options, setOptions, covered, button: optionButton, panel, onClose, onShrink, sheet, onSheet } = useOptionsDisclosure({ hidden: hideOptions, native: true });
-  // Focus in setup falls back to body when its controls unmount. Once the
-  // shortcut remounts, recover stranded focus and preserve focus elsewhere.
+  // The setup root has unmounted. Restore to the visible launcher or toggle
+  // only if closing left focus stranded.
   useLayoutEffect(() => {
     if (setup !== null || setupOpener.current === null) return;
     const from = setupOpener.current;
     setupOpener.current = null;
-    const active = document.activeElement;
-    if (active !== null && active !== document.body && active.closest('[inert]') === null) return;
     const opener = from === 'shortcut' ? talkSetupButton.current : from === 'options' ? null : from;
-    if (opener?.isConnected && opener.closest('[hidden], [inert]') === null) {
-      opener.focus();
-      if (document.activeElement === opener) return;
-    }
-    optionButton.ref.current?.focus();
+    if (opener?.isConnected && opener.closest('[hidden], [inert]') === null && focusMayMove(null)) opener.focus();
+    if (focusMayMove(null)) optionButton.ref.current?.focus();
   }, [setup, optionButton.ref]);
   // The idle dock also offers device choices for the next join. Ending a
   // session closes the current disclosure before those choices can be opened.

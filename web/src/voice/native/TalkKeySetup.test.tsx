@@ -32,7 +32,7 @@ async function open(f = fake(), joined = false) {
   await screen.findByText(/Press the key/);
   return { ...f, onSaved, onClose };
 }
-const press = (code: string) => { fireEvent.keyDown(window, { code }); };
+const press = (code: string) => { fireEvent.keyDown(document.activeElement ?? document.body, { code }); };
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
@@ -155,9 +155,9 @@ describe('TalkKeySetup', () => {
 
   it('binds Shift when pressed and released on its own', async () => {
     const f = await open();
-    fireEvent.keyDown(window, { code: 'ShiftRight', shiftKey: true });
+    fireEvent.keyDown(document.activeElement ?? document.body, { code: 'ShiftRight', shiftKey: true });
     expect(screen.getByText('none chosen')).toBeTruthy();
-    fireEvent.keyUp(window, { code: 'ShiftRight' });
+    fireEvent.keyUp(document.activeElement ?? document.body, { code: 'ShiftRight' });
     expect(screen.getByText('Right Shift', { selector: 'bdi' })).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => { expect(f.saveTalkBinding).toHaveBeenCalledWith({ deviceId: 'k1', code: 54 }); });
@@ -297,13 +297,14 @@ describe('TalkKeySetup', () => {
 
   it('forgets a pending Shift on window blur and on a click', async () => {
     await open();
-    fireEvent.keyDown(window, { code: 'ShiftLeft' });
+    const prompt = screen.getByText(/Press the key/);
+    fireEvent.keyDown(prompt, { code: 'ShiftLeft' });
     fireEvent.blur(window);
-    fireEvent.keyUp(window, { code: 'ShiftLeft' });
+    fireEvent.keyUp(prompt, { code: 'ShiftLeft' });
     expect(screen.getByText('none chosen')).toBeTruthy();
-    fireEvent.keyDown(window, { code: 'ShiftLeft' });
+    fireEvent.keyDown(prompt, { code: 'ShiftLeft' });
     fireEvent.mouseDown(window, { button: 0 });
-    fireEvent.keyUp(window, { code: 'ShiftLeft' });
+    fireEvent.keyUp(prompt, { code: 'ShiftLeft' });
     expect(screen.getByText('none chosen')).toBeTruthy();
     expect(screen.getByText(/Press the key/)).toBeTruthy();
   });
