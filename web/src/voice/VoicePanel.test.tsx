@@ -673,6 +673,45 @@ describe('what is sent, as the strip says it', () => {
     if (_what.includes('only')) expect(talk.getAttribute('title')).not.toContain('Talk key');
   });
 
+  // Round 3 (independent review of #2201).
+  it('draws no About talking and sharing on a touch screen that cannot share: nothing would open', () => {
+    vi.stubGlobal('matchMedia', (query: string) => ({ matches: query.includes('pointer: coarse'), media: query, addEventListener: () => undefined, removeEventListener: () => undefined, addListener: () => undefined, removeListener: () => undefined }));
+    try {
+      const noShare = { ...chrome, canShare: false };
+      render(<VoicePanel voice={{ ...control(inVoice('connected', 'c'), [], { kind: 'presence', presence }), features: noShare }} viewer={7} viewerName="" people={new Map()} viewed="c" onOpen={() => undefined} />);
+      const voice = screen.getByRole('region', { name: 'Voice' });
+      expect(within(voice).queryByRole('button', { name: 'About talking and sharing' })).toBeNull();
+      // No keyboard key is named for Hold to talk either (F18).
+      const talk = within(voice).getByRole('button', { name: 'Hold to talk' });
+      expect(talk.hasAttribute('title')).toBe(false);
+      expect(talk.hasAttribute('aria-describedby')).toBe(false);
+      expect(document.getElementById('voice-talk-key')).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('points About talking and sharing at the notes it opens, and closes it on Leave voice and a rejoin', () => {
+    const { voice, redraw } = panel(inVoice('connected', 'c'), 'c');
+    const about = () => within(voice).getByRole('button', { name: 'About talking and sharing' });
+    expect(document.getElementById(about().getAttribute('aria-controls') ?? '')).toBe(voice.querySelector('.voice-notes'));
+    fireEvent.click(about());
+    expect(about().getAttribute('aria-expanded')).toBe('true');
+    redraw(initialVoice);
+    redraw(inVoice('connected', 'c'));
+    expect(about().getAttribute('aria-expanded')).toBe('false');
+    expect(voice.querySelector('.voice-notes .talk-key-note')).toBeNull();
+  });
+
+  it('says for a viewer beside their voice on another device what is true, not Use microphone', () => {
+    const { voice } = panel({ ...inVoice('connected', 'c'), watchOnly: true, viewer: true }, 'c');
+    const talk = within(voice).getByRole('button', { name: 'Hold to talk' });
+    const said = 'Hold to talk is off: you are watching beside your voice on another device.';
+    expect(talk.getAttribute('title')).toBe(said);
+    expect(document.getElementById('voice-talk-key')?.textContent).toBe(said);
+    expect(within(voice).queryByRole('button', { name: 'Use microphone' })).toBeNull();
+  });
+
   it('shows "x stopped sharing." in the strip, and nothing in the stage, when no stage content is left', () => {
     const stage = document.createElement('div');
     document.body.append(stage);

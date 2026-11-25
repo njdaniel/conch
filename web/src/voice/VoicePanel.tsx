@@ -53,7 +53,7 @@ import { archivedLine } from '../archived';
 import { Avatar, Glyph } from '../Icons';
 import { IdentityMarks } from '../Identity';
 import type { ChannelV0 } from '../schema/channel';
-import { MicTestShown, onPhoneCamera, usePhone, VoiceLive, VoiceSheet, VoiceStrip } from '../phone';
+import { MicTestShown, onPhoneCamera, useCoarsePointer, usePhone, VoiceLive, VoiceSheet, VoiceStrip } from '../phone';
 import { StageHost } from '../stage';
 import { MicTest } from './MicTest';
 import { cameraNote, cameraOffForYou, cameraOn, listenOnlyCamera, watchOnlyCamera } from './camera';
@@ -207,7 +207,11 @@ export function VoicePanel({
   const [toAbout, setToAbout] = useState(false);
   // Whether the talk key and sharing notes are open (About talking and sharing).
   const [help, setHelp] = useState(false);
+  // A touch screen has no talk key to explain (F18).
+  const coarse = useCoarsePointer();
   const inVoice = state.phase !== 'idle' && state.phase !== 'stopped';
+  // About talking and sharing starts closed on every join: leaving closes it.
+  if (!inVoice && help) setHelp(false);
   // The open microphone has no level meter to hear with, while a connection
   // holds the microphone (as VoiceStatus's captured): said in the notes, and
   // in the phone's strip, where the notes are hidden.
@@ -759,7 +763,7 @@ export function VoicePanel({
   const sharable = shareLine;
   // What About talking and sharing would show: the talk-key line, the sharing
   // line. With neither there is nothing to disclose, and no button.
-  const talkLine = state.mode === 'ptt' && !state.listenOnly && !state.watchOnly;
+  const talkLine = state.mode === 'ptt' && !state.listenOnly && !state.watchOnly && !coarse;
   const hasHelp = talkLine || shareLine;
   // Everyone else in the room joined, whose volumes Voice options sets.
   const others = roster.filter((o) => o.principal !== viewer).map((o) => ({ principal: o.principal, name: nameOf(people, o.principal, viewer) }));
@@ -838,7 +842,7 @@ export function VoicePanel({
                     not always shown (issue #2198, UI-talk-6). Nothing is
                     remembered: it starts closed. */}
                 {hasHelp ? (
-                  <button type="button" className="quiet voice-help-button" aria-expanded={help} aria-label="About talking and sharing" onClick={() => { setHelp(!help); }}>
+                  <button type="button" className="quiet voice-help-button" aria-expanded={help} aria-controls="voice-notes" aria-label="About talking and sharing" onClick={() => { setHelp(!help); }}>
                     <span aria-hidden="true">i</span>
                   </button>
                 ) : null}
@@ -884,7 +888,7 @@ export function VoicePanel({
         {strip && noPlayback ? <HearButton voice={voice} /> : null}
       </div>
 
-      <div className="voice-notes" hidden={strip} inert={covered}>
+      <div id="voice-notes" className="voice-notes" hidden={strip} inert={covered}>
         {state.why === null ? null : <p role="status" className="hint">{state.why}</p>}
         {state.reportNote === 'rate_limited' ? <p role="status" className="hint">Too many talk reports; slow down</p> : null}
         {state.reportNote === 'retrying' ? <p role="status" className="hint">Reporting your talking is slow; retrying</p> : null}
@@ -1022,6 +1026,7 @@ function talkKeyNote(key: string): string {
 
 // What Hold to talk says where the session cannot send.
 const listenOnlyTalkNote = 'Hold to talk is off: this session is listen only.';
+const viewerTalkNote = 'Hold to talk is off: you are watching beside your voice on another device.';
 const watchOnlyTalkNote = 'Hold to talk is off: you are in Watch only. Use microphone to talk.';
 
 // TalkControl is Hold to talk, or, with the open microphone, its level: the
@@ -1031,8 +1036,11 @@ function TalkControl({ voice, silenced }: { readonly voice: VoiceControl; readon
   // Without a microphone nothing can be sent: the key is not advertised, and
   // the description says why. The reason muted is only referenced while it is
   // drawn (the notes' #voice-talk-why), so no description points at nothing.
-  const cannot = state.listenOnly ? listenOnlyTalkNote : state.watchOnly ? watchOnlyTalkNote : null;
+  const coarse = useCoarsePointer();
+  const cannot = state.listenOnly ? listenOnlyTalkNote : state.viewer ? viewerTalkNote : state.watchOnly ? watchOnlyTalkNote : null;
   const why = silenced && cannot === null;
+  // On a touch screen no keyboard key is named (F18); only a reason is said.
+  const description = cannot ?? (coarse ? null : talkKeyNote(voice.talkKey));
   if (state.mode !== 'ptt') {
     return (
       <span className="open-mic">
@@ -1055,8 +1063,8 @@ function TalkControl({ voice, silenced }: { readonly voice: VoiceControl; readon
         // is shut and sends nothing), but it looks off and says why in the note
         // below (UX-07).
         aria-disabled={silenced ? true : undefined}
-        title={cannot ?? `Talk key: ${keyLabel(voice.talkKey)}`}
-        aria-describedby={why ? 'voice-talk-why voice-talk-key' : 'voice-talk-key'}
+        title={cannot ?? (coarse ? undefined : `Talk key: ${keyLabel(voice.talkKey)}`)}
+        aria-describedby={[why ? 'voice-talk-why' : '', description === null ? '' : 'voice-talk-key'].filter((id) => id !== '').join(' ') || undefined}
         onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); client.press(); }}
         onPointerUp={() => { client.release(); }}
         onPointerCancel={() => { client.release(); }}
@@ -1079,7 +1087,7 @@ function TalkControl({ voice, silenced }: { readonly voice: VoiceControl; readon
       </button>
     {/* The talk key is in the button's description as well as its title,
         whether or not the notes behind About talking and sharing are open. */}
-    <span id="voice-talk-key" hidden>{cannot ?? talkKeyNote(voice.talkKey)}</span>
+    {description === null ? null : <span id="voice-talk-key" hidden>{description}</span>}
     </>
   );
 }

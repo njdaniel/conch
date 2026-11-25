@@ -89,7 +89,9 @@ test.describe('the voice strip status', () => {
         else await about.tap();
         await expect(about).toHaveAttribute('aria-expanded', 'true');
         await expect(strip.locator('.share-line')).toBeVisible();
-        await expect(strip.getByRole('button', { name: 'Hold to talk' })).toHaveAttribute('title', /^Talk key: /);
+        // The talk key is named on a keyboard's screen, and not on a touch one (F18).
+        if (desktop) await expect(strip.getByRole('button', { name: 'Hold to talk' })).toHaveAttribute('title', /^Talk key: /);
+        else await expect(strip.getByRole('button', { name: 'Hold to talk' })).not.toHaveAttribute('title', /Talk key/);
         // Said with Voice options open, where it is visible.
         const options = strip.getByRole('button', { name: 'Voice options' });
         if (desktop) await options.click();
@@ -191,6 +193,14 @@ test.describe('the voice strip status', () => {
         expect(b.x + b.width, `the phrase ends at ${String(b.x + b.width)}, the strip's text column at ${String(s.x + s.width)}`).toBeLessThanOrEqual(s.x + s.width + 0.5);
         expect(b.x + b.width, 'the phrase is inside the window').toBeLessThanOrEqual(390);
       }).toPass({ timeout: 5000 });
+      // The phrase itself is one line: its own nowrap, whatever the sentence before it does.
+      const lines = await phrase.evaluate((el) => {
+        const style = getComputedStyle(el);
+        const line = style.lineHeight.endsWith('px') ? parseFloat(style.lineHeight) : parseFloat(style.fontSize) * 1.4;
+        return { height: el.getBoundingClientRect().height, line, rects: el.getClientRects().length };
+      });
+      expect(lines.rects, 'the phrase is drawn in one box').toBe(1);
+      expect(lines.height, `the phrase is ${String(lines.height)} px high, one line is ${String(lines.line)} px`).toBeLessThanOrEqual(lines.line * 1.2);
       const overflow = await page.evaluate(() => ({ page: document.documentElement.scrollWidth - window.innerWidth, state: (() => { const el = document.querySelector('.voice-state'); return el === null ? 0 : el.scrollWidth - el.clientWidth; })() }));
       expect(overflow.page, 'the page scrolls sideways').toBeLessThanOrEqual(0);
       expect(overflow.state, 'the status column is clipped').toBeLessThanOrEqual(1);
@@ -262,6 +272,34 @@ test.describe('the voice strip status', () => {
     } finally {
       await a?.close();
       await b?.close();
+    }
+  });
+
+  // Round 3: a phone's browser cannot share a screen, and has no talk key, so
+  // there is nothing for About talking and sharing to open: no button.
+  test('P2198 a touch phone that cannot share has no About talking and sharing, and names no key', async ({ browser }) => {
+    let p: Someone | undefined;
+    try {
+      p = await enter(browser, vw, vw.alice, {
+        context: { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true },
+        before: async (page) => {
+          await page.addInitScript(() => {
+            Reflect.deleteProperty(navigator.mediaDevices, 'getDisplayMedia');
+            Reflect.deleteProperty(MediaDevices.prototype, 'getDisplayMedia');
+          });
+        },
+      });
+      const page = p.page;
+      await joinVoice(p, 'Join voice');
+      await showView(page, 'Voice');
+      const strip = voice(page);
+      await chooseMicrophone(strip, 'push to talk', 'tap');
+      await expect(strip.getByRole('button', { name: 'Hold to talk' })).toBeVisible();
+      await expect(strip.getByRole('button', { name: 'Share screen' })).toHaveCount(0);
+      await expect(strip.getByRole('button', { name: 'About talking and sharing' })).toHaveCount(0);
+      await expect(strip.getByRole('button', { name: 'Hold to talk' })).not.toHaveAttribute('title', /Talk key/);
+    } finally {
+      await p?.close();
     }
   });
 });

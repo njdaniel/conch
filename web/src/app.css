@@ -2952,8 +2952,12 @@ label {
 
 /* About talking and sharing: a small round "i", a disclosure for the talk key
    and sharing notes. */
-.voice-help-button {
-  min-width: 2.25rem;
+.voice-controls button.voice-help-button {
+  flex: 0 0 auto;
+  width: 2.75rem;
+  min-width: 2.75rem;
+  padding: 0;
+  border-radius: 50%;
   font-style: italic;
   font-weight: 600;
 }
@@ -4955,6 +4959,13 @@ button.link {
   .lobby.phone.view-voice .voice-controls button {
     flex: 1 1 calc(50% - var(--s2));
     min-width: 0;
+  }
+
+  /* The round "i" stays a small button beside the others, not a half-width
+     cell of its own. */
+  .lobby.phone.view-voice .voice-controls button.voice-help-button {
+    flex: 0 0 2.75rem;
+    min-width: 2.75rem;
   }
 
   .lobby.phone.view-voice .voice-controls .talk {

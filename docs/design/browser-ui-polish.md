@@ -116,7 +116,7 @@ so form controls and scroll bars match.
 | `--accent` / `--accent-hover` | `#6fd69b` / `#8ee3b1` | Connected, the open channel, speaking, primary buttons |
 | `--accent-bg` / `--on-accent` | `#183324` / `#0d1912` | Fill behind accent text; text on an accent button |
 | `--danger` / `--danger-bg` | `#ff8a80` / `#3a1c1c` | Leave, refusals, Failed |
-| `--warn` | `#e8c06a` | Reconnecting, stale, Not confirmed, Microphone in use, a narrowed audience |
+| `--warn` | `#e8c06a` | Reconnecting, stale, Not confirmed, a narrowed audience (the microphone is no amber chip any more, #2198) |
 | `--focus` | `#8ec5ff` | Focus outline (2 px, offset 2 px) |
 | `--hue-0` … `--hue-5` | six muted hues | Initials, chosen by principal id; white letter |
 
