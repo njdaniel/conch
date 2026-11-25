@@ -12,7 +12,7 @@ import { FakeClock } from './fakes';
 import { ownPageNote, soundNote, type ShareFeatures, type ShareQuality } from './share';
 import { ShareQualityMenu, sourceSixtyNote } from './ShareQualityMenu';
 import { useState } from 'react';
-import { MicTestShown, VoiceLive, VoiceStrip } from '../phone';
+import { MicTestShown, VoiceLive, VoiceSheet, VoiceStrip } from '../phone';
 import type { Snapshot, VoiceControl } from './useVoice';
 import { followsNote, hearLabel, meterNote, meterStripNote, missingNote, noOtherOutputs, noOutputChoice, processingLabel, processingOffNote, processingUseNote, reportedNote, stoppedFor, thresholdHint, VoicePanel } from './VoicePanel';
 
@@ -614,6 +614,307 @@ describe('what is sent, as the strip says it', () => {
   });
 });
 
+// Issue #2189: Voice options is a panel over the page; Escape and a press
+// outside close it, and Escape puts focus back on its button.
+describe('Voice options as a panel', () => {
+  const open = () => {
+    const made = panel(inVoice('connected', 'c'), 'c');
+    const button = within(made.voice).getByRole('button', { name: 'Voice options' });
+    fireEvent.click(button);
+    expect(button.getAttribute('aria-expanded')).toBe('true');
+    return { ...made, button };
+  };
+
+  it('Escape closes it and returns focus to the Voice options button', () => {
+    const { voice, button } = open();
+    const slider = within(voice).getByRole('slider', { name: /Release delay/ });
+    slider.focus();
+    fireEvent.keyDown(slider, { key: 'Escape' });
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+    expect(voice.querySelector('#voice-options')?.hasAttribute('hidden')).toBe(true);
+    expect(document.activeElement).toBe(button);
+  });
+
+  it('a press outside closes it, and a press inside does not', () => {
+    const { voice, button } = open();
+    fireEvent.mouseDown(within(voice).getByRole('slider', { name: /Release delay/ }));
+    expect(button.getAttribute('aria-expanded')).toBe('true');
+    fireEvent.mouseDown(document.body);
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('the button still toggles it', () => {
+    const { button } = open();
+    fireEvent.mouseDown(button);
+    fireEvent.click(button);
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.mouseDown(button);
+    fireEvent.click(button);
+    expect(button.getAttribute('aria-expanded')).toBe('true');
+  });
+});
+
+// Issue #2189: re-authentication outranks the sheet; the lobby says so
+// (blocked), and Voice options closes and stays closed.
+it('Voice options closes when re-authentication blocks it', () => {
+  const voice = control(inVoice('connected', 'c'), [], { kind: 'presence', presence });
+  const drawn = (blocked: boolean) => (
+    <VoiceSheet.Provider value={{ report: () => undefined, blocked, behind: blocked }}>
+      <VoicePanel voice={voice} viewer={7} people={new Map()} viewed="c" onOpen={() => undefined} />
+    </VoiceSheet.Provider>
+  );
+  const { rerender } = render(drawn(false));
+  const button = screen.getByRole('button', { name: 'Voice options' });
+  fireEvent.click(button);
+  expect(button.getAttribute('aria-expanded')).toBe('true');
+  rerender(drawn(true));
+  expect(screen.getByRole('button', { name: 'Voice options' }).getAttribute('aria-expanded')).toBe('false');
+  // Re-authentication done: it stays closed until it is opened again.
+  rerender(drawn(false));
+  expect(screen.getByRole('button', { name: 'Voice options' }).getAttribute('aria-expanded')).toBe('false');
+  expect(document.querySelector('#voice-options')?.hasAttribute('hidden')).toBe(true);
+});
+
+// Issue #2189: Settings opened over the sheet makes the dock inert and the
+// sheet loses focus; when Settings closes (behind goes) focus is given back to
+// the sheet's Close, not left on the body.
+it('Voice options takes focus back when what was over it goes', () => {
+  const voice = control(inVoice('connected', 'c'), [], { kind: 'presence', presence });
+  const drawn = (behind: boolean) => (
+    <VoiceSheet.Provider value={{ report: () => undefined, blocked: false, behind }}>
+      <VoicePanel voice={voice} viewer={7} people={new Map()} viewed="c" onOpen={() => undefined} />
+    </VoiceSheet.Provider>
+  );
+  // jsdom has no layout: the panel is a sheet where the section's top is above 40% of the window.
+  const top = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0, toJSON: () => ({}) });
+  const height = vi.spyOn(document.documentElement, 'clientHeight', 'get').mockReturnValue(800);
+  try {
+    const { rerender } = render(drawn(false));
+    fireEvent.click(screen.getByRole('button', { name: 'Voice options' }));
+    const close = document.querySelector<HTMLElement>('.voice-options-close');
+    expect(document.activeElement).toBe(close);
+    rerender(drawn(true));
+    // The dock went inert and took the focus with it.
+    close?.blur();
+    expect(document.activeElement).toBe(document.body);
+    rerender(drawn(false));
+    expect(document.activeElement).toBe(close);
+  } finally {
+    top.mockRestore();
+    height.mockRestore();
+  }
+});
+
+// Issue #2189: Settings over the open sheet. A press on its Close or its
+// backdrop is Settings' own: the outside-press handler leaves the sheet open,
+// and focus goes back into it once Settings is gone.
+it('Voice options stays open under a press, and under Escape, while Settings is over it', () => {
+  const voice = control(inVoice('connected', 'c'), [], { kind: 'presence', presence });
+  const drawn = (behind: boolean) => (
+    <VoiceSheet.Provider value={{ report: () => undefined, blocked: false, behind }}>
+      <VoicePanel voice={voice} viewer={7} people={new Map()} viewed="c" onOpen={() => undefined} />
+      <div className="backdrop" data-testid="backdrop" />
+      <button type="button">Settings Close</button>
+    </VoiceSheet.Provider>
+  );
+  const top = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0, toJSON: () => ({}) });
+  const height = vi.spyOn(document.documentElement, 'clientHeight', 'get').mockReturnValue(800);
+  try {
+    const { rerender } = render(drawn(false));
+    const button = screen.getByRole('button', { name: 'Voice options' });
+    fireEvent.click(button);
+    const close = document.querySelector<HTMLElement>('.voice-options-close');
+    rerender(drawn(true));
+    close?.blur();
+    fireEvent.mouseDown(screen.getByRole('button', { name: 'Settings Close' }));
+    fireEvent.mouseDown(screen.getByTestId('backdrop'));
+    expect(screen.getByRole('button', { name: 'Voice options' }).getAttribute('aria-expanded')).toBe('true');
+    // Focus fell to the body (a click on content that takes none): Escape is
+    // still Settings' and does not close the panel beneath it.
+    fireEvent.keyDown(document.body, { key: 'Escape' });
+    expect(screen.getByRole('button', { name: 'Voice options' }).getAttribute('aria-expanded')).toBe('true');
+    rerender(drawn(false));
+    expect(document.activeElement).toBe(close);
+    // With nothing over it, a press outside closes it as before.
+    fireEvent.mouseDown(screen.getByTestId('backdrop'));
+    expect(screen.getByRole('button', { name: 'Voice options' }).getAttribute('aria-expanded')).toBe('false');
+  } finally {
+    top.mockRestore();
+    height.mockRestore();
+  }
+});
+
+// Issue #2189: whatever modal has focus, the sheet does not take it. A foreign
+// aria-modal dialog (one the lobby was never told of) holds it against the
+// sheet opening.
+it('Voice options does not take focus from another open modal dialog', () => {
+  const voice = control(inVoice('connected', 'c'), [], { kind: 'presence', presence });
+  const top = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0, toJSON: () => ({}) });
+  const height = vi.spyOn(document.documentElement, 'clientHeight', 'get').mockReturnValue(800);
+  try {
+    render(
+      <>
+        <div role="dialog" aria-modal="true" aria-label="Elsewhere"><input aria-label="Field" /></div>
+        <VoicePanel voice={voice} viewer={7} people={new Map()} viewed="c" onOpen={() => undefined} />
+      </>,
+    );
+    const field = screen.getByLabelText('Field');
+    field.focus();
+    fireEvent.click(screen.getByRole('button', { name: 'Voice options' }));
+    expect(document.querySelector('#voice-options')?.classList.contains('sheet')).toBe(true);
+    expect(document.activeElement).toBe(field);
+  } finally {
+    top.mockRestore();
+    height.mockRestore();
+  }
+});
+
+// Issue #2189: an anchored panel the window narrows under closes, rather than
+// becoming a sheet over what else is open; a sheet is only opened by a press.
+it('an open anchored panel closes when it would become a sheet, with focus on its button if it was in it', () => {
+  const voice = control(inVoice('connected', 'c'), [], { kind: 'presence', presence });
+  let top = 700;
+  const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(() => ({ top, left: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: top, toJSON: () => ({}) }));
+  const height = vi.spyOn(document.documentElement, 'clientHeight', 'get').mockReturnValue(800);
+  try {
+    render(<VoicePanel voice={voice} viewer={7} people={new Map()} viewed="c" onOpen={() => undefined} />);
+    const button = screen.getByRole('button', { name: 'Voice options' });
+    fireEvent.click(button);
+    expect(document.querySelector('#voice-options')?.classList.contains('sheet')).toBe(false);
+    const slider = screen.getByRole('slider', { name: /Release delay/ });
+    slider.focus();
+    top = 100;
+    act(() => {
+      window.dispatchEvent(new Event('resize'));
+    });
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(button);
+    // Focus outside the panel is left alone.
+    fireEvent.click(button);
+    top = 700;
+    act(() => {
+      window.dispatchEvent(new Event('resize'));
+    });
+    const other = document.createElement('input');
+    document.body.append(other);
+    other.focus();
+    top = 100;
+    act(() => {
+      window.dispatchEvent(new Event('resize'));
+    });
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(other);
+    other.remove();
+  } finally {
+    rect.mockRestore();
+    height.mockRestore();
+  }
+});
+
+// Issue #2189: every way Voice options goes out of sight closes it, so that
+// coming back never reopens it: the phone's Chat and Channels views (the
+// strip), and leaving voice.
+describe('Voice options closes when it goes out of sight', () => {
+  const drawn = (state: VoiceState, strip: boolean) => (
+    <VoiceStrip.Provider value={strip ? () => undefined : null}>
+      <VoicePanel voice={control(state, [], { kind: 'presence', presence })} viewer={7} people={new Map()} viewed="c" onOpen={() => undefined} />
+    </VoiceStrip.Provider>
+  );
+  const expanded = () => screen.queryByRole('button', { name: 'Voice options' })?.getAttribute('aria-expanded');
+
+  it('does not come back after the phone goes to Chat and returns to Voice', () => {
+    const { rerender } = render(drawn(inVoice('connected', 'c'), false));
+    fireEvent.click(screen.getByRole('button', { name: 'Voice options' }));
+    expect(expanded()).toBe('true');
+    rerender(drawn(inVoice('connected', 'c'), true));
+    rerender(drawn(inVoice('connected', 'c'), false));
+    expect(expanded()).toBe('false');
+    expect(document.querySelector('#voice-options')?.hasAttribute('hidden')).toBe(true);
+  });
+
+  it('does not come back after leaving voice and joining again', () => {
+    const { rerender } = render(drawn(inVoice('connected', 'c'), false));
+    fireEvent.click(screen.getByRole('button', { name: 'Voice options' }));
+    rerender(drawn(initialVoice, false));
+    rerender(drawn(inVoice('connected', 'c'), false));
+    expect(expanded()).toBe('false');
+  });
+});
+
+// Issue #2189: the anchored panel is a popover: focus gained by anything but
+// the panel or its button closes it, wherever focus went; losing the window's
+// focus (Alt-Tab, a native picker) does not.
+describe('the anchored Voice options panel and focus leaving it', () => {
+  const setup = () => {
+    const voice = control(inVoice('connected', 'c'), [], { kind: 'presence', presence });
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ top: 700, left: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 700, toJSON: () => ({}) });
+    const height = vi.spyOn(document.documentElement, 'clientHeight', 'get').mockReturnValue(800);
+    const other = document.createElement('input');
+    document.body.append(other);
+    render(<VoicePanel voice={voice} viewer={7} people={new Map()} viewed="c" onOpen={() => undefined} />);
+    const button = screen.getByRole('button', { name: 'Voice options' });
+    fireEvent.click(button);
+    expect(document.querySelector('#voice-options')?.classList.contains('sheet')).toBe(false);
+    return { button, other, done: () => { rect.mockRestore(); height.mockRestore(); other.remove(); } };
+  };
+
+  it('closes when focus goes to something else, and leaves focus there', () => {
+    const { button, other, done } = setup();
+    try {
+      const slider = screen.getByRole('slider', { name: /Release delay/ });
+      slider.focus();
+      fireEvent.focusIn(slider);
+      expect(button.getAttribute('aria-expanded')).toBe('true');
+      button.focus();
+      fireEvent.focusIn(button);
+      expect(button.getAttribute('aria-expanded')).toBe('true');
+      other.focus();
+      fireEvent.focusIn(other);
+      expect(button.getAttribute('aria-expanded')).toBe('false');
+      expect(document.activeElement).toBe(other);
+    } finally {
+      done();
+    }
+  });
+
+  it('stays open when focus goes into another modal dialog (the quick switcher)', () => {
+    const { button, done } = setup();
+    const dialog = document.createElement('div');
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    const field = document.createElement('input');
+    dialog.append(field);
+    document.body.append(dialog);
+    try {
+      const slider = screen.getByRole('slider', { name: /Release delay/ });
+      slider.focus();
+      field.focus();
+      fireEvent.focusIn(field);
+      expect(button.getAttribute('aria-expanded')).toBe('true');
+    } finally {
+      dialog.remove();
+      done();
+    }
+  });
+
+  it('stays open when the window loses focus, and when it comes back to the panel', () => {
+    const { button, done } = setup();
+    try {
+      const slider = screen.getByRole('slider', { name: /Release delay/ });
+      slider.focus();
+      // Alt-Tab: a focusout with no related target, and the window's blur.
+      fireEvent.focusOut(slider, { relatedTarget: null });
+      fireEvent.blur(window);
+      expect(button.getAttribute('aria-expanded')).toBe('true');
+      fireEvent.focus(window);
+      fireEvent.focusIn(slider);
+      expect(button.getAttribute('aria-expanded')).toBe('true');
+    } finally {
+      done();
+    }
+  });
+});
+
 // Issue #590 (F09, F20): Hold to talk works from the keyboard while it has
 // focus, the hint says where the talk key does not work, and Leave voice
 // hands focus to Join voice instead of dropping it.
@@ -723,6 +1024,53 @@ describe('talk-key capture', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Voice options' }));
     return { setTalkKey, capture };
   };
+
+  // Issue #2189: while the talk key is chosen the capture has Tab and Shift+Tab
+  // too: the panel's Tab routing leaves them alone and focus stays put.
+  it('leaves Shift+Tab to the capture: no focus move to the button, the panel stays open', () => {
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ top: 700, left: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 700, toJSON: () => ({}) });
+    const height = vi.spyOn(document.documentElement, 'clientHeight', 'get').mockReturnValue(800);
+    // jsdom draws nothing: every element counts as drawn for the Tab routing.
+    const drawn = vi.spyOn(HTMLElement.prototype, 'getClientRects').mockReturnValue([{}] as unknown as DOMRectList);
+    try {
+      capturing();
+      const panel = document.querySelector<HTMLElement>('#voice-options');
+      const first = panel?.querySelector<HTMLElement>('button:not(:disabled), select:not(:disabled), input:not(:disabled)');
+      if (first === null || first === undefined) throw new Error('no control in the panel');
+      first.focus();
+      const button = screen.getByRole('button', { name: 'Voice options' });
+      // (The capture itself takes the key and prevents its default.)
+      fireEvent.keyDown(first, { key: 'Tab', shiftKey: true });
+      expect(document.activeElement).toBe(first);
+      expect(document.activeElement).not.toBe(button);
+      expect(button.getAttribute('aria-expanded')).toBe('true');
+    } finally {
+      rect.mockRestore();
+      height.mockRestore();
+      drawn.mockRestore();
+    }
+  });
+
+  // Issue #2189: the capture ends with the panel, by whatever route it closes,
+  // and Escape during a capture cancels only the capture.
+  it('ends the capture when the panel closes by a press outside, or by its button', () => {
+    const { capture } = capturing();
+    fireEvent.mouseDown(document.body);
+    expect(capture).toHaveBeenCalledWith(false);
+    capture.mockClear();
+    fireEvent.click(screen.getByRole('button', { name: 'Voice options' }));
+    expect(capture).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Voice options' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Voice options' }));
+    expect(capture).toHaveBeenCalledWith(false);
+  });
+
+  it('Escape during a capture cancels the capture and leaves the panel open', () => {
+    const { capture } = capturing();
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Press a key or Mouse 4/5 (Escape cancels)' }), { code: 'Escape', key: 'Escape' });
+    expect(capture).toHaveBeenCalledWith(false);
+    expect(screen.getByRole('button', { name: 'Voice options' }).getAttribute('aria-expanded')).toBe('true');
+  });
 
   it.each([
     [3, 'Mouse4'],
@@ -1736,7 +2084,7 @@ describe('the phone strip under Chat and Channels (issue #1028)', () => {
     expect(voice.querySelector('.voice-notes')?.hasAttribute('hidden')).toBe(false);
   });
 
-  it('keeps Voice options as they were left across the strip and the Voice view', () => {
+  it('closes Voice options when the strip hides them, and leaves them closed in the Voice view (issue #2189)', () => {
     const voiceControl = control(inVoice('connected', 'channel-a'), [], crowd);
     const page = (opens: (() => void) | null) => (
       <VoiceStrip.Provider value={opens}>
@@ -1751,7 +2099,7 @@ describe('the phone strip under Chat and Channels (issue #1028)', () => {
     rerender(page(() => undefined));
     expect(options()).toBe(true);
     rerender(page(null));
-    expect(options()).toBe(false);
+    expect(options()).toBe(true);
   });
 
   it('is not the strip out of voice: Join voice is the Voice view\'s, and the lobby hides the dock', () => {

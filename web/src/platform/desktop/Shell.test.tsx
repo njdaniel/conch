@@ -5,6 +5,7 @@ import { NotificationSettings } from '../../NotificationSettings';
 import { credentials } from './credentials';
 import { DesktopShell } from './Shell';
 import { SWAP_GUARD_MS } from './ui/InviteLink';
+import { setPageModal } from '../../pageModal';
 import { serverOrigin, setServerOrigin } from './state';
 
 const ID_A = 'a'.repeat(32);
@@ -1067,5 +1068,40 @@ describe('opening an invite link (issue #1591)', () => {
     render(<DesktopShell>{child}</DesktopShell>);
     await screen.findByLabelText('Server address');
     expect(screen.queryByLabelText('Invite link')).toBeNull();
+  });
+});
+
+// Issue #2189: the desktop strip is outside the lobby; while a modal of the
+// lobby (Settings, re-authentication, the voice options sheet) is up it is
+// inert, so the keyboard cannot reach Desktop app and Servers behind it.
+describe('behind a modal of the lobby', () => {
+  afterEach(() => {
+    act(() => {
+      setPageModal(false);
+    });
+  });
+
+  it('makes the strip and what it opens inert, and gives them back', async () => {
+    const active = view({ profiles: [profile(ID_A, 'a.example.org', 'ada', true)], active: ID_A });
+    install({ profiles: () => Promise.resolve(active) });
+    render(<DesktopShell>{child}</DesktopShell>);
+    const servers = await screen.findByRole('button', { name: 'Servers' });
+    const app = screen.getByRole('button', { name: 'Desktop app' });
+    expect(servers.closest('[inert]')).toBeNull();
+    fireEvent.click(app);
+    expect(screen.getByRole('button', { name: 'Desktop app' }).closest('[inert]')).toBeNull();
+    act(() => {
+      setPageModal(true);
+    });
+    expect(servers.closest('[inert]')).not.toBeNull();
+    expect(app.closest('[inert]')).not.toBeNull();
+    // What the strip opened below it is behind the modal too.
+    expect(document.querySelector('.page-scope')?.hasAttribute('inert')).toBe(true);
+    expect(screen.getByText('the client').closest('[inert]')).toBeNull();
+    act(() => {
+      setPageModal(false);
+    });
+    expect(servers.closest('[inert]')).toBeNull();
+    expect(app.closest('[inert]')).toBeNull();
   });
 });

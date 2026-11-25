@@ -46,14 +46,14 @@ import { ModerationConfirm, useMayModerate, useMayModerateIn } from '../Moderati
 // §7.1, #1509): the people's tiles join them only with the person's choice to
 // view, and a focused stream is the main picture with every other tile in the
 // strip (design §7.4).
-import { useCallback, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent as KeyEvent, type RefObject } from 'react';
+import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as KeyEvent, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { readHideNonVideo, writeHideNonVideo } from '../api';
 import { archivedLine } from '../archived';
 import { Avatar, Glyph } from '../Icons';
 import { IdentityMarks } from '../Identity';
 import type { ChannelV0 } from '../schema/channel';
-import { MicTestShown, onPhoneCamera, usePhone, VoiceLive, VoiceStrip } from '../phone';
+import { MicTestShown, onPhoneCamera, usePhone, VoiceLive, VoiceSheet, VoiceStrip } from '../phone';
 import { StageHost } from '../stage';
 import { MicTest } from './MicTest';
 import { cameraNote, cameraOffForYou, cameraOn, listenOnlyCamera, watchOnlyCamera } from './camera';
@@ -173,6 +173,31 @@ export function VoicePanel({
   const [hideNonVideo, setHideNonVideo] = useState(readHideNonVideo);
   const [focusShow, setFocusShow] = useState(false);
   const showVideoButton = useRef<HTMLButtonElement>(null);
+  // The Voice options button: Escape returns focus to it, and a press on it is
+  // its own toggle, not an outside press (issue #2189).
+  const optionsButton = useRef<HTMLButtonElement>(null);
+  const optionsPanel = useRef<HTMLDivElement>(null);
+  // Closing by keyboard puts focus back on the button once the panel is gone
+  // (the button can be inert while a sheet is open).
+  const focusBack = useRef(false);
+  const closeOptions = useCallback(() => {
+    focusBack.current = true;
+    setOptions(false);
+  }, []);
+  // The window changed so that the open anchored panel would be a bottom sheet
+  // (issue #2189): it closes instead, so that a sheet, which is modal, is only
+  // ever opened by a press, with nothing else open. Through the same close as
+  // any other (the talk key capture ends with it); focus goes to the button
+  // only if it was inside the panel, and is left alone otherwise.
+  const shrinkOptions = useCallback(() => {
+    // The button may be inert or covered at that moment (a modal over it): then
+    // focus stays where it is.
+    const button = optionsButton.current;
+    focusBack.current = optionsPanel.current?.contains(document.activeElement) === true && button !== null && button.closest('[inert]') === null;
+    setOptions(false);
+  }, []);
+  // Whether the open panel is a bottom sheet (set by Options from its place).
+  const [sheet, setSheet] = useState(false);
   // Each publisher's volume survives its tile moving or being watched again;
   // one stream's control never changes another's (voice-multi-share.md §7.1).
   const shareVolumes = useRef(new Map<number, number>());
@@ -263,11 +288,186 @@ export function VoicePanel({
     };
   }, [voice]);
 
+  // What the lobby says of the sheet (VoiceSheet), read here for the press
+  // below and for the sheet's own handling after it.
+  const { report, blocked, behind } = useContext(VoiceSheet);
+  // Voice options is a panel over the page (issue #2189): Escape closes it and
+  // puts focus back on its button; a press outside it closes it. Escape while
+  // the talk key is being chosen only cancels that, as Change talk key says.
+  useEffect(() => {
+    if (!options) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.defaultPrevented || voice.capturing) return;
+      // Settings or re-authentication is over the panel (behind): Escape is
+      // theirs, even when focus has fallen to the body and their own handler
+      // is not on its path.
+      if (behind) return;
+      closeOptions();
+    };
+    // Focus reaching the share quality menu's button closes the panel, so the
+    // menu, which paints over it, is not drawn on top of an open panel.
+    //
+    // The anchored panel is a popover, not a modal: focus moving to anything
+    // else than the panel or its own button closes it, where focus went (it is
+    // not moved), so no control is left focused under it, covered. Only focus
+    // gained counts (focusin): the window losing focus, a native picker or the
+    // talk key capture moves none. Not while something is over the panel
+    // (behind), and not as a sheet, which is modal and has the rest inert.
+    const onFocus = (e: FocusEvent) => {
+      const at = e.target;
+      if (!(at instanceof Element)) return;
+      if (at.closest('.share-chooser') !== null) setOptions(false);
+      // Focus going into another modal (the quick switcher, whose field takes
+      // it before the lobby has said it is over the panel) is not leaving it:
+      // the panel stays open beneath, and Escape from that modal returns.
+      else if (!sheet && !behind && !voice.capturing && optionsPanel.current?.contains(at) !== true && optionsButton.current?.contains(at) !== true && !inOtherModal(at, optionsPanel.current)) setOptions(false);
+    };
+    const onPress = (e: MouseEvent) => {
+      const at = e.target;
+      if (!(at instanceof Node)) return;
+      if (optionsPanel.current?.contains(at) === true || optionsButton.current?.contains(at) === true) return;
+      // Settings or re-authentication is over the panel (behind): a press on
+      // them, their Close and their backdrop among them, is theirs, and the
+      // panel stays open beneath, to take focus back when they go.
+      if (behind) return;
+      setOptions(false);
+    };
+    document.addEventListener('keydown', onKey);
+    document.addEventListener('mousedown', onPress);
+    document.addEventListener('focusin', onFocus);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('mousedown', onPress);
+      document.removeEventListener('focusin', onFocus);
+    };
+  }, [options, voice.capturing, closeOptions, behind, sheet]);
+
+  useEffect(() => {
+    if (options || !focusBack.current) return;
+    focusBack.current = false;
+    optionsButton.current?.focus();
+  }, [options]);
+
+  // As a sheet the panel covers the strip's controls, Leave voice among them,
+  // and may cover a watched share's. It is modal (role dialog, aria-modal):
+  // the strip and the notes here are inert while it is open (inert props on
+  // them), and the lobby, told through VoiceSheet, makes the rest of the page
+  // inert beside its own modals, so there is one owner of each inert. The
+  // phone's navigation is left out, as the sheet rests on it and a tap there is
+  // a way out. Focus moves into the sheet (to its Close) when it opens, unless
+  // More about sharing is taking it to the notes. Above the strip the panel
+  // covers the conversation and not the strip's controls, which stay in the tab
+  // order. Re-authentication outranks the sheet: it closes it, and (blocked) it
+  // stays closed.
+  const covered = options && !strip && inVoice && sheet && !blocked;
+  useEffect(() => {
+    if (!covered) return;
+    report(true);
+    return () => { report(false); };
+  }, [covered, report]);
+  useEffect(() => {
+    if (blocked && options) setOptions(false);
+  }, [blocked, options]);
+  // Voice options is closed by every way it goes out of sight, so that coming
+  // back never reopens it, and a sheet is never opened but by a press: the
+  // phone's Chat and Channels views and the strip they make of the section
+  // (strip), and leaving voice, or the call ending (no longer in voice). The
+  // panel is not unmounted for these, so its open state is closed here, with
+  // the same close as any other; focus is not moved, as the panel is out of
+  // sight and what hid it has its own.
+  useEffect(() => {
+    if (options && (strip || !inVoice)) setOptions(false);
+  }, [options, strip, inVoice]);
+  // Whether focus is inside another modal (a dialog or aria-modal element that
+  // is not the options panel, and not shut away): the panel never takes focus
+  // from it, whatever it was that opened it, as a guard beside behind.
+  const inForeignModal = () => inOtherModal(document.activeElement, optionsPanel.current);
+  useEffect(() => {
+    if (!covered || toAbout || behind || inForeignModal()) return;
+    if (optionsPanel.current?.contains(document.activeElement) === true) return;
+    optionsPanel.current?.querySelector<HTMLElement>('.voice-options-close')?.focus();
+    // Behind: Settings was opened over the sheet and has closed again, and the
+    // focus the sheet lost to the dock's inert is given back to it.
+  }, [covered, toAbout, behind]);
+  // The sheet turning into the panel above the strip (a resize, a scroll)
+  // hides its Close: focus held there moves to the panel's first control.
+  const wasCovered = useRef(false);
+  useEffect(() => {
+    if (wasCovered.current && !covered && options && !inForeignModal()) {
+      const at = document.activeElement;
+      if (at === null || at === document.body || at.classList.contains('voice-options-close')) {
+        // The first control that is enabled and drawn, else the panel itself
+        // (Watch only has few of them).
+        const controls = optionsPanel.current?.querySelectorAll<HTMLElement>('select:not(:disabled), input:not(:disabled), button:not(:disabled):not(.voice-options-close)') ?? [];
+        const first = Array.from(controls).find((c) => c.offsetParent !== null);
+        (first ?? optionsPanel.current)?.focus();
+      }
+    }
+    wasCovered.current = covered;
+  }, [covered, options]);
+
+  // The talk key capture ends with the panel it was started in, by whatever
+  // route the panel closes (outside press, its button, the phone's strip, or
+  // leaving voice): otherwise the next key anywhere would set the talk key.
+  const shown = options && !strip && inVoice;
+  const capturing = voice.capturing;
+  const wasShown = useRef(shown);
+  useEffect(() => {
+    if (wasShown.current && !shown && capturing) voice.capture(false);
+    wasShown.current = shown;
+  }, [shown, capturing, voice]);
+
   useEffect(() => {
     if (!toAbout || !options) return;
     setToAbout(false);
     about.current?.focus();
   }, [toAbout, options]);
+
+  // Opened with the keyboard, the anchored panel takes focus at its first
+  // control: the panel follows the section's notes in the DOM (it cannot sit
+  // right after its button, inside the bar that a sheet makes inert), so
+  // without this Tab from the button would go to Leave voice and close it. A
+  // sheet takes focus at its Close, and More about sharing at the notes. Opened
+  // with a pointer, focus stays on the button.
+  const byKeyboard = useRef(false);
+  useEffect(() => {
+    if (!options) {
+      byKeyboard.current = false;
+      return;
+    }
+    if (!byKeyboard.current || toAbout) return;
+    byKeyboard.current = false;
+    const panel = optionsPanel.current;
+    if (panel === null || panel.classList.contains('sheet')) return;
+    panelTabbables(panel)[0]?.focus();
+  }, [options, toAbout]);
+  // Tab order of a disclosure, kept inside the anchored panel: Shift+Tab from
+  // its first control goes back to the button (the panel stays open), and Tab
+  // from its last goes on to what follows the button, which closes it.
+  useEffect(() => {
+    const panel = optionsPanel.current;
+    if (!options || sheet || panel === null) return;
+    const onTab = (e: KeyboardEvent) => {
+      // While the talk key is being chosen the capture has every key, Tab
+      // and Shift+Tab among them, and focus stays put.
+      if (e.key !== 'Tab' || e.defaultPrevented || voice.capturing) return;
+      const list = panelTabbables(panel);
+      const at = document.activeElement;
+      if (e.shiftKey && at === list[0]) {
+        e.preventDefault();
+        optionsButton.current?.focus();
+      } else if (!e.shiftKey && at === list[list.length - 1]) {
+        const after = optionsButton.current === null ? null : tabbablesAfter(optionsButton.current);
+        if (after === null) return;
+        e.preventDefault();
+        after.focus();
+      }
+    };
+    panel.addEventListener('keydown', onTab);
+    return () => {
+      panel.removeEventListener('keydown', onTab);
+    };
+  }, [options, sheet, voice.capturing]);
 
   useEffect(() => {
     if (state.phase !== 'idle' || !left.current) return;
@@ -564,7 +764,7 @@ export function VoicePanel({
           so a roster that grows, or a longer status, moves the strip's top and
           leaves the controls where they were. The phone's strip is the one
           row, of four controls (issue #1028). */}
-      <div className="voice-bar">
+      <div className="voice-bar" inert={covered}>
         {inVoice ? <BlockedVoiceMute voice={voice} others={others} /> : null}
         {strip ? null : (
           <Roster channel={rosterChannel ?? undefined} mayModerate={mayModerateRoster} roster={roster} people={people} viewer={viewer} viewerName={viewerName} elsewhere={elsewhere} speaking={speaking} volumes={inVoice ? state.volumes : noVolumes} />
@@ -622,7 +822,21 @@ export function VoicePanel({
                     <span className="label">Show video ({cameraCount})</span>
                   </button>
                 ) : null}
-                <button type="button" className="quiet" aria-expanded={options} aria-controls="voice-options" onClick={() => { setOptions(!options); }}>
+                <button ref={optionsButton} type="button" className="quiet" aria-expanded={options} aria-controls="voice-options" onKeyDown={(e) => {
+                  // Tab from the button, with the anchored panel open, enters it, as
+                  // if it followed the button (it follows the notes in the DOM).
+                  const panel = optionsPanel.current;
+                  if (e.key !== 'Tab' || e.shiftKey || !options || sheet || panel === null || voice.capturing) return;
+                  const first = panelTabbables(panel)[0];
+                  if (first === undefined) return;
+                  e.preventDefault();
+                  first.focus();
+                }} onClick={(e) => {
+                  // Enter and Space click with no pointer (detail 0): opened so,
+                  // focus goes into the panel (below), as a disclosure's does.
+                  if (!options) byKeyboard.current = e.detail === 0;
+                  setOptions(!options);
+                }}>
                   <Glyph name="options" />
                   <span className="label">Voice options</span>
                 </button>
@@ -650,7 +864,7 @@ export function VoicePanel({
         {strip && noPlayback ? <HearButton voice={voice} /> : null}
       </div>
 
-      <div className="voice-notes" hidden={strip}>
+      <div className="voice-notes" hidden={strip} inert={covered}>
         {state.why === null ? null : <p role="status" className="hint">{state.why}</p>}
         {state.reportNote === 'rate_limited' ? <p role="status" className="hint">Too many talk reports; slow down</p> : null}
         {state.reportNote === 'retrying' ? <p role="status" className="hint">Reporting your talking is slow; retrying</p> : null}
@@ -730,7 +944,7 @@ export function VoicePanel({
         ) : null}
       </div>
 
-      {inVoice ? <Options voice={voice} open={options && !strip} sharable={sharable} about={about} others={others} cameraAllowed={cameraAllowed} /> : null}
+      {inVoice ? <Options panel={optionsPanel} onClose={closeOptions} onShrink={shrinkOptions} sheet={sheet} onSheet={setSheet} voice={voice} open={options && !strip} sharable={sharable} about={about} others={others} cameraAllowed={cameraAllowed} /> : null}
       {staged === null ? null : stage === null ? staged : createPortal(staged, stage)}
     </section>
   );
@@ -1354,8 +1568,46 @@ function CameraOptions({ voice, open, cameraAllowed }: { readonly voice: VoiceCo
   );
 }
 
-// Voice options: the less used choices, out of the strip.
-function Options({ voice, open, sharable, about, others, cameraAllowed }: {
+// Whether el is inside a dialog or aria-modal element that is not the panel
+// and not shut away: another modal has the focus (the switcher, Settings).
+function inOtherModal(el: Element | null, panel: Element | null): boolean {
+  const modal = el === null ? null : el.closest('[role="dialog"], [role="alertdialog"], [aria-modal="true"]');
+  return modal !== null && modal !== panel && modal.closest('[hidden], [inert]') === null;
+}
+
+const tabbable = 'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])';
+
+// The controls of the panel that Tab reaches, in order: enabled and drawn.
+function panelTabbables(panel: HTMLElement): HTMLElement[] {
+  return Array.from(panel.querySelectorAll<HTMLElement>(tabbable)).filter((c) => c.offsetParent !== null || c.getClientRects().length > 0);
+}
+
+// The next control after the button in its own row (Leave voice, say), as Tab
+// would reach it, or null.
+function tabbablesAfter(button: HTMLElement): HTMLElement | null {
+  const row = button.parentElement;
+  if (row === null) return null;
+  const all = Array.from(row.querySelectorAll<HTMLElement>(tabbable));
+  const next = all[all.indexOf(button) + 1];
+  return next ?? null;
+}
+
+// Voice options: the less used choices, out of the strip. A panel over the
+// page above the voice section, not a row in it (issue #2189): opening it moves
+// nothing under it. It is fixed, so the dock's own scroll does not clip it;
+// its place is the section's, set on it from the section's box, or a bottom
+// sheet over the window where there is too little room above the section.
+function Options({ panel, onClose, onShrink, sheet, onSheet, voice, open, sharable, about, others, cameraAllowed }: {
+  readonly panel: RefObject<HTMLDivElement | null>;
+  // Closes the panel and returns focus to its button.
+  readonly onClose: () => void;
+  // Closes the panel for the window having changed under it: it was anchored
+  // and would now be a sheet.
+  readonly onShrink: () => void;
+  // Whether the panel is drawn as a bottom sheet, which is a modal dialog.
+  readonly sheet: boolean;
+  // Says whether the panel is drawn as a bottom sheet.
+  readonly onSheet: (sheet: boolean) => void;
   readonly voice: VoiceControl;
   readonly open: boolean;
   readonly cameraAllowed: boolean;
@@ -1367,8 +1619,63 @@ function Options({ voice, open, sharable, about, others, cameraAllowed }: {
   readonly about: RefObject<HTMLElement | null>;
 }) {
   const { state, client, features } = voice;
+  // The panel's left, width and bottom (and so its tallest) follow the voice
+  // section's box while open: CSSOM custom properties, which the page's CSP
+  // allows where a style attribute would not.
+  useLayoutEffect(() => {
+    const el = panel.current;
+    const section = el?.parentElement;
+    if (!open || !el || !section) return;
+    // Whether the panel was anchored when last placed: null until it is first.
+    let anchored: boolean | null = null;
+    const place = () => {
+      const r = section.getBoundingClientRect();
+      const view = document.documentElement.clientHeight;
+      // Where the section's top leaves less than 40% of the window above it
+      // (or is itself above the window, as a scrolled dock can leave it), the
+      // panel is a bottom sheet over the window instead: always in view.
+      const sheet = r.top < view * 0.4;
+      // An anchored panel does not become a sheet under what is open: it
+      // closes (a sheet that opens by a press is the one that is modal).
+      if (anchored === true && sheet) {
+        onShrink();
+        return;
+      }
+      anchored = !sheet;
+      el.classList.toggle('sheet', sheet);
+      onSheet(sheet);
+      // The sheet rests on the phone's navigation, which stays in reach.
+      const nav = document.querySelector('.phone-nav')?.getBoundingClientRect();
+      el.style.setProperty('--vo-sheet-bottom', `${String(nav === undefined ? 0 : Math.max(0, view - nav.top))}px`);
+      el.style.setProperty('--vo-left', `${String(Math.max(0, r.left))}px`);
+      el.style.setProperty('--vo-width', `${String(r.width)}px`);
+      el.style.setProperty('--vo-bottom', `${String(Math.max(0, view - r.top))}px`);
+    };
+    place();
+    window.addEventListener('resize', place);
+    window.addEventListener('scroll', place, true);
+    const watch = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(place);
+    watch?.observe(section);
+    return () => {
+      window.removeEventListener('resize', place);
+      window.removeEventListener('scroll', place, true);
+      watch?.disconnect();
+    };
+  }, [open, panel, onSheet, onShrink]);
   return (
-    <div id="voice-options" className="voice-options" hidden={!open}>
+    <div
+      ref={panel}
+      id="voice-options"
+      className="voice-options popover"
+      hidden={!open}
+      tabIndex={-1}
+      role={sheet ? 'dialog' : undefined}
+      aria-modal={sheet ? true : undefined}
+      aria-label={sheet ? 'Voice options' : undefined}
+    >
+      {/* As a sheet the panel covers the Voice options button, so it has its
+          own way out; the style rules draw this only for the sheet. */}
+      <button type="button" className="voice-options-close" onClick={onClose}>Close</button>
       <MicrophoneChoice voice={voice} />
       <CameraOptions voice={voice} open={open} cameraAllowed={cameraAllowed} />
       <SpeakersChoice voice={voice} />

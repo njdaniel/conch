@@ -3,6 +3,7 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import * as api from './api';
+import { setPageModal } from './pageModal';
 import { UpdateNotice, updateCheckInterval, updateText } from './UpdateNotice';
 
 const health = (version: string) => ({ version, temporary: false });
@@ -62,5 +63,23 @@ describe('UpdateNotice', () => {
     expect(reload).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Reload' }));
     expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  // Issue #2189: behind a modal of the lobby the Reload button is out of reach.
+  it('is inert behind a modal of the lobby', async () => {
+    answers = ['v1', 'v2'];
+    render(<UpdateNotice reload={reload} />);
+    await act(async () => {});
+    await tick();
+    const notice = screen.getByRole('status');
+    expect(notice.hasAttribute('inert')).toBe(false);
+    act(() => {
+      setPageModal(true);
+    });
+    expect(notice.hasAttribute('inert')).toBe(true);
+    act(() => {
+      setPageModal(false);
+    });
+    expect(notice.hasAttribute('inert')).toBe(false);
   });
 });

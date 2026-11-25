@@ -61,6 +61,17 @@ const mic = () => screen.getByLabelText<HTMLSelectElement>('Microphone');
 const speakers = () => screen.getByLabelText<HTMLSelectElement>('Speakers');
 const texts = (s: HTMLSelectElement) => Array.from(s.options).map((o) => o.text.replace(/[\u2068\u2069]/gu, ''));
 
+// Issue #2189: the web panel's overlay (popover) and sheet classes are not the
+// desktop app's: its panel renders as it did, in the dock's flow.
+describe('VoiceOptions is not the web popover', () => {
+  it('carries neither the popover nor the sheet class, and no Close', async () => {
+    await open(new Fake());
+    const panel = document.querySelector('#voice-options');
+    expect(panel?.className).toBe('voice-options');
+    expect(panel?.querySelector('.voice-options-close')).toBeNull();
+  });
+});
+
 describe('VoiceOptions saved choices', () => {
   it('preselects the saved microphone and speakers on first open', async () => {
     const fake = new Fake();

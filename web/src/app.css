@@ -3242,6 +3242,55 @@ label {
   font-weight: 600;
 }
 
+/* Voice options is a panel over the page, above the voice section (issue
+   #2189), so opening it moves nothing under it. Fixed, so the dock's own
+   scroll does not clip it; VoicePanel sets --vo-left, --vo-width and
+   --vo-bottom from the section's box. Taller than the room above the section,
+   it scrolls inside itself. Only the web panel (popover): the desktop app's
+   own Voice options (voice/native) is drawn as before. */
+.voice-options.popover:not([hidden]) {
+  position: fixed;
+  left: var(--vo-left, 0);
+  bottom: calc(var(--vo-bottom, 0px) + var(--s1));
+  z-index: 20;
+  box-sizing: border-box;
+  width: var(--vo-width, 100%);
+  max-height: calc(100vh - var(--vo-bottom, 0px) - var(--s2));
+  max-height: calc(100dvh - var(--vo-bottom, 0px) - var(--s2));
+  overflow-y: auto;
+  /* At either end of its scroll, a wheel or touch does not move the page,
+     which would move the open panel. */
+  overscroll-behavior: contain;
+  padding: var(--s3);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 0.5rem;
+  box-shadow: 0 -4px 16px rgb(0 0 0 / 0.25);
+}
+
+.voice-options-close {
+  display: none;
+}
+
+.voice-options.sheet .voice-options-close {
+  display: block;
+  flex-basis: auto;
+  margin-left: auto;
+}
+
+.voice-options.sheet:not([hidden]) {
+  /* A bottom sheet over the window, for where the section has too little room
+     above it (a phone's Voice view, a dock scrolled past its top). It rests on
+     the phone's navigation, which stays in reach. */
+  left: 0;
+  bottom: var(--vo-sheet-bottom, 0px);
+  width: 100%;
+  /* At most 80% of the window, and never more than the room above the nav. */
+  max-height: min(80vh, calc(100vh - var(--vo-sheet-bottom, 0px) - var(--s2)));
+  max-height: min(80dvh, calc(100dvh - var(--vo-sheet-bottom, 0px) - var(--s2)));
+  border-radius: 0.5rem 0.5rem 0 0;
+}
+
 .voice-options:not([hidden]),
 .voice-diagnostics:not([hidden]) {
   display: flex;
@@ -3251,6 +3300,11 @@ label {
   margin-top: var(--s2);
   padding-top: var(--s2);
   border-top: 1px solid var(--border);
+}
+
+.voice-options.popover:not([hidden]) {
+  margin-top: 0;
+  border-top: 1px solid var(--border-strong);
 }
 
 .voice-options > .hint {
@@ -4342,7 +4396,8 @@ button.link {
     padding: var(--s2) var(--s2) 0;
   }
 
-  /* Voice options open scroll inside the strip rather than take the screen. */
+  /* Voice options is a panel over the page (issue #2189), so it takes no
+     room here; the dock itself is held to a short share of the screen. */
   .dock {
     max-height: 40vh;
     padding: var(--s2);
@@ -4986,8 +5041,8 @@ button.link {
     min-height: 12rem;
   }
 
-  /* The dock keeps its half of the window (Voice options open can be taller
-     than the window), scrolling inside itself, except on a phone. */
+  /* The dock keeps its half of the window, scrolling inside itself, except on
+     a phone. Voice options is a panel over the page, not part of the dock. */
   .lobby.phone .dock {
     max-height: none;
   }
@@ -5202,6 +5257,11 @@ button.link {
 
 .draft-attachment-size {
   white-space: nowrap;
+}
+
+/* Wraps what the desktop strip opens below it, to be inert in one place. */
+.page-scope {
+  display: contents;
 }
 
 /* The desktop app's server list and the strip over the client (issue #945). */
