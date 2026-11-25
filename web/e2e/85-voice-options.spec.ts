@@ -313,7 +313,9 @@ test.describe('Voice options', () => {
       await expect(panel).toBeHidden();
       await expect(options).toHaveAttribute('aria-expanded', 'false');
       await expect(options).toBeFocused();
-      expect(await page.locator('[inert]').count(), 'nothing is left inert').toBe(0);
+      // The roster's hidden placeholder (#2202) is inert by design, before presence
+      // lists this page; only modal state counts here (issue #2215).
+      expect(await page.locator('[inert]:not(.reserved)').count(), 'nothing is left inert').toBe(0);
     } finally {
       await p?.close();
     }
@@ -416,7 +418,8 @@ test.describe('Voice options', () => {
         await expect(options).toHaveAttribute('aria-expanded', 'false');
         await expect(panel).toBeHidden();
         expect(await page.evaluate(() => document.activeElement?.closest('#voice-options') != null), 'focus was not moved into a sheet').toBe(false);
-        expect(await page.locator('[inert]').count(), 'nothing is inert').toBe(0);
+        // The roster's hidden placeholder (#2202) is inert by design (issue #2215).
+        expect(await page.locator('[inert]:not(.reserved)').count(), 'nothing is inert').toBe(0);
       } finally {
         await p?.close();
       }
