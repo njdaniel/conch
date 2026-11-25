@@ -5,10 +5,11 @@
 // explain what a read grant exposes before showing the user any rule.
 //
 // Capture: listeners exist only while choosing a key. Escape closes setup and
-// Cancel stops the capture. The event's code is turned at once into an evdev
-// number and a name; the event itself is not kept, logged or passed on. Only
-// the number and the name outlive the capture. Rule text is rendered as text
-// and copied with services.copyText; nothing here executes it.
+// Cancel stops the capture. During a save, Close and Escape wait for the result.
+// The event's code is turned at once into an evdev number and a name; the
+// event itself is not kept, logged or passed on. Only the number and the name
+// outlive the capture. Rule text is rendered as text and copied with
+// services.copyText; nothing here executes it.
 import { WindowsTalkKeySetup } from './WindowsTalkKeySetup';
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { keyboardKeys, keyForCode, keyForMouseButton, mouseKeys, type EvdevKey } from '../../platform/desktop/evdev';
@@ -124,15 +125,21 @@ export function TalkKeySetup({
   source,
   joined,
   binding = 'talk',
+  openRequest = 0,
   onSaved,
+  onDetachedSaveError,
   onClose,
 }: {
   readonly source: NativeVoice;
   // Whether a voice session is on: a saved key then waits for the next join.
   readonly joined: boolean;
   readonly binding?: 'talk' | 'mute';
-  // The chosen key's name, once saved; Windows says if it waits for a join.
+  // A new activation requests focus even when the chosen binding is unchanged.
+  readonly openRequest?: number;
+  // A successful write reaches the parent even after setup closes.
+  // Windows says whether the change waits for a join.
   readonly onSaved: (label: string, nextJoinOnly?: boolean) => void;
+  readonly onDetachedSaveError?: (message: string) => void;
   readonly onClose: () => void;
 }) {
   const title = binding === 'mute' ? 'Mute key' : 'Talk key';
@@ -145,20 +152,26 @@ export function TalkKeySetup({
   const [outcome, setOutcome] = useState<string | null>(null);
   const live = useRef(true);
   const heading = useId();
+  const saveStatus = useId();
   const setup = useRef<HTMLDivElement>(null);
+  const saveButton = useRef<HTMLButtonElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
+  const handledOpen = useRef<number | null>(null);
   const windows = listing?.ok === true && listing.platform === 'win32';
 
-  // Focus the setup on mount and recover it when Windows replaces the loading view.
+  // A launch takes focus. Replacing the loading view on Windows only recovers
+  // focus if the user has stayed in setup.
   useLayoutEffect(() => {
     const root = setup.current;
     if (root === null) return;
+    const opened = handledOpen.current !== openRequest;
+    handledOpen.current = openRequest;
     const active = document.activeElement;
-    if (windows && active !== null && active !== document.body && !root.contains(active)) return;
-    const target = root.querySelector<HTMLElement>('button:not(:disabled), select:not(:disabled), input:not(:disabled)')
+    if (windows && !opened && active !== null && active !== document.body && !root.contains(active)) return;
+    const target = root.querySelector<HTMLElement>('button:not(:disabled, [aria-disabled="true"]), select:not(:disabled), input:not(:disabled)')
       ?? root.querySelector<HTMLElement>('h3');
     target?.focus();
-  }, [windows]);
+  }, [openRequest, windows]);
 
   const load = useCallback(() => {
     // Check again disappears while the device list reloads.
@@ -254,28 +267,32 @@ export function TalkKeySetup({
   const readable = matching.filter((d) => d.readable);
   const unreadable = matching.filter((d) => !d.readable);
   const device = (readable.length === 1 ? readable[0] : readable.find((d) => d.id === deviceId)) ?? null;
-  const ready = device !== null && key !== null && !saving && !capturing;
+  const ready = device !== null && key !== null && !capturing;
 
-  const save = () => {
-    if (device === null || key === null || !ready) return;
+  const save = async () => {
+    if (device === null || key === null || !ready || saving) return;
     const call = source.saveTalkBinding;
+    // Keep Save focusable as the other editing controls become disabled.
+    saveButton.current?.focus();
     setSaving(true);
     setOutcome(null);
-    const done = (r: VoiceTalkBindingResult) => {
-      if (!live.current) return;
-      setSaving(false);
-      if (r.ok) {
-        onSaved(key.label);
-        setOutcome(savedBindingWords(binding, key.label, joined));
-      } else {
-        setOutcome(failedWords(r));
-      }
-    };
-    if (call === undefined) {
-      done({ ok: false, error: 'unsupported' });
+    let result: VoiceTalkBindingResult;
+    try {
+      result = await call?.({ deviceId: device.id, code: key.code, ...(binding === 'mute' ? { binding } : {}) })
+        ?? { ok: false, error: 'unsupported' };
+    } catch {
+      result = { ok: false, error: 'failed' };
+    }
+    if (result.ok) onSaved(key.label);
+    const message = result.ok ? savedBindingWords(binding, key.label, joined) : failedWords(result);
+    const root = setup.current;
+    if (root === null) {
+      if (!result.ok) onDetachedSaveError?.(message);
       return;
     }
-    call({ deviceId: device.id, code: key.code, ...(binding === 'mute' ? { binding } : {}) }).then(done, () => { done({ ok: false, error: 'failed' }); });
+    if (!result.ok && root.contains(document.activeElement)) saveButton.current?.focus();
+    setOutcome(message);
+    setSaving(false);
   };
 
   const pick = (value: string) => {
@@ -291,8 +308,15 @@ export function TalkKeySetup({
     if (k !== undefined) setKey(k);
   };
 
-  const content = windows ? <WindowsTalkKeySetup source={source} binding={binding} onSaved={onSaved} onClose={onClose} /> : (
-    <section className="talk-setup" aria-labelledby={heading}>
+  const content = windows ? (
+    <WindowsTalkKeySetup source={source} binding={binding} onSaved={onSaved} onDetachedSaveError={onDetachedSaveError} onClose={onClose} />
+  ) : (
+    <section className="talk-setup" aria-labelledby={heading} onKeyDown={(event) => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (!event.repeat && !saving) onClose();
+    }}>
       <h3 id={heading} tabIndex={-1}>{title}</h3>
 
       {listing === null ? <p role="status" className="hint">Reading what is available…</p> : null}
@@ -364,26 +388,15 @@ export function TalkKeySetup({
                 <button type="button" disabled={saving} onClick={load}>Check again</button>
               </>
             )}
-            <button type="button" className="primary" disabled={!ready} onClick={save}>
-              {saving ? 'Saving…' : 'Save'}
-            </button>
+            <button ref={saveButton} type="button" className="primary" disabled={!ready} aria-disabled={saving || undefined} onClick={() => { void save(); }}>Save</button>
           </div>
         </>
       ) : null}
 
-      {outcome === null ? null : <p role="status">{outcome}</p>}
-      <button ref={closeButton} type="button" onClick={onClose}>Close</button>
+      {saving || outcome !== null ? <p id={saveStatus} role="status">{saving ? 'Saving…' : outcome}</p> : null}
+      <button ref={closeButton} type="button" aria-disabled={saving || undefined} aria-describedby={saving ? saveStatus : undefined} onClick={() => { if (!saving) onClose(); }}>Close</button>
     </section>
   );
 
-  return (
-    <div ref={setup} onKeyDown={(event) => {
-      if (event.key !== 'Escape' || event.defaultPrevented) return;
-      event.preventDefault();
-      event.stopPropagation();
-      if (!event.repeat) onClose();
-    }}>
-      {content}
-    </div>
-  );
+  return <div ref={setup}>{content}</div>;
 }

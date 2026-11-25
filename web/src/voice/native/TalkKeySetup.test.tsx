@@ -111,7 +111,13 @@ describe('TalkKeySetup', () => {
   it('Escape closes setup during automatic capture', async () => {
     const f = await open();
     const close = screen.getByRole('button', { name: 'Close' });
+    close.focus();
+    // Capture must consume Escape before it reaches even a native target
+    // listener. The setup's React handler also closes it when capture is off.
+    const reachedTarget = vi.fn();
+    close.addEventListener('keydown', reachedTarget);
     fireEvent.keyDown(close, { key: 'Escape', code: 'Escape' });
+    expect(reachedTarget).not.toHaveBeenCalled();
     expect(f.onClose).toHaveBeenCalledOnce();
     expect(f.saveTalkBinding).not.toHaveBeenCalled();
   });

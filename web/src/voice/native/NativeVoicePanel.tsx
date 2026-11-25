@@ -144,7 +144,13 @@ export function NativeVoicePanel({
   // page owes it; undefined unless main's switch is on.
   const sound = useShareSound(source, companion, view);
   const session = hasSession(view);
-  const [setup, setSetup] = useState<'talk' | 'mute' | null>(null);
+  const [setup, setSetup] = useState<{ readonly binding: 'talk' | 'mute' } | null>(null);
+  const [setupRequest, setSetupRequest] = useState(0);
+  const openSetup = (binding: 'talk' | 'mute') => {
+    // Keep the current selection and any save when reactivating its launcher.
+    setSetup((current) => current?.binding === binding ? current : { binding });
+    setSetupRequest((count) => count + 1);
+  };
   const closeSetup = useCallback(() => { setSetup(null); }, []);
   const talkSetupButton = useRef<HTMLButtonElement>(null);
   const setupOpener = useRef<HTMLButtonElement | 'shortcut' | 'options' | null>(null);
@@ -384,7 +390,7 @@ export function NativeVoicePanel({
                 const focused = document.activeElement;
                 setupOpener.current = focused instanceof HTMLButtonElement && panel.current?.contains(focused) ? focused : 'options';
                 setOptions(false);
-                setSetup(binding);
+                openSetup(binding);
               },
             })}
           />
@@ -409,7 +415,7 @@ export function NativeVoicePanel({
         {unavailable || source.keyDevices === undefined || setup ? null : (
           <button ref={talkSetupButton} type="button" className="more" onClick={() => {
             setupOpener.current = 'shortcut';
-            setSetup('talk');
+            openSetup('talk');
           }}>
             {needsTalkSetup ? 'Set up the talk key' : 'Talk key'}
           </button>
@@ -430,18 +436,24 @@ export function NativeVoicePanel({
         {companion === null || unavailable ? null : <NativeStreams companion={companion} presence={presence} viewer={viewer} people={named} joined={joined} live={live} />}
         {setup !== null ? (
           <TalkKeySetup
-            key={setup}
-            binding={setup}
+            key={setup.binding}
+            binding={setup.binding}
+            openRequest={setupRequest}
             source={source}
             joined={session}
             onSaved={(label, nextJoinOnly) => {
-              if (setup === 'talk') {
-                if (nextJoinOnly === true) setPreviousBinding((old) => old ?? { generation: view.generation, label: binding });
+              const currentView = source.snapshot();
+              if (setup.binding === 'talk') {
+                if (nextJoinOnly === true && currentView.generation === view.generation && hasSession(currentView)) {
+                  setPreviousBinding((old) => old?.generation === view.generation ? old : { generation: view.generation, label: binding });
+                }
                 onBound?.(label);
               }
-              setNote(savedBindingWords(setup, label, session));
-              closeSetup();
+              setNote(savedBindingWords(setup.binding, label, hasSession(currentView)));
+              // An earlier setup can finish after another binding was opened.
+              setSetup((current) => current === setup ? null : current);
             }}
+            onDetachedSaveError={setNote}
             onClose={closeSetup}
           />
         ) : null}

@@ -57,6 +57,16 @@ it('tests only confirmed active-session state and respects mute and deafen', () 
   expect(f.saveTalkBinding).not.toHaveBeenCalled();
 });
 
+it('moves focus to Close when the active binding test becomes unavailable', () => {
+  const f = setup();
+  const test = screen.getByRole<HTMLButtonElement>('button', { name: 'Test active binding' });
+  test.focus();
+  expect(document.activeElement).toBe(test);
+  f.update({ status: 'ended', generation: 7, channel: null, retryable: false });
+  expect(test.disabled).toBe(true);
+  expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Close' }));
+});
+
 it.each(['Enter', ' '])('keeps keyboard focus through %s activation, Escape cancellation and a key selection', (key) => {
   setup();
   const control = screen.getByRole('button', { name: 'Set talk key' });
