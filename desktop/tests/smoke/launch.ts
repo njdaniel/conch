@@ -25,6 +25,8 @@ export interface Launched {
 }
 
 export interface LaunchOptions {
+  // A private copy of the packaged app, when a test supplies its own helper.
+  readonly executable?: string;
   // Use this user data directory (it is not removed on stop), as a restart does.
   readonly userData?: string;
   readonly args?: readonly string[];
@@ -33,8 +35,9 @@ export interface LaunchOptions {
 }
 
 export function launch(options: LaunchOptions = {}): Launched {
-  if (!existsSync(APP)) {
-    throw new Error(`${APP} does not exist; run make desktop-build first`);
+  const executable = options.executable ?? APP;
+  if (!existsSync(executable)) {
+    throw new Error(`${executable} does not exist; run make desktop-build first`);
   }
   // Under /tmp where it exists: the data root must have ancestors that others
   // cannot write to (main/instance.ts), and a developer's $TMPDIR may not.
@@ -66,7 +69,7 @@ export function launch(options: LaunchOptions = {}): Launched {
     delete env['DISPLAY'];
     delete env['WAYLAND_DISPLAY'];
   }
-  const child = spawn(APP, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(executable, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
 
   let text = '';
   const append = (chunk: Buffer): void => {

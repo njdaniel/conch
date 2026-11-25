@@ -16,7 +16,10 @@
 // format characters: they are stripped of those, and each is set apart in its
 // own isolate (an isolating mark pair inside an option, a bdi elsewhere), so
 // one name cannot reorder the words around it.
-import { useCallback, useContext, useEffect, useRef, useState } from 'react';
+//
+// NativeVoicePanel supplies the shared Options wrapper. This component owns
+// the helper settings and keeps their state while the disclosure is closed.
+import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { NativeVoiceDevicesResult, NativeVoiceView, VoiceDeviceKey, VoiceOneShotError, VoiceSaveResult } from '../../platform/desktop/bridge';
 import { DesktopOS } from '../../platform/os';
 import type { NativeVoice } from '../../platform/types';
@@ -103,6 +106,12 @@ export function VoiceOptions({
   const [busy, setBusy] = useState<Side | 'talk' | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const openMic = useRef<HTMLInputElement>(null);
+  const confirmMic = useRef<HTMLButtonElement>(null);
+  useLayoutEffect(() => {
+    if (!open) setConfirmOpen(false);
+    else if (confirmOpen) confirmMic.current?.focus();
+  }, [open, confirmOpen]);
   const alive = useRef(true);
   useEffect(() => {
     alive.current = true;
@@ -183,7 +192,7 @@ export function VoiceOptions({
   const lists = devices.kind === 'ok' ? devices : null;
 
   return (
-    <div id="voice-options" className="voice-options" hidden={!open}>
+    <>
       {onKeySetup === undefined ? null : (
         <div>
           <button type="button" onClick={() => { onKeySetup('talk'); }}>Set up talk key</button>
@@ -241,6 +250,7 @@ export function VoiceOptions({
         </label>
         <label>
           <input
+            ref={openMic}
             type="radio"
             name="native-talk-mode"
             checked={talk === 'open'}
@@ -252,15 +262,18 @@ export function VoiceOptions({
         {confirmOpen ? (
           <p className="hint" role="alertdialog" aria-label="Use the open microphone">
             Open microphone {openMeans}.{' '}
-            <button type="button" className="primary" onClick={() => { void chooseTalk('open'); }}>Use open microphone</button>{' '}
-            <button type="button" onClick={() => { setConfirmOpen(false); }}>Cancel</button>
+            <button ref={confirmMic} type="button" className="primary" onClick={() => { void chooseTalk('open'); }}>Use open microphone</button>{' '}
+            <button type="button" onClick={() => {
+              setConfirmOpen(false);
+              openMic.current?.focus();
+            }}>Cancel</button>
           </p>
         ) : null}
         {talk === undefined ? <span className="hint">Choose a talk mode{liveTalk ? '' : `; it ${nextTime}`}.</span> : null}
         {session && !liveTalk ? <span className="hint">Talk mode {nextTime}.</span> : null}
       </fieldset>
       {note === null ? null : <p role="status" className="hint">{note}</p>}
-    </div>
+    </>
   );
 }
 

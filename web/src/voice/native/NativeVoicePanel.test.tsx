@@ -3,6 +3,7 @@
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../../api';
+import { VoiceStrip } from '../../phone';
 import { setSoundAudience, sounds } from '../../sounds';
 import type { NativeVoiceHelper, NativeVoiceView } from '../../platform/desktop/bridge';
 import type { NativeVoice, NativeVoiceError, NativeVoiceOutcome } from '../../platform/types';
@@ -123,12 +124,110 @@ const channels: ChannelV0[] = [];
 const people: ReadonlyMap<number, Person> = new Map([[2, { name: 'Ada' } as Person]]);
 
 function strip(fake: Fake, channel: string | null = 'general', binding?: string, viewerName?: string) {
-  const ui = (ch: string | null) => (
-    <NativeVoicePanel source={fake.nv} binding={binding} signedIn channel={ch} viewer={1} {...(viewerName === undefined ? {} : { viewerName })} people={people} voiceAllowed channels={channels} onUnauthorized={() => undefined} onOpen={() => undefined} />
+  const ui = (ch: string | null, chat: boolean) => (
+    <VoiceStrip.Provider value={chat ? () => undefined : null}>
+      <NativeVoicePanel source={fake.nv} binding={binding} signedIn channel={ch} viewer={1} {...(viewerName === undefined ? {} : { viewerName })} people={people} voiceAllowed channels={channels} onUnauthorized={() => undefined} onOpen={() => undefined} />
+    </VoiceStrip.Provider>
   );
-  const r = render(ui(channel));
-  return { ...r, show: (ch: string | null) => { r.rerender(ui(ch)); } };
+  const r = render(ui(channel, false));
+  return { ...r, show: (ch: string | null, chat = false) => { r.rerender(ui(ch, chat)); } };
 }
+
+describe('native Voice options disclosure (#2195)', () => {
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  async function open(row = new DOMRect(300, 750, 875, 48), height = 900) {
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(row);
+    vi.spyOn(HTMLElement.prototype, 'offsetParent', 'get').mockReturnValue(document.body);
+    vi.spyOn(document.documentElement, 'clientHeight', 'get').mockReturnValue(height);
+    const fake = new Fake(running({ talkMode: 'push_to_talk' }));
+    const { show } = strip(fake);
+    const toggle = screen.getByRole('button', { name: 'Voice options' });
+    toggle.focus();
+    fireEvent.click(toggle, { detail: 1 });
+    const retry = await screen.findByRole('button', { name: 'Try again' });
+    return { fake, toggle, retry, show };
+  }
+
+  it.each(['Escape', 'outside press', 'Close'])('closes on %s and restores the toggle focus', async (action) => {
+    const { toggle, retry } = await open();
+    retry.focus();
+    if (action === 'Escape') fireEvent.keyDown(retry, { key: 'Escape' });
+    else if (action === 'outside press') fireEvent.mouseDown(document.body);
+    else fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(toggle);
+  });
+
+  it('Tabs into the panel, Shift+Tabs back, and Tabs out to Leave voice', async () => {
+    const { toggle } = await open();
+    expect(fireEvent.keyDown(toggle, { key: 'Tab' })).toBe(false);
+    const first = screen.getByRole('button', { name: 'Close' });
+    expect(document.activeElement).toBe(first);
+    fireEvent.keyDown(first, { key: 'Tab', shiftKey: true });
+    expect(document.activeElement).toBe(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+
+    const last = screen.getByRole('radio', { name: 'Push to talk' });
+    last.focus();
+    fireEvent.keyDown(last, { key: 'Tab' });
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Leave voice' }));
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('keeps focus in the open-microphone confirmation inside the panel', async () => {
+    const { fake, toggle } = await open();
+    fireEvent.click(screen.getByRole('radio', { name: 'Open microphone' }));
+    const dialog = screen.getByRole('alertdialog', { name: 'Use the open microphone' });
+    const confirm = within(dialog).getByRole('button', { name: 'Use open microphone' });
+    expect(document.activeElement).toBe(confirm);
+    fake.set(running({ talkMode: 'push_to_talk', muted: true }));
+    expect(document.activeElement).toBe(confirm);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('closes on narrowing and returns focus to the toggle', async () => {
+    vi.stubGlobal('innerWidth', 1215);
+    const { toggle, retry } = await open();
+    retry.focus();
+    vi.stubGlobal('innerWidth', 360);
+    act(() => { window.dispatchEvent(new Event('resize')); });
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(toggle);
+  });
+
+  it('focuses Close in the narrow modal sheet and clears inert on dismissal', async () => {
+    vi.stubGlobal('innerWidth', 360);
+    const { toggle } = await open(new DOMRect(12, 170, 336, 150), 480);
+    const dialog = screen.getByRole('dialog', { name: 'Voice options' });
+    const close = within(dialog).getByRole('button', { name: 'Close' });
+    const bar = toggle.closest('.voice-bar');
+    expect(dialog.getAttribute('aria-modal')).toBe('true');
+    expect(document.activeElement).toBe(close);
+    expect(bar?.hasAttribute('inert')).toBe(true);
+    fireEvent.keyDown(close, { key: 'Escape' });
+    expect(dialog.hasAttribute('hidden')).toBe(true);
+    expect(bar?.hasAttribute('inert')).toBe(false);
+    expect(document.activeElement).toBe(toggle);
+  });
+
+  it('closes when the helper leaves, with idle options still available', async () => {
+    const { fake } = await open();
+    fake.set(idle);
+    const idleToggle = screen.getByRole('button', { name: 'Voice options' });
+    expect(idleToggle.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(idleToggle);
+    expect(await screen.findByRole('button', { name: 'Try again' })).toBeTruthy();
+  });
+
+  it('stays closed after switching to Chat and back', async () => {
+    const { toggle, show } = await open();
+    show('general', true);
+    show('general');
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+  });
+});
 
 describe('usePresence', () => {
   const hook = () => renderHook(() => usePresence({ channel: 'general', joined: null, voiceAllowed: true, onUnauthorized: vi.fn() }));
