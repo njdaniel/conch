@@ -1,12 +1,14 @@
 // "Keep me signed in on this computer" on the desktop sign-in form (issue
-// #2077). The choice is main's, for the window in force (ProfilesView.keep);
-// beside it, what this computer can do with it: kept in the system keyring,
-// or why it cannot be (no keyring unlocked, a keyring that protects nothing,
-// a private folder that is not private), with Check again for the keyring
-// (the server list's Retry, under its own name) and the help page. It is on by default where storage is protected, and cannot be
-// turned on where it is not. An operator's sign-in is never kept, and the
-// line says so. No password passes through here, and nothing is stored by the
-// page.
+// #2077). The box shows main's choice for the window in force
+// (ProfilesView.keep), whatever storage is, because main acts on that choice:
+// a keyring that answers by the time of the sign-in keeps it. Beside it, what
+// will happen: kept in the system keyring, or why it cannot be (no keyring
+// unlocked, a keyring that protects nothing, a folder that is not private),
+// with Check again for the keyring (the server list's Retry, under its own
+// name) and the help page. Unchecking only keeps less, so it is always
+// allowed; checking is only where storage is protected. An operator's sign-in
+// is never kept, and the line says so. No password passes through here, and
+// nothing is stored by the page.
 import { useEffect, useState } from 'react';
 
 import { bridge } from '../access';
@@ -56,6 +58,7 @@ export function KeepSignIn() {
     );
   }
   const kept = view.storage.kind === 'protected';
+  const keep = clicked ?? view.keep;
   // Main names the help page (keepHelpFor in desktop/main/profiles/service.ts).
   const help = view.keepHelp;
   return (
@@ -64,8 +67,9 @@ export function KeepSignIn() {
         <input
           type="checkbox"
           name="keep-signed-in"
-          checked={kept && (clicked ?? view.keep)}
-          disabled={!kept || busy}
+          checked={keep}
+          // Off is always allowed; on only where storage can keep it.
+          disabled={busy || (!kept && !keep)}
           aria-describedby="keep-signin-status"
           onChange={(event) => {
             const keep = event.currentTarget.checked;
@@ -78,7 +82,7 @@ export function KeepSignIn() {
         {keepText.label}
       </label>
       <p id="keep-signin-status" className="hint" role="status" aria-label="Staying signed in">
-        {keepLine(view.storage, view.platform)} {keepText.operator}
+        {keepLine(view.storage, view.platform, keep)} {keepText.operator}
       </p>
       {kept ? null : (
         <button

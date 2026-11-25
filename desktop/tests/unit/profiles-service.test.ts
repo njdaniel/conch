@@ -826,8 +826,9 @@ describe('keeping a sign-in across restarts', () => {
     await s.service.switchTo(null);
     await s.service.switchTo(id);
     expect(s.active().spec.token).toBe('tok-ada');
-    // The choice belongs to the window it was made in: the new one starts kept.
-    expect(s.service.view().keep).toBe(true);
+    // "Don't keep" holds for the profile for this run: its later window
+    // shows it, and a sign-out ends it.
+    expect(s.service.view().keep).toBe(false);
 
     const again = await restart(s);
     expect(again.active().spec.token).toBeNull();
@@ -838,6 +839,109 @@ describe('keeping a sign-in across restarts', () => {
     expect(keepHelpFor('linux')).toMatch(/^https:\/\/github\.com\/njdaniel\/conch\/blob\/main\/docs\/desktop\/linux\.md#staying-signed-in$/);
     expect(keepHelpFor('win32')).toBeNull();
     expect(keepHelpFor('darwin')).toBeNull();
+  });
+
+  it('"don\u2019t keep" survives a switch away and back: a password change there (a rotated credential) is not put either', async () => {
+    const s = await setup();
+    const id = await addAndSwitch(s, ORIGIN_A);
+    await s.service.setKeep(false);
+    s.active().held = 'tok-ada';
+    await s.service.signedIn(ADA);
+    await s.service.switchTo(null);
+    await s.service.switchTo(id);
+    expect(s.active().spec.token).toBe('tok-ada');
+    // The new window shows no box; its password change rotates the credential
+    // and comes back through signedIn, as replaceCredential does.
+    s.active().held = 'tok-ada-rotated';
+    expect(await s.service.signedIn(ADA)).toBe(true);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(s.vault.calls).not.toContain(`put ${id}`);
+    expect(s.vault.secrets.has(id)).toBe(false);
+    expect(s.service.view().keep).toBe(false);
+    // A sign-out ends the choice: the next sign-in form starts kept again.
+    await s.service.signOut();
+    expect(s.service.view().keep).toBe(true);
+  });
+
+  it('turned off while the keep\u2019s write is on its way, what it wrote comes out and the sign-in lasts this run', async () => {
+    const vault = fakeVault();
+    let open: () => void = () => undefined;
+    vault.putGate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const s = await setup({ vault });
+    const id = await addAndSwitch(s, ORIGIN_A);
+    s.active().held = 'tok-ada';
+    const signing = s.service.signedIn(ADA);
+    await new Promise((r) => setTimeout(r, 5));
+    const turningOff = s.service.setKeep(false);
+    open();
+    await signing;
+    await turningOff;
+    await new Promise((r) => setTimeout(r, 10));
+    expect(vault.secrets.has(id)).toBe(false);
+    expect(s.service.view().keep).toBe(false);
+    await s.service.switchTo(null);
+    await s.service.switchTo(id);
+    expect(s.active().spec.token).toBe('tok-ada');
+    expect((await restart(s)).active().spec.token).toBeNull();
+  });
+
+  it('turned off again while turning it back on is writing, nothing stays in the vault', async () => {
+    const vault = fakeVault();
+    const s = await setup({ vault });
+    const id = await addAndSwitch(s, ORIGIN_A);
+    await s.service.setKeep(false);
+    s.active().held = 'tok-ada';
+    await s.service.signedIn(ADA);
+    await new Promise((r) => setTimeout(r, 10));
+    let open: () => void = () => undefined;
+    vault.putGate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const on = s.service.setKeep(true);
+    await new Promise((r) => setTimeout(r, 5));
+    const off = s.service.setKeep(false);
+    open();
+    await on;
+    await off;
+    await new Promise((r) => setTimeout(r, 10));
+    expect(vault.secrets.has(id)).toBe(false);
+    expect(s.service.view().keep).toBe(false);
+    // And Retry does not put it later.
+    await s.service.retry();
+    expect(vault.secrets.has(id)).toBe(false);
+  });
+
+  it('keeps only the credential the sign-in put in force: one that replaced it while the binding was written is not kept by this call', async () => {
+    const s = await setup();
+    const id = await addAndSwitch(s, ORIGIN_A);
+    s.active().held = 'tok-first';
+    const first = s.service.signedIn(ADA);
+    // Another credential is put in force before the first call's binding returns.
+    s.active().held = 'tok-second';
+    expect(await first).toBe(true);
+    expect(s.vault.secrets.has(id)).toBe(false);
+    // The later sign-in's own call keeps its own credential.
+    await s.service.signedIn(ADA);
+    expect(s.vault.secrets.get(id)).toBe('tok-second');
+  });
+
+  it('a pasted credential is kept only if it is still the one whoami was asked about', async () => {
+    const s = await setup();
+    const id = await addAndSwitch(s, ORIGIN_A);
+    const active = s.active();
+    active.held = 'tok-pasted';
+    let answer: (a: typeof ADA) => void = () => undefined;
+    active.whoami = () =>
+      new Promise((resolve) => {
+        answer = resolve;
+      });
+    const kept = s.service.keptCredential();
+    active.held = 'tok-other';
+    answer(ADA);
+    expect(await kept).toBe(true);
+    expect(s.vault.secrets.has(id)).toBe(false);
   });
 
   it('Retry never puts a sign-in the person chose not to keep', async () => {

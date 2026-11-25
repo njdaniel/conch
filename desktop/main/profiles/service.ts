@@ -346,6 +346,14 @@ export class ProfilesService {
       .map((p) => this.#profileView(p, active));
   }
 
+  // Whether the window in force is one whose sign-in is not to be kept: the
+  // person turned the choice off in it, or earlier for its profile this run.
+  #declinedNow(): boolean {
+    const current = this.#switcher.current;
+    if (current === null) return false;
+    return this.#declined === current || (current.profileId !== null && this.#unkept.has(current.profileId));
+  }
+
   view(): ProfilesView {
     const { store, platform } = this.#deps;
     const active = this.#switcher.current?.profileId ?? null;
@@ -353,7 +361,7 @@ export class ProfilesService {
       profiles: store.list().map((p) => this.#profileView(p, active)),
       active,
       storage: storageOf(this.#storage),
-      keep: this.#declined === null || this.#declined !== this.#switcher.current,
+      keep: !this.#declinedNow(),
       keepHelp: keepHelpFor(platform),
       recovery: store.corrupt,
       notice: this.#notice,
@@ -512,11 +520,19 @@ export class ProfilesService {
   // when storage is protected, in memory otherwise. An operator's stays in the
   // window, with a notice explaining why. false when the profile belongs
   // to another account: the credential is then forgotten and revoked.
-  async signedIn(account: Account): Promise<boolean> {
+  //
+  // expected is the credential that sign-in put in force, read before
+  // anything was awaited (keptCredential passes the one it asked whoami
+  // about); by default the one in force when this is called. Only that
+  // credential is kept: if another is in force once the binding is written (a
+  // second sign-in or a rotation overtook this one), this keeps nothing and
+  // the later sign-in's own call decides.
+  async signedIn(account: Account, expected?: string | null): Promise<boolean> {
     const { store } = this.#deps;
     const current = this.#switcher.current;
     if (current === null || current.profileId === null) return false;
     const id = current.profileId;
+    const signedInWith = expected === undefined ? current.token() : expected;
     // A guest is not an account of the server's people: nothing binds to it,
     // and nothing is kept.
     if (account.guest) return true;
@@ -542,22 +558,25 @@ export class ProfilesService {
     }
     if (this.#notice === 'operator-window-only') this.#notice = null;
     const token = current.token();
-    // The window may have moved on while the store was written.
-    if (token === null || this.#switcher.current !== current) return true;
-    if (this.#declined === current) {
-      // The person chose not to keep it: this run only, in memory, and never
-      // put by a later Retry. An older entry of this profile goes, so that
-      // the next start does not bring back what was not chosen.
-      this.#held.set(id, token);
-      this.#unkept.add(id);
-      this.#signedOut.add(id);
-      void this.#purge(id);
+    // The window may have moved on while the store was written, or another
+    // credential been put in force in it.
+    if (token === null || token !== signedInWith || this.#switcher.current !== current) return true;
+    // Declined in this window, or earlier for this profile in this run (a
+    // later window of it, after a switch, shows no box: a password change
+    // there must not keep what the person chose not to keep).
+    if (this.#declined === current || this.#unkept.has(id)) {
+      this.#keepInMemory(id, token);
       this.#deps.log('conch-desktop: a sign-in is kept until the app closes, as chosen', { ring: true });
       return true;
     }
-    this.#unkept.delete(id);
     const put = await this.#put(id, token);
     if (this.#switcher.current !== current) return true;
+    if (this.#declined === current) {
+      // Declined while the write was on its way: what it wrote comes out.
+      this.#keepInMemory(id, token);
+      this.#deps.log('conch-desktop: a sign-in is kept until the app closes, as chosen', { ring: true });
+      return true;
+    }
     if (put.kind === 'stored') {
       this.#storage = { kind: 'protected' };
       this.#held.delete(id);
@@ -574,6 +593,16 @@ export class ProfilesService {
       this.#deps.log(`conch-desktop: a sign-in is kept until the app closes (${why})`, { ring: true });
     }
     return true;
+  }
+
+  // keepInMemory holds a member's credential for this run only, never to be
+  // put by a later Retry or keep, and deletes the profile's entry, so that
+  // the next start does not bring back what was not chosen.
+  #keepInMemory(id: string, token: string): void {
+    this.#held.set(id, token);
+    this.#unkept.add(id);
+    this.#signedOut.add(id);
+    void this.#purge(id);
   }
 
   // setKeep records the person's "Keep me signed in on this computer" choice
@@ -596,6 +625,16 @@ export class ProfilesService {
         const token = this.#held.get(id);
         if (token !== undefined && this.#switcher.current === current) {
           const put = await this.#put(id, token);
+          if (this.#declined === current || this.#switcher.current !== current) {
+            // Turned off again (or the window left) while the write was on
+            // its way: not kept, and what it wrote comes out.
+            this.#unkept.add(id);
+            if (put.kind === 'stored') {
+              this.#signedOut.add(id);
+              await this.#purge(id);
+            }
+            return this.view();
+          }
           if (put.kind === 'stored' && this.#held.get(id) === token) {
             this.#held.delete(id);
             this.#signedOut.delete(id);
@@ -620,8 +659,10 @@ export class ProfilesService {
   // in force: who it is has to be asked.
   async keptCredential(): Promise<boolean> {
     const current = this.#switcher.current;
+    // The credential whoami is asked about is the one that may be kept.
+    const asked = current?.token() ?? null;
     const account = current === null ? null : await current.whoami();
-    if (account !== null) return this.signedIn(account);
+    if (account !== null) return this.signedIn(account, asked);
     // Who it is could not be checked (a timeout, a 5xx): it is not left in
     // force unbound. As a refused sign-in, it is forgotten and revoked.
     if (current !== null && this.#switcher.current === current) await current.signOut();

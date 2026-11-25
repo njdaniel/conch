@@ -98,26 +98,62 @@ describe('Keep me signed in on this computer', () => {
     expect((await keepBox()).checked).toBe(false);
   });
 
-  it.each<[string, StorageStatus, string, string]>([
-    ['no keyring unlocked', { kind: 'session-only', reason: 'no-keyring' }, 'linux', 'No system keyring is unlocked, so you’ll be asked to sign in each time Conch starts.'],
-    ['a keyring that protects nothing', { kind: 'session-only', reason: 'insecure-backend' }, 'linux', 'This desktop gives Conch no keyring that protects anything, so you’ll be asked to sign in each time Conch starts.'],
-    ['no secret store', { kind: 'session-only', reason: 'unavailable' }, 'linux', 'This computer has no secret store, so you’ll be asked to sign in each time Conch starts.'],
-    ['no Windows protection', { kind: 'session-only', reason: 'unavailable' }, 'win32', 'Windows credential protection is unavailable, so you’ll be asked to sign in each time Conch starts.'],
-    ['an unknown keyring', { kind: 'session-only', reason: 'unknown-backend' }, 'linux', 'Conch can’t tell that this computer’s keyring is a safe one, so you’ll be asked to sign in each time Conch starts.'],
-    ['a data folder that is not private', { kind: 'session-only', reason: 'unsafe-root' }, 'linux', 'Conch’s data folder is not private to you, so nothing is saved and you’ll be asked to sign in each time Conch starts.'],
-    ['a keyring that has not answered', { kind: 'unavailable' }, 'linux', 'The system keyring has not answered, so Conch can’t keep this sign-in right now'],
-  ])('%s: the choice is off and cannot be turned on, the status says why, and Check again asks again', async (_name, storage, platform, line) => {
+  // What main does is what the box and the line say (#2077 review): main
+  // keeps a member's sign-in if the keyring answers by the time of the
+  // sign-in, whatever the form saw when it opened, so the box shows main's
+  // choice, unchecking is always allowed, and checking is only where storage
+  // is protected.
+  it.each<[string, StorageStatus, string, string, boolean]>([
+    ['no keyring unlocked', { kind: 'session-only', reason: 'no-keyring' }, 'linux', 'No system keyring is unlocked, so you’ll be asked to sign in each time Conch starts.', true],
+    ['a keyring that protects nothing', { kind: 'session-only', reason: 'insecure-backend' }, 'linux', 'This desktop gives Conch no keyring that protects anything, so you’ll be asked to sign in each time Conch starts.', false],
+    ['no secret store', { kind: 'session-only', reason: 'unavailable' }, 'linux', 'This computer has no secret store, so you’ll be asked to sign in each time Conch starts.', false],
+    ['no Windows protection', { kind: 'session-only', reason: 'unavailable' }, 'win32', 'Windows credential protection is unavailable, so you’ll be asked to sign in each time Conch starts.', false],
+    ['an unknown keyring', { kind: 'session-only', reason: 'unknown-backend' }, 'linux', 'Conch can’t tell that this computer’s keyring is a safe one, so you’ll be asked to sign in each time Conch starts.', false],
+    ['a data folder that is not private', { kind: 'session-only', reason: 'unsafe-root' }, 'linux', 'Conch’s data folder is not private to you, so nothing is saved and you’ll be asked to sign in each time Conch starts.', false],
+    ['a keyring that has not answered', { kind: 'unavailable' }, 'linux', 'The system keyring has not answered yet.', true],
+  ])('%s: the box shows main’s choice, the line says why, unchecking is allowed and checking is not, and Check again asks again', async (_name, storage, platform, line, mayYetKeep) => {
     const { profileKeep, storageRetry } = install(view({ storage, platform }));
     signIn();
     const box = await keepBox();
-    expect(box.checked).toBe(false);
+    expect(box.checked).toBe(true);
+    expect(box.disabled).toBe(false);
+    const said = (await status()).textContent;
+    expect(said).toContain(line);
+    // Where the keyring may still answer before the sign-in, the line says
+    // that the sign-in will then be kept; where it cannot, it does not.
+    expect(said.includes('your sign-in will be kept in it')).toBe(mayYetKeep);
+    fireEvent.click(box);
+    await waitFor(() => {
+      expect(profileKeep).toHaveBeenCalledWith(false);
+    });
+    await waitFor(() => {
+      expect(box.checked).toBe(false);
+    });
+    // Off here cannot be turned back on: there is nothing to keep it in.
     expect(box.disabled).toBe(true);
-    expect((await status()).textContent).toContain(line);
+    expect((await status()).textContent).toContain('This sign-in will last only until Conch closes');
     fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
     await waitFor(() => {
       expect(storageRetry).toHaveBeenCalledTimes(1);
     });
-    expect(profileKeep).not.toHaveBeenCalled();
+  });
+
+  it('never says the sign-in will not be kept while main will keep it: no keyring yet, choice on', async () => {
+    install(view({ storage: { kind: 'session-only', reason: 'no-keyring' }, keep: true }));
+    signIn();
+    expect((await keepBox()).checked).toBe(true);
+    expect((await status()).textContent).toContain('If you unlock one before you sign in, your sign-in will be kept in it');
+  });
+
+  it('with the choice off on protected storage, says the sign-in lasts only until Conch closes', async () => {
+    install(view({ keep: false }));
+    signIn();
+    const box = await keepBox();
+    expect(box.checked).toBe(false);
+    expect(box.disabled).toBe(false);
+    const said = (await status()).textContent;
+    expect(said).toContain('This sign-in will last only until Conch closes');
+    expect(said).not.toContain('will be kept in the system keyring');
   });
 
   it.each<[string, string]>([

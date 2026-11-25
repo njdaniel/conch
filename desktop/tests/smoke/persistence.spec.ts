@@ -18,8 +18,9 @@
 // summarised in docs/design/linux-desktop.md §4.1).
 //
 // It needs dbus-daemon, gnome-keyring-daemon and busctl. Without them it is
-// skipped and says so; CI's desktop-smoke job installs gnome-keyring and dbus
-// so it runs there.
+// skipped and says so on a developer's machine. With CI set it fails instead:
+// CI's desktop-smoke job installs gnome-keyring and dbus, and a job that lost
+// one of them must not pass by skipping.
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -107,7 +108,7 @@ async function signOut(run: Run, page: Page): Promise<Page> {
 }
 
 test.describe('staying signed in across a restart (issue #2077)', () => {
-  test.skip(missing !== null, missing ?? '');
+  test.skip(missing !== null && process.env['CI'] === undefined, missing ?? '');
 
   let server: Disposable;
   let userData: string;
@@ -116,6 +117,7 @@ test.describe('staying signed in across a restart (issue #2077)', () => {
 
   test.beforeAll(async () => {
     test.setTimeout(240_000);
+    if (missing !== null) throw new Error(`CI must run this spec: ${missing}`);
     server = await startConchd();
   });
 
@@ -195,8 +197,10 @@ test.describe('staying signed in across a restart (issue #2077)', () => {
     run = await start(userData, bus);
     const page = await addServer(run, server.origin);
     await expect(staying(page)).toContainText('No system keyring is unlocked, so you’ll be asked to sign in each time Conch starts.');
-    await expect(keep(page)).not.toBeChecked();
-    await expect(keep(page)).toBeDisabled();
+    // The box shows main's choice (on); with no keyring by the time of the
+    // sign-in, nothing is kept all the same, as the line says.
+    await expect(keep(page)).toBeChecked();
+    await expect(keep(page)).toBeEnabled();
     await signIn(page, server.member.name, server.member.password);
     await expect(bar(page)).toContainText('until the app closes');
     // Not even a ciphertext sealed with Chromium's built-in key (v10), which

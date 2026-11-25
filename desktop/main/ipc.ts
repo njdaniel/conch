@@ -642,9 +642,17 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
   },
   storageRetry: { limit: 30, maxBytes: 0, parse: none, run: ({ profiles }) => profiles.retry() },
   // The "Keep me signed in on this computer" choice (issue #2077): one
-  // boolean, for the window in force. It can only keep less than the default
-  // or restore the default, and an operator's sign-in is never kept either way.
-  profileKeep: { limit: 30, maxBytes: 16, parse: oneBoolean, run: ({ profiles }, [keep]) => profiles.setKeep(keep as boolean) },
+  // boolean, for the window in force. Off keeps less, so it needs no act of
+  // the person; on asks for one (the click on the box), so that a script in the
+  // page cannot turn keeping back on by itself. An operator's sign-in is never
+  // kept either way.
+  profileKeep: {
+    limit: 30,
+    maxBytes: 16,
+    parse: oneBoolean,
+    run: ({ profiles }, [keep]) => profiles.setKeep(keep as boolean),
+    gesture: ([keep]) => keep === true,
+  },
   profilesRecover: { limit: 10, maxBytes: 0, parse: none, run: ({ profiles }) => profiles.recover() },
   // The feeds (issue #943). A reconnecting feed subscribes at most once a
   // second, and an acknowledgement follows each batch of frames; past these

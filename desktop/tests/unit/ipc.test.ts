@@ -257,10 +257,21 @@ describe('every invocation is checked before anything else', () => {
 // The "Keep me signed in on this computer" choice (issue #2077): one boolean,
 // handed to the profiles as it is, and nothing else accepted.
 describe('profileKeep', () => {
-  it.each([true, false])('hands the choice %s to the profiles', async (keep) => {
+  it.each([true, false])('hands the choice %s to the profiles after the person’s act', async (keep) => {
     const f = fixture();
+    f.input.recent = true;
     expect((await f.ipc.invoke(f.event(), 'profileKeep', [keep])).ok).toBe(true);
     expect(f.calls).toEqual([['profiles.setKeep', [keep]]]);
+  });
+
+  // Off keeps less, so a script may say it; on keeps more, so only a click may.
+  it('turns keeping off without an act, and refuses to turn it on without one', async () => {
+    const f = fixture();
+    f.input.recent = false;
+    expect((await f.ipc.invoke(f.event(), 'profileKeep', [false])).ok).toBe(true);
+    expect(await f.ipc.invoke(f.event(), 'profileKeep', [true])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toEqual([['profiles.setKeep', [false]]]);
+    expect(f.logs.join('\n')).toContain('(gesture)');
   });
 
   it.each([[[]], [['true']], [[1]], [[{ keep: true }]], [[true, false]], [[null]]])('refuses %j', async (args) => {

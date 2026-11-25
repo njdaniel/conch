@@ -49,6 +49,16 @@ export function launch(options: LaunchOptions = {}): Launched {
     ...(options.debugPort === true ? ['--remote-debugging-port=0'] : []),
     ...(options.args ?? []),
   ];
+  // The developer's own keyring is never reached (#2077 review): unless the
+  // spec brings its own bus (./keyring.ts) or names a store itself, Chromium
+  // is told to use its built-in one. Measured with Electron 44.10.0: without
+  // this, merely starting the app on a session bus with a Secret Service adds
+  // an item to that keyring; with it, nothing is added. The app then classes
+  // storage session-only, as on CI before it had a keyring; no spec but
+  // persistence.spec.ts, which has its own bus, checks protected storage.
+  const ownBus = options.env?.['DBUS_SESSION_BUS_ADDRESS'] !== undefined;
+  const ownStore = (options.args ?? []).some((a) => a.startsWith('--password-store'));
+  if (!ownBus && !ownStore) args.splice(1, 0, '--password-store=basic');
   // A packaged app refuses remote debugging unless told it is meant
   // (main/debugging.ts); a test that asks for the port is telling it.
   const env: NodeJS.ProcessEnv = { ...process.env, ...(options.debugPort === true ? { CONCH_DESKTOP_ALLOW_CDP: '1' } : {}), ...options.env };

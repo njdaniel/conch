@@ -83,21 +83,27 @@ export const keepText = {
   retry: 'Check again',
 };
 
-// keepLine is the status beside the choice: where a kept sign-in goes, or why
-// none can be kept here.
-export function keepLine(storage: StorageStatus, platform: string): string {
+// keepLine is the status beside the choice, and says what will happen, never
+// something else: with the choice off, the sign-in lasts until the app
+// closes; with it on, where a kept sign-in goes, or why none can be kept here.
+// Where the keyring may still answer before the sign-in (it has not answered
+// yet, or none is unlocked yet), main will keep the sign-in if it does, and
+// the line says that too.
+export function keepLine(storage: StorageStatus, platform: string, keep: boolean): string {
   const each = 'you’ll be asked to sign in each time Conch starts';
+  if (!keep) return 'This sign-in will last only until Conch closes, and you’ll be asked to sign in next time.';
+  const unless = 'If it answers before you sign in, your sign-in will be kept in it; uncheck this to keep it only until Conch closes.';
   switch (storage.kind) {
     case 'protected':
       if (platform === 'win32') return 'Your sign-in will be kept on this computer, sealed by Windows for your account.';
       if (platform === 'darwin') return 'Your sign-in will be kept in your macOS keychain.';
       return 'Your sign-in will be kept in the system keyring.';
     case 'unavailable':
-      return `The system keyring has not answered, so Conch can’t keep this sign-in right now and ${each}. Unlock it, then choose ${keepText.retry}.`;
+      return `The system keyring has not answered yet. Unlock it, then choose ${keepText.retry}. ${unless}`;
     case 'session-only':
       switch (storage.reason) {
         case 'no-keyring':
-          return `No system keyring is unlocked, so ${each}.`;
+          return `No system keyring is unlocked, so ${each}. If you unlock one before you sign in, your sign-in will be kept in it; uncheck this to keep it only until Conch closes.`;
         case 'insecure-backend':
           return `This desktop gives Conch no keyring that protects anything, so ${each}.`;
         case 'unavailable':
