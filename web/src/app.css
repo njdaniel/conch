@@ -3457,6 +3457,8 @@ label {
   height: auto;
   overflow: visible;
   clip-path: none;
+  /* Wraps as the row's words did (the hidden labels are nowrap). */
+  white-space: normal;
 }
 
 /* Words without the icon below the picture, as the row had them: with both it

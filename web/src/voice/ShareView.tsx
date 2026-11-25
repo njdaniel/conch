@@ -207,6 +207,8 @@ export function ShareView({
     idleTimer.current = window.setTimeout(() => { idleNow.current = true; setIdle(true); }, controlsIdleMs);
   }, []);
   const swallow = useRef(false);
+  const pointerDown = useRef(false);
+  const controls = useRef<HTMLDivElement>(null);
   const stillWaking = useRef(false);
   const wakingTimer = useRef<number | null>(null);
   const swallowTimer = useRef<number | null>(null);
@@ -217,13 +219,20 @@ export function ShareView({
   const pressDown = (e: PointerEvent) => {
     // The pop-out is not in the row and never fades: its press is its own.
     const own = e.target instanceof Element && e.target.closest('.share-pip') !== null;
-    if (!own && ((faded && idleNow.current) || stillWaking.current)) {
+    // Only where the row really is faded: the row fades in the single-share
+    // overlay alone (CSS says where), so what the page computes for it, not
+    // the idle timer, decides; elsewhere the first press is the control's.
+    const row = controls.current;
+    const inert = row !== null && getComputedStyle(row).pointerEvents === 'none';
+    if (!own && ((faded && idleNow.current && inert) || stillWaking.current)) {
       swallow.current = true;
       stillWaking.current = true;
+      pointerDown.current = true;
       setWaking(true);
       afterMs(wakingTimer, 300, () => { stillWaking.current = false; setWaking(false); });
-      // Backstop: a press whose click never comes is forgotten.
-      afterMs(swallowTimer, 1000, () => { swallow.current = false; });
+      // Backstop: a press whose click never comes is forgotten, but not while
+      // the pointer is still down (a long hold is still one press).
+      afterMs(swallowTimer, 1000, () => { if (!pointerDown.current) swallow.current = false; });
     }
     wake();
   };
@@ -237,14 +246,22 @@ export function ShareView({
   };
   // A press released anywhere, outside the share too, ends its wait for a click.
   useEffect(() => {
-    const ended = () => {
+    const released = () => {
+      pointerDown.current = false;
       if (swallow.current) afterMs(swallowTimer, 300, () => { swallow.current = false; });
     };
-    window.addEventListener('pointerup', ended);
-    window.addEventListener('pointercancel', ended);
+    // A cancelled press (a drag, a lost pointer) is followed by no click.
+    const cancelled = () => {
+      pointerDown.current = false;
+      swallow.current = false;
+    };
+    window.addEventListener('pointerup', released);
+    window.addEventListener('pointercancel', cancelled);
+    window.addEventListener('blur', cancelled);
     return () => {
-      window.removeEventListener('pointerup', ended);
-      window.removeEventListener('pointercancel', ended);
+      window.removeEventListener('pointerup', released);
+      window.removeEventListener('pointercancel', cancelled);
+      window.removeEventListener('blur', cancelled);
     };
   }, []);
   useEffect(() => {
@@ -340,7 +357,7 @@ export function ShareView({
         {!compact && blocked && hasSound ? <button type="button" className="primary share-tap" onClick={tapToPlay}>Tap to play sound</button> : null}
       </div>
       <audio ref={sound} autoPlay aria-label={`${name}'s stream audio`} />
-      <div className="share-controls">
+      <div ref={controls} className="share-controls">
         <button type="button" aria-pressed={muted} onClick={() => { setMuted(!muted); }}>
           <Glyph name={muted ? 'speakerOff' : 'speaker'} />
           <span className="label">{muted ? 'Unmute share' : 'Mute share'}</span>

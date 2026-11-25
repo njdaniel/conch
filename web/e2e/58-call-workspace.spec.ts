@@ -559,6 +559,17 @@ test.describe('the persistent call workspace', () => {
       await expect(shareView(tp), 'a quick double tap on the faded Stop watching does not stop').toHaveCount(1);
       await expect(back(tp)).toHaveCount(0);
 
+      // A touch held 1.6 s on the faded Stop watching is one press that wakes
+      // and does no more, however long it is held.
+      await faded(tp).toBe('0');
+      const [hx, hy] = await centreOf(shareView(tp).getByRole('button', { name: 'Stop watching' }));
+      const cdp = await tp.context().newCDPSession(tp);
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: hx, y: hy }] });
+      await tp.waitForTimeout(1600);
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+      await tp.waitForTimeout(600);
+      await expect(shareView(tp), 'a long hold on the faded Stop watching stops nothing').toHaveCount(1);
+
       // Mouse resting on a faded control: its first press only wakes the row.
       const mp = mouse.page;
       const mute = shareView(mp).getByRole('button', { name: /^(Mute|Unmute) share$/ });
@@ -586,6 +597,86 @@ test.describe('the persistent call workspace', () => {
       await mp.waitForTimeout(700);
       await mute.click();
       await expect(mute, 'a press released outside leaves nothing swallowed').toHaveAttribute('aria-pressed', 'false');
+
+    } finally {
+      for (const p of people) await leave(p);
+    }
+  });
+
+  // Where the row does not fade (the overlay is the single share in an open
+  // call view over 560 px tall), the first press on a control is the control's
+  // however long the share has been left alone.
+  test('P2187 outside the overlay the first press after a pause presses the control', async ({ browser }) => {
+    test.setTimeout(240_000);
+    const people: Person[] = [];
+    try {
+      const a = await person(browser, vw.alice);
+      people.push(a);
+      const phone = await person(browser, vw.carol, { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 });
+      people.push(phone);
+      const desk = await person(browser, vw.bob, { viewport: { width: 1000, height: 540 } });
+      people.push(desk);
+      await join(a);
+      await join(phone);
+      await join(desk);
+      await share(a);
+      await watching(phone);
+      await watching(desk);
+      const mute = (page: Page) => shareView(page).getByRole('button', { name: /^(Mute|Unmute) share$/ });
+      const centreOf = async (control: Locator): Promise<[number, number]> => {
+        await control.scrollIntoViewIfNeeded();
+        const box = await control.boundingBox();
+        if (box === null) throw new Error('control not drawn');
+        return [box.x + box.width / 2, box.y + box.height / 2];
+      };
+
+      // Phone Chat stage: untouched for 4 s, one tap mutes.
+      await showView(phone.page, 'Chat');
+      await phone.page.waitForTimeout(4000);
+      const [px, py] = await centreOf(mute(phone.page));
+      await phone.page.touchscreen.tap(px, py);
+      await expect(mute(phone.page), 'phone Chat: one tap after a pause mutes').toHaveAttribute('aria-pressed', 'true');
+
+      // A short desktop window: the pointer resting on Mute, a second press unmutes.
+      const dp = desk.page;
+      const [dx, dy] = await centreOf(mute(dp));
+      await dp.mouse.click(dx, dy);
+      await expect(mute(dp)).toHaveAttribute('aria-pressed', 'true');
+      await dp.waitForTimeout(4000);
+      await dp.mouse.down();
+      await dp.mouse.up();
+      await expect(mute(dp), '1000×540: the press after a pause unmutes').toHaveAttribute('aria-pressed', 'false');
+    } finally {
+      for (const p of people) await leave(p);
+    }
+  });
+
+  test('P2187 in a grid of two one click on a picture focuses it, after a pause too', async ({ browser }) => {
+    test.setTimeout(240_000);
+    const people: Person[] = [];
+    try {
+      const a = await person(browser, vw.alice);
+      people.push(a);
+      const b = await person(browser, vw.bob, { viewport: { width: 1440, height: 900 } });
+      people.push(b);
+      const c = await person(browser, vw.carol);
+      people.push(c);
+      await join(a);
+      await join(b);
+      await join(c);
+      await share(a);
+      await share(c);
+      await tile(b.page, 'alice').getByRole('button', { name: 'Watch' }).click({ timeout: 30_000 });
+      await tile(b.page, 'carol').getByRole('button', { name: 'Watch' }).click({ timeout: 30_000 });
+      await expect(b.page.locator('.call-enlarge')).toHaveCount(2, { timeout: 30_000 });
+      await b.page.waitForTimeout(1500);
+      const box = await b.page.locator('.call-enlarge').first().boundingBox();
+      if (box === null) throw new Error('no picture');
+      await b.page.mouse.move(box.x + 8, box.y + 8);
+      await b.page.waitForTimeout(4500);
+      await b.page.mouse.down();
+      await b.page.mouse.up();
+      await expect(b.page.locator('ul.call-grid.focus'), 'the click after a pause focuses the picture').toHaveCount(1);
     } finally {
       for (const p of people) await leave(p);
     }

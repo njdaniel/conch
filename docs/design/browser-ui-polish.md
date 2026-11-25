@@ -91,7 +91,8 @@ on the picture, or keyboard focus inside it (a faded control is opacity 0 and
 still in the tab order; a control a pointer pressed keeps focus but not the
 row); it stays shown while the share is not playing (waiting for the picture
 or the stream, or for the tap that starts the sound). The press that brings a
-faded row back is a pure wake: its click is swallowed, so it presses no
+faded row back is a pure wake where the row fades (the single-share
+overlay; elsewhere the first press is the control's): its click is swallowed, so it presses no
 control and enlarges or focuses nothing, and the row takes no press while it
 fades in. "Tap to play sound" is a button on the middle of the picture, never
 in the row, in every layout but the compact row (a short picture gets a
