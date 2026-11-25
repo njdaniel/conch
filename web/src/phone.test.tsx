@@ -575,19 +575,6 @@ describe('member links on a phone (issue #990)', () => {
     );
   }
 
-  // The invite panel is painted over the page, as the drawer is: it closes when
-  // the drawer opens, rather than stay up over it, inert.
-  it('closes when the Members drawer opens over the page', () => {
-    windowOf(true);
-    withPanel();
-    const toggle = within(screen.getByRole('region', { name: 'Invites' })).getByRole('button', { name: 'Invite someone' });
-    fireEvent.click(toggle);
-    expect(toggle.getAttribute('aria-expanded')).toBe('true');
-    fireEvent.click(screen.getByRole('button', { name: 'Members' }));
-    expect(screen.getByRole('region', { name: 'Members list' })).toBeTruthy();
-    expect(toggle.getAttribute('aria-expanded')).toBe('false');
-  });
-
   it.each(['Chat', 'Channels', 'Voice'])('reaches Invite someone from the %s view, and the form with it', (view) => {
     windowOf(true);
     withPanel();

@@ -266,14 +266,9 @@ export function InvitePanel({
   const [focusAsk, setFocusAsk] = useState(0);
   const asked = request?.n ?? 0;
   // The Members drawer is drawn over the page: this panel, painted over it
-  // too and inert behind the drawer, closes. Focus is not moved: the drawer
-  // takes it.
+  // too and inert behind it, is hidden meanwhile, not closed, so what it
+  // holds (the link just made, shown only once) is there when the drawer goes.
   const drawer = useContext(DrawerOver);
-  useEffect(() => {
-    if (!drawer) return;
-    setOpen(false);
-    setClosedAsk(asked);
-  }, [drawer, asked]);
   const channel = open && asked !== closedAsk ? request?.channel : undefined;
   useEffect(() => {
     if (asked === 0) return;
@@ -451,7 +446,7 @@ export function InvitePanel({
       <div
         id="invites-body"
         ref={body}
-        hidden={!open}
+        hidden={!open || drawer}
         onKeyDown={(event) => {
           if (event.key !== 'Escape' || event.defaultPrevented) return;
           event.preventDefault();
