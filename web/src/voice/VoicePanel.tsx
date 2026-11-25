@@ -320,7 +320,7 @@ export function VoicePanel({
       // Focus going into another modal (the quick switcher, whose field takes
       // it before the lobby has said it is over the panel) is not leaving it:
       // the panel stays open beneath, and Escape from that modal returns.
-      else if (!sheet && !behind && optionsPanel.current?.contains(at) !== true && optionsButton.current?.contains(at) !== true && !inOtherModal(at, optionsPanel.current)) setOptions(false);
+      else if (!sheet && !behind && !voice.capturing && optionsPanel.current?.contains(at) !== true && optionsButton.current?.contains(at) !== true && !inOtherModal(at, optionsPanel.current)) setOptions(false);
     };
     const onPress = (e: MouseEvent) => {
       const at = e.target;
@@ -448,7 +448,9 @@ export function VoicePanel({
     const panel = optionsPanel.current;
     if (!options || sheet || panel === null) return;
     const onTab = (e: KeyboardEvent) => {
-      if (e.key !== 'Tab' || e.defaultPrevented) return;
+      // While the talk key is being chosen the capture has every key, Tab
+      // and Shift+Tab among them, and focus stays put.
+      if (e.key !== 'Tab' || e.defaultPrevented || voice.capturing) return;
       const list = panelTabbables(panel);
       const at = document.activeElement;
       if (e.shiftKey && at === list[0]) {
@@ -465,7 +467,7 @@ export function VoicePanel({
     return () => {
       panel.removeEventListener('keydown', onTab);
     };
-  }, [options, sheet]);
+  }, [options, sheet, voice.capturing]);
 
   useEffect(() => {
     if (state.phase !== 'idle' || !left.current) return;
@@ -824,7 +826,7 @@ export function VoicePanel({
                   // Tab from the button, with the anchored panel open, enters it, as
                   // if it followed the button (it follows the notes in the DOM).
                   const panel = optionsPanel.current;
-                  if (e.key !== 'Tab' || e.shiftKey || !options || sheet || panel === null) return;
+                  if (e.key !== 'Tab' || e.shiftKey || !options || sheet || panel === null || voice.capturing) return;
                   const first = panelTabbables(panel)[0];
                   if (first === undefined) return;
                   e.preventDefault();

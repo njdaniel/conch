@@ -1025,6 +1025,32 @@ describe('talk-key capture', () => {
     return { setTalkKey, capture };
   };
 
+  // Issue #2189: while the talk key is chosen the capture has Tab and Shift+Tab
+  // too: the panel's Tab routing leaves them alone and focus stays put.
+  it('leaves Shift+Tab to the capture: no focus move to the button, the panel stays open', () => {
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ top: 700, left: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 700, toJSON: () => ({}) });
+    const height = vi.spyOn(document.documentElement, 'clientHeight', 'get').mockReturnValue(800);
+    // jsdom draws nothing: every element counts as drawn for the Tab routing.
+    const drawn = vi.spyOn(HTMLElement.prototype, 'getClientRects').mockReturnValue([{}] as unknown as DOMRectList);
+    try {
+      capturing();
+      const panel = document.querySelector<HTMLElement>('#voice-options');
+      const first = panel?.querySelector<HTMLElement>('button:not(:disabled), select:not(:disabled), input:not(:disabled)');
+      if (first === null || first === undefined) throw new Error('no control in the panel');
+      first.focus();
+      const button = screen.getByRole('button', { name: 'Voice options' });
+      // (The capture itself takes the key and prevents its default.)
+      fireEvent.keyDown(first, { key: 'Tab', shiftKey: true });
+      expect(document.activeElement).toBe(first);
+      expect(document.activeElement).not.toBe(button);
+      expect(button.getAttribute('aria-expanded')).toBe('true');
+    } finally {
+      rect.mockRestore();
+      height.mockRestore();
+      drawn.mockRestore();
+    }
+  });
+
   // Issue #2189: the capture ends with the panel, by whatever route it closes,
   // and Escape during a capture cancels only the capture.
   it('ends the capture when the panel closes by a press outside, or by its button', () => {
