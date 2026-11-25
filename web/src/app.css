@@ -3096,7 +3096,7 @@ label {
   box-sizing: border-box;
   width: max-content;
   height: max-content;
-  max-width: min(22rem, calc(100% - 2 * var(--s2)));
+  max-width: min(23rem, calc(100% - 2 * var(--s2)));
   max-height: calc(100% - 2 * var(--s2));
   margin: auto;
   padding: var(--s2);
@@ -3177,17 +3177,7 @@ label {
 
 @media (forced-colors: active) {
   .share-chooser-menu button[aria-checked='true']::before {
-    forced-color-adjust: auto;
     color: ButtonText;
-  }
-
-  /* A hovered or focused row is drawn on Highlight, so its text and the mark
-     take HighlightText with it. */
-  .share-chooser-menu button[role^='menuitem']:hover,
-  .share-chooser-menu button[role^='menuitem']:focus-visible,
-  .share-chooser-menu button[role^='menuitem']:hover::before,
-  .share-chooser-menu button[role^='menuitem']:focus-visible::before {
-    color: HighlightText;
   }
 }
 

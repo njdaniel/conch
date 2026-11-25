@@ -6,6 +6,15 @@ import { enter, joinVoice } from './people';
 import { dockerAvailable, startVoiceWorld, type VoiceWorld } from './voice-world';
 import { loadWorld } from './world';
 
+function lum([r, g, b]: readonly [number, number, number]): number {
+  const f = (v: number) => { const c = v / 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
+  return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+}
+function contrast(a: readonly [number, number, number], b: readonly [number, number, number]): number {
+  const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x) as [number, number];
+  return (hi + 0.05) / (lo + 0.05);
+}
+
 // fits: the whole menu shows without scrolling. On a phone the voice view puts
 // the button about halfway down, so neither side holds all nine options: the
 // menu takes the roomier side and scrolls, and every option must be reachable.
@@ -128,6 +137,8 @@ test.describe('the share quality menu', { tag: '@voice' }, () => {
         await choose(/^1080p/);
         await choose('30 fps');
         const before = await boxes();
+        // On a desktop-wide screen every label, Source (up to 4K) included, fits on one line.
+        if (context.viewport.width >= 1000) for (const r of before.rects) expect(r.height).toBeLessThan(40);
 
         await choose(/^Auto/);
         await expect(menu.getByRole('menuitemradio', { name: /^Auto/ })).toBeChecked();
@@ -208,11 +219,74 @@ test.describe('the share quality menu', { tag: '@voice' }, () => {
         }
       }
       expect((await marks()).filter(([c]) => c === 'true').length).toBe(2);
-      // A hovered row is drawn on Highlight: the mark takes the row's own text colour.
-      const checked = items.and(page.locator('[aria-checked="true"]')).first();
-      await checked.hover();
-      const [row, mark] = await checked.evaluate((el) => [getComputedStyle(el).color, getComputedStyle(el, '::before').color]);
-      expect(mark).toBe(row);
+      // Computed colours ignore the backplate forced colors paints behind text,
+      // so read the pixels: a row's label must show ink against its ground in
+      // every state a row can be drawn in.
+      const row = (name: string | RegExp) => menu.getByRole('menuitemradio', { name }).first();
+      const inkOf = async (clip: { x: number; y: number; width: number; height: number }) => {
+        const shot = Array.from((await page.screenshot({ clip, animations: 'disabled' })) as unknown as Uint8Array);
+        // Decode in the page (a canvas), so the test needs no image library.
+        const entries = await page.evaluate(async (bytes) => {
+          const bmp = await createImageBitmap(new Blob([new Uint8Array(bytes)], { type: 'image/png' }));
+          const cv = new OffscreenCanvas(bmp.width, bmp.height);
+          const ctx = cv.getContext('2d');
+          if (ctx === null) throw new Error('no 2d context');
+          ctx.drawImage(bmp, 0, 0);
+          const data = ctx.getImageData(0, 0, bmp.width, bmp.height).data;
+          const tally = new Map<string, number>();
+          for (let i = 0; i < data.length; i += 4) {
+            const key = `${String(data[i])},${String(data[i + 1])},${String(data[i + 2])}`;
+            tally.set(key, (tally.get(key) ?? 0) + 1);
+          }
+          return Array.from(tally.entries());
+        }, shot);
+        const count = new Map<string, number>(entries);
+        const sorted = [...count.entries()].sort((x, y) => y[1] - x[1]);
+        const ground = (sorted[0]?.[0] ?? '0,0,0').split(',').map(Number) as [number, number, number];
+        let best = 1;
+        let strong = 0;
+        for (const [key, n] of sorted) {
+          const c = contrast(key.split(',').map(Number) as [number, number, number], ground);
+          if (c > best) best = c;
+          if (c >= 4.5) strong += n;
+        }
+        return { best, strong, colours: sorted.length };
+      };
+      const readable = async (what: string, target: ReturnType<typeof row>, mark: boolean) => {
+        const parts = await target.evaluate((el) => {
+          const r = el.getBoundingClientRect();
+          const label = el.querySelector('.item-text')?.getBoundingClientRect();
+          return { row: { x: r.left, y: r.top, right: r.right, height: r.height }, labelLeft: label?.left ?? r.left };
+        });
+        const text = await inkOf({ x: parts.labelLeft, y: parts.row.y + 4, width: parts.row.right - parts.labelLeft - 4, height: parts.row.height - 8 });
+        expect(text.colours, `${what}: label shows more than one colour`).toBeGreaterThanOrEqual(2);
+        expect(text.best, `${what}: label contrast`).toBeGreaterThanOrEqual(4.5);
+        expect(text.strong, `${what}: label ink pixels`).toBeGreaterThan(8);
+        if (mark) {
+          const ticks = await inkOf({ x: parts.row.x + 8, y: parts.row.y + 6, width: 18, height: parts.row.height - 12 });
+          expect(ticks.strong, `${what}: checkmark ink pixels`).toBeGreaterThan(5);
+        }
+      };
+      await row(/^1080p/).click();
+      await row('30 fps').click();
+      await row(/^1080p/).hover();
+      await readable('hovered checked row', row(/^1080p/), true);
+      await row(/^720p/).hover();
+      await readable('hovered unchecked row', row(/^720p/), false);
+      await page.mouse.move(0, 0);
+      await page.keyboard.press('Escape');
+      await expect(menu).toBeHidden();
+      const opener = voice.getByRole('button', { name: 'Share quality' });
+      await opener.focus();
+      await page.keyboard.press('Enter');
+      await page.keyboard.press('ArrowUp');
+      const focused = menu.locator('[role^="menuitem"]:focus');
+      await expect(focused).toHaveCount(1);
+      await page.mouse.move(0, 0);
+      await readable('keyboard-focused row', focused, false);
+      await row(/^Auto/).click();
+      await row('15 fps').hover({ force: true });
+      await readable('hovered disabled frame rate in Auto', row('15 fps'), false);
     } finally {
       await person.close();
     }
