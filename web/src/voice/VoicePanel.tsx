@@ -134,6 +134,20 @@ function Tag({ text }: { readonly text: string }) {
   );
 }
 
+// Status is a chip's sending or speaking mark: a dot on its avatar, out of the
+// chip's flow, so the chip is the same size with it and without it. It used to
+// be a pill after the name, and a pill wider than the room left wrapped the
+// chip onto a second line and moved every control below it, Hold to talk under
+// a held finger among them (issue #2211). The word is the text read out, as
+// " (sending)" after the name.
+function Status({ text }: { readonly text: 'sending' | 'speaking' }) {
+  return (
+    <span className={`state ${text}`}>
+      <span className="vh"> ({text})</span>
+    </span>
+  );
+}
+
 export function VoicePanel({
   voice,
   viewer,
@@ -1254,7 +1268,7 @@ export function Roster({ channel, mayModerate: standing, reserve = false, roster
             {/* One badge for sending audio (issue #2198, UI-talk-4): "speaking"
                 when the level says so, else "sending"; the level is the
                 avatar's ring. */}
-            {speaking.has(o.principal) ? <Tag text="speaking" /> : o.transmitting ? <Tag text="sending" /> : null}
+            {speaking.has(o.principal) ? <Status text="speaking" /> : o.transmitting ? <Status text="sending" /> : null}
             {o.sharing ? <Tag text="sharing" /> : null}
             {/* Others' claims; the person's own camera is said from their
                 own track, in the strip (S5). */}
