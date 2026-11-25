@@ -84,49 +84,61 @@ test.describe('the share quality menu', { tag: '@voice' }, () => {
         await joinVoice(person, 'Join voice');
         const voice = page.getByRole('region', { name: 'Voice' });
         const menu = voice.getByRole('menu', { name: 'Share quality' });
-        await voice.getByRole('button', { name: 'Share quality' }).click();
-        const items = menu.getByRole('menuitemradio');
-        const count = await items.count();
-        const boxes = async () => {
-          const all: { x: number; y: number; width: number; height: number }[] = [];
-          for (let i = 0; i < count; i++) {
-            const item = items.nth(i);
-            await item.scrollIntoViewIfNeeded();
-            const box = await item.boundingBox();
-            if (box === null) throw new Error('every option must have a box');
-            all.push(box);
-          }
-          return all;
+        const opener = voice.getByRole('button', { name: 'Share quality' });
+        // Joining voice settles the page above the button a moment later (a
+        // 44 px row can appear); the menu is anchored to the button, so wait
+        // until the button has held still for 1.2 s before measuring anything.
+        const settled = async () => {
+          let last = Number.NaN;
+          let still = 0;
+          await expect.poll(async () => {
+            const y = (await opener.boundingBox())?.y ?? Number.NaN;
+            still = y === last ? still + 1 : 0;
+            last = y;
+            await page.waitForTimeout(400);
+            return still;
+          }, { timeout: 20_000 }).toBeGreaterThanOrEqual(3);
         };
-        const choose = async (option: string | RegExp) => { await menu.getByRole('menuitemradio', { name: option }).first().click(); };
+        await settled();
+        await opener.click();
+        // Each option's rect in the viewport, where the pointer is, read in one
+        // step. Nothing scrolls during the test: choices are made by a dispatched
+        // click, which does not scroll, and the menu's scrollTop is part of what
+        // must stay the same. (A rect relative to the menu would pass even when
+        // the whole menu grows upward under the pointer.)
+        const boxes = () => menu.evaluate((el) => ({
+          scrollTop: el.scrollTop,
+          rects: Array.from(el.querySelectorAll('[role^="menuitem"]')).map((item) => {
+            const r = item.getBoundingClientRect();
+            return { x: r.left, y: r.top, width: r.width, height: r.height };
+          }),
+        }));
+        const choose = async (option: string | RegExp) => { await menu.getByRole('menuitemradio', { name: option }).first().evaluate((el) => { (el as HTMLElement).click(); }); };
         const same = async (before: Awaited<ReturnType<typeof boxes>>, why: string) => {
           const after = await boxes();
-          for (const [i, b] of before.entries()) {
+          expect(after.scrollTop, `${why}: the menu scrolled`).toBe(before.scrollTop);
+          expect(after.rects).toHaveLength(before.rects.length);
+          for (const [i, b] of before.rects.entries()) {
             for (const k of ['x', 'y', 'width', 'height'] as const) {
-              expect(Math.abs((after[i]?.[k] ?? Number.NaN) - b[k]), `${why}: option ${String(i)} ${k}`).toBeLessThanOrEqual(0.5);
+              expect(Math.abs((after.rects[i]?.[k] ?? Number.NaN) - b[k]), `${why}: option ${String(i)} ${k}`).toBeLessThanOrEqual(0.5);
             }
           }
         };
 
         await choose(/^1080p/);
         await choose('30 fps');
-        // Scrolling a phone's menu changes where the boxes are, so measure at the top.
-        await menu.evaluate((el) => { el.scrollTop = 0; });
         const before = await boxes();
 
         await choose(/^Auto/);
         await expect(menu.getByRole('menuitemradio', { name: /^Auto/ })).toBeChecked();
-        await menu.evaluate((el) => { el.scrollTop = 0; });
         await same(before, 'entering Auto');
 
         await choose(/^1080p/);
-        await menu.evaluate((el) => { el.scrollTop = 0; });
         await same(before, 'leaving Auto');
 
         await choose(/^Source/);
         await choose('60 fps');
         await expect(menu.getByText(/Source at 60 fps is 4K/)).toBeVisible();
-        await menu.evaluate((el) => { el.scrollTop = 0; });
         await same(before, 'Source at 60 fps');
 
         // A second click 150 ms after the first lands on Auto again, not on what
@@ -134,7 +146,7 @@ test.describe('the share quality menu', { tag: '@voice' }, () => {
         // Real mouse clicks at one fixed point, as a hand does; a locator click
         // would wait for the option to settle and follow it.
         await choose(/^1080p/);
-        await menu.evaluate((el) => { el.scrollTop = 0; });
+        await settled();
         const auto = menu.getByRole('menuitemradio', { name: /^Auto/ });
         const at = await auto.boundingBox();
         if (at === null) throw new Error('Auto must have a box');
@@ -151,6 +163,29 @@ test.describe('the share quality menu', { tag: '@voice' }, () => {
       }
     });
   }
+
+  test('P2194 on a phone the checkmark clears the row label', async ({ browser }) => {
+    if (vw === undefined) throw new Error('no voice world');
+    const person = await enter(browser, vw, vw.bob, { context: phones[0][1] });
+    try {
+      const { page } = person;
+      await joinVoice(person, 'Join voice');
+      const voice = page.getByRole('region', { name: 'Voice' });
+      await voice.getByRole('button', { name: 'Share quality' }).click();
+      const row = voice.getByRole('menu', { name: 'Share quality' }).locator('[aria-checked="true"]').first();
+      await row.scrollIntoViewIfNeeded();
+      // The mark's right edge: its left offset plus its glyph, from the row's own box.
+      const [markRight, labelLeft] = await row.evaluate((el) => {
+        const r = el.getBoundingClientRect();
+        const m = getComputedStyle(el, '::before');
+        const label = el.querySelector('.item-text')?.getBoundingClientRect().left ?? Number.NaN;
+        return [r.left + el.clientLeft + Number.parseFloat(m.insetInlineStart) + Number.parseFloat(m.width), label];
+      });
+      expect(labelLeft).toBeGreaterThanOrEqual(markRight);
+    } finally {
+      await person.close();
+    }
+  });
 
   test('P2194 under forced colors only the checked option shows a checkmark', async ({ browser }) => {
     if (vw === undefined) throw new Error('no voice world');
@@ -173,6 +208,11 @@ test.describe('the share quality menu', { tag: '@voice' }, () => {
         }
       }
       expect((await marks()).filter(([c]) => c === 'true').length).toBe(2);
+      // A hovered row is drawn on Highlight: the mark takes the row's own text colour.
+      const checked = items.and(page.locator('[aria-checked="true"]')).first();
+      await checked.hover();
+      const [row, mark] = await checked.evaluate((el) => [getComputedStyle(el).color, getComputedStyle(el, '::before').color]);
+      expect(mark).toBe(row);
     } finally {
       await person.close();
     }

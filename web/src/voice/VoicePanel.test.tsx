@@ -2327,7 +2327,7 @@ describe('the share quality menu', () => {
     { what: 'Auto', start: { resolution: 'auto', frameRate: 30 }, live: autoNote, inactive: sourceSixtyNote },
     { what: 'Source at 60 fps', start: { resolution: 'source', frameRate: 60 }, live: sourceSixtyNote, inactive: autoNote },
     { what: '1080p', start: { resolution: '1080p', frameRate: 30 }, live: null, inactive: null },
-  ] as const)('keeps the note slot in $what, announcing only the live text', ({ start, live, inactive }) => {
+  ] as const)('in $what the note slot is a status region and only the live paragraph is left out of aria-hidden', ({ start, live, inactive }) => {
     render(<Harness start={start} />);
     fireEvent.click(opener());
     const slot = screen.getByRole('menu', { name: 'Share quality' }).querySelector('.share-chooser-notes');

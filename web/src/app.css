@@ -3148,9 +3148,10 @@ label {
   text-align: left;
 }
 
-.share-chooser-menu button[role^='menuitem'] {
+.share-chooser .share-chooser-menu button[role^='menuitem'] {
   /* Every row reserves the leading slot the checkmark fills, so choosing an
-     option changes no row's width or height (#2194). */
+     option changes no row's width or height (#2194). The extra class outweighs
+     the phone's .voice-controls button:not(.talk) padding. */
   position: relative;
   padding-inline-start: 1.75rem;
 }
@@ -3178,6 +3179,15 @@ label {
   .share-chooser-menu button[aria-checked='true']::before {
     forced-color-adjust: auto;
     color: ButtonText;
+  }
+
+  /* A hovered or focused row is drawn on Highlight, so its text and the mark
+     take HighlightText with it. */
+  .share-chooser-menu button[role^='menuitem']:hover,
+  .share-chooser-menu button[role^='menuitem']:focus-visible,
+  .share-chooser-menu button[role^='menuitem']:hover::before,
+  .share-chooser-menu button[role^='menuitem']:focus-visible::before {
+    color: HighlightText;
   }
 }
 
