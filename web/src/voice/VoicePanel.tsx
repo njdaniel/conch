@@ -134,6 +134,21 @@ function Tag({ text }: { readonly text: string }) {
   );
 }
 
+// Dot is a chip's sending or speaking mark: a dot on the corner of its avatar
+// (the avatar's own box, so it stays there however the chip wraps), out of the
+// chip's flow, so the chip is the same size with it and without it. It used to
+// be a pill after the name, and a pill wider than the room left wrapped the
+// chip onto a second line and moved every control below it, Hold to talk under
+// a held finger among them (issue #2211). The dot is for the eye; Said is the
+// word read out, after the name as before.
+function Dot({ text }: { readonly text: 'sending' | 'speaking' }) {
+  return <span className={`state ${text}`} aria-hidden="true" />;
+}
+
+function Said({ text }: { readonly text: 'sending' | 'speaking' | undefined }) {
+  return text === undefined ? null : <span className="vh said"> ({text})</span>;
+}
+
 export function VoicePanel({
   voice,
   viewer,
@@ -1221,7 +1236,7 @@ export function Roster({ channel, mayModerate: standing, reserve = false, roster
   const ownName = nameOf(people, viewer, viewer, false, viewerName);
   const placeholder = (
     <li key="held" className="me reserved" aria-hidden="true" inert>
-      <Avatar id={viewer} name={ownName} />
+      <span className="face"><Avatar id={viewer} name={ownName} /></span>
       <span className="who">{nameOf(people, viewer, viewer, elsewhere, viewerName)}</span>
       <IdentityMarks kind={people.get(viewer)?.kind} only={['agent']} />
       {!mayModerate || channel === undefined ? null : <button type="button" tabIndex={-1} aria-label={`Remove ${ownName} from voice`}>Remove from voice</button>}
@@ -1243,18 +1258,23 @@ export function Roster({ channel, mayModerate: standing, reserve = false, roster
         {roster.length} in voice
       </h2>
       <ul id="voice-roster" aria-labelledby="voice-count" className={capped ? 'voice-roster capped' : 'voice-roster'}>
-        {roster.flatMap((o, i) => [
+        {roster.flatMap((o, i) => {
+          const mark = speaking.has(o.principal) ? 'speaking' : o.transmitting ? 'sending' : undefined;
+          return [
           unlisted && i === heldAt ? placeholder : null,
           (
           <li key={o.principal} className={[speaking.has(o.principal) ? 'speaking' : '', kept.has(o.principal) ? '' : 'beyond', o.principal === viewer ? 'me' : ''].filter((c) => c !== '').join(' ') || undefined}>
-            <Avatar id={o.principal} name={people.get(o.principal)?.name ?? nameOf(people, o.principal, viewer, false, viewerName)} />
+            <span className="face">
+              <Avatar id={o.principal} name={people.get(o.principal)?.name ?? nameOf(people, o.principal, viewer, false, viewerName)} />
+              {/* One badge for sending audio (issue #2198, UI-talk-4): "speaking"
+                  when the level says so, else "sending"; the level is the
+                  avatar's ring. */}
+              {mark === undefined ? null : <Dot text={mark} />}
+            </span>
             <span className="who">{nameOf(people, o.principal, viewer, elsewhere, viewerName)}</span>
             <IdentityMarks kind={people.get(o.principal)?.kind} only={['agent']} />
             {!mayModerate || channel === undefined ? null : <button type="button" aria-label={`Remove ${nameOf(people, o.principal, viewer, false, viewerName)} from voice`} onClick={(event) => { kickOpener.current = event.currentTarget; setKick({ id: o.principal, name: nameOf(people, o.principal, viewer, false, viewerName) }); }}>Remove from voice</button>}
-            {/* One badge for sending audio (issue #2198, UI-talk-4): "speaking"
-                when the level says so, else "sending"; the level is the
-                avatar's ring. */}
-            {speaking.has(o.principal) ? <Tag text="speaking" /> : o.transmitting ? <Tag text="sending" /> : null}
+            <Said text={mark} />
             {o.sharing ? <Tag text="sharing" /> : null}
             {/* Others' claims; the person's own camera is said from their
                 own track, in the strip (S5). */}
@@ -1262,7 +1282,7 @@ export function Roster({ channel, mayModerate: standing, reserve = false, roster
             {o.principal === viewer ? null : <VolumeTag volume={volumes.get(o.principal)} />}
           </li>
           ),
-        ])}
+        ];})}
         {unlisted && heldAt === roster.length ? placeholder : null}
       </ul>
       {kick === null || channel === undefined || !mayModerate ? null : <ModerationConfirm key={kick.id} op="kickVoice" channel={channel} id={kick.id} name={kick.name} onClose={() => { setKick(null); kickOpener.current?.focus(); }} />}

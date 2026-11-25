@@ -801,6 +801,50 @@ describe('what is sent, as the strip says it', () => {
     expect(voice.querySelector('.voice-roster li.speaking')).not.toBeNull();
   });
 
+  // Issue #2211: the badge was a pill after the name, and on a phone a manager's
+  // chip (with Remove from voice) wrapped onto a second line when it showed. The
+  // mark is out of the chip's flow: the chip's children are the same with it and
+  // without it, and its word stays in the text read out.
+  describe('the sending and speaking mark on a chip', () => {
+    const people: ReadonlyMap<number, Person> = new Map([[3, { name: 'Ana' } as Person], [7, { name: 'Bartholomew' } as Person]]);
+    const occupant = (principal: number, transmitting: boolean): Occupant => ({ principal, transmitting, camera: false, sharing: false, sharingAudio: false, joinedAt: '2026-10-18T00:00:00Z' });
+    const chipOf = (transmitting: boolean, speaking: ReadonlySet<number>, mayModerate: boolean) => {
+      const r = render(<Roster channel="c" mayModerate={mayModerate} roster={[occupant(3, false), occupant(7, transmitting)]} people={people} viewer={3} viewerName="Ana" elsewhere={false} speaking={speaking} volumes={new Map()} />);
+      const chip = Array.from(r.container.querySelectorAll('li')).find((li) => li.textContent.includes('Bartholomew'));
+      if (chip === undefined) throw new Error('no chip');
+      return chip;
+    };
+    const shape = (chip: Element) => Array.from(chip.querySelectorAll(':scope > *:not(.face):not(.said), :scope > .face > *:not(.state)')).filter((el) => !el.classList.contains('state')).map((el) => `${el.tagName}.${el.className}`);
+
+    it.each([[true], [false]])('does not change what is in the chip\'s flow, for a manager: %s', (mayModerate) => {
+      const quiet = chipOf(false, new Set(), mayModerate);
+      cleanup();
+      const sending = chipOf(true, new Set(), mayModerate);
+      cleanup();
+      const speaking = chipOf(true, new Set([7]), mayModerate);
+      expect(shape(sending)).toEqual(shape(quiet));
+      expect(shape(speaking)).toEqual(shape(quiet));
+      expect(quiet.querySelector('.state')).toBeNull();
+    });
+
+    it('is one mark in the chip, with the word read out and no pill', () => {
+      const sending = chipOf(true, new Set(), true);
+      expect(sending.querySelectorAll('.state')).toHaveLength(1);
+      expect(sending.querySelector('.state.sending')).not.toBeNull();
+      expect(sending.querySelector('.said')?.textContent).toBe(' (sending)');
+      expect(sending.querySelector('.tag')).toBeNull();
+      cleanup();
+      const speaking = chipOf(true, new Set([7]), true);
+      expect(speaking.querySelectorAll('.state')).toHaveLength(1);
+      expect(speaking.querySelector('.state.speaking')).not.toBeNull();
+      expect(speaking.querySelector('.said')?.textContent).toBe(' (speaking)');
+    });
+
+    it('reads out "(sending)" after the name and the button, as the pill did', () => {
+      expect(chipOf(true, new Set(), true).textContent).toBe('BartholomewRemove from voice (sending)');
+    });
+  });
+
   it.each([
     ['nothing held', { talking: false, transmitting: false }, 'Push to talk: not sending', 'false'],
     ['a press waiting for its answer', { talking: true, transmitting: false }, 'Waiting for the server', 'true'],
