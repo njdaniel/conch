@@ -3019,6 +3019,14 @@ label {
   min-width: 0;
 }
 
+/* In voice, before presence lists this page: its own chip, unseen, alone in
+   an empty row or in the slot the real one will take, so the chip arriving a
+   moment after the join wraps the row the same way and moves nothing (#2202). */
+.voice-who.reserved,
+.voice-roster li.reserved {
+  visibility: hidden;
+}
+
 .voice-count {
   flex: none;
   margin: 0;

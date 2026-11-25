@@ -781,7 +781,7 @@ export function VoicePanel({
       <div className="voice-bar" inert={covered}>
         {inVoice ? <BlockedVoiceMute voice={voice} others={others} /> : null}
         {strip ? null : (
-          <Roster channel={rosterChannel ?? undefined} mayModerate={mayModerateRoster} roster={roster} people={people} viewer={viewer} viewerName={viewerName} elsewhere={elsewhere} speaking={speaking} volumes={inVoice ? state.volumes : noVolumes} />
+          <Roster channel={rosterChannel ?? undefined} mayModerate={mayModerateRoster} reserve={inVoice} roster={roster} people={people} viewer={viewer} viewerName={viewerName} elsewhere={elsewhere} speaking={speaking} volumes={inVoice ? state.volumes : noVolumes} />
         )}
         {awayLine}
         <div className="voice-row">
@@ -1182,12 +1182,17 @@ function shownOnPhone(roster: readonly Occupant[], viewer: number): ReadonlySet<
 // Roster is who is in voice, with how many as its heading, which also names
 // the list. At 700 px and wider every chip shows, wrapping onto more lines;
 // on a phone three show, the viewer's own among them, and "+N more" shows
-// the rest.
-export function Roster({ channel, mayModerate: standing, roster, people, viewer, viewerName = '', elsewhere, speaking, volumes }: {
+// the rest. While this page is in voice (reserve) and presence does not yet
+// list it, the roster holds the page's own chip, invisible, in the slot the
+// real one takes (the roster is in principal order): the real chip arrives with
+// the next presence snapshot a moment after the join, and where the roster is
+// above the controls a row that wrapped differently would push them (issue #2202).
+export function Roster({ channel, mayModerate: standing, reserve = false, roster, people, viewer, viewerName = '', elsewhere, speaking, volumes }: {
   // The channel the roster belongs to, and whether the viewer may moderate it
   // (when not said, the standing in the channel on screen).
   readonly channel?: string;
   readonly mayModerate?: boolean;
+  readonly reserve?: boolean;
   readonly roster: readonly Occupant[];
   readonly people: ReadonlyMap<number, Person>;
   readonly viewer: number;
@@ -1207,14 +1212,40 @@ export function Roster({ channel, mayModerate: standing, roster, people, viewer,
   const more = roster.length - phoneChips;
   const capped = more > 0 && !all;
   const kept = shownOnPhone(roster, viewer);
-  if (roster.length === 0 && kick === null) return null;
+  // The page's own chip, before presence lists it (issue #2202): the real
+  // chip's markup, name and moderation button included, unseen, inert and
+  // hidden from assistive technology, in the slot where the real one will
+  // sort (by principal, as the roster is), so the row wraps now and not a
+  // moment after the join.
+  const unlisted = reserve && !roster.some((o) => o.principal === viewer);
+  const ownName = nameOf(people, viewer, viewer, false, viewerName);
+  const placeholder = (
+    <li key="held" className="me reserved" aria-hidden="true" inert>
+      <Avatar id={viewer} name={ownName} />
+      <span className="who">{nameOf(people, viewer, viewer, elsewhere, viewerName)}</span>
+      <IdentityMarks kind={people.get(viewer)?.kind} only={['agent']} />
+      {!mayModerate || channel === undefined ? null : <button type="button" tabIndex={-1} aria-label={`Remove ${ownName} from voice`}>Remove from voice</button>}
+    </li>
+  );
+  const slot = roster.findIndex((o) => o.principal > viewer);
+  const heldAt = slot < 0 ? roster.length : slot;
+  if (roster.length === 0 && kick === null) {
+    return unlisted ? (
+      <div className="voice-who reserved" aria-hidden="true" inert>
+        <span className="voice-count">1 in voice</span>
+        <ul className="voice-roster">{placeholder}</ul>
+      </div>
+    ) : null;
+  }
   return (
     <div className="voice-who">
       <h2 id="voice-count" className="voice-count">
         {roster.length} in voice
       </h2>
       <ul id="voice-roster" aria-labelledby="voice-count" className={capped ? 'voice-roster capped' : 'voice-roster'}>
-        {roster.map((o) => (
+        {roster.flatMap((o, i) => [
+          unlisted && i === heldAt ? placeholder : null,
+          (
           <li key={o.principal} className={[speaking.has(o.principal) ? 'speaking' : '', kept.has(o.principal) ? '' : 'beyond', o.principal === viewer ? 'me' : ''].filter((c) => c !== '').join(' ') || undefined}>
             <Avatar id={o.principal} name={people.get(o.principal)?.name ?? nameOf(people, o.principal, viewer, false, viewerName)} />
             <span className="who">{nameOf(people, o.principal, viewer, elsewhere, viewerName)}</span>
@@ -1230,7 +1261,9 @@ export function Roster({ channel, mayModerate: standing, roster, people, viewer,
             {o.camera && o.principal !== viewer ? <Tag text="camera" /> : null}
             {o.principal === viewer ? null : <VolumeTag volume={volumes.get(o.principal)} />}
           </li>
-        ))}
+          ),
+        ])}
+        {unlisted && heldAt === roster.length ? placeholder : null}
       </ul>
       {kick === null || channel === undefined || !mayModerate ? null : <ModerationConfirm key={kick.id} op="kickVoice" channel={channel} id={kick.id} name={kick.name} onClose={() => { setKick(null); kickOpener.current?.focus(); }} />}
       {more > 0 ? (

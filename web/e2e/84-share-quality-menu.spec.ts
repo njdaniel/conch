@@ -94,21 +94,6 @@ test.describe('the share quality menu', { tag: '@voice' }, () => {
         const voice = page.getByRole('region', { name: 'Voice' });
         const menu = voice.getByRole('menu', { name: 'Share quality' });
         const opener = voice.getByRole('button', { name: 'Share quality' });
-        // Joining voice settles the page above the button a moment later (a
-        // 44 px row can appear); the menu is anchored to the button, so wait
-        // until the button has held still for 1.2 s before measuring anything.
-        const settled = async () => {
-          let last = Number.NaN;
-          let still = 0;
-          await expect.poll(async () => {
-            const y = (await opener.boundingBox())?.y ?? Number.NaN;
-            still = y === last ? still + 1 : 0;
-            last = y;
-            await page.waitForTimeout(400);
-            return still;
-          }, { timeout: 20_000 }).toBeGreaterThanOrEqual(3);
-        };
-        await settled();
         await opener.click();
         // Each option's rect in the viewport, where the pointer is, read in one
         // step. Nothing scrolls during the test: choices are made by a dispatched
@@ -157,7 +142,6 @@ test.describe('the share quality menu', { tag: '@voice' }, () => {
         // Real mouse clicks at one fixed point, as a hand does; a locator click
         // would wait for the option to settle and follow it.
         await choose(/^1080p/);
-        await settled();
         const auto = menu.getByRole('menuitemradio', { name: /^Auto/ });
         const at = await auto.boundingBox();
         if (at === null) throw new Error('Auto must have a box');
