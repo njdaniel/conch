@@ -1211,14 +1211,24 @@ export function Roster({ channel, mayModerate: standing, reserve = false, roster
   const more = roster.length - phoneChips;
   const capped = more > 0 && !all;
   const kept = shownOnPhone(roster, viewer);
+  // The page's own chip, before presence lists it (issue #2202): the real
+  // chip's markup, name and moderation button included, unseen, inert and
+  // hidden from assistive technology, where the real one will appear, so the
+  // row wraps now and not a moment after the join.
+  const unlisted = reserve && !roster.some((o) => o.principal === viewer);
+  const ownName = nameOf(people, viewer, viewer, false, viewerName);
+  const placeholder = (
+    <li className="me reserved" aria-hidden="true" inert>
+      <Avatar id={viewer} name={ownName} />
+      <span className="who">{nameOf(people, viewer, viewer, elsewhere, viewerName)}</span>
+      {!mayModerate || channel === undefined ? null : <button type="button" tabIndex={-1} aria-label={`Remove ${ownName} from voice`}>Remove from voice</button>}
+    </li>
+  );
   if (roster.length === 0 && kick === null) {
-    return reserve ? (
-      <div className="voice-who reserved" aria-hidden="true">
-        <ul className="voice-roster">
-          <li>
-            <Avatar id={viewer} name={viewerName} />
-          </li>
-        </ul>
+    return unlisted ? (
+      <div className="voice-who reserved" aria-hidden="true" inert>
+        <span className="voice-count">1 in voice</span>
+        <ul className="voice-roster">{placeholder}</ul>
       </div>
     ) : null;
   }
@@ -1245,6 +1255,7 @@ export function Roster({ channel, mayModerate: standing, reserve = false, roster
             {o.principal === viewer ? null : <VolumeTag volume={volumes.get(o.principal)} />}
           </li>
         ))}
+        {unlisted ? placeholder : null}
       </ul>
       {kick === null || channel === undefined || !mayModerate ? null : <ModerationConfirm key={kick.id} op="kickVoice" channel={channel} id={kick.id} name={kick.name} onClose={() => { setKick(null); kickOpener.current?.focus(); }} />}
       {more > 0 ? (

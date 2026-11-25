@@ -3021,7 +3021,8 @@ label {
 
 /* Nothing yet, in voice: the height of one row of chips, unseen, so the
    page's own chip arriving a moment after the join moves nothing (#2202). */
-.voice-who.reserved {
+.voice-who.reserved,
+.voice-roster li.reserved {
   visibility: hidden;
 }
 

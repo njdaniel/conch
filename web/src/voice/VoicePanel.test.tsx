@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ChannelV0 } from '../schema/channel';
 import type { VoicePresenceV2 } from '../schema/voice';
 import type { Person } from '../useLiveChannel';
+import type { Occupant } from './presence';
 import { initialVoice, VoiceClient, type Phase, type Processing, type VoiceState } from './connection';
 import { FakeClock } from './fakes';
 import { ownPageNote, soundNote, type ShareFeatures, type ShareQuality } from './share';
@@ -16,7 +17,7 @@ import { useState } from 'react';
 import { MicTestShown, VoiceLive, VoiceSheet, VoiceStrip } from '../phone';
 import { StageHost } from '../stage';
 import type { Snapshot, VoiceControl } from './useVoice';
-import { followsNote, hearLabel, meterNote, meterStripNote, missingNote, noOtherOutputs, noOutputChoice, processingLabel, processingOffNote, processingUseNote, reportedNote, stoppedFor, thresholdHint, VoicePanel } from './VoicePanel';
+import { followsNote, hearLabel, meterNote, meterStripNote, missingNote, noOtherOutputs, noOutputChoice, processingLabel, processingOffNote, processingUseNote, reportedNote, stoppedFor, thresholdHint, Roster, VoicePanel } from './VoicePanel';
 
 const chrome: ShareFeatures = { canShare: true, chromium: true, platform: 'linux' };
 const presence: VoicePresenceV2 = { schema: 'conch.voice_presence.v2', channel_id: 1, configured: true, available: true, rooms: [] };
@@ -564,13 +565,49 @@ describe('the strip in voice', () => {
     Array.from(voice.querySelectorAll('.voice-bar, .voice-bar *')).map((el) => `${el.tagName}.${el.getAttribute('class') ?? ''}`);
 
   // Issue #2202: the page's own chip arrives with a presence snapshot a moment
-  // after the join; the room for it is there before, and hidden from everyone.
+  // after the join; the room for it, in the real chip's markup, is there before.
   it('holds the height of the roster, unseen, before the first chip arrives', () => {
     const { voice } = panel(joined(false), 'c', { kind: 'presence', presence });
     const bar = voice.querySelector('.voice-bar');
     expect(Array.from(bar?.children ?? []).map((el) => el.className)).toEqual(['voice-who reserved', 'voice-row']);
     expect(bar?.querySelector('.voice-who')?.getAttribute('aria-hidden')).toBe('true');
     expect(within(voice).queryByRole('heading', { name: /in voice$/ })).toBeNull();
+  });
+
+  describe('the own chip held before presence lists the viewer', () => {
+    const people: ReadonlyMap<number, Person> = new Map([[3, { name: 'Ana' } as Person], [7, { name: 'Bartholomew' } as Person]]);
+    const drawn = (roster: readonly Occupant[], mayModerate: boolean) => {
+      const r = render(<Roster channel="c" mayModerate={mayModerate} reserve roster={roster} people={people} viewer={3} viewerName="Ana" elsewhere={false} speaking={new Set()} volumes={new Map()} />);
+      return r.container;
+    };
+    const other: Occupant = { principal: 7, transmitting: false, camera: false, sharing: false, sharingAudio: false, joinedAt: '2026-10-18T00:00:00Z' };
+    const own: Occupant = { ...other, principal: 3 };
+
+    it('carries the moderation button when the viewer may moderate, hidden and inert', () => {
+      const chip = drawn([], true).querySelector('li.reserved');
+      expect(chip?.getAttribute('aria-hidden')).toBe('true');
+      expect(chip?.hasAttribute('inert')).toBe(true);
+      expect(chip?.textContent).toBe('AnaRemove from voice');
+      expect(chip?.querySelector('button')?.tabIndex).toBe(-1);
+      expect(screen.queryByRole('button', { name: /Remove/ })).toBeNull();
+    });
+
+    it('has no button for a viewer who may not moderate', () => {
+      expect(drawn([], false).querySelector('li.reserved button')).toBeNull();
+    });
+
+    it('follows the listed people, so the row wraps before the chip arrives', () => {
+      const chips = Array.from(drawn([other], true).querySelectorAll('li'));
+      expect(chips).toHaveLength(2);
+      expect(chips[1]?.classList.contains('reserved')).toBe(true);
+    });
+
+    it('is replaced by the real chip when presence lists the viewer', () => {
+      const container = drawn([other, own], true);
+      expect(container.querySelectorAll('li.reserved')).toHaveLength(0);
+      expect(container.querySelectorAll('li')).toHaveLength(2);
+      expect(screen.getByRole('button', { name: 'Remove Ana from voice' })).toBeTruthy();
+    });
   });
 
   it('is the roster, then a row of the state and the controls, with Leave voice last', () => {
