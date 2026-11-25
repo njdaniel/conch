@@ -67,6 +67,89 @@ test.describe('the share quality menu', { tag: '@voice' }, () => {
     });
   }
 
+  // #2194: choosing an option never moves the options under the pointer. Opening
+  // upward (1440×900) pins the menu's bottom edge, so any change of its height
+  // would shift every option.
+  const stable = [
+    { name: '1440×900 browser, opening upward', member: 'alice', context: { viewport: { width: 1440, height: 900 } } },
+    { name: '390×844 phone, opening downward', member: 'bob', context: phones[0][1] },
+  ] as const satisfies readonly { name: string; member: 'alice' | 'bob'; context: BrowserContextOptions }[];
+
+  for (const { name, member, context } of stable) {
+    test(`P2194 choosing an option does not move the menu at ${name}`, async ({ browser }) => {
+      if (vw === undefined) throw new Error('no voice world');
+      const person = await enter(browser, vw, vw[member], { context });
+      try {
+        const { page } = person;
+        await joinVoice(person, 'Join voice');
+        const voice = page.getByRole('region', { name: 'Voice' });
+        const menu = voice.getByRole('menu', { name: 'Share quality' });
+        await voice.getByRole('button', { name: 'Share quality' }).click();
+        const items = menu.getByRole('menuitemradio');
+        const count = await items.count();
+        const boxes = async () => {
+          const all: { x: number; y: number; width: number; height: number }[] = [];
+          for (let i = 0; i < count; i++) {
+            const item = items.nth(i);
+            await item.scrollIntoViewIfNeeded();
+            const box = await item.boundingBox();
+            if (box === null) throw new Error('every option must have a box');
+            all.push(box);
+          }
+          return all;
+        };
+        const choose = async (option: string | RegExp) => { await menu.getByRole('menuitemradio', { name: option }).first().click(); };
+        const same = async (before: Awaited<ReturnType<typeof boxes>>, why: string) => {
+          const after = await boxes();
+          for (const [i, b] of before.entries()) {
+            for (const k of ['x', 'y', 'width', 'height'] as const) {
+              expect(Math.abs((after[i]?.[k] ?? Number.NaN) - b[k]), `${why}: option ${String(i)} ${k}`).toBeLessThanOrEqual(0.5);
+            }
+          }
+        };
+
+        await choose(/^1080p/);
+        await choose('30 fps');
+        // Scrolling a phone's menu changes where the boxes are, so measure at the top.
+        await menu.evaluate((el) => { el.scrollTop = 0; });
+        const before = await boxes();
+
+        await choose(/^Auto/);
+        await expect(menu.getByRole('menuitemradio', { name: /^Auto/ })).toBeChecked();
+        await menu.evaluate((el) => { el.scrollTop = 0; });
+        await same(before, 'entering Auto');
+
+        await choose(/^1080p/);
+        await menu.evaluate((el) => { el.scrollTop = 0; });
+        await same(before, 'leaving Auto');
+
+        await choose(/^Source/);
+        await choose('60 fps');
+        await expect(menu.getByText(/Source at 60 fps is 4K/)).toBeVisible();
+        await menu.evaluate((el) => { el.scrollTop = 0; });
+        await same(before, 'Source at 60 fps');
+
+        // A second click 150 ms after the first lands on Auto again, not on what
+        // moved under the pointer.
+        // Real mouse clicks at one fixed point, as a hand does; a locator click
+        // would wait for the option to settle and follow it.
+        await choose(/^1080p/);
+        await menu.evaluate((el) => { el.scrollTop = 0; });
+        const auto = menu.getByRole('menuitemradio', { name: /^Auto/ });
+        const at = await auto.boundingBox();
+        if (at === null) throw new Error('Auto must have a box');
+        const x = at.x + at.width / 2;
+        const y = at.y + at.height / 2;
+        await page.mouse.click(x, y);
+        await page.waitForTimeout(150);
+        await page.mouse.click(x, y);
+        await expect(auto).toBeChecked();
+      } finally {
+        await person.close();
+      }
+    });
+  }
+
   test('P2188 a short phone menu scrolls by mouse and keyboard', async ({ browser }) => {
     if (vw === undefined) throw new Error('no voice world');
     const context = { ...phones[0][1], viewport: { width: 390, height: 420 } };

@@ -3151,7 +3151,25 @@ label {
 .share-chooser-menu button[aria-checked='true'] {
   border-color: var(--accent);
   color: var(--accent);
-  font-weight: 600;
+  /* Not font-weight: bold text is wider, so choosing Source wrapped its row and
+     grew the menu under the pointer (#2194). A shadow thickens the strokes at
+     the same width. */
+  text-shadow: 0.4px 0 0 currentColor;
+}
+
+.share-chooser-menu .share-chooser-notes {
+  display: grid;
+}
+
+/* The Auto note and the caution share one cell, so the slot keeps the height of
+   the longer text whichever applies (#2194). */
+.share-chooser-menu .share-chooser-notes > p {
+  grid-area: 1 / 1;
+  margin: 0;
+}
+
+.share-chooser-menu .share-chooser-notes > p[aria-hidden='true'] {
+  visibility: hidden;
 }
 
 .share-chooser-menu .item-hint {

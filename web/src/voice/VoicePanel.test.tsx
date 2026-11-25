@@ -10,7 +10,7 @@ import type { Person } from '../useLiveChannel';
 import { initialVoice, VoiceClient, type Phase, type Processing, type VoiceState } from './connection';
 import { FakeClock } from './fakes';
 import { ownPageNote, soundNote, type ShareFeatures, type ShareQuality } from './share';
-import { ShareQualityMenu, sourceSixtyNote } from './ShareQualityMenu';
+import { ShareQualityMenu, autoNote, sourceSixtyNote } from './ShareQualityMenu';
 import { useState } from 'react';
 import { MicTestShown, VoiceLive, VoiceSheet, VoiceStrip } from '../phone';
 import type { Snapshot, VoiceControl } from './useVoice';
@@ -2308,7 +2308,7 @@ describe('the share quality menu', () => {
     fireEvent.click(screen.getByRole('menuitemradio', { name: '60 fps' }));
     expect(chosen()).toBe('source/60');
     expect(screen.getByRole('menuitemradio', { name: /^Source/ }).getAttribute('aria-checked')).toBe('true');
-    expect(screen.getByText(sourceSixtyNote)).toBeTruthy();
+    expect(screen.getByText(sourceSixtyNote).getAttribute('aria-hidden')).toBeNull();
   });
 
   it.each([
@@ -2318,7 +2318,25 @@ describe('the share quality menu', () => {
   ] as const)('says the 4K60 caution only for $what', ({ start, shown }) => {
     render(<Harness start={start} />);
     fireEvent.click(opener());
-    expect(screen.queryByText(sourceSixtyNote) !== null).toBe(shown);
+    expect(screen.getByText(sourceSixtyNote).hasAttribute('aria-hidden')).toBe(!shown);
+  });
+
+  // #2194: the menu never changes size on a choice, so the note slot is always
+  // laid out, holds both texts, and announces only the one that applies.
+  it.each([
+    { what: 'Auto', start: { resolution: 'auto', frameRate: 30 }, live: autoNote, inactive: sourceSixtyNote },
+    { what: 'Source at 60 fps', start: { resolution: 'source', frameRate: 60 }, live: sourceSixtyNote, inactive: autoNote },
+    { what: '1080p', start: { resolution: '1080p', frameRate: 30 }, live: null, inactive: null },
+  ] as const)('keeps the note slot in $what, announcing only the live text', ({ start, live, inactive }) => {
+    render(<Harness start={start} />);
+    fireEvent.click(opener());
+    const slot = screen.getByRole('menu', { name: 'Share quality' }).querySelector('.share-chooser-notes');
+    if (slot === null) throw new Error('the note slot must be present');
+    expect(slot.getAttribute('role')).toBe('status');
+    const hidden = Array.from(slot.querySelectorAll('p')).filter((p) => p.getAttribute('aria-hidden') === 'true').map((p) => p.textContent);
+    const shown = Array.from(slot.querySelectorAll('p')).filter((p) => !p.hasAttribute('aria-hidden')).map((p) => p.textContent);
+    expect(shown).toEqual(live === null ? [] : [live]);
+    expect(hidden).toEqual(live === null ? [autoNote, sourceSixtyNote] : [inactive]);
   });
 
   it('Auto is 30 fps: the frame rates are off and the choice says what Auto does', () => {
