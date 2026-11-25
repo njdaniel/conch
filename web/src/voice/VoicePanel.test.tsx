@@ -583,11 +583,10 @@ describe('the strip in voice', () => {
     const other: Occupant = { principal: 7, transmitting: false, camera: false, sharing: false, sharingAudio: false, joinedAt: '2026-10-18T00:00:00Z' };
     const own: Occupant = { ...other, principal: 3 };
 
-    it('carries the moderation button when the viewer may moderate, hidden, and not inert (the page counts inert as modal state)', () => {
+    it('carries the moderation button when the viewer may moderate, hidden and inert', () => {
       const chip = drawn([], true).querySelector('li.reserved');
       expect(chip?.getAttribute('aria-hidden')).toBe('true');
-      expect(chip?.hasAttribute('inert')).toBe(false);
-      expect(chip?.closest('[inert]')).toBeNull();
+      expect(chip?.hasAttribute('inert')).toBe(true);
       expect(chip?.textContent).toBe('AnaRemove from voice');
       expect(chip?.querySelector('button')?.tabIndex).toBe(-1);
       expect(screen.queryByRole('button', { name: /Remove/ })).toBeNull();

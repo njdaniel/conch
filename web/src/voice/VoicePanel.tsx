@@ -1228,15 +1228,14 @@ export function Roster({ channel, mayModerate: standing, reserve = false, roster
   const capped = more > 0 && !all;
   const kept = shownOnPhone(roster, viewer);
   // The page's own chip, before presence lists it (issue #2202): the real
-  // chip's markup, name and moderation button included, unseen (visibility:
-  // hidden, so nothing in it takes focus or a press) and hidden from assistive
-  // technology, in the slot where the real one will
+  // chip's markup, name and moderation button included, unseen, inert and
+  // hidden from assistive technology, in the slot where the real one will
   // sort (by principal, as the roster is), so the row wraps now and not a
   // moment after the join.
   const unlisted = reserve && !roster.some((o) => o.principal === viewer);
   const ownName = nameOf(people, viewer, viewer, false, viewerName);
   const placeholder = (
-    <li key="held" className="me reserved" aria-hidden="true">
+    <li key="held" className="me reserved" aria-hidden="true" inert>
       <span className="face"><Avatar id={viewer} name={ownName} /></span>
       <span className="who">{nameOf(people, viewer, viewer, elsewhere, viewerName)}</span>
       <IdentityMarks kind={people.get(viewer)?.kind} only={['agent']} />
@@ -1247,7 +1246,7 @@ export function Roster({ channel, mayModerate: standing, reserve = false, roster
   const heldAt = slot < 0 ? roster.length : slot;
   if (roster.length === 0 && kick === null) {
     return unlisted ? (
-      <div className="voice-who reserved" aria-hidden="true">
+      <div className="voice-who reserved" aria-hidden="true" inert>
         <span className="voice-count">1 in voice</span>
         <ul className="voice-roster">{placeholder}</ul>
       </div>
