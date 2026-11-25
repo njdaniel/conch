@@ -8,6 +8,8 @@
 // phone a row appeared above them a moment after Join voice and pushed them
 // down by about 44 px. From the first in-voice frame the boxes of Share
 // quality, Voice options and Leave voice stay put.
+// Watching beside your voice on another device keeps the whole row in place
+// while the connection confirms the viewer's listen-only grant (issue #2210).
 import type { BrowserContextOptions, Page } from '@playwright/test';
 import { expect, phones, showView, test } from './fixtures';
 import { enter, joinVoice, leaveVoice, type Someone } from './people';
@@ -17,7 +19,7 @@ import { loadWorld } from './world';
 // who: a plain member alone in the room; a manager alone, whose chip also
 // carries Remove from voice (44 px tall on a phone); a member joining a room
 // where two people with long names are already in voice, so that their own
-// chip wraps to a second row.
+// chip wraps to a second row; or a viewer beside their own voice on another page.
 const layouts = [
   { name: '1440×900 browser', who: 'member', context: { viewport: { width: 1440, height: 900 } } },
   { name: '1215×900 browser', who: 'member', context: { viewport: { width: 1215, height: 900 } } },
@@ -36,12 +38,15 @@ const layouts = [
   // differ in width, so a held chip in another slot wraps the row differently.
   { name: '390×844 phone, joining two people with names of 18 and 21 characters', who: 'crowd', names: ['Abcdefghijklmnop', 'Ghijklmnopqrstuvwxy'], context: phones[0][1] },
   { name: '360×740 phone, joining two people with names of 18 and 21 characters', who: 'crowd', names: ['Abcdefghijklmnop', 'Ghijklmnopqrstuvwxy'], context: phones[1][1] },
-] as const satisfies readonly { name: string; who: 'member' | 'manager' | 'crowd'; mode?: 'unchosen'; names?: readonly string[]; context: BrowserContextOptions }[];
+  { name: '390×844 phone with Watch only beside your own voice', who: 'viewer', context: phones[0][1] },
+] as const satisfies readonly { name: string; who: 'member' | 'manager' | 'crowd' | 'viewer'; mode?: 'unchosen'; names?: readonly string[]; context: BrowserContextOptions }[];
 
 // Counts the people made for the crowd, so that no name repeats.
 let crowds = 0;
 
 const controls = ['Share quality', 'Voice options', 'Leave voice'] as const;
+const viewerControls = ['Hold to talk', 'Open mic', 'Mute', 'Deafen', 'Voice options', 'Leave voice'] as const;
+type JoinSample = { t: number; mark: boolean; boxes: Boxes };
 
 test.describe('the voice strip', { tag: '@voice' }, () => {
   let vw: VoiceWorld | undefined;
@@ -58,7 +63,7 @@ test.describe('the voice strip', { tag: '@voice' }, () => {
   test.afterAll(() => { vw?.stop(); });
 
   for (const { name, who, context, ...rest } of layouts) {
-    test(`P2202 the controls do not move after joining at ${name}`, async ({ browser }) => {
+    test(`${who === 'viewer' ? 'P2210' : 'P2202'} the controls do not move after joining at ${name}`, async ({ browser }) => {
       if (vw === undefined) throw new Error('no voice world');
       // Someone of their own each time, so nobody from an earlier case is
       // still listed in voice when they join.
@@ -71,9 +76,14 @@ test.describe('the voice strip', { tag: '@voice' }, () => {
         const { page } = person;
         await showView(page, 'Voice');
         const voice = page.getByRole('region', { name: 'Voice' });
-        const join = voice.getByRole('button', { name: 'Join voice' });
+        const join = voice.getByRole('button', { name: who === 'viewer' ? 'Watch only' : 'Join voice' });
         await expect(join).toBeEnabled({ timeout: 30_000 });
-        if (who === 'crowd') {
+        if (who === 'viewer') {
+          const other = await enter(browser, vw, me, { context: { viewport: { width: 1440, height: 900 } } });
+          others.push(other);
+          await joinVoice(other, 'Join voice');
+          await expect(voice).toContainText('You are in voice on another device.', { timeout: 30_000 });
+        } else if (who === 'crowd') {
           for (const n of 'names' in rest ? rest.names : ['Abcdef', 'Ghijkl']) {
             // Eight characters each unless the case says otherwise, and not a name of an earlier case.
             const m = await vw.addMember(`${n}${String(++crowds).padStart(2, '0')}`);
@@ -88,40 +98,46 @@ test.describe('the voice strip', { tag: '@voice' }, () => {
         }
         // Watch from inside the page, so the first frame with the controls is
         // read in the same task that added them.
+        const labels = who === 'viewer' ? viewerControls : controls;
         await page.evaluate((labels) => {
-          const w = window as unknown as { __strip: { t: number; mark: boolean; boxes: Record<string, number[] | null> }[] };
+          const w = window as unknown as { __strip: JoinSample[] };
           w.__strip = [];
           const read = () => {
-            const region = document.querySelector('section[aria-label="Voice"]');
-            const boxes: Record<string, number[] | null> = {};
+            const row = document.querySelector('section[aria-label="Voice"] .voice-controls');
+            const buttons = Array.from(row?.querySelectorAll('button') ?? []);
+            const boxes: Boxes = {};
             for (const l of labels) {
-              const el = Array.from(region?.querySelectorAll('button') ?? []).find((b) => b.getAttribute('aria-label') === l || b.textContent.trim() === l);
-              const r = el?.getBoundingClientRect();
+              const el = buttons.find((b) => b.getAttribute('aria-label') === l || b.textContent.trim() === l);
+              const r = el === undefined || getComputedStyle(el).visibility !== 'visible' ? undefined : el.getBoundingClientRect();
               boxes[l] = r === undefined ? null : [r.left, r.top, r.width, r.height];
             }
             return boxes;
           };
-          const t0 = performance.now();
-          let started = false;
+          let started: number | undefined;
           const note = () => {
             const boxes = read();
-            if (!started && Object.values(boxes).some((b) => b === null)) return;
-            started = true;
-            w.__strip.push({ t: performance.now() - t0, mark: document.querySelector('.voice-roster .state') !== null, boxes });
+            if (started === undefined && boxes['Leave voice'] == null) return;
+            const now = performance.now();
+            started ??= now;
+            w.__strip.push({ t: now - started, mark: document.querySelector('.voice-roster .state') !== null, boxes });
           };
           new MutationObserver(note).observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true });
           setInterval(note, 50);
-        }, [...controls]);
+        }, [...labels]);
         await join.click();
         await expect(voice.getByRole('button', { name: 'Leave voice' })).toBeVisible({ timeout: 30_000 });
-        await page.waitForTimeout(3_000);
-        const samples = await page.evaluate(() => (window as unknown as { __strip: { t: number; mark: boolean; boxes: Record<string, number[] | null> }[] }).__strip);
+        if (who === 'viewer') {
+          await expect(voice.locator('.voice-phase')).toHaveText(`Connected in #${vw.channel}`, { timeout: 30_000 });
+          await expect(voice.locator('.voice-sub')).toContainText('Watching beside your voice on another device.');
+        }
+        await page.waitForFunction(() => ((window as unknown as { __strip: JoinSample[] }).__strip.at(-1)?.t ?? 0) >= 3_000);
+        const samples = await page.evaluate(() => (window as unknown as { __strip: JoinSample[] }).__strip);
         const first = samples[0];
         if (first === undefined) throw new Error('the controls never appeared');
         // In the open microphone the viewer's own sending mark must have shown,
         // or the case proves nothing about it.
         if ('mode' in rest) expect(samples.some((s) => s.mark), 'the viewer\'s sending or speaking mark never showed').toBe(true);
-        for (const label of controls) {
+        for (const label of labels) {
           const want = first.boxes[label];
           if (want === null || want === undefined) throw new Error(`${label} was not there in the first frame`);
           for (const s of samples) {
