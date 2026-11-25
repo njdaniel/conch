@@ -333,5 +333,5 @@ export const rosterChip = (list: Locator, name: string): Locator => {
   return list
     .getByRole('listitem')
     .filter({ has: list.page().locator('.who', { hasText: exact }) })
-    .filter({ has: list.page().locator('.tag', { hasText: /\b(sending|speaking)\b/ }) });
+    .filter({ has: list.page().locator('.said', { hasText: /\b(sending|speaking)\b/ }) });
 };

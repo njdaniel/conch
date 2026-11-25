@@ -3086,6 +3086,32 @@ label {
   color: var(--accent);
 }
 
+/* A chip's sending or speaking mark: a dot on the corner of its avatar's own box, out of
+   the chip's flow, so the chip is the same size with it and without it (#2211).
+   Open for sending, filled for speaking; the word is its visually hidden text. */
+.voice-roster .face {
+  position: relative;
+  display: inline-grid;
+  flex: none;
+}
+
+.voice-roster .state {
+  position: absolute;
+  right: -0.15rem;
+  bottom: -0.05rem;
+  pointer-events: none;
+  box-sizing: border-box;
+  width: 0.55rem;
+  height: 0.55rem;
+  background: var(--surface);
+  border: 2px solid var(--accent);
+  border-radius: 50%;
+}
+
+.voice-roster .state.speaking {
+  background: var(--accent);
+}
+
 .voice-controls {
   display: flex;
   flex: none;
@@ -5358,6 +5384,7 @@ button.link {
   .lobby.phone.view-voice .voice-who:has(> .voice-roster.capped),
   .lobby.phone.view-voice .voice-roster.capped {
     flex-wrap: wrap;
+    gap: var(--s2);
     overflow: visible;
   }
 
