@@ -252,27 +252,42 @@ test.describe('the share quality menu', { tag: '@voice' }, () => {
         }
         return { best, strong, colours: sorted.length };
       };
-      const readable = async (what: string, target: ReturnType<typeof row>, mark: boolean) => {
+      // Each clip is the glyph's or text's own box, not the row: a clip that
+      // reaches the row's fill would count the Canvas backplates forced colors
+      // paints behind blank text as ink.
+      const readable = async (what: string, target: ReturnType<typeof row>, opts: { mark?: boolean; hint?: boolean; minContrast?: number } = {}) => {
+        // Dimmed text (a disabled row, as on main) only has to reach 3:1.
+        const min = opts.minContrast ?? 4.5;
         const parts = await target.evaluate((el) => {
+          const box = (e: Element | null) => {
+            const r = e?.getBoundingClientRect();
+            return r === undefined ? null : { x: Math.ceil(r.left) + 1, y: Math.ceil(r.top) + 3, width: Math.floor(r.width) - 2, height: Math.floor(r.height) - 6 };
+          };
           const r = el.getBoundingClientRect();
-          const label = el.querySelector('.item-text')?.getBoundingClientRect();
-          return { row: { x: r.left, y: r.top, right: r.right, height: r.height }, labelLeft: label?.left ?? r.left };
+          const m = getComputedStyle(el, '::before');
+          return {
+            label: box(el.querySelector('.item-text')),
+            hint: box(el.querySelector('.item-hint')),
+            mark: { x: Math.floor(r.left + el.clientLeft + Number.parseFloat(m.insetInlineStart)), y: Math.floor(r.top + r.height / 2 - 9), width: Math.ceil(Number.parseFloat(m.width)), height: 18 },
+          };
         });
-        const text = await inkOf({ x: parts.labelLeft, y: parts.row.y + 4, width: parts.row.right - parts.labelLeft - 4, height: parts.row.height - 8 });
-        expect(text.colours, `${what}: label shows more than one colour`).toBeGreaterThanOrEqual(2);
-        expect(text.best, `${what}: label contrast`).toBeGreaterThanOrEqual(4.5);
-        expect(text.strong, `${what}: label ink pixels`).toBeGreaterThan(8);
-        if (mark) {
-          const ticks = await inkOf({ x: parts.row.x + 8, y: parts.row.y + 6, width: 18, height: parts.row.height - 12 });
-          expect(ticks.strong, `${what}: checkmark ink pixels`).toBeGreaterThan(5);
-        }
+        const check = async (part: string, clip: { x: number; y: number; width: number; height: number } | null) => {
+          if (clip === null) throw new Error(`${what}: no ${part} box`);
+          const text = await inkOf(clip);
+          expect(text.colours, `${what}: ${part} shows more than one colour`).toBeGreaterThanOrEqual(2);
+          expect(text.best, `${what}: ${part} contrast`).toBeGreaterThanOrEqual(min);
+          expect(text.strong, `${what}: ${part} ink pixels`).toBeGreaterThan(opts.mark === true && part === 'checkmark' ? 5 : 8);
+        };
+        await check('label', parts.label);
+        if (opts.hint === true) await check('estimate', parts.hint);
+        if (opts.mark === true) await check('checkmark', parts.mark);
       };
       await row(/^1080p/).click();
       await row('30 fps').click();
       await row(/^1080p/).hover();
-      await readable('hovered checked row', row(/^1080p/), true);
+      await readable('hovered checked row', row(/^1080p/), { mark: true, hint: true });
       await row(/^720p/).hover();
-      await readable('hovered unchecked row', row(/^720p/), false);
+      await readable('hovered unchecked row', row(/^720p/), { hint: true });
       await page.mouse.move(0, 0);
       await page.keyboard.press('Escape');
       await expect(menu).toBeHidden();
@@ -283,10 +298,10 @@ test.describe('the share quality menu', { tag: '@voice' }, () => {
       const focused = menu.locator('[role^="menuitem"]:focus');
       await expect(focused).toHaveCount(1);
       await page.mouse.move(0, 0);
-      await readable('keyboard-focused row', focused, false);
+      await readable('keyboard-focused row', focused, { hint: true });
       await row(/^Auto/).click();
       await row('15 fps').hover({ force: true });
-      await readable('hovered disabled frame rate in Auto', row('15 fps'), false);
+      await readable('hovered disabled frame rate in Auto', row('15 fps'), { minContrast: 3 });
     } finally {
       await person.close();
     }
