@@ -279,7 +279,10 @@ test.describe('Voice options', () => {
       await page.keyboard.press('Escape');
       await expect(panel).toBeHidden();
       await expect(button).toBeFocused();
-      expect(await watched.evaluate((el) => el.closest('[inert]') !== null), 'the watched share is reachable again').toBe(false);
+      // The sheet tells the lobby it has closed from an effect, so the page
+      // behind it loses inert a task after the panel hides (issue #2203):
+      // poll rather than read it once.
+      await expect.poll(() => watched.evaluate((el) => el.closest('[inert]') !== null), { message: 'the watched share is reachable again' }).toBe(false);
       await page.keyboard.press('Tab');
       await expect(leave).toBeFocused();
     } finally {
