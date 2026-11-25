@@ -4,8 +4,9 @@
 // Show a device choice only when needed. The device-access instructions
 // explain what a read grant exposes before showing the user any rule.
 //
-// Capture: listeners exist only while choosing a key. Escape closes setup and
-// Cancel stops the capture. During a save, Close and Escape wait for the result.
+// Capture: focus starts on the prompt. Enter and Space still activate a
+// focused button. Escape closes setup, and Tab or Cancel stops capture.
+// During a save, Close and Escape wait for the result.
 // The event's code is turned at once into an evdev number and a name; the
 // event itself is not kept, logged or passed on. Only the number and the name
 // outlive the capture. Rule text is rendered as text and copied with
@@ -154,6 +155,8 @@ export function TalkKeySetup({
   const heading = useId();
   const saveStatus = useId();
   const setup = useRef<HTMLDivElement>(null);
+  const capturePrompt = useRef<HTMLParagraphElement>(null);
+  const captureButton = useRef<HTMLButtonElement>(null);
   const saveButton = useRef<HTMLButtonElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
   const handledOpen = useRef<number | null>(null);
@@ -168,7 +171,8 @@ export function TalkKeySetup({
     handledOpen.current = openRequest;
     const active = document.activeElement;
     if (windows && !opened && active !== null && active !== document.body && !root.contains(active)) return;
-    const target = root.querySelector<HTMLElement>('button:not(:disabled, [aria-disabled="true"]), select:not(:disabled), input:not(:disabled)')
+    const target = capturePrompt.current
+      ?? root.querySelector<HTMLElement>('button:not(:disabled, [aria-disabled="true"]), select:not(:disabled), input:not(:disabled)')
       ?? root.querySelector<HTMLElement>('h3');
     target?.focus();
   }, [openRequest, windows]);
@@ -203,6 +207,8 @@ export function TalkKeySetup({
     let pendingShift: string | null = null;
     const take = (next: EvdevKey) => {
       pendingShift = null;
+      // Keep focus in setup when choosing a binding removes the prompt.
+      if (document.activeElement === capturePrompt.current) captureButton.current?.focus();
       setKey(next);
       setRefused(false);
       setCapturing(false);
@@ -219,6 +225,10 @@ export function TalkKeySetup({
       if (e.code === 'Tab' || e.target instanceof HTMLSelectElement) {
         pendingShift = null;
         setCapturing(false);
+        return;
+      }
+      if ((e.key === 'Enter' || e.key === ' ') && document.activeElement instanceof HTMLButtonElement) {
+        pendingShift = null;
         return;
       }
       e.preventDefault();
@@ -261,6 +271,10 @@ export function TalkKeySetup({
       window.removeEventListener('mousedown', onMouse, true);
     };
   }, [canCapture, onClose]);
+
+  useLayoutEffect(() => {
+    if (canCapture) capturePrompt.current?.focus();
+  }, [canCapture]);
 
   const devices = listing !== null && listing.ok ? listing.devices : [];
   const matching = devices.filter((d) => d.kind === key?.kind);
@@ -333,8 +347,8 @@ export function TalkKeySetup({
             <p>
               {title}: <strong>{key === null ? 'none chosen' : <bdi>{key.label}</bdi>}</strong>
             </p>
-            {capturing ? <p role="status">Press the key or Mouse 4 now. Escape closes setup.</p> : null}
-            <button type="button" disabled={saving} onClick={() => {
+            {capturing ? <p ref={capturePrompt} role="status" tabIndex={-1}>Press the key you want to bind, or press Mouse 4. Escape closes setup.</p> : null}
+            <button ref={captureButton} type="button" disabled={saving} onClick={() => {
               setRefused(false);
               setCapturing(!capturing);
             }}>{capturing ? 'Cancel' : `Set ${binding} key`}</button>

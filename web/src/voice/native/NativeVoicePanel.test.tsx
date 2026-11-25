@@ -972,9 +972,11 @@ describe('NativeVoicePanel', () => {
   });
 });
 
-function activate(button: HTMLElement) {
+function activate(button: HTMLElement, code: 'Enter' | 'Space' = 'Enter') {
   button.focus();
-  fireEvent.keyDown(button, { key: 'Enter', code: 'Enter' });
+  const key = code === 'Space' ? ' ' : 'Enter';
+  if (!fireEvent.keyDown(button, { key, code })) return;
+  if (code === 'Space' && !fireEvent.keyUp(button, { key, code })) return;
   // jsdom does not synthesize the click from a button's keyboard activation.
   fireEvent.click(button, { detail: 0 });
 }
@@ -1023,6 +1025,26 @@ describe.each(['talk', 'mute'] as const)('%s key setup focus (#2220)', (binding)
     expect(saveTalkBinding).toHaveBeenCalledTimes(1);
     expect(setup.isConnected).toBe(false);
     expect(screen.getByText(/Saved: .*F13/)).toBeTruthy();
+  });
+
+  it.each(['linux', 'win32'] as const)('preserves chat focus when a pending %s save succeeds', async (platform) => {
+    const { saveTalkBinding } = open(true, platform);
+    render(<input aria-label="Chat message" />);
+    let resolve!: (result: VoiceTalkBindingResult) => void;
+    saveTalkBinding.mockReturnValueOnce(new Promise((done) => { resolve = done; }));
+    const picker = await screen.findByRole('combobox', { name: 'Or pick one' });
+    const setup = screen.getByRole('region', { name: binding === 'talk' ? 'Talk key' : 'Mute key' });
+    fireEvent.change(picker, { target: { value: 'F12' } });
+    activate(within(setup).getByRole('button', { name: 'Save' }));
+    expect(within(setup).getByText('Saving…')).toBeTruthy();
+
+    const chat = screen.getByRole('textbox', { name: 'Chat message' });
+    chat.focus();
+    fireEvent.change(chat, { target: { value: 'hello' } });
+    resolve({ ok: true });
+    expect(await screen.findByText(/Saved: .*F12/)).toBeTruthy();
+    expect(setup.isConnected).toBe(false);
+    expect(document.activeElement).toBe(chat);
   });
 
   it.each(['linux', 'win32'] as const)('keeps %s setup focused and open until a rejected save settles', async (platform) => {
@@ -1074,20 +1096,43 @@ describe.each(['talk', 'mute'] as const)('%s key setup focus (#2220)', (binding)
     expect(picker.value).toBe('F13');
   });
 
-  it.each(['cancel', 'Escape'])('restores the toggle after %s', async (action) => {
+  it.each(['Close after Tab', 'Escape'])('restores the toggle after %s', async (action) => {
     const { setup, toggle, saveTalkBinding } = open();
     const close = within(setup).getByRole('button', { name: 'Close' });
     await within(setup).findByRole('combobox');
     close.focus();
     if (action === 'Escape') fireEvent.keyDown(close, { key: 'Escape' });
     else {
-      // Tab has left automatic key capture, so Enter acts on Close.
       fireEvent.keyDown(close, { key: 'Tab', code: 'Tab' });
       activate(close);
     }
     expect(document.activeElement).toBe(toggle);
     expect(setup.isConnected).toBe(false);
     expect(saveTalkBinding).not.toHaveBeenCalled();
+  });
+
+  it.each(['Enter', 'Space'] as const)('%s activates focused Close during capture without binding a key', async (key) => {
+    const { setup, toggle, saveTalkBinding } = open();
+    const picker = await within(setup).findByRole<HTMLSelectElement>('combobox');
+    expect(within(setup).getByRole('button', { name: 'Cancel' })).toBeTruthy();
+    const close = within(setup).getByRole('button', { name: 'Close' });
+    activate(close, key);
+    expect(setup.isConnected).toBe(false);
+    expect(document.activeElement).toBe(toggle);
+    expect(picker.value).toBe('');
+    expect(saveTalkBinding).not.toHaveBeenCalled();
+  });
+
+  it.each(['Close', 'Escape'])('preserves chat focus when %s dismisses capture', async (action) => {
+    const { setup } = open();
+    render(<input aria-label="Chat message" />);
+    await within(setup).findByText(/Press the key/);
+    const chat = screen.getByRole('textbox', { name: 'Chat message' });
+    chat.focus();
+    if (action === 'Escape') fireEvent.keyDown(chat, { key: 'Escape', code: 'Escape' });
+    else fireEvent.click(within(setup).getByRole('button', { name: 'Close' }));
+    expect(setup.isConnected).toBe(false);
+    expect(document.activeElement).toBe(chat);
   });
 
   if (binding === 'talk') {

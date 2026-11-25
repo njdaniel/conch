@@ -29,7 +29,7 @@ async function open(f = fake(), joined = false) {
   const onSaved = vi.fn();
   const onClose = vi.fn();
   render(<TalkKeySetup source={f.nv} joined={joined} onSaved={onSaved} onClose={onClose} />);
-  await screen.findByText(/Press the key or Mouse 4 now/);
+  await screen.findByText(/Press the key/);
   return { ...f, onSaved, onClose };
 }
 const press = (code: string) => { fireEvent.keyDown(window, { code }); };
@@ -37,6 +37,14 @@ const press = (code: string) => { fireEvent.keyDown(window, { code }); };
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe('TalkKeySetup', () => {
+  it('focuses the prompt when automatic capture starts', async () => {
+    await open();
+    const prompt = screen.getByText(/Press the key/);
+    expect(document.activeElement).toBe(prompt);
+    expect(prompt.getAttribute('role')).toBe('status');
+    expect(prompt.tabIndex).toBe(-1);
+  });
+
   it('captures first and explains the exposure before showing a device rule', async () => {
     await open(fake({ ok: true, devices: [locked], disclosure }));
     expect(screen.queryByText(disclosure[0] ?? '')).toBeNull();
@@ -102,6 +110,7 @@ describe('TalkKeySetup', () => {
     expect(screen.getByText(cantUse)).toBeTruthy();
     press('CapsLock');
     expect(screen.getByText('Caps Lock', { selector: 'bdi' })).toBeTruthy();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Set talk key' }));
     // Capture has ended: the next key changes nothing.
     press('KeyQ');
     expect(screen.getByText('Caps Lock', { selector: 'bdi' })).toBeTruthy();
@@ -125,7 +134,7 @@ describe('TalkKeySetup', () => {
   it('Tab leaves automatic capture without consuming navigation or binding a key', async () => {
     await open();
     const tab = new KeyboardEvent('keydown', { code: 'Tab', cancelable: true });
-    fireEvent(window, tab);
+    fireEvent(screen.getByText(/Press the key/), tab);
     expect(tab.defaultPrevented).toBe(false);
     expect(screen.getByText('none chosen')).toBeTruthy();
     expect(screen.queryByText(/Press the key/)).toBeNull();

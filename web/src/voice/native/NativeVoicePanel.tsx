@@ -211,11 +211,14 @@ export function NativeVoicePanel({
   const outsideVoiceView = useContext(VoiceStrip) !== null;
   const hideOptions = outsideVoiceView || view.status === 'unavailable' || view.status === 'stopping' || actions === undefined;
   const { options, setOptions, covered, button: optionButton, panel, onClose, onShrink, sheet, onSheet } = useOptionsDisclosure({ hidden: hideOptions, native: true });
-  // Restore focus after the shortcut has remounted or the options panel has hidden.
+  // Focus in setup falls back to body when its controls unmount. Once the
+  // shortcut remounts, recover stranded focus and preserve focus elsewhere.
   useLayoutEffect(() => {
     if (setup !== null || setupOpener.current === null) return;
     const from = setupOpener.current;
     setupOpener.current = null;
+    const active = document.activeElement;
+    if (active !== null && active !== document.body && active.closest('[inert]') === null) return;
     const opener = from === 'shortcut' ? talkSetupButton.current : from === 'options' ? null : from;
     if (opener?.isConnected && opener.closest('[hidden], [inert]') === null) {
       opener.focus();
