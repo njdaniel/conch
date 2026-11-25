@@ -44,12 +44,26 @@ describe('CSS :has() hygiene (issue #1931)', () => {
 // sheet on a phone). The desktop app's own panel (voice/native) shares the
 // .voice-options class and is drawn as before: every rule that positions or
 // covers with it is for .popover or .sheet, which only the web panel sets.
+// Each selector of a comma list counts on its own: one bare .voice-options
+// among them is a rule for the bare class.
+export function bareFixedSelectors(css: string): string[] {
+  const rules = [...css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => ({ selector: (m[1] ?? '').trim(), body: m[2] ?? '' }));
+  return rules
+    .filter((r) => /position:\s*fixed/.test(r.body))
+    .flatMap((r) => r.selector.split(','))
+    .map((s) => s.trim())
+    .filter((s) => /\.voice-options\b/.test(s) && !/\.(popover|sheet)\b/.test(s));
+}
+
 describe('Voice options overlay rules are for the web panel only (issue #2189)', () => {
-  const css = readFileSync('src/app.css', 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
-  const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => ({ selector: (m[1] ?? '').trim(), body: m[2] ?? '' }));
   it('no rule that fixes a .voice-options panel applies to the bare class', () => {
-    const fixed = rules.filter((r) => /\.voice-options\b/.test(r.selector) && /position:\s*fixed/.test(r.body));
-    expect(fixed.length).toBeGreaterThan(0);
-    for (const r of fixed) expect(r.selector, r.selector).toMatch(/\.(popover|sheet)\b/);
+    const css = readFileSync('src/app.css', 'utf8');
+    expect(/\.voice-options\.popover:not\(\[hidden\]\)\s*\{[^}]*position:\s*fixed/.test(css)).toBe(true);
+    expect(bareFixedSelectors(css)).toEqual([]);
+  });
+
+  it('catches a bare selector in a comma list', () => {
+    expect(bareFixedSelectors('.voice-options, .voice-options.popover { position: fixed; }')).toEqual(['.voice-options']);
+    expect(bareFixedSelectors('.voice-options.popover, .voice-options.sheet { position: fixed; }')).toEqual([]);
   });
 });

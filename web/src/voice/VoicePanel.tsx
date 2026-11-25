@@ -306,8 +306,18 @@ export function VoicePanel({
     };
     // Focus reaching the share quality menu's button closes the panel, so the
     // menu, which paints over it, is not drawn on top of an open panel.
+    //
+    // The anchored panel is a popover, not a modal: focus moving to anything
+    // else than the panel or its own button closes it, where focus went (it is
+    // not moved), so no control is left focused under it, covered. Only focus
+    // gained counts (focusin): the window losing focus, a native picker or the
+    // talk key capture moves none. Not while something is over the panel
+    // (behind), and not as a sheet, which is modal and has the rest inert.
     const onFocus = (e: FocusEvent) => {
-      if (e.target instanceof Element && e.target.closest('.share-chooser') !== null) setOptions(false);
+      const at = e.target;
+      if (!(at instanceof Element)) return;
+      if (at.closest('.share-chooser') !== null) setOptions(false);
+      else if (!sheet && !behind && optionsPanel.current?.contains(at) !== true && optionsButton.current?.contains(at) !== true) setOptions(false);
     };
     const onPress = (e: MouseEvent) => {
       const at = e.target;
@@ -327,7 +337,7 @@ export function VoicePanel({
       document.removeEventListener('mousedown', onPress);
       document.removeEventListener('focusin', onFocus);
     };
-  }, [options, voice.capturing, closeOptions, behind]);
+  }, [options, voice.capturing, closeOptions, behind, sheet]);
 
   useEffect(() => {
     if (options || !focusBack.current) return;

@@ -841,6 +841,60 @@ describe('Voice options closes when it goes out of sight', () => {
   });
 });
 
+// Issue #2189: the anchored panel is a popover: focus gained by anything but
+// the panel or its button closes it, wherever focus went; losing the window's
+// focus (Alt-Tab, a native picker) does not.
+describe('the anchored Voice options panel and focus leaving it', () => {
+  const setup = () => {
+    const voice = control(inVoice('connected', 'c'), [], { kind: 'presence', presence });
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ top: 700, left: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 700, toJSON: () => ({}) });
+    const height = vi.spyOn(document.documentElement, 'clientHeight', 'get').mockReturnValue(800);
+    const other = document.createElement('input');
+    document.body.append(other);
+    render(<VoicePanel voice={voice} viewer={7} people={new Map()} viewed="c" onOpen={() => undefined} />);
+    const button = screen.getByRole('button', { name: 'Voice options' });
+    fireEvent.click(button);
+    expect(document.querySelector('#voice-options')?.classList.contains('sheet')).toBe(false);
+    return { button, other, done: () => { rect.mockRestore(); height.mockRestore(); other.remove(); } };
+  };
+
+  it('closes when focus goes to something else, and leaves focus there', () => {
+    const { button, other, done } = setup();
+    try {
+      const slider = screen.getByRole('slider', { name: /Release delay/ });
+      slider.focus();
+      fireEvent.focusIn(slider);
+      expect(button.getAttribute('aria-expanded')).toBe('true');
+      button.focus();
+      fireEvent.focusIn(button);
+      expect(button.getAttribute('aria-expanded')).toBe('true');
+      other.focus();
+      fireEvent.focusIn(other);
+      expect(button.getAttribute('aria-expanded')).toBe('false');
+      expect(document.activeElement).toBe(other);
+    } finally {
+      done();
+    }
+  });
+
+  it('stays open when the window loses focus, and when it comes back to the panel', () => {
+    const { button, done } = setup();
+    try {
+      const slider = screen.getByRole('slider', { name: /Release delay/ });
+      slider.focus();
+      // Alt-Tab: a focusout with no related target, and the window's blur.
+      fireEvent.focusOut(slider, { relatedTarget: null });
+      fireEvent.blur(window);
+      expect(button.getAttribute('aria-expanded')).toBe('true');
+      fireEvent.focus(window);
+      fireEvent.focusIn(slider);
+      expect(button.getAttribute('aria-expanded')).toBe('true');
+    } finally {
+      done();
+    }
+  });
+});
+
 // Issue #590 (F09, F20): Hold to talk works from the keyboard while it has
 // focus, the hint says where the talk key does not work, and Leave voice
 // hands focus to Join voice instead of dropping it.
