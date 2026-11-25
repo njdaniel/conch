@@ -3125,7 +3125,7 @@ label {
   box-sizing: border-box;
   width: max-content;
   height: max-content;
-  max-width: min(23rem, calc(100% - 2 * var(--s2)));
+  max-width: min(26rem, calc(100% - 2 * var(--s2)));
   max-height: calc(100% - 2 * var(--s2));
   margin: auto;
   padding: var(--s2);
