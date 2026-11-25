@@ -394,7 +394,10 @@ test.describe('the phone voice strip with LiveKit', () => {
         // flake of issue #1163: a row went while Voice options was tapped).
         await expect(voice.getByRole('list', { name: `${String(3 - turn)} in voice` })).toContainText(p.name, { timeout: 30_000 });
         await expect(voice).toContainText('Connected in #voice-room');
-        await expect(voice.getByText('Microphone in use')).toBeVisible();
+        // No amber chip says the microphone is in use (issue #2198); the
+        // status phrase says what others hear.
+        await expect(voice.getByText('Microphone in use')).toHaveCount(0);
+        await expect(voice.locator('.voice-tx')).toHaveText('Push to talk: not sending');
         await voice.getByRole('button', { name: 'Deafen' }).tap();
         await expect(voice).toContainText('Deafened');
         await voice.getByRole('button', { name: 'Undeafen' }).tap();

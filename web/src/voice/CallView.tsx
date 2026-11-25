@@ -409,6 +409,9 @@ export function CallView({ client, state, tiles, hidden, open, viewed = state.ch
     setLayoutSaid(next ? 'Call view compact.' : 'Call view expanded.');
   };
 
+  // The phone's switcher: the focused stream and the way to change it.
+  const switcher = open && narrow && focusedStream !== null;
+
   return (
     <section ref={view} tabIndex={open ? -1 : undefined} aria-label={open ? 'Video call' : undefined} className={viewClass} onKeyDown={open ? onKey : undefined}>
       {/* The layout toggle is the header's wherever the header is drawn: in
@@ -423,7 +426,10 @@ export function CallView({ client, state, tiles, hidden, open, viewed = state.ch
             <p className="call-title">
               <Glyph name="camera" />
               Video
-              {main === null ? null : <span className="call-state" title={main.kind === 'share' ? `Watching ${main.name}'s screen` : enlargedWords(main)}>{main.kind === 'share' ? `Watching ${main.name}'s screen` : enlargedWords(main)}</span>}
+              {/* On a phone the switcher below says "Watching NAME's screen"
+                  once, on its label; the title row keeps its room for the
+                  channel (issue #2198, UI-stream-6). */}
+              {main === null || (switcher && main.kind === 'share') ? null : <span className="call-state" title={main.kind === 'share' ? `Watching ${main.name}'s screen` : enlargedWords(main)}>{main.kind === 'share' ? `Watching ${main.name}'s screen` : enlargedWords(main)}</span>}
             </p>
             <p className="call-context" title={context}>
               <span className="call-channel">
@@ -447,7 +453,7 @@ export function CallView({ client, state, tiles, hidden, open, viewed = state.ch
       {/* The phone's switcher is the Voice view's: under Chat and Channels
           the stage holds the focused stream alone, and the log keeps its
           room (issue #1028). */}
-      {open && narrow && focusedStream !== null ? (
+      {switcher ? (
         <label className="call-state">Watching {focusedStream.name}&apos;s screen
           <select aria-label={`Watching ${focusedStream.name}'s screen`} value={focusedStream.principal} onChange={(e) => {
             client.switchStream(Number(e.target.value));

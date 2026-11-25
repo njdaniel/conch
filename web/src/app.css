@@ -2943,6 +2943,35 @@ label {
   font-weight: 600;
 }
 
+/* The send phrase ("Muted: not sending") is one line, whatever the width: it
+   never breaks mid-phrase (issue #2198, UI-talk-5). The sentences before it
+   are long and wrap as text, so a narrow phone clips neither. */
+.voice-tx-phrase {
+  white-space: nowrap;
+}
+
+/* About talking and sharing: a small round "i", a disclosure for the talk key
+   and sharing notes. */
+.voice-controls button.voice-help-button {
+  flex: 0 0 auto;
+  width: 2.75rem;
+  min-width: 2.75rem;
+  padding: 0;
+  border-radius: 50%;
+  font-style: italic;
+  font-weight: 600;
+}
+
+/* "<name> stopped sharing." where the stage was, for a few seconds. */
+.stage-notice {
+  margin: 0 0 var(--s2);
+  padding: var(--s2) var(--s3);
+  background: var(--raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-weight: 600;
+}
+
 .chip {
   background: var(--raised);
   border: 1px solid var(--warn);
@@ -5189,6 +5218,13 @@ button.link {
   .lobby.phone.view-voice .voice-controls button {
     flex: 1 1 calc(50% - var(--s2));
     min-width: 0;
+  }
+
+  /* The round "i" stays a small button beside the others, not a half-width
+     cell of its own. */
+  .lobby.phone.view-voice .voice-controls button.voice-help-button {
+    flex: 0 0 2.75rem;
+    min-width: 2.75rem;
   }
 
   .lobby.phone.view-voice .voice-controls .talk {

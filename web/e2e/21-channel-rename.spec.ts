@@ -13,7 +13,7 @@ import type { Browser, Page } from '@playwright/test';
 import { createChannelResponse, listChannelsResponse, renameChannelResponseV1, type CreateChannelRequest, type RenameChannelRequestV1 } from '../src/schema/channel';
 import { errorV0 } from '../src/schema/error';
 import { post } from './api';
-import { closeAll, channelButton, credentialField, expect, messages, rememberPushToTalk, signIn, statusLine, test } from './fixtures';
+import { notSendingText, sendingText, closeAll, channelButton, credentialField, expect, messages, rememberPushToTalk, signIn, statusLine, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, watchPage, type Member, type VoiceWorld } from './voice-world';
 import { call, ok, type World } from './world';
 
@@ -264,9 +264,9 @@ test.describe('in voice, with LiveKit', () => {
       // A press and a release report under the new name.
       await a.page.getByRole('heading', { name: 'Conch' }).click();
       await a.page.keyboard.down('Backquote');
-      await expect(voiceRegion(a.page)).toContainText('Transmitting');
+      await expect(voiceRegion(a.page).locator('.voice-tx')).toHaveText(sendingText);
       await a.page.keyboard.up('Backquote');
-      await expect(voiceRegion(a.page)).toContainText('Not transmitting');
+      await expect(voiceRegion(a.page).locator('.voice-tx')).toHaveText(notSendingText);
       await expect.poll(() => a.asked.slice(renamedAt).filter((r) => r.endsWith('/voice/transmit'))).toEqual([
         `POST /v1/channels/${to}/voice/transmit`,
         `POST /v1/channels/${to}/voice/transmit`,
