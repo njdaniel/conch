@@ -517,6 +517,80 @@ test.describe('the persistent call workspace', () => {
     }
   });
 
+  test('P2187 the press that wakes a faded row is a pure wake, on touch and with a mouse', async ({ browser }) => {
+    test.setTimeout(180_000);
+    const people: Person[] = [];
+    try {
+      const a = await person(browser, vw.alice);
+      people.push(a);
+      const touch = await person(browser, vw.bob, { viewport: { width: 1024, height: 768 }, hasTouch: true });
+      people.push(touch);
+      const mouse = await person(browser, vw.carol, { viewport: { width: 1440, height: 900 } });
+      people.push(mouse);
+      await join(a);
+      await join(touch);
+      await join(mouse);
+      await share(a);
+      await watching(touch);
+      await watching(mouse);
+      const back = (page: Page) => page.getByRole('button', { name: 'Back to grid' });
+      const centreOf = async (control: Locator): Promise<[number, number]> => {
+        const box = await control.boundingBox();
+        if (box === null) throw new Error('control not drawn');
+        return [box.x + box.width / 2, box.y + box.height / 2];
+      };
+
+      // Touch: a tap on the picture while faded wakes the row and does no more;
+      // a quick second tap on a faded Stop watching does not stop watching.
+      const tp = touch.page;
+      await faded(tp).toBe('0');
+      const frame = await shareView(tp).locator('.share-frame').boundingBox();
+      if (frame === null) throw new Error('no frame');
+      await tp.touchscreen.tap(frame.x + 40, frame.y + 40);
+      await tp.waitForTimeout(600);
+      await expect.poll(() => controlsOpacity(tp)).toBe('1');
+      await expect(back(tp), 'a wake tap on the picture enlarges nothing').toHaveCount(0);
+      await faded(tp).toBe('0');
+      const [sx, sy] = await centreOf(shareView(tp).getByRole('button', { name: 'Stop watching' }));
+      await tp.touchscreen.tap(sx, sy);
+      await tp.waitForTimeout(80);
+      await tp.touchscreen.tap(sx, sy);
+      await tp.waitForTimeout(600);
+      await expect(shareView(tp), 'a quick double tap on the faded Stop watching does not stop').toHaveCount(1);
+      await expect(back(tp)).toHaveCount(0);
+
+      // Mouse resting on a faded control: its first press only wakes the row.
+      const mp = mouse.page;
+      const mute = shareView(mp).getByRole('button', { name: /^(Mute|Unmute) share$/ });
+      await wake(mp);
+      await expect.poll(() => controlsOpacity(mp)).toBe('1');
+      const [mx, my] = await centreOf(mute);
+      await mp.mouse.move(mx, my);
+      await faded(mp).toBe('0');
+      await mp.mouse.down();
+      await mp.mouse.up();
+      await mp.waitForTimeout(500);
+      await expect.poll(() => controlsOpacity(mp)).toBe('1');
+      await expect(mute, 'the first press on a faded control presses nothing').toHaveAttribute('aria-pressed', 'false');
+      await expect(back(mp)).toHaveCount(0);
+      await mp.waitForTimeout(400);
+      await mute.click();
+      await expect(mute, 'the next press is the control\'s').toHaveAttribute('aria-pressed', 'true');
+
+      // A press released outside the share does not leave the next click swallowed.
+      await mp.mouse.move(mx, my);
+      await faded(mp).toBe('0');
+      await mp.mouse.down();
+      await mp.mouse.move(2, 2);
+      await mp.mouse.up();
+      await mp.waitForTimeout(700);
+      await mute.click();
+      await expect(mute, 'a press released outside leaves nothing swallowed').toHaveAttribute('aria-pressed', 'false');
+    } finally {
+      for (const p of people) await leave(p);
+    }
+  });
+
   test('P2187 after a pointer press on a control the row still fades; keyboard focus holds it', async ({ browser }) => {
     test.setTimeout(120_000);
     const people: Person[] = [];
@@ -662,6 +736,23 @@ test.describe('the persistent call workspace', () => {
       await page.setViewportSize({ width: 390, height: 844 });
       await showView(page, 'Chat');
       expect(await stopWidth(), 'phone Chat: Stop watching says so').toBeGreaterThan(40);
+      // The words take the room the icon would: Stop watching is as wide as
+      // main's (119.6 px; with its icon 146 px, which wrapped the row onto a
+      // second line and took the picture's height: 105.5 px to 53.5 at 360×640),
+      // and the row stays one line. The picture's own height depends on what
+      // else the Chat view holds, so it is not compared here.
+      for (const [w, h] of [[360, 740], [360, 640]] as const) {
+        await page.setViewportSize({ width: w, height: h });
+        const row = await shareView(page).evaluate((share) => {
+          const tops = [...share.querySelectorAll('.share-controls button, .share-controls input')].map((e) => e.getBoundingClientRect()).filter((r) => r.width > 0).map((r) => Math.round(r.top + r.height / 2));
+          const stop = share.querySelector('.stop');
+          const icon = stop?.querySelector('svg');
+          return { spread: Math.max(...tops) - Math.min(...tops), stop: Math.round(stop?.getBoundingClientRect().width ?? 0), icon: icon != null && getComputedStyle(icon).display !== 'none' };
+        });
+        expect(row.spread, `phone Chat ${String(w)}×${String(h)}: the controls are one line ${JSON.stringify(row)}`).toBeLessThanOrEqual(2);
+        expect(row.stop, `phone Chat ${String(w)}×${String(h)}: Stop watching is words alone in width (main's 119.6 px, 126 on wider fonts; with the icon 26 px more) ${JSON.stringify(row)}`).toBeLessThanOrEqual(135);
+        expect(row.icon, `phone Chat ${String(w)}×${String(h)}: Stop watching is words alone`).toBe(false);
+      }
       for (const [w, h] of [[390, 844], [360, 740], [360, 640]] as const) {
         await page.setViewportSize({ width: w, height: h });
         await tapGeometry(page, `phone Chat ${String(w)}×${String(h)}`);

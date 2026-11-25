@@ -3459,6 +3459,17 @@ label {
   clip-path: none;
 }
 
+/* Words without the icon below the picture, as the row had them: with both it
+   is wider than the phone's row and wraps (a 360 px Chat stage). The overlay
+   and a strip tile, which have no words, show the icon alone. */
+.share-controls .stop svg {
+  display: none;
+}
+
+.call-share.in-strip .share-controls .stop svg {
+  display: inline;
+}
+
 /* The tap that starts the sound (ShareView): centred on the picture and above
    the focus button, in every layout but the compact row. A frame too short
    for it shrinks to the frame (a smaller pill) and clips its words rather
@@ -3807,6 +3818,10 @@ label {
     overflow: hidden;
     clip-path: inset(50%);
     white-space: nowrap;
+  }
+
+  .call-view.call-single-share .share-controls .stop svg {
+    display: inline;
   }
 
   .call-view.call-single-share .share-controls button {

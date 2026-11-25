@@ -87,16 +87,22 @@ Full screen, Stop watching; their names are read out as before) on the
 picture's bottom edge, over a dark gradient that is the same in both themes
 (icons, slider track and thumb are at least 3:1 against it). The row fades out
 after 3 s without a pointer on the share, and returns on a pointer move, a tap
-on the picture, or focus inside it (a faded control is opacity 0 and still in
-the tab order); it stays shown while the share is not playing (waiting for the
-picture or the stream, or for the tap that starts the sound). "Tap to play
-sound" is a button on the middle of the picture, not in the row, and the
-status hint is above the row. The picture's frame takes what the view leaves
+on the picture, or keyboard focus inside it (a faded control is opacity 0 and
+still in the tab order; a control a pointer pressed keeps focus but not the
+row); it stays shown while the share is not playing (waiting for the picture
+or the stream, or for the tap that starts the sound). The press that brings a
+faded row back is a pure wake: its click is swallowed, so it presses no
+control and enlarges or focuses nothing, and the row takes no press while it
+fades in. "Tap to play sound" is a button on the middle of the picture, never
+in the row, in every layout but the compact row (a short picture gets a
+smaller pill), and the status hint is above the row. The picture's frame takes what the view leaves
 under the title, down to 6rem, with the video contained in it, and the row
 covers at most its own 56 px. The stage's own size is unchanged. At 560 px
 tall and under (the page scrolls as a document), in a grid of several tiles,
 in the compact strip and in the closed phone Chat stage, the controls stay in
-a row below, with their words. Nothing is a fixed reserve, so other font metrics (CI's
+a row below, with their words (Stop watching as words alone, without its icon,
+so the phone's row stays one line; a strip tile's row, which has no words,
+shows the bare icon). Nothing is a fixed reserve, so other font metrics (CI's
 runner wraps the share controls onto two rows) move the picture, not the
 composer. The composer is on screen without scrolling at 390×844 and 360×740
 (checked in 12-screen-share, and by hand with every rem made 19 px).

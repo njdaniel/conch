@@ -6,7 +6,7 @@
 // (adaptive stream), so a phone gets a smaller layer than a full-screen
 // desktop, and a closed view gets none (voice-multi-share.md §8). It asks for
 // no device.
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type MouseEvent, type PointerEvent } from 'react';
 import { Glyph } from '../Icons';
 import { platform } from '../platform';
 import { fullscreenVideo } from './fullscreen';
@@ -189,37 +189,70 @@ export function ShareView({
   // (CSS :focus-visible; a control pressed by a pointer keeps focus but not
   // the row).
   const [idle, setIdle] = useState(false);
-  // The press that brings a faded row back is the picture's, not a control's:
-  // on touch the row would otherwise be pressable before that tap's click is
-  // aimed. The row stays unpressable (CSS .waking) until the press has ended.
+  // The press that brings a faded row back is a pure wake: it presses no
+  // control, enlarges nothing and focuses nothing. Its click is swallowed
+  // whatever it lands on (on touch the row would otherwise be pressable before
+  // that tap's click is aimed), and the row takes no press while it fades in
+  // (CSS .waking), so a quick second tap is not a control's either.
   const [waking, setWaking] = useState(false);
   const idleTimer = useRef<number | null>(null);
+  // Whether the row is faded as far as the last event knows: set at once,
+  // where the state above waits for a render, so a press right after the
+  // pointer moved onto the share (which woke it) is not taken for a waking one.
+  const idleNow = useRef(false);
   const wake = useCallback(() => {
+    idleNow.current = false;
     setIdle(false);
     if (idleTimer.current !== null) window.clearTimeout(idleTimer.current);
-    idleTimer.current = window.setTimeout(() => { setIdle(true); }, controlsIdleMs);
+    idleTimer.current = window.setTimeout(() => { idleNow.current = true; setIdle(true); }, controlsIdleMs);
   }, []);
-  const pressDown = () => {
-    if (faded) setWaking(true);
+  const swallow = useRef(false);
+  const stillWaking = useRef(false);
+  const wakingTimer = useRef<number | null>(null);
+  const swallowTimer = useRef<number | null>(null);
+  const afterMs = (timer: { current: number | null }, ms: number, then: () => void) => {
+    if (timer.current !== null) window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(then, ms);
+  };
+  const pressDown = (e: PointerEvent) => {
+    // The pop-out is not in the row and never fades: its press is its own.
+    const own = e.target instanceof Element && e.target.closest('.share-pip') !== null;
+    if (!own && ((faded && idleNow.current) || stillWaking.current)) {
+      swallow.current = true;
+      stillWaking.current = true;
+      setWaking(true);
+      afterMs(wakingTimer, 300, () => { stillWaking.current = false; setWaking(false); });
+      // Backstop: a press whose click never comes is forgotten.
+      afterMs(swallowTimer, 1000, () => { swallow.current = false; });
+    }
     wake();
   };
-  const wakingTimer = useRef<number | null>(null);
-  const woken = () => {
-    if (wakingTimer.current !== null) window.clearTimeout(wakingTimer.current);
-    wakingTimer.current = null;
-    setWaking(false);
+  // The click of a waking press is swallowed here, before any control, the
+  // focus button or the picture sees it.
+  const swallowClick = (e: MouseEvent) => {
+    if (!swallow.current) return;
+    swallow.current = false;
+    e.stopPropagation();
+    e.preventDefault();
   };
-  // A touch's click is aimed after its pointerup, so the row stays unpressable
-  // until that click has come (or, with none, a moment).
-  const pressEnd = () => {
-    if (wakingTimer.current !== null) window.clearTimeout(wakingTimer.current);
-    wakingTimer.current = window.setTimeout(woken, 400);
-  };
+  // A press released anywhere, outside the share too, ends its wait for a click.
+  useEffect(() => {
+    const ended = () => {
+      if (swallow.current) afterMs(swallowTimer, 300, () => { swallow.current = false; });
+    };
+    window.addEventListener('pointerup', ended);
+    window.addEventListener('pointercancel', ended);
+    return () => {
+      window.removeEventListener('pointerup', ended);
+      window.removeEventListener('pointercancel', ended);
+    };
+  }, []);
   useEffect(() => {
     wake();
     return () => {
       if (idleTimer.current !== null) window.clearTimeout(idleTimer.current);
       if (wakingTimer.current !== null) window.clearTimeout(wakingTimer.current);
+      if (swallowTimer.current !== null) window.clearTimeout(swallowTimer.current);
     };
   }, [wake]);
 
@@ -287,7 +320,7 @@ export function ShareView({
   ) : null;
 
   return (
-    <section aria-label="Shared screen" className={`share-view${faded ? ' idle' : ''}${waking ? ' waking' : ''}`} onPointerMove={wake} onPointerDown={pressDown} onPointerUp={pressEnd} onPointerCancel={pressEnd} onClick={waking ? woken : undefined}>
+    <section aria-label="Shared screen" className={`share-view${faded ? ' idle' : ''}${waking ? ' waking' : ''}`} onPointerMove={wake} onPointerDown={pressDown} onClickCapture={swallowClick}>
       <p className="share-title">
         <Glyph name="screen" />
         {name} · {reconnecting ? 'Reconnecting' : 'LIVE'}{quality === null || quality === undefined ? null : <> · {quality}</>}{audio ? ' · with sound' : ''}
