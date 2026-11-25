@@ -913,6 +913,82 @@ describe('keeping a sign-in across restarts', () => {
     expect(vault.secrets.has(id)).toBe(false);
   });
 
+  // A write the bound reported failed may still land (review of 59ce6835):
+  // with the choice off, it never stays in the vault.
+  function lateVault() {
+    const vault = fakeVault();
+    let land: () => void = () => undefined;
+    vault.putGate = new Promise<void>((resolve) => {
+      land = resolve;
+    });
+    return {
+      vault,
+      land: () => {
+        land();
+      },
+    };
+  }
+  const later = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  it('on, then off while the write is pending past the bound: the write that lands late is deleted', async () => {
+    const { vault, land } = lateVault();
+    const s = await setup({ vault, vaultBoundMs: 20 });
+    const id = await addAndSwitch(s, ORIGIN_A);
+    await s.service.setKeep(false);
+    vault.putGate = null;
+    s.active().held = 'tok-ada';
+    await s.service.signedIn(ADA);
+    const late = lateVault();
+    vault.putGate = late.vault.putGate;
+    const on = s.service.setKeep(true);
+    await later(5);
+    const off = s.service.setKeep(false);
+    await on;
+    // The bound has passed: the write was reported failed, and is still on its way.
+    late.land();
+    land();
+    await off;
+    await later(10);
+    expect(vault.secrets.has(id)).toBe(false);
+    expect(s.service.view().keep).toBe(false);
+  });
+
+  it('a sign-in whose write lands after the bound, then off: the late write is deleted', async () => {
+    const { vault, land } = lateVault();
+    const s = await setup({ vault, vaultBoundMs: 20 });
+    const id = await addAndSwitch(s, ORIGIN_A);
+    s.active().held = 'tok-ada';
+    await s.service.signedIn(ADA);
+    expect(s.service.view().notice).toBe('not-kept');
+    const off = s.service.setKeep(false);
+    land();
+    await off;
+    await later(10);
+    expect(vault.secrets.has(id)).toBe(false);
+    expect((await restart(s)).active().spec.token).toBeNull();
+  });
+
+  it('a sign-out while turning it back on is writing leaves no stale "don\u2019t keep": the next form starts kept', async () => {
+    const { vault, land } = lateVault();
+    vault.putGate = null;
+    const s = await setup({ vault });
+    const id = await addAndSwitch(s, ORIGIN_A);
+    await s.service.setKeep(false);
+    s.active().held = 'tok-ada';
+    await s.service.signedIn(ADA);
+    const gate = lateVault();
+    vault.putGate = gate.vault.putGate;
+    const on = s.service.setKeep(true);
+    await later(5);
+    await s.service.signOut();
+    gate.land();
+    land();
+    await on;
+    await later(10);
+    expect(s.service.view().keep).toBe(true);
+    expect(vault.secrets.has(id)).toBe(false);
+  });
+
   it('keeps only the credential the sign-in put in force: one that replaced it while the binding was written is not kept by this call', async () => {
     const s = await setup();
     const id = await addAndSwitch(s, ORIGIN_A);

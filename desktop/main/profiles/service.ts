@@ -627,12 +627,15 @@ export class ProfilesService {
           const put = await this.#put(id, token);
           if (this.#declined === current || this.#switcher.current !== current) {
             // Turned off again (or the window left) while the write was on
-            // its way: not kept, and what it wrote comes out.
-            this.#unkept.add(id);
-            if (put.kind === 'stored') {
-              this.#signedOut.add(id);
-              await this.#purge(id);
-            }
+            // its way: not kept, and whatever it wrote comes out. The purge is
+            // issued whatever the write said: one reported failed at the
+            // bound may still land, and the vault runs this delete after it.
+            // The credential stays "not kept" only while it is still the one
+            // held: a sign-out in between ended it, and the next form starts
+            // with the default.
+            if (this.#held.get(id) === token) this.#unkept.add(id);
+            this.#signedOut.add(id);
+            await this.#purge(id);
             return this.view();
           }
           if (put.kind === 'stored' && this.#held.get(id) === token) {
@@ -646,12 +649,18 @@ export class ProfilesService {
     }
     this.#declined = current;
     // Already signed in and kept in the vault: the entry comes out. A
-    // credential held in memory (session-only, or already unkept) stays as it
-    // is; neither is ever put by Retry once unkept.
+    // credential held in memory (session-only, a keep that failed, or already
+    // unkept) stays held and is never put by Retry once unkept; its entry is
+    // deleted too, because a write reported failed at the bound may still
+    // land, and the vault runs this delete after it.
     if (current.token() !== null && !this.#held.has(id)) {
       this.#signedOut.add(id);
       await this.#purge(id);
-    } else if (this.#held.has(id)) this.#unkept.add(id);
+    } else if (this.#held.has(id)) {
+      this.#unkept.add(id);
+      this.#signedOut.add(id);
+      await this.#purge(id);
+    }
     return this.view();
   }
 
