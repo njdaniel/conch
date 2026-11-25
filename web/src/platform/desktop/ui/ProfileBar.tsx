@@ -4,6 +4,7 @@
 // sign-in completes inside the client, which does not tell this strip.
 import { useEffect, useState } from 'react';
 
+import { usePageModal } from '../../../pageModal';
 import { bridge, inviteBridge } from '../access';
 import type { InviteCheck, ProfilesView } from '../bridge';
 import { DevelopmentNote, Incompatible } from './Compat';
@@ -67,9 +68,14 @@ export function ProfileBar({ initial }: { readonly initial: ProfilesView }) {
   const current = view.profiles.find((p) => p.id === view.active);
   const kept = view.storage.kind === 'protected';
 
+  // Behind a modal of the lobby the strip, its notes and its panels are inert
+  // (pageModal). The strip is a direct child of the page (the layout's rules
+  // select it so), so it carries the attribute itself; the rest is in a
+  // wrapper that draws nothing of its own.
+  const modal = usePageModal();
   return (
     <>
-      <header className="desktop-bar" aria-label="Server">
+      <header className="desktop-bar" aria-label="Server" inert={modal}>
         <span className="desktop-bar-host">{current?.host ?? 'No server'}</span>
         <span className="desktop-bar-account">{current?.account ?? 'not signed in yet'}</span>
         {kept || view.notice === 'operator-window-only' ? null : <span className="desktop-bar-session">sign-in kept until the app closes</span>}
@@ -95,6 +101,7 @@ export function ProfileBar({ initial }: { readonly initial: ProfilesView }) {
           Servers
         </button>
       </header>
+      <div className="page-scope" inert={modal}>
       {view.compat.override ? <DevelopmentNote compat={view.compat} /> : null}
       <Incompatible compat={view.compat} />
       {settingsOpen ? <DesktopSettings /> : null}
@@ -108,6 +115,7 @@ export function ProfileBar({ initial }: { readonly initial: ProfilesView }) {
           }}
         />
       ) : null}
+      </div>
     </>
   );
 }

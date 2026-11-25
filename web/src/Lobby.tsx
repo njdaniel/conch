@@ -11,7 +11,8 @@ import { headingId } from './Conversation';
 import { Avatar, Glyph } from './Icons';
 import { ServerVersion, TemporaryBanner } from './ServerVersion';
 import { AddPerson, JoiningSettings, SettingsOpen, type JoiningRequest } from './joiningSettings';
-import { MicTestShown, phoneViews, ShowChat, useAppHeight, usePhone, VoiceLive, VoiceStrip, type PhoneView } from './phone';
+import { OverlayReport, setPageModal } from './pageModal';
+import { MicTestShown, phoneViews, ShowChat, useAppHeight, usePhone, VoiceLive, VoiceSheet, VoiceStrip, type PhoneView } from './phone';
 import { DesktopOS } from './platform/os';
 import type { ChannelV0 } from './schema/channel';
 import { StageHost } from './stage';
@@ -292,6 +293,37 @@ export function Lobby({
     [joiningAsks],
   );
   const asking = overlay !== undefined && overlay !== null;
+  // The voice options sheet is open (VoiceSheet): the page behind it is inert
+  // with the same attribute as Settings and re-authentication, in one
+  // expression each. Re-authentication outranks it: the sheet is told it is
+  // blocked and closes; the dock, the nav and the overlay are never made inert
+  // for the sheet.
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const voiceSheet = sheetOpen && !asking;
+  // Modals drawn outside the lobby's own (the quick switcher, in the body) say
+  // they are open through OverlayReport; they are counted here.
+  const [overlays, setOverlays] = useState(0);
+  const reportOverlay = useCallback((open: boolean) => {
+    setOverlays((n) => Math.max(0, n + (open ? 1 : -1)));
+  }, []);
+  // Settings, re-authentication or one of those is up over the sheet: told to
+  // it as behind, so it takes focus back when the modal over it goes.
+  const behind = settingsOpen || asking || overlays > 0;
+  const sheetLink = useMemo(() => ({ report: setSheetOpen, blocked: asking, behind }), [asking, behind]);
+  // What the lobby does not draw but the page does (the desktop strip, the
+  // update notices) is inert for the same modals: said here, once, to them.
+  const modalNow = settingsOpen || asking || voiceSheet;
+  useEffect(() => {
+    setPageModal(modalNow);
+    return () => {
+      setPageModal(false);
+    };
+  }, [modalNow]);
+  // Whether the sheet is the modal that is left when Settings closes.
+  const sheetModal = useRef(false);
+  useEffect(() => {
+    sheetModal.current = voiceSheet;
+  }, [voiceSheet]);
   // Which sign-out is waiting for its yes, if one is.
   const [confirming, setConfirming] = useState<'here' | 'everywhere' | null>(null);
   const [stage, setStage] = useState<HTMLElement | null>(null);
@@ -322,20 +354,32 @@ export function Lobby({
     };
   }, []);
   // Focus goes back to Settings once the panel has closed: until then the
-  // button is inert behind it, and cannot take focus.
+  // button is inert behind it, and cannot take focus. Unless the voice options
+  // sheet is open: it is modal, the button stays inert behind it, and focus
+  // goes back into the sheet. Re-authentication is above Settings and makes it
+  // inert: while it is up nothing here moves focus (the restore waits), and
+  // when it clears focus goes to what is next, the Settings panel if it is
+  // still open, else the button Settings was opened from.
   const settingsClosed = useRef(false);
   useEffect(() => {
     if (settingsOpen) onSettingsOpen?.();
   }, [settingsOpen, onSettingsOpen]);
   useEffect(() => {
+    if (asking) return;
     if (settingsOpen) {
       if (toJoining.current) toJoining.current = false;
       else settingsHeading.current?.focus();
     } else if (settingsClosed.current) {
       settingsClosed.current = false;
-      settingsButton.current?.focus();
+      // The button is inert behind the voice options sheet: focus belongs in
+      // the sheet, which takes it (VoicePanel) now that nothing is over it.
+      // And focus the person already has somewhere usable is left alone: it
+      // moves only from the body, nothing, the closed panel or an inert subtree.
+      const at = document.activeElement;
+      const stranded = at === null || at === document.body || at.closest('[inert]') !== null || at.closest('#settings-panel') !== null;
+      if (!sheetModal.current && stranded) settingsButton.current?.focus();
     }
-  }, [settingsOpen]);
+  }, [settingsOpen, asking]);
   useEffect(() => {
     if (membersOver) membersBody.current?.focus();
   }, [membersOver]);
@@ -377,12 +421,13 @@ export function Lobby({
   return (
     <JoiningSettings.Provider value={joining}>
     <SettingsOpen.Provider value={settingsOpen}>
+    <OverlayReport.Provider value={reportOverlay}>
     <AddPerson.Provider value={onAddPerson === undefined ? null : addPerson}>
       <div ref={lobbyEl} className={`${phone ? `lobby phone view-${view}${live ? ' in-voice' : ''}` : 'lobby'}${band === undefined ? '' : ' has-band'}`}>
         {/* While Settings is open the rest of the page is inert: the panel is
             modal, and focus cannot wander behind its backdrop. */}
-        <div className="top-group" inert={band !== undefined && (settingsOpen || asking)}>
-        <header className="topbar" inert={settingsOpen || asking}>
+        <div className="top-group" inert={band !== undefined && (settingsOpen || asking || voiceSheet)}>
+        <header className="topbar" inert={settingsOpen || asking || voiceSheet}>
           <h1 className="brand">Conch</h1>
           <div role="status" aria-label="Status" className="status">
             <Avatar id={me} name={name} />
@@ -426,7 +471,7 @@ export function Lobby({
         </header>
         {band}
         </div>
-        <div className={panelOpen ? 'areas' : 'areas side-closed'} inert={settingsOpen || asking}>
+        <div className={panelOpen ? 'areas' : 'areas side-closed'} inert={settingsOpen || asking || voiceSheet}>
           {/* The switcher's entry is above the Channels navigation, not in it: that holds channel controls only. */}
           <div className="channels">
             {channels.loaded ? (
@@ -551,7 +596,9 @@ export function Lobby({
             <MicTestShown.Provider value={!phone || view === 'voice'}>
               <VoiceStrip.Provider value={phone && view !== 'voice' ? openVoice : null}>
                 <StageHost.Provider value={stage}>
-                  <ChannelJoin.Provider value={joinVoice}>{voice}</ChannelJoin.Provider>
+                  <VoiceSheet.Provider value={sheetLink}>
+                    <ChannelJoin.Provider value={joinVoice}>{voice}</ChannelJoin.Provider>
+                  </VoiceSheet.Provider>
                 </StageHost.Provider>
               </VoiceStrip.Provider>
             </MicTestShown.Provider>
@@ -693,6 +740,7 @@ export function Lobby({
         {overlay}
       </div>
     </AddPerson.Provider>
+    </OverlayReport.Provider>
     </SettingsOpen.Provider>
     </JoiningSettings.Provider>
   );

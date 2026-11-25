@@ -828,9 +828,11 @@ test.describe('screen share with LiveKit', () => {
       await expect(b.page.getByRole('region', { name: 'Members list' })).toBeFocused();
       await b.page.keyboard.press('Escape');
       await expectFits(b.page, 'watching at phone width');
-      // Voice options, left open, are the Voice view's: under Chat the strip
-      // is one row (issue #1028), and the composer is on the screen while
-      // watching, without scrolling to it.
+      // The resize to the phone's Chat view hides Voice options first (the
+      // strip is one row there, issue #1028); the Members click after it then
+      // clears the open state as an outside press (issue #2189). Either way the
+      // options button is the Voice view's, and the composer is on the screen
+      // while watching, without scrolling to it.
       await expect(voiceRegion(b.page).getByRole('button', { name: 'Voice options' })).toBeHidden();
       await expectComposerShown(b.page, 'watching at 390×844');
       await b.page.setViewportSize({ width: 360, height: 740 });

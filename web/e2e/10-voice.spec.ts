@@ -777,7 +777,15 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
       expect(open?.height ?? Infinity, `${size}: the strip, open microphone`).toBeLessThanOrEqual(64);
       await expectFits(a.page, `${size}: the strip, open microphone`);
       await showView(a.page, 'Voice');
+      // The tap on Chat was a press outside Voice options, which closed it
+      // (issue #2189): open it again for the choice back.
+      const reopen = voice.getByRole('button', { name: 'Voice options' });
+      if ((await reopen.getAttribute('aria-expanded')) !== 'true') await reopen.tap();
       await voice.getByLabel('Push to talk').tap();
+      // As a sheet the panel covers the controls under it, Leave voice among
+      // them: it is closed by its own Close first.
+      const close = voice.getByRole('button', { name: 'Close' });
+      if (await close.isVisible()) await close.tap();
       await voice.getByRole('button', { name: 'Leave voice' }).tap();
       await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
     } finally {

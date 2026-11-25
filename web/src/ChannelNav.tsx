@@ -1,4 +1,5 @@
 import { createPortal } from 'react-dom';
+import { useReportOverlay } from './pageModal';
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
 import * as api from './api';
 import { isArchived } from './archived';
@@ -90,6 +91,8 @@ export function ChannelNav({
   const seq = useRef(0);
   const timer = useRef<number | null>(null);
   const id = useId();
+  // The switcher is a modal drawn into the body: the lobby is told (pageModal).
+  useReportOverlay(open);
   const canBrowse = onBrowse !== undefined;
   const latest = useRef({ channels, unread, selected, onOpen, open });
   latest.current = { channels, unread, selected, onOpen, open };

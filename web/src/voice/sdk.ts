@@ -1136,8 +1136,15 @@ class LiveKitAdapter implements Room {
         events.onDisconnected(causeOf(reason));
       })
       .on(RoomEvent.ActiveSpeakersChanged, (speakers: Participant[]) => {
-        const ids = speakers.map((p) => principalOf(p.identity)).filter((n): n is number => n !== null);
-        events.onSpeakers(ids);
+        // The local participant is told apart from the remote ones: another
+        // client of the same person (a viewer, a companion) maps to the same
+        // principal and must still count as speaking.
+        const local = speakers.some((p) => p === room.localParticipant);
+        const ids = speakers
+          .filter((p) => p !== room.localParticipant)
+          .map((p) => principalOf(p.identity))
+          .filter((n): n is number => n !== null);
+        events.onSpeakers(ids, local);
       })
       .on(RoomEvent.TrackPublished, (pub: RemoteTrackPublication, participant: RemoteParticipant) => {
         this.subscribe(pub, participant);

@@ -425,9 +425,15 @@ test.describe('the phone voice strip with LiveKit', () => {
         await showView(page, 'Chat');
         await expectOpenMicrophone(p);
         await openVoiceView(page);
+        // The tap on Chat was a press outside Voice options, which closed it
+        // (issue #2189): open it again for the choice back.
+        await tapUntil(options, expanded('true'));
         await tapUntil(voice.getByLabel('Push to talk'), () => voice.getByLabel('Push to talk').isChecked());
         await expect(voice.getByLabel('Push to talk')).toBeChecked();
-        await tapUntil(options, expanded('false'));
+        // The panel over the Voice view is a sheet that covers the button,
+        // which then has its own Close (issue #2189).
+        const close = voice.getByRole('button', { name: 'Close' });
+        await tapUntil((await close.isVisible()) ? close : options, expanded('false'));
         await expect(voice.getByLabel('Push to talk')).toBeHidden();
         // The strip's Leave voice leaves.
         await showView(page, 'Chat');

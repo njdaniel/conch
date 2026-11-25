@@ -4,6 +4,7 @@
 // app never restarts by itself, and a call goes on until the click.
 import { useEffect, useState } from 'react';
 
+import { usePageModal } from '../../../pageModal';
 import { bridge } from '../access';
 import type { DesktopUpdateBridge, DesktopVoiceBridge, InstalledView, NativeVoiceView } from '../bridge';
 import { restartLabel, updatedLine } from './text';
@@ -31,6 +32,8 @@ function voiceBridge(): Pick<DesktopVoiceBridge, 'voiceState' | 'onVoiceState'> 
 export function UpdateNotice() {
   const [view, setView] = useState<InstalledView>({ updated: false, version: null });
   const [callActive, setCallActive] = useState(false);
+  // Behind a modal of the lobby the notice is inert (pageModal).
+  const modal = usePageModal();
 
   useEffect(() => {
     const b = voiceBridge();
@@ -68,7 +71,7 @@ export function UpdateNotice() {
 
   if (!view.updated) return null;
   return (
-    <section role="status" aria-label="Update" className="notice desktop-update">
+    <section role="status" aria-label="Update" className="notice desktop-update" inert={modal}>
       <p>{updatedLine(view.version, callActive)}</p>
       <button
         type="button"
