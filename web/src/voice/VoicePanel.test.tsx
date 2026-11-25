@@ -11,6 +11,7 @@ import { initialVoice, VoiceClient, type Phase, type Processing, type VoiceState
 import { FakeClock } from './fakes';
 import { ownPageNote, soundNote, type ShareFeatures, type ShareQuality } from './share';
 import { ShareQualityMenu, autoNote, sourceSixtyNote } from './ShareQualityMenu';
+import { resetSharePreview, SelfShareView } from './ShareView';
 import { useState } from 'react';
 import { MicTestShown, VoiceLive, VoiceSheet, VoiceStrip } from '../phone';
 import { StageHost } from '../stage';
@@ -2650,5 +2651,118 @@ describe('the share quality menu', () => {
     const { voice } = panel(joined({ share: { kind: 'sharing', audio: false } }), 'c');
     expect(within(voice).queryByRole('button', { name: 'Share quality' })).toBeNull();
     expect(within(voice).getByRole('button', { name: 'Stop sharing' })).toBeTruthy();
+  });
+});
+
+// The sharer's preview of their own screen (#2197): the local picture, muted,
+// in the same frame as a watched share, which the sharer may hide.
+describe('the sharer\'s preview', () => {
+  const mine = {
+    principal_id: 7,
+    can_publish: true,
+    transmitting: false,
+    joined_at: '2026-10-18T00:00:00Z',
+    sharing: true,
+    share_started_at: '2026-10-16T00:00:00.000Z',
+  };
+  const sharing: Snapshot = { kind: 'presence', presence: { ...presence, rooms: [{ participants: [mine] }] } };
+  const joined: VoiceState = { ...inVoice('connected', 'c'), share: { kind: 'sharing', audio: false } };
+  afterEach(resetSharePreview);
+
+  it('plays the local picture muted and inline, and names it', () => {
+    panel(joined, 'c', sharing);
+    const own = screen.getByRole('region', { name: 'Your stream' });
+    const video = own.querySelector('video');
+    expect(video).not.toBeNull();
+    expect(video?.muted).toBe(true);
+    expect(video?.hasAttribute('playsinline')).toBe(true);
+    expect(video?.getAttribute('aria-label')).toBe('Preview of your screen');
+    expect(own.querySelector('audio')).toBeNull();
+    expect(within(own).getByText(/You · LIVE/)).toBeTruthy();
+    expect(within(own).getByRole('button', { name: 'Stop sharing' })).toBeTruthy();
+  });
+
+  it('attaches the video to the client, and lets it go when the tile goes', () => {
+    const calls: (HTMLVideoElement | null)[] = [];
+    const spy = vi.spyOn(VoiceClient.prototype, 'attachShareSelf').mockImplementation((el) => { calls.push(el); });
+    try {
+      const { unmount } = panel(joined, 'c', sharing);
+      const video = screen.getByRole('region', { name: 'Your stream' }).querySelector('video');
+      expect(calls).toEqual([video]);
+      unmount();
+      expect(calls).toEqual([video, null]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('is hidden and shown again by its toggle, which the session keeps', () => {
+    const calls: (HTMLVideoElement | null)[] = [];
+    const spy = vi.spyOn(VoiceClient.prototype, 'attachShareSelf').mockImplementation((el) => { calls.push(el); });
+    try {
+      const first = panel(joined, 'c', sharing);
+      const own = () => screen.getByRole('region', { name: 'Your stream' });
+      fireEvent.click(within(own()).getByRole('button', { name: 'Hide preview of your screen' }));
+      expect(own().querySelector('video')).toBeNull();
+      expect(calls.at(-1)).toBeNull();
+      expect(within(own()).getByRole('button', { name: 'Show preview of your screen' }).textContent).toBe('Show preview');
+      expect(within(own()).getByRole('button', { name: 'Stop sharing' })).toBeTruthy();
+      // Drawn again elsewhere (another layout): still hidden.
+      first.unmount();
+      panel(joined, 'c', sharing);
+      expect(own().querySelector('video')).toBeNull();
+      fireEvent.click(within(own()).getByRole('button', { name: 'Show preview of your screen' }));
+      const video = own().querySelector('video');
+      expect(video).not.toBeNull();
+      expect(calls.at(-1)).toBe(video);
+      expect(within(own()).getByRole('button', { name: 'Hide preview of your screen' }).textContent).toBe('Hide preview');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('keeps the toggle\'s name in the compact strip, where it is an icon with the words as its title', () => {
+    const { client } = panel(joined, 'c', sharing);
+    cleanup();
+    render(<SelfShareView client={client} compact />);
+    const toggle = screen.getByRole('button', { name: 'Hide preview of your screen' });
+    expect(toggle.classList.contains('icon')).toBe(true);
+    expect(toggle.getAttribute('title')).toBe('Hide preview');
+    expect(screen.getByRole('button', { name: 'Stop sharing' })).toBeTruthy();
+  });
+
+  it.each([
+    { surface: 'monitor', words: 'You · LIVE · your entire screen · 1080p' },
+    { surface: 'window', words: 'You · LIVE · a window · 1080p' },
+    { surface: 'browser', words: 'You · LIVE · a tab · 1080p' },
+    { surface: null, words: 'You · LIVE · 1080p' },
+  ] as const)('names a $surface capture in the title', ({ surface, words }) => {
+    const { client } = panel(joined, 'c', sharing);
+    cleanup();
+    vi.spyOn(client, 'shareSurface').mockReturnValue(surface);
+    render(<SelfShareView client={client} quality="1080p" />);
+    expect(screen.getByRole('region', { name: 'Your stream' }).querySelector('.share-title')?.textContent).toBe(words);
+  });
+
+  it('draws a different icon for hiding and for showing', () => {
+    panel(joined, 'c', sharing);
+    const icon = () => screen.getByRole('button', { name: /preview of your screen$/ }).querySelector('svg')?.innerHTML;
+    const title = screen.getByRole('region', { name: 'Your stream' }).querySelector('.share-title svg')?.innerHTML;
+    const hide = icon();
+    fireEvent.click(screen.getByRole('button', { name: 'Hide preview of your screen' }));
+    const show = icon();
+    expect(hide).not.toBe(show);
+    expect(hide).not.toBe(title);
+    expect(show).not.toBe(title);
+  });
+
+  it('has none of a watched share\'s controls', () => {
+    panel(joined, 'c', sharing);
+    const own = screen.getByRole('region', { name: 'Your stream' });
+    for (const name of [/mute/i, /volume/i, /full screen/i, /pop out/i, /tap to play/i]) {
+      expect(within(own).queryByRole('button', { name })).toBeNull();
+    }
+    expect(within(own).queryByRole('slider')).toBeNull();
+    expect(own.classList.contains('idle')).toBe(false);
   });
 });

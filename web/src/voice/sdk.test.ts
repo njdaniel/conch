@@ -192,6 +192,10 @@ interface StubScreenTrack {
   sender?: StubSender;
   publishOptions?: unknown;
   stop: () => void;
+  // The elements it plays into (the sharer's preview).
+  attached: unknown[];
+  attach: (el: unknown) => unknown;
+  detach: (el?: unknown) => unknown[];
 }
 // A camera's capture, as the browser gives it and as the page wraps it.
 interface StubVideo {
@@ -301,6 +305,15 @@ vi.mock('livekit-client', () => {
     const track: StubScreenTrack = {
       source,
       stopped: 0,
+      attached: [],
+      attach: (el) => {
+        track.attached.push(el);
+        return el;
+      },
+      detach: (el) => {
+        track.attached = track.attached.filter((e) => el !== undefined && e !== el);
+        return [];
+      },
       setDegradationPreference: (preference) => {
         if (track.sender !== undefined) track.sender.parameters.degradationPreference = preference;
         return Promise.resolve();
@@ -2017,6 +2030,72 @@ describe('sharing a screen', () => {
       log.mockRestore();
       vi.useRealTimers();
     }
+  });
+
+  // The sharer's preview (#2197): the raw capture's picture alone, never the
+  // share's sound, never through the SDK's attach() (whose visibility handler
+  // restarts a muted or ended track with the camera on a phone), and nothing
+  // left of it once the share is stopped, kept or replaced.
+  describe('the sharer\'s preview', () => {
+    class Stream {
+      constructor(readonly tracks: unknown[]) {}
+    }
+    const playing = (el: HTMLVideoElement): unknown[] | null => (el.srcObject as Stream | null)?.tracks ?? null;
+    beforeEach(() => {
+      vi.stubGlobal('MediaStream', Stream);
+    });
+
+    it('plays the raw picture, not its sound, and lets it go on stop', async () => {
+      const room = await connected();
+      const el = document.createElement('video');
+      room.attachShareSelf(el);
+      await room.pickScreen();
+      await room.publishScreen();
+      const [picture, sound] = state.screenTracks;
+      expect(playing(el)).toEqual([picture?.mediaStreamTrack]);
+      expect(sound?.mediaStreamTrack).not.toBe(picture?.mediaStreamTrack);
+      // The SDK's attach registers its visibility handler: never called.
+      expect(picture?.attached).toEqual([]);
+      expect(sound?.attached).toEqual([]);
+      await room.stopScreen();
+      expect(el.srcObject).toBeNull();
+      await room.close();
+    });
+
+    it('plays a capture picked before the preview is there, and follows a replaced capture', async () => {
+      const room = await connected();
+      await room.pickScreen();
+      const first = state.screenTracks[0];
+      const el = document.createElement('video');
+      room.attachShareSelf(el);
+      expect(playing(el)).toEqual([first?.mediaStreamTrack]);
+      await room.pickScreen();
+      const second = state.screenTracks[2];
+      expect(playing(el)).toEqual([second?.mediaStreamTrack]);
+      room.attachShareSelf(null);
+      expect(el.srcObject).toBeNull();
+      expect([first, second].flatMap((t) => t?.attached ?? [])).toEqual([]);
+      await room.close();
+    });
+
+    it('is cleared when the capture is kept, plays it again when adopted, and is cleared on close', async () => {
+      const room = await connected();
+      const el = document.createElement('video');
+      room.attachShareSelf(el);
+      await room.pickScreen();
+      const capture = state.screenTracks[0]?.mediaStreamTrack;
+      expect(playing(el)).toEqual([capture]);
+      const kept = room.keepScreen();
+      if (kept === null) throw new Error('nothing kept');
+      expect(el.srcObject).toBeNull();
+      await room.close();
+      const next = await connected();
+      next.attachShareSelf(el);
+      next.adoptScreen(kept);
+      expect(playing(el)).toEqual([capture]);
+      await next.close();
+      expect(el.srcObject).toBeNull();
+    });
   });
 
   it('keeps the asked sender rate when capture settings report 1 fps', async () => {

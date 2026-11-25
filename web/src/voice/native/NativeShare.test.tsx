@@ -158,6 +158,15 @@ describe('the indicator and Stop', () => {
     expect(t.calls).toEqual(['stop']);
   });
 
+  // The desktop's capture is the helper's, with no browser track to play (#2197):
+  // the sharer's stage has no preview and no control for one.
+  it('shows no preview of the screen while sharing', () => {
+    const t = fake({ phase: 'connected', channel: 'general', companion: true, share: { kind: 'sharing', audio: false } });
+    const { container } = strip(t.companion);
+    expect(container.querySelector('video')).toBeNull();
+    expect(screen.queryByRole('button', { name: /preview of your screen/i })).toBeNull();
+  });
+
   it.each<[ShareState, string]>([
     [{ kind: 'claiming' }, 'Starting your screen share…'],
     [{ kind: 'picking' }, 'Starting your screen share…'],

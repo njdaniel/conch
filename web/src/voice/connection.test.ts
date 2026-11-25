@@ -353,6 +353,11 @@ class StubRoom implements Room {
     return Promise.reject(this.switchError);
   };
   attachSelf = (): void => undefined;
+  shareSurface = (): null => null;
+  shareSelves: (HTMLVideoElement | null)[] = [];
+  attachShareSelf = (el: HTMLVideoElement | null): void => {
+    this.shareSelves.push(el);
+  };
   setViewing = (on: boolean): void => {
     this.viewings.push(on);
   };
@@ -1983,6 +1988,19 @@ describe('watching', () => {
     t.client.presence(presenceWith(null), voicePresenceV2Schema);
     expect(t.client.snapshot().watched.has(8)).toBe(false);
     expect(t.rooms[1]?.watching).toEqual([true, false]);
+  });
+
+  it('keeps the sharer\'s preview element for the next connection, told before it connects', async () => {
+    const t = setup([okSession(), okSession()]);
+    await joined(t);
+    const el = document.createElement('video');
+    t.client.attachShareSelf(el);
+    expect(t.rooms[0]?.shareSelves.at(-1)).toBe(el);
+    t.rooms[0]?.events?.onDisconnected('room_deleted');
+    await settle();
+    expect(t.rooms[1]?.shareSelves).toEqual([el]);
+    t.client.attachShareSelf(null);
+    expect(t.rooms[1]?.shareSelves.at(-1)).toBeNull();
   });
 
   it('the phone switcher stops the previous stream before watching and focusing the next, picture and sound together', async () => {

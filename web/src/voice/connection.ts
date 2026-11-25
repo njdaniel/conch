@@ -249,6 +249,9 @@ export interface ShareSink {
   readonly audio: HTMLAudioElement;
 }
 
+// What a capture is of, as the browser reports it (displaySurface).
+export type ShareSurface = 'monitor' | 'window' | 'browser';
+
 // What the client needs of one LiveKit room connection.
 export interface Room extends ShareRoom, CameraRoom {
   // The dock reads these track-scoped sources only while diagnostics is open.
@@ -328,6 +331,13 @@ export interface Room extends ShareRoom, CameraRoom {
   cameras: () => Promise<readonly Camera[] | null>;
   switchCamera: (choice: string) => Promise<void>;
   attachSelf: (el: HTMLVideoElement | null) => void;
+  // Plays this page's own screen picture, muted, into the sharer's preview
+  // (#2197), or into none: it follows the capture, and is empty once the
+  // share is stopped.
+  attachShareSelf: (el: HTMLVideoElement | null) => void;
+  // What the capture is of (a whole screen, a window, a tab), as the browser
+  // says, or null: named in the sharer's title.
+  shareSurface: () => ShareSurface | null;
   // Receiving cameras: whether the call view is open (the person's choice),
   // whether the video is shown here now (setShown: false in the phone layout
   // outside the Voice view, where no camera is received), who holds a camera
@@ -801,6 +811,7 @@ export class VoiceClient {
   private cameraClaims: ReadonlySet<number> = new Set();
   private readonly cameraViews = new Map<number, HTMLVideoElement>();
   private selfView: HTMLVideoElement | null = null;
+  private shareSelfView: HTMLVideoElement | null = null;
   // Numbers the camera's operations (on, off, a switch, and every new
   // capture or stop, however it came): a switch's outcome counts only while
   // nothing newer has happened to the camera.
@@ -1537,6 +1548,19 @@ export class VoiceClient {
   attachSelf(el: HTMLVideoElement | null): void {
     this.selfView = el;
     this.room?.attachSelf(el);
+  }
+
+  // shareSurface says what this page's screen capture is of, for the sharer's
+  // title (#2197), or null when there is none or the browser does not say.
+  shareSurface(): ShareSurface | null {
+    return this.room?.shareSurface() ?? null;
+  }
+
+  // attachShareSelf plays the sharer's own screen into the preview, on this
+  // connection and every one after it (#2197).
+  attachShareSelf(el: HTMLVideoElement | null): void {
+    this.shareSelfView = el;
+    this.room?.attachShareSelf(el);
   }
 
   // refreshCameras reads the cameras the browser lists again: after the
@@ -2323,6 +2347,7 @@ export class VoiceClient {
     room.setViewing(this.state.viewing);
     room.setShown(this.videoShown);
     room.attachSelf(this.selfView);
+    room.attachShareSelf(this.shareSelfView);
     for (const [principal, el] of this.cameraViews) room.attachCamera(principal, el);
     // So is each person's volume, so that nobody is heard at full volume
     // first.
