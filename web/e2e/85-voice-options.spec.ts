@@ -396,6 +396,9 @@ test.describe('Voice options', () => {
           // By keyboard throughout: a pointer press outside would close the
           // hidden panel on its own, which is not the path under test.
           if ((await members.getAttribute('aria-expanded')) !== 'true') {
+            // The top bar is inert while the sheet is still going out, and a
+            // focus on an inert button does nothing: wait for it to clear.
+            await expect(page.locator('.topbar')).not.toHaveAttribute('inert');
             await members.focus();
             await page.keyboard.press('Enter');
           }

@@ -11,7 +11,7 @@ import { headingId } from './Conversation';
 import { Avatar, Glyph } from './Icons';
 import { ServerVersion, TemporaryBanner } from './ServerVersion';
 import { AddPerson, JoiningSettings, SettingsOpen, type JoiningRequest } from './joiningSettings';
-import { LeaveDrawer, OverlayReport, setPageModal } from './pageModal';
+import { DrawerOver, LeaveDrawer, OverlayReport, setPageModal } from './pageModal';
 import { MicTestShown, phoneViews, ShowChat, useAppHeight, usePhone, VoiceLive, VoiceSheet, VoiceStrip, type PhoneView } from './phone';
 import { DesktopOS } from './platform/os';
 import type { ChannelV0 } from './schema/channel';
@@ -401,14 +401,16 @@ export function Lobby({
     if (at !== null && at !== document.body && at.closest('[inert]') === null) return;
     membersBody.current?.focus();
   }, []);
-  // The channel the drawer was opened on.
-  const openedOn = useRef<string | null>(null);
+  // The channel the drawer was opened on, by id: a rename keeps it. A channel
+  // shown that the list does not hold (yet) is no change; none shown is null.
+  const shownChannel = channels.selected === null ? null : (channels.channels.find((c) => c.name === channels.selected)?.id ?? undefined);
+  const openedOn = useRef<number | null>(null);
   const wasOver = useRef(false);
   useEffect(() => {
     const entered = membersOver && !wasOver.current;
     wasOver.current = membersOver;
     if (entered) {
-      openedOn.current = channels.selected;
+      openedOn.current = shownChannel ?? null;
       membersBody.current?.focus();
     } else if (membersOver) recoverFocus();
     else if (membersClosed.current) {
@@ -416,17 +418,24 @@ export function Lobby({
       membersButton.current?.focus();
     } else if (toCentre.current) {
       toCentre.current = false;
-      const target = centre.current?.querySelector<HTMLElement>('[data-centre-target]') ?? null;
-      (target ?? centre.current)?.focus();
+      // The heading of what the action showed, else the conversation's.
+      (centre.current?.querySelector<HTMLElement>('[data-centre-target]') ?? document.getElementById(headingId))?.focus();
     }
   }, [membersOver, asking, recoverFocus]);
   // A row that remounts under focus drops it with no event to hear.
   useEffect(() => {
     const body = membersBody.current;
     if (!membersOver || body === null || typeof MutationObserver === 'undefined') return;
-    const watch = new MutationObserver(recoverFocus);
+    // One task later, and only if focus is still nowhere: the browser's own
+    // Tab (out of a row's menu, say) moves it first, and it is not ours to take.
+    let later = 0;
+    const watch = new MutationObserver(() => {
+      window.clearTimeout(later);
+      later = window.setTimeout(recoverFocus, 0);
+    });
     watch.observe(body, { childList: true, subtree: true });
     return () => {
+      window.clearTimeout(later);
       watch.disconnect();
     };
   }, [membersOver, recoverFocus]);
@@ -438,15 +447,16 @@ export function Lobby({
   // stays open across channels.
   useEffect(() => {
     if (!over.current.over) return;
+    if (shownChannel === undefined) return;
     if (openedOn.current === null) {
-      openedOn.current = channels.selected;
+      openedOn.current = shownChannel;
       return;
     }
-    if (channels.selected === openedOn.current) return;
+    if (shownChannel === openedOn.current) return;
     const at = document.activeElement;
     if (at === null || at === document.body || membersBody.current?.contains(at) === true) membersClosed.current = true;
     setPanelOpen(false);
-  }, [channels.selected]);
+  }, [shownChannel]);
   const leaveDrawer = useCallback(() => {
     if (!over.current.over) return;
     toCentre.current = true;
@@ -534,7 +544,7 @@ export function Lobby({
           </div>
           <div className="topbar-actions">
             {notificationCenter}
-            {invites}
+            <DrawerOver.Provider value={membersOver}>{invites}</DrawerOver.Provider>
             <button
               ref={membersButton}
               type="button"
@@ -654,7 +664,7 @@ export function Lobby({
           </nav>
             {channels.loaded && visit === undefined && channels.channels.length > 0 ? <GroupsPanel controls={arranged} /> : null}
           </div>
-          <main ref={centre} tabIndex={-1} className="centre" inert={membersOver}>
+          <main ref={centre} className="centre" inert={membersOver}>
             <div ref={setStage} className="stage" />
             <section ref={conversationEl} aria-label="Conversation" className="conversation">
               {temporary === true ? <TemporaryBanner /> : null}
@@ -678,7 +688,7 @@ export function Lobby({
               role="region"
               onKeyDown={membersOver ? onMembersKey : undefined}
               onBlur={membersOver ? (event) => {
-                if (event.relatedTarget === null) queueMicrotask(recoverFocus);
+                if (event.relatedTarget === null) window.setTimeout(recoverFocus, 0);
               } : undefined}
             >
               {membersOver ? (

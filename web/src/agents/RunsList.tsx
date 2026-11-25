@@ -2,6 +2,8 @@
 // see, newest first, from the REST list (a page at a time) and the run frames.
 // Selecting one opens run detail in the centre. Every task, outcome and name is
 // another person's or an agent's text and is rendered as a text node.
+import { useContext } from 'react';
+import { LeaveDrawer } from '../pageModal';
 import type { ChannelMemberV1 } from '../schema/channel';
 import type { RunV1 } from '../schema/run';
 import { runEnded } from '../schema/run';
@@ -9,8 +11,6 @@ import { clockSeconds, runSpan, spanText } from './format';
 import { visibleRuns, type RunFilter } from './state';
 import type { Agents } from './useAgents';
 import { useNow } from './useNow';
-import { useContext } from 'react';
-import { LeaveDrawer } from '../pageModal';
 
 const filters: readonly RunFilter[] = ['all', 'open', 'ended'];
 

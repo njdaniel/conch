@@ -292,14 +292,14 @@ describe('Members as a modal drawer: shortcuts, stranded focus, other channels, 
   const inert = (selector: string) => document.querySelector(selector)?.hasAttribute('inert');
   const list = () => screen.getByRole('region', { name: 'Members list' });
   const membersButton = () => screen.getByRole('button', { name: 'Members' });
-  function tree(props: { selected?: string | null; panel?: ReactNode; conversation?: ReactNode; onOpen?: (name: string) => void; overlay?: ReactNode }) {
+  function tree(props: { list?: typeof two; selected?: string | null; panel?: ReactNode; conversation?: ReactNode; onOpen?: (name: string) => void; overlay?: ReactNode }) {
     return (
       <Lobby
         overlay={props.overlay}
         origin="http://127.0.0.1:8080"
         name="ada"
         me={2}
-        channels={{ ...initialChannels, loaded: true, channels: two, selected: props.selected === undefined ? 'a' : props.selected }}
+        channels={{ ...initialChannels, loaded: true, channels: props.list ?? two, selected: props.selected === undefined ? 'a' : props.selected }}
         unread={new Map()}
         connection="connected"
         conversation={props.conversation ?? <p>conversation</p>}
@@ -409,6 +409,14 @@ describe('Members as a modal drawer: shortcuts, stranded focus, other channels, 
     expect(screen.getByRole('region', { name: 'Members list' })).toBeTruthy();
     early.rerender(tree({ selected: 'b' }));
     expect(screen.queryByRole('region', { name: 'Members list' })).toBeNull();
+  });
+
+  it('stays open when the open channel is renamed, which changes the name shown and not the channel', () => {
+    windowOf(false);
+    const { rerender } = render(tree({}));
+    fireEvent.click(membersButton());
+    rerender(tree({ list: [{ id: 1, name: 'renamed', created_at: at }, two[1] as (typeof two)[number]], selected: 'renamed' }));
+    expect(screen.getByRole('region', { name: 'Members list' })).toBeTruthy();
   });
 
   it('leaves the wide side column open across channels', () => {

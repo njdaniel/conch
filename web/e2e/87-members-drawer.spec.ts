@@ -4,9 +4,11 @@
 // one inert owner), Escape closes it and focus returns to the Members button.
 // At a wide window it is a side column and focus leaves it as before.
 import type { Page } from '@playwright/test';
+import { createChannelResponse } from '../src/schema/channel';
+import { createCredentialResponseV1, createPrincipalResponse } from '../src/schema/credential';
 import { runV1 } from '../src/schema/run';
-import { openSession } from './api';
-import { expect, openChannel, showView, signIn, test } from './fixtures';
+import { openSession, post } from './api';
+import { credentialField, expect, messages, openChannel, showView, signIn, statusLine, test } from './fixtures';
 import { call, ok } from './world';
 
 const members = (page: Page) => page.getByRole('button', { name: 'Members' });
@@ -93,6 +95,78 @@ for (const from of ['Voice', 'Channels'] as const) {
     const detail = page.getByRole('article', { name: 'Run detail' });
     await expect(detail).toBeVisible();
     await expect(page.getByRole('navigation', { name: 'Main navigation' }).getByRole('button', { name: 'Chat' })).toHaveAttribute('aria-current', 'page');
-    await expect(detail).toBeFocused();
+    // The run's heading takes focus, not the article around it.
+    await expect(detail.getByRole('heading', { name: `Run #${String(started.id)}` })).toBeFocused();
   });
 }
+
+// Issue #2196, round 4. Nothing in the centre is made focusable by a press on
+// it: a tabindex on the centre or the run detail would draw the focus ring
+// around the whole column at the next key, and break PageUp in the log.
+test('P2196 1440×900: pressing the centre does not focus it, and PageUp still scrolls the log', async ({ meet, world }) => {
+  const channel = `p2196-${String(Date.now())}`;
+  await ok(world, world.tokens.operator, 'POST', '/v0/channels', createChannelResponse, { name: channel });
+  await call(world, world.tokens.operator, 'PUT', `/v1/channels/${encodeURIComponent(channel)}/members/${String(await principalId(world, 'browser'))}`);
+  for (let i = 0; i < 40; i++) await post(world, world.tokens.operator, channel, `p2196 line ${String(i)}`);
+  const { page } = await meet({ viewport: { width: 1440, height: 900 } });
+  await signIn(page, world, world.tokens.browser, 'browser-test');
+  await openChannel(page, channel);
+  const main = page.locator('main.centre');
+  await expect(main).not.toHaveAttribute('tabindex');
+  await expect(messages(page)).toContainText('p2196 line 39');
+  const log = messages(page);
+  await log.evaluate((el) => { el.scrollTop = el.scrollHeight; });
+  // A press in the log's padding, then Shift (a key that types nothing).
+  await log.click({ position: { x: 1, y: 1 } });
+  await page.keyboard.press('Shift');
+  expect(await page.evaluate(() => document.activeElement?.matches('main.centre') === true), 'the centre took focus').toBe(false);
+  expect(await main.evaluate((el) => el.matches(':focus-visible')), 'the focus ring is drawn around the centre').toBe(false);
+  const before = await log.evaluate((el) => el.scrollTop);
+  await page.keyboard.press('PageUp');
+  await expect.poll(() => log.evaluate((el) => el.scrollTop), 'PageUp scrolls the log').toBeLessThan(before);
+});
+
+async function principalId(world: Parameters<typeof call>[0], who: 'browser'): Promise<number> {
+  const me = await call(world, world.tokens[who], 'GET', '/v1/whoami');
+  const id = (me.body as { id?: number }).id;
+  if (id === undefined) throw new Error('no id in whoami');
+  return id;
+}
+
+// A row's menu is open in the drawer; the browser's own Tab leaves it, and
+// focus goes where Tab goes, inside the drawer, not to the drawer's body.
+test('P2196 tablet 1050×800: Tab and Shift+Tab out of a row menu stay in the drawer, where the browser puts them', async ({ meet, world }) => {
+  const suffix = Date.now().toString(36).slice(-5);
+  const channel = `p2196m-${suffix}`;
+  const name = `q${String(Math.floor(Math.random() * 100000)).padStart(5, '0')}m`;
+  await ok(world, world.tokens.operator, 'POST', '/v0/channels', createChannelResponse, { name: channel });
+  const id = (await ok(world, world.tokens.operator, 'POST', '/v0/principals', createPrincipalResponse, { kind: 'human', name })).principal.id;
+  await ok(world, world.tokens.operator, 'POST', `/v1/principals/${String(id)}/credentials`, createCredentialResponseV1, { label: name });
+  expect((await call(world, world.tokens.operator, 'PUT', `/v1/channels/${encodeURIComponent(channel)}/members/${String(id)}`)).status).toBeLessThan(300);
+  for (const key of ['Tab', 'Shift+Tab']) {
+    const { page } = await meet({ viewport: { width: 1050, height: 800 } });
+    await page.goto(world.appUrl);
+    await (await credentialField(page)).fill(world.tokens.operator);
+    await page.getByRole('button', { name: 'Use credential' }).click();
+    await page.getByRole('button', { name: 'Continue anyway' }).click();
+    await expect(statusLine(page)).toContainText('Connected');
+    await openChannel(page, channel);
+    await members(page).focus();
+    await page.keyboard.press('Enter');
+    const more = list(page).getByRole('button', { name: `Actions for ${name}` }).first();
+    await more.focus();
+    await page.keyboard.press('Enter');
+    await expect(list(page).getByRole('menu')).toBeVisible();
+    await page.keyboard.press(key);
+    await expect(list(page).getByRole('menu')).toHaveCount(0);
+    // Past the browser's own move and any recovery after it.
+    await page.waitForTimeout(300);
+    expect(await inDrawer(page), `${key} left the drawer`).toBe(true);
+    const at = await page.evaluate(() => ({ body: document.activeElement?.id === 'members-body', close: document.activeElement?.textContent.trim() === 'Close' }));
+    if (key === 'Tab') {
+      expect(at.body || at.close, 'Tab landed on the drawer or its Close, not on the stop after the menu button').toBe(false);
+    } else {
+      await expect(more).toBeFocused();
+    }
+  }
+});
