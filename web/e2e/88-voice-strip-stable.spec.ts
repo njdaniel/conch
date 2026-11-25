@@ -21,7 +21,11 @@ const layouts = [
   { name: '1440×900 browser, a channel manager', who: 'manager', context: { viewport: { width: 1440, height: 900 } } },
   { name: '390×844 phone, joining two people already in voice', who: 'crowd', context: phones[0][1] },
   { name: '360×740 phone, joining two people already in voice', who: 'crowd', context: phones[1][1] },
-] as const satisfies readonly { name: string; who: 'member' | 'manager' | 'crowd'; context: BrowserContextOptions }[];
+  // The joiner has the lowest id, so the real chip sorts first; the names
+  // differ in width, so a held chip in another slot wraps the row differently.
+  { name: '390×844 phone, joining two people with names of 18 and 21 characters', who: 'crowd', names: ['Abcdefghijklmnop', 'Ghijklmnopqrstuvwxy'], context: phones[0][1] },
+  { name: '360×740 phone, joining two people with names of 18 and 21 characters', who: 'crowd', names: ['Abcdefghijklmnop', 'Ghijklmnopqrstuvwxy'], context: phones[1][1] },
+] as const satisfies readonly { name: string; who: 'member' | 'manager' | 'crowd'; names?: readonly string[]; context: BrowserContextOptions }[];
 
 // Counts the people made for the crowd, so that no name repeats.
 let crowds = 0;
@@ -42,7 +46,7 @@ test.describe('the voice strip', { tag: '@voice' }, () => {
 
   test.afterAll(() => { vw?.stop(); });
 
-  for (const { name, who, context } of layouts) {
+  for (const { name, who, context, ...rest } of layouts) {
     test(`P2202 the controls do not move after joining at ${name}`, async ({ browser }) => {
       if (vw === undefined) throw new Error('no voice world');
       // Someone of their own each time, so nobody from an earlier case is
@@ -59,8 +63,8 @@ test.describe('the voice strip', { tag: '@voice' }, () => {
         const join = voice.getByRole('button', { name: 'Join voice' });
         await expect(join).toBeEnabled({ timeout: 30_000 });
         if (who === 'crowd') {
-          for (const n of ['Abcdef', 'Ghijkl']) {
-            // Eight characters each, and not a name of an earlier case.
+          for (const n of 'names' in rest ? rest.names : ['Abcdef', 'Ghijkl']) {
+            // Eight characters each unless the case says otherwise, and not a name of an earlier case.
             const m = await vw.addMember(`${n}${String(++crowds).padStart(2, '0')}`);
             const other = await enter(browser, vw, m, { context: { viewport: { width: 1440, height: 900 } } });
             others.push(other);

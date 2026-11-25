@@ -596,10 +596,15 @@ describe('the strip in voice', () => {
       expect(drawn([], false).querySelector('li.reserved button')).toBeNull();
     });
 
-    it('follows the listed people, so the row wraps before the chip arrives', () => {
-      const chips = Array.from(drawn([other], true).querySelectorAll('li'));
-      expect(chips).toHaveLength(2);
-      expect(chips[1]?.classList.contains('reserved')).toBe(true);
+    // The held chip takes the slot the real one will sort into (by principal).
+    it.each([
+      ['last, after lower ids', [1, 2], 2],
+      ['first, before higher ids', [7, 9], 0],
+      ['between lower and higher ids', [1, 7], 1],
+    ])('sits %s', (_, ids, at) => {
+      const chips = Array.from(drawn(ids.map((principal) => ({ ...other, principal })), true).querySelectorAll('li'));
+      expect(chips).toHaveLength(ids.length + 1);
+      expect(chips.findIndex((c) => c.classList.contains('reserved'))).toBe(at);
     });
 
     it('is replaced by the real chip when presence lists the viewer', () => {

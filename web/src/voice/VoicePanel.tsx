@@ -1182,10 +1182,11 @@ function shownOnPhone(roster: readonly Occupant[], viewer: number): ReadonlySet<
 // Roster is who is in voice, with how many as its heading, which also names
 // the list. At 700 px and wider every chip shows, wrapping onto more lines;
 // on a phone three show, the viewer's own among them, and "+N more" shows
-// the rest. While this page is in voice (reserve) an empty roster still holds
-// the height of one row of chips, invisible: the page's own chip arrives with
+// the rest. While this page is in voice (reserve) and presence does not yet
+// list it, the roster holds the page's own chip, invisible, in the slot the
+// real one takes (the roster is in principal order): the real chip arrives with
 // the next presence snapshot a moment after the join, and where the roster is
-// above the controls it would push them down (issue #2202).
+// above the controls a row that wrapped differently would push them (issue #2202).
 export function Roster({ channel, mayModerate: standing, reserve = false, roster, people, viewer, viewerName = '', elsewhere, speaking, volumes }: {
   // The channel the roster belongs to, and whether the viewer may moderate it
   // (when not said, the standing in the channel on screen).
@@ -1213,17 +1214,21 @@ export function Roster({ channel, mayModerate: standing, reserve = false, roster
   const kept = shownOnPhone(roster, viewer);
   // The page's own chip, before presence lists it (issue #2202): the real
   // chip's markup, name and moderation button included, unseen, inert and
-  // hidden from assistive technology, where the real one will appear, so the
-  // row wraps now and not a moment after the join.
+  // hidden from assistive technology, in the slot where the real one will
+  // sort (by principal, as the roster is), so the row wraps now and not a
+  // moment after the join.
   const unlisted = reserve && !roster.some((o) => o.principal === viewer);
   const ownName = nameOf(people, viewer, viewer, false, viewerName);
   const placeholder = (
-    <li className="me reserved" aria-hidden="true" inert>
+    <li key="held" className="me reserved" aria-hidden="true" inert>
       <Avatar id={viewer} name={ownName} />
       <span className="who">{nameOf(people, viewer, viewer, elsewhere, viewerName)}</span>
+      <IdentityMarks kind={people.get(viewer)?.kind} only={['agent']} />
       {!mayModerate || channel === undefined ? null : <button type="button" tabIndex={-1} aria-label={`Remove ${ownName} from voice`}>Remove from voice</button>}
     </li>
   );
+  const slot = roster.findIndex((o) => o.principal > viewer);
+  const heldAt = slot < 0 ? roster.length : slot;
   if (roster.length === 0 && kick === null) {
     return unlisted ? (
       <div className="voice-who reserved" aria-hidden="true" inert>
@@ -1238,7 +1243,9 @@ export function Roster({ channel, mayModerate: standing, reserve = false, roster
         {roster.length} in voice
       </h2>
       <ul id="voice-roster" aria-labelledby="voice-count" className={capped ? 'voice-roster capped' : 'voice-roster'}>
-        {roster.map((o) => (
+        {roster.flatMap((o, i) => [
+          unlisted && i === heldAt ? placeholder : null,
+          (
           <li key={o.principal} className={[speaking.has(o.principal) ? 'speaking' : '', kept.has(o.principal) ? '' : 'beyond', o.principal === viewer ? 'me' : ''].filter((c) => c !== '').join(' ') || undefined}>
             <Avatar id={o.principal} name={people.get(o.principal)?.name ?? nameOf(people, o.principal, viewer, false, viewerName)} />
             <span className="who">{nameOf(people, o.principal, viewer, elsewhere, viewerName)}</span>
@@ -1254,8 +1261,9 @@ export function Roster({ channel, mayModerate: standing, reserve = false, roster
             {o.camera && o.principal !== viewer ? <Tag text="camera" /> : null}
             {o.principal === viewer ? null : <VolumeTag volume={volumes.get(o.principal)} />}
           </li>
-        ))}
-        {unlisted ? placeholder : null}
+          ),
+        ])}
+        {unlisted && heldAt === roster.length ? placeholder : null}
       </ul>
       {kick === null || channel === undefined || !mayModerate ? null : <ModerationConfirm key={kick.id} op="kickVoice" channel={channel} id={kick.id} name={kick.name} onClose={() => { setKick(null); kickOpener.current?.focus(); }} />}
       {more > 0 ? (
