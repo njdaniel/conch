@@ -116,7 +116,9 @@ export function keepLine(storage: StorageStatus, platform: string, keep: boolean
   }
 }
 
-export const noticeLines: Readonly<Record<ProfileNotice, string>> = {
+// The fixed notices. legacy-not-ended names its server, so it is made by
+// noticeLine below.
+export const noticeLines: Readonly<Record<Exclude<ProfileNotice, 'legacy-not-ended'>, string>> = {
   'operator-window-only':
     'Operator sign-ins aren’t remembered on this computer. They’re kept for this window only, and the server ends them after 12 hours or an hour idle. Use a member account for everyday use.',
   'sign-in-again': 'The saved sign-in for this server could not be used. Sign in again.',
@@ -130,6 +132,17 @@ export const noticeLines: Readonly<Record<ProfileNotice, string>> = {
   'revocation-unsent': 'Signed out on this computer. The server could not be reached, so the app cannot prove the sign-in was ended there; it was forgotten here.',
   'teardown-slow': 'Something that was using the old sign-in did not stop in time. It was left behind, and the new server was started without it.',
 };
+
+// A sign-in an older Conch saved with a key that protects nothing was deleted,
+// but its server could not be asked to end it (issue #2217). server is the
+// active profile's host.
+export const legacyNotEnded = (server: string): string =>
+  `A sign-in saved by an older Conch for ${server} was removed but couldn’t be ended at the server. Sign out of ${server} on your other devices, or ask an operator to end it.`;
+
+// noticeLine is what a notice says, for the active profile's server.
+export function noticeLine(notice: ProfileNotice, server: string | null): string {
+  return notice === 'legacy-not-ended' ? legacyNotEnded(server ?? 'this server') : noticeLines[notice];
+}
 
 // What the app says of the server's release (issue #946). X is the server's
 // version as /healthz named it, or "unknown"; Y is this app's own.

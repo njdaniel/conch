@@ -3,7 +3,7 @@
 import type { ProfileFiles, ReadText } from '../../main/profiles/files.ts';
 import type { ActivationSpec } from '../../main/profiles/service.ts';
 import type { Account, Activation } from '../../main/profiles/switch.ts';
-import type { Classification, GetResult, PutResult, RemoveResult, Vault } from '../../main/vault/vault.ts';
+import type { Classification, GetResult, LegacyDecide, LegacyEnd, PutResult, RemoveResult, Vault } from '../../main/vault/vault.ts';
 
 export interface MemoryFiles extends ProfileFiles {
   text: string | null;
@@ -80,11 +80,21 @@ export interface FakeVault extends Vault {
   // put waits for this before it writes, when set.
   putGate: Promise<void> | null;
   unusable: Set<string>;
+  // Entries an older build sealed with the built-in key (issue #2217), by
+  // profile id: what a decrypt would give.
+  readonly legacy: Map<string, string>;
+  // The search for them fails, or never answers.
+  findFails: boolean;
+  findHangs: boolean;
+  // Legacy entries that cannot be decrypted, or deleted.
+  unopenable: Set<string>;
+  legacyRemoveFails: boolean;
   readonly calls: string[];
 }
 
 export function fakeVault(classification: Classification = { kind: 'protected' }): FakeVault {
   const secrets = new Map<string, string>();
+  const legacy = new Map<string, string>();
   const calls: string[] = [];
   // One operation at a time per profile id, in the order they were asked, as
   // the real vault does.
@@ -101,6 +111,11 @@ export function fakeVault(classification: Classification = { kind: 'protected' }
     removeHangs: false,
     putGate: null,
     unusable: new Set(),
+    legacy,
+    findFails: false,
+    findHangs: false,
+    unopenable: new Set(),
+    legacyRemoveFails: false,
     calls,
     classify: () => Promise.resolve(vault.classification),
     put(id, secret): Promise<PutResult> {
@@ -109,6 +124,7 @@ export function fakeVault(classification: Classification = { kind: 'protected' }
         if (vault.classification.kind !== 'protected') return vault.classification;
         if (vault.putGate !== null) await vault.putGate;
         secrets.set(id, secret);
+        legacy.delete(id);
         return { kind: 'stored' } as const;
       });
     },
@@ -116,6 +132,12 @@ export function fakeVault(classification: Classification = { kind: 'protected' }
       calls.push(`get ${id}`);
       return serial<GetResult>(id, () => {
         if (vault.classification.kind !== 'protected') return Promise.resolve(vault.classification);
+        if (legacy.has(id)) {
+          // Sealed with the built-in key: deleted unread, as the real vault does.
+          if (vault.legacyRemoveFails) return Promise.resolve({ kind: 'unusable' } as const);
+          legacy.delete(id);
+          return Promise.resolve({ kind: 'legacyRemoved' } as const);
+        }
         if (vault.unusable.has(id)) return Promise.resolve({ kind: 'unusable' } as const);
         const secret = secrets.get(id);
         return Promise.resolve(secret === undefined ? ({ kind: 'absent' } as const) : ({ kind: 'found', secret } as const));
@@ -127,7 +149,31 @@ export function fakeVault(classification: Classification = { kind: 'protected' }
         if (vault.removeHangs) return new Promise<RemoveResult>(() => undefined);
         if (vault.removeFails) return Promise.resolve({ kind: 'failed' });
         secrets.delete(id);
+        legacy.delete(id);
         return Promise.resolve({ kind: 'removed' });
+      });
+    },
+    findLegacy(): Promise<readonly string[]> {
+      calls.push('find-legacy');
+      if (vault.findHangs) return new Promise<readonly string[]>(() => undefined);
+      if (vault.findFails) return Promise.reject(new Error('EACCES'));
+      return Promise.resolve([...legacy.keys()].sort());
+    },
+    endLegacy<T>(id: string, decide: LegacyDecide<T>): Promise<LegacyEnd<T>> {
+      calls.push(`end-legacy ${id}`);
+      return serial(id, async (): Promise<LegacyEnd<T>> => {
+        const secret = legacy.get(id);
+        if (secret === undefined) return { kind: 'not-legacy' };
+        // Decided in the turn, as the real vault does.
+        const use = await decide();
+        let used: { readonly value: T } | null = null;
+        if (use !== null && !vault.unopenable.has(id)) {
+          calls.push(`decrypt ${id}`);
+          used = { value: await use(secret) };
+        }
+        if (vault.legacyRemoveFails) return used === null ? { kind: 'ended', opened: false, removed: false } : { kind: 'ended', opened: true, used: used.value, removed: false };
+        legacy.delete(id);
+        return used === null ? { kind: 'ended', opened: false, removed: true } : { kind: 'ended', opened: true, used: used.value, removed: true };
       });
     },
   };

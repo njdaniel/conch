@@ -19,6 +19,17 @@
 // or the server is asked about a credential, /healthz must name a release on
 // the allowlist (or the development flag must allow it). The same verdict
 // decides whether a sign-in may happen in the window at all.
+//
+// The sweep of issue #2217 runs once per start, in the background, after the
+// list loads and whatever any server's health: every vault entry an older
+// build sealed with Chromium's built-in key (v10, as good as plain text) is
+// ended, each in its profile's own vault turn, so that a remove, a sign-out or
+// a kept sign-in asked meanwhile waits for it. If its server answers /healthz
+// in time with the health document, the entry is opened only to be handed to
+// revokeStored, as sign-out does, then deleted; if not, it is deleted unopened.
+// Whenever an older build's sign-in is not confirmed ended at the server (and
+// also when a read deleted one unread), that profile shows a notice saying it
+// could not be ended there. Each outcome is one fixed log line.
 import type { MainLog } from '../diagnostics.ts';
 import type { CompatView, ProfileAddResult, ProfileNotice, ProfilesView, ProfileView, ShareSoundChoice, StorageStatus } from '../../../web/src/platform/desktop/bridge.ts';
 import type { OperationId } from '../../../web/src/platform/operations.ts';
@@ -36,6 +47,35 @@ export const REVOKE_BOUND_MS = 6_000;
 export const VERIFY_BOUND_MS = 10_000;
 
 export const HEALTH_BOUND_MS = 8_000;
+
+// What the sweep of #2217 did with one entry, or with the whole sweep: the
+// closed vocabulary of its log lines. ended: revoked at the server and
+// deleted; ended-not-deleted: revoked, but the file could not be deleted (a
+// get deletes it unread later). deleted-*: deleted, and not shown ended at the
+// server, because the server did not answer /healthz with the health document
+// (unreachable), the revocation was not confirmed (unconfirmed), the file
+// could not be opened (unopened), no saved server owns it (no-profile), or
+// the file was open to group or others, so it was not read whatever its seal
+// (loose-mode, issue #2217's review, R1).
+// not-deleted: not ended at the server, and it could not be deleted.
+// replaced: something replaced or deleted it before its turn. late: it did
+// not finish within its bound. not-listed: the vault could not be searched (a
+// get deletes such a file unread later, and says so). skipped: profiles.json
+// could not be read, so no entry's server is known and nothing was done. Every
+// outcome but ended and ended-not-deleted puts the profile's notice up.
+export type LegacyOutcome =
+  | 'ended'
+  | 'ended-not-deleted'
+  | 'deleted-unreachable'
+  | 'deleted-unconfirmed'
+  | 'deleted-unopened'
+  | 'deleted-no-profile'
+  | 'deleted-loose-mode'
+  | 'not-deleted'
+  | 'replaced'
+  | 'late'
+  | 'not-listed'
+  | 'skipped';
 
 // What an activation is opened with: the profile, the credential main found
 // for it (null: signed out), and the way it reports an answer of a required
@@ -62,6 +102,10 @@ export interface ProfilesDeps {
   readonly compat: CompatPolicy;
   readonly desktopVersion: string;
   readonly readHealth: (origin: string) => Promise<HealthResult>;
+  // The same question, strictly (issue #2217's review): answered only when the
+  // reply is the health document. The sweep opens an older build's entry
+  // only on such an answer.
+  readonly readSweepHealth: (origin: string) => Promise<HealthResult>;
   // Asks an address whether it is a Conch server, with no credential.
   readonly probe: (origin: string) => Promise<ProbeResult>;
   // Tells a server that a credential main holds for a profile that is not
@@ -139,6 +183,18 @@ export class ProfilesService {
   // that answered with something this app does not understand.
   #verdict: Verdict | null = null;
   #invalid: string | null = null;
+  // The sweep of #2217: whether its search of the vault has finished, the
+  // whole sweep, the profiles whose old entry it is still ending (never read
+  // as a sign-in meanwhile), and those whose entry it deleted without the
+  // server ending it (the notice, while that profile is active).
+  #listed: Promise<void> = Promise.resolve();
+  #swept: Promise<void> = Promise.resolve();
+  readonly #sweeping = new Map<string, Promise<void>>();
+  readonly #unended = new Set<string>();
+  // Profiles whose older build's sign-in the server confirmed ended this run:
+  // a read that later deletes its file (one the sweep could not) needs no
+  // notice.
+  readonly #endedLegacy = new Set<string>();
 
   constructor(deps: ProfilesDeps) {
     this.#deps = deps;
@@ -166,11 +222,113 @@ export class ProfilesService {
     return this.#switcher.current;
   }
 
-  // start loads the list, asks the vault what storage is, and activates the
-  // profile that was active last time (or the server list).
+  // swept settles when the sweep of #2217 this start began has finished (it
+  // never rejects). Nothing waits for it but tests.
+  get swept(): Promise<void> {
+    return this.#swept;
+  }
+
+  // sweep starts the one sweep of this start, in the background (see the head
+  // of this file). It never throws and never holds up start.
+  #sweep(): void {
+    let listed = (): void => undefined;
+    this.#listed = new Promise<void>((resolve) => {
+      listed = () => {
+        resolve();
+      };
+    });
+    this.#swept = this.#runSweep(listed).catch(() => undefined).finally(listed);
+  }
+
+  async #runSweep(listed: () => void): Promise<void> {
+    const { store, vault } = this.#deps;
+    if (store.corrupt) {
+      // No entry's server is known: nothing is opened or deleted.
+      this.#legacyLog('skipped');
+      return;
+    }
+    const found = await within(vault.findLegacy().catch(() => null), this.#deps.vaultBoundMs ?? VAULT_BOUND_MS);
+    if (!found.done || found.value === null) {
+      this.#legacyLog('not-listed');
+      return;
+    }
+    const ends = found.value.map((id) => {
+      const end = (async () => {
+        try {
+          this.#legacyLog(await this.#endLegacy(id));
+        } finally {
+          this.#sweeping.delete(id);
+        }
+      })();
+      // Set before anything can ask: the end above has not finished yet.
+      this.#sweeping.set(id, end);
+      return end;
+    });
+    listed();
+    await Promise.all(ends);
+  }
+
+  // The longest one entry's end may take: its turn behind earlier work, the
+  // health question, the decrypt, the revocation and the delete.
+  #legacyBound(): number {
+    const vault = this.#deps.vaultBoundMs ?? VAULT_BOUND_MS;
+    return 2 * vault + (this.#deps.healthBoundMs ?? HEALTH_BOUND_MS) + (this.#deps.revokeBoundMs ?? REVOKE_BOUND_MS);
+  }
+
+  // endLegacy ends one entry sealed with the built-in key, bounded. Everything
+  // happens in the profile's vault turn: the health question (bounded, so a
+  // server that hangs holds the turn no longer than the health bound), then
+  // the revocation or not. The credential exists only inside the use handed
+  // to the vault: it goes to revokeStored and nowhere else.
+  async #endLegacy(id: string): Promise<LegacyOutcome> {
+    const profile = this.#deps.store.get(id);
+    // Set by decide, in the turn.
+    const asked = { answered: false };
+    const revokeBound = this.#deps.revokeBoundMs ?? REVOKE_BOUND_MS;
+    const decide = async (): Promise<((token: string) => Promise<'ended' | 'unconfirmed' | 'unsent'>) | null> => {
+      // No saved server owns it, so there is no one to tell or ask.
+      if (profile === undefined) return null;
+      const health = await within(
+        this.#deps.readSweepHealth(profile.origin).catch((): HealthResult => ({ kind: 'unreachable' })),
+        this.#deps.healthBoundMs ?? HEALTH_BOUND_MS,
+      );
+      asked.answered = health.done && health.value.kind === 'answered';
+      if (!asked.answered) return null;
+      return async (token) => {
+        const r = await within(this.#deps.revokeStored(profile.origin, token), revokeBound);
+        return r.done ? r.value : 'unconfirmed';
+      };
+    };
+    const r = await within(this.#deps.vault.endLegacy(id, decide), this.#legacyBound());
+    const ended = r.done ? r.value : null;
+    if (ended !== null && ended.kind === 'ended' && ended.opened && ended.used === 'ended') {
+      this.#endedLegacy.add(id);
+      return ended.removed ? 'ended' : 'ended-not-deleted';
+    }
+    // Not shown ended at the server, whatever the delete did: a copy of it may
+    // still work there.
+    this.#unended.add(id);
+    if (ended === null) return 'late';
+    if (ended.kind === 'not-legacy') return 'replaced';
+    if (!ended.removed) return 'not-deleted';
+    if (ended.kind === 'loose-mode') return 'deleted-loose-mode';
+    if (profile === undefined) return 'deleted-no-profile';
+    if (!asked.answered) return 'deleted-unreachable';
+    return ended.opened ? 'deleted-unconfirmed' : 'deleted-unopened';
+  }
+
+  // One fixed line per outcome, from the closed LegacyOutcome vocabulary.
+  #legacyLog(outcome: LegacyOutcome): void {
+    this.#deps.log(`conch-desktop: a sign-in saved by an older build (v10): ${outcome}`, { ring: true });
+  }
+
+  // start loads the list, starts the sweep of #2217 without waiting for it,
+  // asks the vault what storage is, and activates the profile that was active
+  // last time (or the server list).
   async start(): Promise<void> {
     const { store } = this.#deps;
     await store.load();
+    this.#sweep();
     this.#storage = await this.#classify();
     const last = store.corrupt || store.active === null ? undefined : store.get(store.active);
     await this.#switcher.switchTo(last ?? null, { reason: 'switch' });
@@ -201,6 +359,15 @@ export class ProfilesService {
       void this.#purge(profile.id);
       return null;
     }
+    // The sweep of #2217 began before this activation and its search is local;
+    // an entry it is ending is never a sign-in, and is not read here (its turn
+    // in the vault may be waiting on the server).
+    await within(this.#listed, this.#deps.vaultBoundMs ?? VAULT_BOUND_MS);
+    if (!this.#switcher.isCurrent(generation)) return null;
+    if (this.#sweeping.has(profile.id)) {
+      this.#deps.log('conch-desktop: a sign-in saved by an older build is being removed, so it was not used', { ring: true });
+      return null;
+    }
     const read = await within(
       this.#deps.vault.get(profile.id).catch(() => ({ kind: 'unusable' as const })),
       this.#deps.vaultBoundMs ?? VAULT_BOUND_MS,
@@ -219,6 +386,14 @@ export class ProfilesService {
         return this.#verified(profile, got.secret, generation);
       case 'absent':
         this.#deps.log('conch-desktop: no saved sign-in for this server', { ring: true });
+        return null;
+      case 'legacyRemoved':
+        // An older build's entry the sweep did not end (it could not search
+        // the vault, or delete the file): deleted unread, so not ended at the
+        // server, unless the sweep had it ended there.
+        if (!this.#endedLegacy.has(profile.id)) this.#unended.add(profile.id);
+        else this.#notice = 'sign-in-again';
+        this.#deps.log('conch-desktop: a sign-in saved by an older build was deleted unread; sign in again', { ring: true });
         return null;
       case 'unusable':
         this.#notice = 'sign-in-again';
@@ -364,7 +539,9 @@ export class ProfilesService {
       keep: !this.#declinedNow(),
       keepHelp: keepHelpFor(platform),
       recovery: store.corrupt,
-      notice: this.#notice,
+      // The sweep's notice is the active profile's until the person removes
+      // or signs out of it; any other notice of the moment comes first.
+      notice: this.#notice ?? (active !== null && this.#unended.has(active) ? 'legacy-not-ended' : null),
       compat: this.#compatView(),
       platform,
     };
@@ -430,6 +607,11 @@ export class ProfilesService {
     // profile's otherwise.
     const target = this.#switcher.current?.profileId === id ? this.#switcher.current : null;
     const known = target?.token() ?? null;
+    // An older build's entry the sweep is ending is ended first (it holds the
+    // profile's vault turn; the reads and the delete below would wait behind
+    // it anyway, and might give up at their bound).
+    const sweeping = this.#sweeping.get(id);
+    if (sweeping !== undefined) await within(sweeping, this.#legacyBound());
     const run = { ended: false };
     if (target !== null) {
       this.#notice = null;
@@ -454,6 +636,7 @@ export class ProfilesService {
     }
     this.#held.delete(id);
     this.#unkept.delete(id);
+    this.#unended.delete(id);
     await within(revoke, this.#deps.revokeBoundMs ?? REVOKE_BOUND_MS);
     this.#signedOut.add(id);
     if (!(await this.#purge(id))) return false;
@@ -502,6 +685,7 @@ export class ProfilesService {
         else if (token !== null && profile !== null) revoke = this.#deps.revokeStored(profile.origin, token);
         this.#held.delete(id);
         this.#unkept.delete(id);
+        this.#unended.delete(id);
         // Until the entry is really gone, this profile does not start from it.
         this.#signedOut.add(id);
         void this.#purge(id);

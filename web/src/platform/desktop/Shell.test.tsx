@@ -269,6 +269,19 @@ describe('with a server active', () => {
     render(<DesktopShell>{child}</DesktopShell>);
     expect((await screen.findByRole('banner', { name: 'Server' })).textContent).toMatch(/cannot prove the sign-in was ended there/);
   });
+
+  // Issue #2217: an older build's sign-in was deleted but not ended at the
+  // server. The line names the active profile's server, in the strip and in
+  // the server list.
+  it('names the server whose older saved sign-in could not be ended there', async () => {
+    install({ profiles: () => Promise.resolve(view({ ...active, notice: 'legacy-not-ended' })) });
+    render(<DesktopShell>{child}</DesktopShell>);
+    const line =
+      'A sign-in saved by an older Conch for chat.example.org was removed but couldn’t be ended at the server. Sign out of chat.example.org on your other devices, or ask an operator to end it.';
+    expect((await screen.findByRole('banner', { name: 'Server' })).textContent).toContain(line);
+    fireEvent.click(await screen.findByRole('button', { name: 'Servers' }));
+    expect((await screen.findByRole('region', { name: 'Servers' })).textContent).toContain(line);
+  });
 });
 
 describe('the desktop app settings (issue #1587)', () => {

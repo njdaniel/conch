@@ -89,6 +89,10 @@ function refusingVault(): Vault {
     put: () => Promise.resolve(unsafe),
     get: () => Promise.resolve(unsafe),
     remove: () => Promise.resolve({ kind: 'removed' }),
+    // Nothing is read from a root that is not private, so there is nothing
+    // to sweep (#2217).
+    findLegacy: () => Promise.resolve([]),
+    endLegacy: () => Promise.resolve({ kind: 'not-legacy' }),
   };
 }
 
@@ -373,6 +377,7 @@ export async function start(): Promise<void> {
     compat: { servers: allowlist?.servers ?? [], override },
     desktopVersion: app.getVersion(),
     readHealth: healthReader(),
+    readSweepHealth: healthReader({ strict: true }),
     probe: prober(log),
     revokeStored: revoker(log),
     verifyStored: verifier(log),
