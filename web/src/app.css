@@ -3086,17 +3086,20 @@ label {
   color: var(--accent);
 }
 
-/* A chip's sending or speaking mark: a dot on the corner of its avatar, out of
+/* A chip's sending or speaking mark: a dot on the corner of its avatar's own box, out of
    the chip's flow, so the chip is the same size with it and without it (#2211).
    Open for sending, filled for speaking; the word is its visually hidden text. */
-.voice-roster li {
+.voice-roster .face {
   position: relative;
+  display: inline-grid;
+  flex: none;
 }
 
 .voice-roster .state {
   position: absolute;
-  bottom: 0.1rem;
-  left: 1.2rem;
+  right: -0.15rem;
+  bottom: -0.05rem;
+  pointer-events: none;
   box-sizing: border-box;
   width: 0.55rem;
   height: 0.55rem;

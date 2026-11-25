@@ -89,7 +89,7 @@ test.describe('the voice strip', { tag: '@voice' }, () => {
         // Watch from inside the page, so the first frame with the controls is
         // read in the same task that added them.
         await page.evaluate((labels) => {
-          const w = window as unknown as { __strip: { t: number; boxes: Record<string, number[] | null> }[] };
+          const w = window as unknown as { __strip: { t: number; mark: boolean; boxes: Record<string, number[] | null> }[] };
           w.__strip = [];
           const read = () => {
             const region = document.querySelector('section[aria-label="Voice"]');
@@ -107,7 +107,7 @@ test.describe('the voice strip', { tag: '@voice' }, () => {
             const boxes = read();
             if (!started && Object.values(boxes).some((b) => b === null)) return;
             started = true;
-            w.__strip.push({ t: performance.now() - t0, boxes });
+            w.__strip.push({ t: performance.now() - t0, mark: document.querySelector('.voice-roster .state') !== null, boxes });
           };
           new MutationObserver(note).observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true });
           setInterval(note, 50);
@@ -115,9 +115,12 @@ test.describe('the voice strip', { tag: '@voice' }, () => {
         await join.click();
         await expect(voice.getByRole('button', { name: 'Leave voice' })).toBeVisible({ timeout: 30_000 });
         await page.waitForTimeout(3_000);
-        const samples = await page.evaluate(() => (window as unknown as { __strip: { t: number; boxes: Record<string, number[] | null> }[] }).__strip);
+        const samples = await page.evaluate(() => (window as unknown as { __strip: { t: number; mark: boolean; boxes: Record<string, number[] | null> }[] }).__strip);
         const first = samples[0];
         if (first === undefined) throw new Error('the controls never appeared');
+        // In the open microphone the viewer's own sending mark must have shown,
+        // or the case proves nothing about it.
+        if ('mode' in rest) expect(samples.some((s) => s.mark), 'the viewer\'s sending or speaking mark never showed').toBe(true);
         for (const label of controls) {
           const want = first.boxes[label];
           if (want === null || want === undefined) throw new Error(`${label} was not there in the first frame`);
@@ -239,6 +242,44 @@ test.describe('the roster chips', { tag: '@voice' }, () => {
       }
     });
   }
+
+  // The sending mark sits on its own avatar's corner however the chip wraps, and
+  // never over Remove from voice (it was anchored to the chip's bottom).
+  test('P2211 the sending mark stays on the avatar of a wrapped chip and covers no button at 390×844', async ({ browser }) => {
+    if (vw === undefined) throw new Error('no voice world');
+    const me = await vw.addMember(`Alexandria Wellington ${String(++crowds)}`);
+    expect((await vw.api(vw.operator, 'PUT', `/v1/channels/${vw.channel}/members/${String(me.id)}`, { manages: true })).status).toBe(204);
+    const person = await enter(browser, vw, me, { context: phones[0][1], mode: 'unchosen' });
+    try {
+      const { page } = person;
+      await joinVoice(person, 'Join voice');
+      const voice = page.getByRole('region', { name: 'Voice' });
+      const chip = voice.getByRole('list', { name: / in voice$/ }).getByRole('listitem').first();
+      const remove = chip.getByRole('button', { name: /^Remove .* from voice$/ });
+      await expect(chip.locator('.state')).toHaveCount(1, { timeout: 15_000 });
+      const read = () => page.evaluate(() => {
+        const chipEl = document.querySelector('.voice-roster li');
+        const dot = chipEl?.querySelector('.state')?.getBoundingClientRect();
+        const face = chipEl?.querySelector('.avatar')?.getBoundingClientRect();
+        const button = chipEl?.querySelector('button')?.getBoundingClientRect();
+        if (dot === undefined || face === undefined || button === undefined) return null;
+        const at = document.elementFromPoint(button.x + button.width / 2, button.y + button.height / 2);
+        return { dot: [dot.left, dot.top, dot.right, dot.bottom], face: [face.left, face.top, face.right, face.bottom], onButton: at?.tagName === 'BUTTON', chipHeight: chipEl?.getBoundingClientRect().height ?? 0, radius: dot.width / 2 };
+      });
+      const got = await read();
+      if (got === null) throw new Error('no mark, avatar or button');
+      // The chip is the wrapped one: taller than a single line.
+      expect(got.chipHeight, 'the name should wrap the chip').toBeGreaterThan(40);
+      const [dl, dt, dr, db] = got.dot;
+      const [fl, ft, fr, fb] = got.face;
+      for (const [d, f, side] of [[dl, fl, 'left'], [dt, ft, 'top']] as const) expect(d, side).toBeGreaterThanOrEqual((f ?? 0) - got.radius - 0.5);
+      for (const [d, f, side] of [[dr, fr, 'right'], [db, fb, 'bottom']] as const) expect(d, side).toBeLessThanOrEqual((f ?? 0) + got.radius + 0.5);
+      expect(got.onButton, 'the mark must not take a press meant for Remove from voice').toBe(true);
+      await expect(remove).toBeVisible();
+    } finally {
+      await person.close();
+    }
+  });
 
   for (const { name, context } of hold) {
     test(`P2211 a fourth person joining and leaving moves no control at ${name}`, async ({ browser }) => {

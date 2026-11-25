@@ -814,7 +814,7 @@ describe('what is sent, as the strip says it', () => {
       if (chip === undefined) throw new Error('no chip');
       return chip;
     };
-    const shape = (chip: Element) => Array.from(chip.children).filter((el) => !el.classList.contains('state')).map((el) => `${el.tagName}.${el.className}`);
+    const shape = (chip: Element) => Array.from(chip.querySelectorAll(':scope > *:not(.face):not(.said), :scope > .face > *:not(.state)')).filter((el) => !el.classList.contains('state')).map((el) => `${el.tagName}.${el.className}`);
 
     it.each([[true], [false]])('does not change what is in the chip\'s flow, for a manager: %s', (mayModerate) => {
       const quiet = chipOf(false, new Set(), mayModerate);
@@ -830,15 +830,17 @@ describe('what is sent, as the strip says it', () => {
     it('is one mark in the chip, with the word read out and no pill', () => {
       const sending = chipOf(true, new Set(), true);
       expect(sending.querySelectorAll('.state')).toHaveLength(1);
-      expect(sending.querySelector('.state.sending')?.textContent).toBe(' (sending)');
+      expect(sending.querySelector('.state.sending')).not.toBeNull();
+      expect(sending.querySelector('.said')?.textContent).toBe(' (sending)');
       expect(sending.querySelector('.tag')).toBeNull();
       cleanup();
       const speaking = chipOf(true, new Set([7]), true);
       expect(speaking.querySelectorAll('.state')).toHaveLength(1);
-      expect(speaking.querySelector('.state.speaking')?.textContent).toBe(' (speaking)');
+      expect(speaking.querySelector('.state.speaking')).not.toBeNull();
+      expect(speaking.querySelector('.said')?.textContent).toBe(' (speaking)');
     });
 
-    it('leaves the chip\'s accessible name and text as they were', () => {
+    it('reads out "(sending)" after the name and the button, as the pill did', () => {
       expect(chipOf(true, new Set(), true).textContent).toBe('BartholomewRemove from voice (sending)');
     });
   });
