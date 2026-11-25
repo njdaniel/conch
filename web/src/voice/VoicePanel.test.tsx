@@ -563,6 +563,16 @@ describe('the strip in voice', () => {
   const shape = (voice: HTMLElement) =>
     Array.from(voice.querySelectorAll('.voice-bar, .voice-bar *')).map((el) => `${el.tagName}.${el.getAttribute('class') ?? ''}`);
 
+  // Issue #2202: the page's own chip arrives with a presence snapshot a moment
+  // after the join; the room for it is there before, and hidden from everyone.
+  it('holds the height of the roster, unseen, before the first chip arrives', () => {
+    const { voice } = panel(joined(false), 'c', { kind: 'presence', presence });
+    const bar = voice.querySelector('.voice-bar');
+    expect(Array.from(bar?.children ?? []).map((el) => el.className)).toEqual(['voice-who reserved', 'voice-row']);
+    expect(bar?.querySelector('.voice-who')?.getAttribute('aria-hidden')).toBe('true');
+    expect(within(voice).queryByRole('heading', { name: /in voice$/ })).toBeNull();
+  });
+
   it('is the roster, then a row of the state and the controls, with Leave voice last', () => {
     const { voice } = panel(joined(false), 'c', { kind: 'presence', presence: someone });
     const bar = voice.querySelector('.voice-bar');

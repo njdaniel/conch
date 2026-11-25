@@ -781,7 +781,7 @@ export function VoicePanel({
       <div className="voice-bar" inert={covered}>
         {inVoice ? <BlockedVoiceMute voice={voice} others={others} /> : null}
         {strip ? null : (
-          <Roster channel={rosterChannel ?? undefined} mayModerate={mayModerateRoster} roster={roster} people={people} viewer={viewer} viewerName={viewerName} elsewhere={elsewhere} speaking={speaking} volumes={inVoice ? state.volumes : noVolumes} />
+          <Roster channel={rosterChannel ?? undefined} mayModerate={mayModerateRoster} reserve={inVoice} roster={roster} people={people} viewer={viewer} viewerName={viewerName} elsewhere={elsewhere} speaking={speaking} volumes={inVoice ? state.volumes : noVolumes} />
         )}
         {awayLine}
         <div className="voice-row">
@@ -1182,12 +1182,16 @@ function shownOnPhone(roster: readonly Occupant[], viewer: number): ReadonlySet<
 // Roster is who is in voice, with how many as its heading, which also names
 // the list. At 700 px and wider every chip shows, wrapping onto more lines;
 // on a phone three show, the viewer's own among them, and "+N more" shows
-// the rest.
-export function Roster({ channel, mayModerate: standing, roster, people, viewer, viewerName = '', elsewhere, speaking, volumes }: {
+// the rest. While this page is in voice (reserve) an empty roster still holds
+// the height of one row of chips, invisible: the page's own chip arrives with
+// the next presence snapshot a moment after the join, and where the roster is
+// above the controls it would push them down (issue #2202).
+export function Roster({ channel, mayModerate: standing, reserve = false, roster, people, viewer, viewerName = '', elsewhere, speaking, volumes }: {
   // The channel the roster belongs to, and whether the viewer may moderate it
   // (when not said, the standing in the channel on screen).
   readonly channel?: string;
   readonly mayModerate?: boolean;
+  readonly reserve?: boolean;
   readonly roster: readonly Occupant[];
   readonly people: ReadonlyMap<number, Person>;
   readonly viewer: number;
@@ -1207,7 +1211,17 @@ export function Roster({ channel, mayModerate: standing, roster, people, viewer,
   const more = roster.length - phoneChips;
   const capped = more > 0 && !all;
   const kept = shownOnPhone(roster, viewer);
-  if (roster.length === 0 && kick === null) return null;
+  if (roster.length === 0 && kick === null) {
+    return reserve ? (
+      <div className="voice-who reserved" aria-hidden="true">
+        <ul className="voice-roster">
+          <li>
+            <Avatar id={viewer} name={viewerName} />
+          </li>
+        </ul>
+      </div>
+    ) : null;
+  }
   return (
     <div className="voice-who">
       <h2 id="voice-count" className="voice-count">
