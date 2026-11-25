@@ -129,6 +129,61 @@ describe('refusals', () => {
   });
 });
 
+// Issue #2217's review, N4: the file is opened without following a symlink,
+// checked again through its handle, and read through that handle, bounded.
+describe('reading through the opened handle', () => {
+  const file = (): string => join(root, 'profiles', 'alpha', 'credential.bin');
+
+  it('a file swapped for a symlink between the check and the open is not read', async () => {
+    await writeCredential(root, 'alpha', Buffer.from('v10ours'));
+    const outside = join(base, 'outside.bin');
+    await writeFile(outside, 'v10not-ours', { mode: 0o600 });
+    const read = await readCredential(root, 'alpha', {
+      beforeOpen: async () => {
+        await rm(file());
+        await symlink(outside, file());
+      },
+    });
+    expect(read).toEqual({ kind: 'corrupt' });
+    expect(await readFile(outside, 'utf8')).toBe('v10not-ours');
+  });
+
+  it('a file swapped for one open to others between the check and the open is not read', async () => {
+    await writeCredential(root, 'alpha', Buffer.from('v10ours'));
+    const read = await readCredential(root, 'alpha', {
+      beforeOpen: async () => {
+        await rm(file());
+        await writeFile(file(), 'v10planted', { mode: 0o644 });
+        await chmod(file(), 0o644);
+      },
+    });
+    expect(read).toEqual({ kind: 'corrupt' });
+  });
+
+  it('a file that grows past the limit between the check and the read is not read', async () => {
+    await writeCredential(root, 'alpha', Buffer.from('v10ours'));
+    const read = await readCredential(root, 'alpha', {
+      beforeOpen: async () => {
+        await writeFile(file(), Buffer.alloc(70 * 1024, 0x41));
+      },
+    });
+    expect(read).toEqual({ kind: 'corrupt' });
+  });
+
+  it('a file deleted between the check and the open is absent', async () => {
+    await writeCredential(root, 'alpha', Buffer.from('v10ours'));
+    expect(await readCredential(root, 'alpha', { beforeOpen: () => rm(file()) })).toEqual({ kind: 'absent' });
+  });
+
+  it('a file open to group or others is not read, even when nothing changes', async () => {
+    await writeCredential(root, 'alpha', Buffer.from('v10ours'));
+    await chmod(file(), 0o640);
+    expect(await readCredential(root, 'alpha')).toEqual({ kind: 'corrupt' });
+    await chmod(file(), 0o600);
+    expect(await readCredential(root, 'alpha')).toEqual({ kind: 'bytes', data: Buffer.from('v10ours') });
+  });
+});
+
 describe('directory fsync', () => {
   it('a failing directory fsync does not fail a write that has renamed', async () => {
     await writeCredential(root, 'alpha', Buffer.from('x'), {

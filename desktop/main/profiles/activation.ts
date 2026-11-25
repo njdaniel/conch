@@ -186,15 +186,17 @@ export function prober(log: MainLog): (origin: string) => Promise<ProbeResult> {
 // credential, through the same client (so the same trust and redirect rules):
 // the version it names, or none. A document that is not the health document
 // answered, but named no version; no answer at all, or any status but 200, is
-// not an answer.
-export function healthReader(): (origin: string) => Promise<HealthResult> {
+// not an answer. Strict (the sweep of #2217, which opens an older build's
+// saved sign-in only for a server that answers): only the health document is
+// an answer, and anything else at 200 is not.
+export function healthReader(options: { readonly strict?: boolean } = {}): (origin: string) => Promise<HealthResult> {
   return async (origin) => {
     const session = new Session();
     session.setOrigin(origin);
     const client = new Client({ fetch: globalThis.fetch, session });
     const exchange = await client.send({ op: 'health' });
     session.forget();
-    if (exchange.kind === 'none') return exchange.reason === 'invalid' ? { kind: 'answered', version: null } : { kind: 'unreachable' };
+    if (exchange.kind === 'none') return exchange.reason === 'invalid' && options.strict !== true ? { kind: 'answered', version: null } : { kind: 'unreachable' };
     if (exchange.kind !== 'answer' || exchange.status !== 200) return { kind: 'unreachable' };
     const body = exchange.body;
     const version = typeof body === 'object' && body !== null && 'version' in body && typeof body.version === 'string' ? body.version : null;

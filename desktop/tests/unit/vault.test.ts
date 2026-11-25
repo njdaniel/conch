@@ -178,13 +178,15 @@ describe('the keyring seal on Linux', () => {
     ['protected now', {}],
     ['session-only now', { backend: 'basic_text' }],
     ['no keyring now', { seal: 'v10' }],
-  ] as const)('a stored file sealed with the built-in key is deleted unread and reported unusable (%s)', async (_n, opts) => {
+  ] as const)('a stored file sealed with the built-in key is deleted unread and reported as an older build’s, removed (%s)', async (_n, opts) => {
     await mkdir(join(root, 'profiles', 'alpha'), { recursive: true, mode: 0o700 });
     await writeFile(credFile('alpha'), `v10${BODY}1:${Buffer.from(SECRET).toString('base64')}`, { mode: 0o600 });
     await mkdir(join(root, 'profiles', 'beta'), { recursive: true, mode: 0o700 });
     await writeFile(credFile('beta'), 'v11other', { mode: 0o600 });
     make(opts);
-    expect(await vault.get('alpha')).toEqual({ kind: 'unusable' });
+    // Issue #2217's review: the caller is told it was an older build's entry,
+    // deleted unread (so not ended at the server), not just unusable.
+    expect(await vault.get('alpha')).toEqual({ kind: 'legacyRemoved' });
     expect(storage.calls).not.toContain('decrypt');
     await expect(stat(join(root, 'profiles', 'alpha'))).rejects.toThrow();
     // Another profile's file is not touched.
@@ -496,6 +498,13 @@ describe('logging', () => {
 // key (v10) is found and ended, opened only for its one hand-off to the
 // server's revocation, or not opened at all, and deleted.
 describe('the start sweep of entries sealed with the built-in key', () => {
+  // endLegacy's decide callback: a fixed use, or none (delete unopened).
+  const using =
+    <T,>(use: (secret: string) => Promise<T>) =>
+    (): Promise<(secret: string) => Promise<T>> =>
+      Promise.resolve(use);
+  const unopened = (): Promise<null> => Promise.resolve(null);
+
   // The file an older build wrote: the built-in key's mark and the fake's body.
   const legacyFile = (secret: string): string => `v10${BODY}1:${Buffer.from(secret).toString('base64')}`;
 
@@ -517,7 +526,7 @@ describe('the start sweep of entries sealed with the built-in key', () => {
       // Their own protected seals start v10 too.
       make({}, platform);
       expect(await vault.findLegacy()).toEqual([]);
-      expect(await vault.endLegacy('alpha', () => Promise.resolve('used'))).toEqual({ kind: 'not-legacy' });
+      expect(await vault.endLegacy('alpha', using(() => Promise.resolve('used')))).toEqual({ kind: 'not-legacy' });
       expect(await readFile(credFile('alpha'), 'utf8')).toBe(legacyFile(SECRET));
     }
   });
@@ -533,10 +542,10 @@ describe('the start sweep of entries sealed with the built-in key', () => {
     await plant('alpha', legacyFile(SECRET));
     await plant('beta', 'v11other');
     const handed: string[] = [];
-    const ended = await vault.endLegacy('alpha', (secret) => {
+    const ended = await vault.endLegacy('alpha', using((secret) => {
       handed.push(secret);
       return Promise.resolve('ended' as const);
-    });
+    }));
     expect(ended).toEqual({ kind: 'ended', opened: true, used: 'ended', removed: true });
     expect(handed).toEqual([SECRET]);
     expect(storage.calls).toEqual(['decrypt']);
@@ -549,7 +558,7 @@ describe('the start sweep of entries sealed with the built-in key', () => {
 
   it('with no use: deletes the entry without decrypting it', async () => {
     await plant('alpha', legacyFile(SECRET));
-    expect(await vault.endLegacy('alpha', null)).toEqual({ kind: 'ended', opened: false, removed: true });
+    expect(await vault.endLegacy('alpha', unopened)).toEqual({ kind: 'ended', opened: false, removed: true });
     expect(storage.calls).toEqual([]);
     await expect(stat(join(root, 'profiles', 'alpha'))).rejects.toThrow();
   });
@@ -559,17 +568,17 @@ describe('the start sweep of entries sealed with the built-in key', () => {
     make({ decryptError: new Error(`bad ${SECRET}`) });
     let called = false;
     expect(
-      await vault.endLegacy('alpha', () => {
+      await vault.endLegacy('alpha', using(() => {
         called = true;
         return Promise.resolve('ended');
-      }),
+      })),
     ).toEqual({ kind: 'ended', opened: false, removed: true });
     expect(called).toBe(false);
     await expect(stat(join(root, 'profiles', 'alpha'))).rejects.toThrow();
 
     make();
     await plant('beta', legacyFile(SECRET));
-    expect(await vault.endLegacy('beta', () => Promise.reject(new Error(SECRET)))).toEqual({ kind: 'ended', opened: false, removed: true });
+    expect(await vault.endLegacy('beta', using(() => Promise.reject(new Error(SECRET))))).toEqual({ kind: 'ended', opened: false, removed: true });
     await expect(stat(join(root, 'profiles', 'beta'))).rejects.toThrow();
   });
 
@@ -583,8 +592,8 @@ describe('the start sweep of entries sealed with the built-in key', () => {
       return Promise.resolve('ended');
     };
     expect(await vault.findLegacy()).toEqual([]);
-    expect(await vault.endLegacy('alpha', use)).toEqual({ kind: 'not-legacy' });
-    expect(await vault.endLegacy('alpha', null)).toEqual({ kind: 'not-legacy' });
+    expect(await vault.endLegacy('alpha', using(use))).toEqual({ kind: 'not-legacy' });
+    expect(await vault.endLegacy('alpha', unopened)).toEqual({ kind: 'not-legacy' });
     expect(called).toBe(false);
     expect(storage.calls).toEqual([]);
     expect(await readFile(credFile('alpha'))).toEqual(before);
@@ -596,7 +605,7 @@ describe('the start sweep of entries sealed with the built-in key', () => {
     expect(await vault.findLegacy()).toEqual(['alpha']);
     // The put is asked first; the sweep's turn comes after it.
     const put = vault.put('alpha', SECRET);
-    const ended = vault.endLegacy('alpha', () => Promise.resolve('ended'));
+    const ended = vault.endLegacy('alpha', using(() => Promise.resolve('ended')));
     expect(await put).toEqual({ kind: 'stored' });
     expect(await ended).toEqual({ kind: 'not-legacy' });
     expect(await vault.get('alpha')).toEqual({ kind: 'found', secret: SECRET });
@@ -622,7 +631,7 @@ describe('the start sweep of entries sealed with the built-in key', () => {
 
       expect(await vault.findLegacy()).toEqual([]);
       for (const id of ['linkfile', 'linkdir', 'plainfile', 'huge']) {
-        expect(await vault.endLegacy(id, () => Promise.resolve('ended'))).toEqual({ kind: 'not-legacy' });
+        expect(await vault.endLegacy(id, using(() => Promise.resolve('ended')))).toEqual({ kind: 'not-legacy' });
       }
       expect(storage.calls).toEqual([]);
       expect(await readFile(join(outside, 'target.bin'), 'utf8')).toBe(legacyFile(SECRET));
@@ -637,11 +646,71 @@ describe('the start sweep of entries sealed with the built-in key', () => {
     }
   });
 
+  // Issue #2217's review, N4: listed as v10, then swapped for a symlink to a
+  // v10 file elsewhere before its turn: never opened, and the target is kept.
+  it('an entry swapped for a symlink after the listing is left alone, and its target is not opened', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'conch-vault-outside-'));
+    try {
+      await plant('alpha', legacyFile(SECRET));
+      expect(await vault.findLegacy()).toEqual(['alpha']);
+      await writeFile(join(outside, 'target.bin'), legacyFile('other-secret'), { mode: 0o600 });
+      await rm(credFile('alpha'));
+      await symlink(join(outside, 'target.bin'), credFile('alpha'));
+      let called = false;
+      expect(
+        await vault.endLegacy(
+          'alpha',
+          using(() => {
+            called = true;
+            return Promise.resolve('ended');
+          }),
+        ),
+      ).toEqual({ kind: 'not-legacy' });
+      expect(called).toBe(false);
+      expect(storage.calls).toEqual([]);
+      expect(await readFile(join(outside, 'target.bin'), 'utf8')).toBe(legacyFile('other-secret'));
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('decides only once the entry is known to be sealed with the built-in key, inside its turn', async () => {
+    await vault.put('alpha', SECRET);
+    let asked = 0;
+    const decide = (): Promise<null> => {
+      asked++;
+      return Promise.resolve(null);
+    };
+    expect(await vault.endLegacy('alpha', decide)).toEqual({ kind: 'not-legacy' });
+    expect(asked).toBe(0);
+    await plant('beta', legacyFile(SECRET));
+    expect(await vault.endLegacy('beta', decide)).toEqual({ kind: 'ended', opened: false, removed: true });
+    expect(asked).toBe(1);
+  });
+
+  it('a decrypt that never answers is given up at its bound, and the entry is deleted unopened', async () => {
+    await plant('alpha', legacyFile(SECRET));
+    vault = createVault({ storage, root, platform: 'linux', isReady: () => true, log: (l) => logs.push(l), legacyDecryptBoundMs: 20 });
+    storage.decryptStringAsync = () => new Promise(() => undefined);
+    let called = false;
+    expect(
+      await vault.endLegacy(
+        'alpha',
+        using(() => {
+          called = true;
+          return Promise.resolve('ended');
+        }),
+      ),
+    ).toEqual({ kind: 'ended', opened: false, removed: true });
+    expect(called).toBe(false);
+    await expect(stat(join(root, 'profiles', 'alpha'))).rejects.toThrow();
+  });
+
   it('a root that is not private to this user is not searched or touched', async () => {
     await plant('alpha', legacyFile(SECRET));
     await chmod(root, 0o755);
     expect(await vault.findLegacy()).toEqual([]);
-    expect(await vault.endLegacy('alpha', () => Promise.resolve('ended'))).toEqual({ kind: 'not-legacy' });
+    expect(await vault.endLegacy('alpha', using(() => Promise.resolve('ended')))).toEqual({ kind: 'not-legacy' });
     expect(storage.calls).toEqual([]);
     expect(await readFile(credFile('alpha'), 'utf8')).toBe(legacyFile(SECRET));
   });
@@ -657,10 +726,10 @@ describe('the start sweep of entries sealed with the built-in key', () => {
     await plant('beta', legacyFile(SECRET));
     await plant('gamma', legacyFile(SECRET));
     await vault.findLegacy();
-    await vault.endLegacy('alpha', () => Promise.resolve('ended'));
-    await vault.endLegacy('beta', null);
+    await vault.endLegacy('alpha', using(() => Promise.resolve('ended')));
+    await vault.endLegacy('beta', unopened);
     make({ decryptError: new Error(`bad ${SECRET} ${root}`) });
-    await vault.endLegacy('gamma', () => Promise.resolve('ended'));
+    await vault.endLegacy('gamma', using(() => Promise.resolve('ended')));
     expect(logs).toEqual([]);
   });
 });

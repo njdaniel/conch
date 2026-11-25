@@ -23,10 +23,13 @@
 // The sweep of issue #2217 runs once per start, in the background, after the
 // list loads and whatever any server's health: every vault entry an older
 // build sealed with Chromium's built-in key (v10, as good as plain text) is
-// ended. If its server answers /healthz in time, the entry is opened only to
-// be handed to revokeStored, as sign-out does, then deleted; if not, it is
-// deleted unopened and that profile shows a notice saying that the sign-in
-// could not be ended at the server. Each outcome is one fixed log line.
+// ended, each in its profile's own vault turn, so that a remove, a sign-out or
+// a kept sign-in asked meanwhile waits for it. If its server answers /healthz
+// in time with the health document, the entry is opened only to be handed to
+// revokeStored, as sign-out does, then deleted; if not, it is deleted unopened.
+// Whenever an older build's sign-in is not confirmed ended at the server (and
+// also when a read deleted one unread), that profile shows a notice saying it
+// could not be ended there. Each outcome is one fixed log line.
 import type { MainLog } from '../diagnostics.ts';
 import type { CompatView, ProfileAddResult, ProfileNotice, ProfilesView, ProfileView, ShareSoundChoice, StorageStatus } from '../../../web/src/platform/desktop/bridge.ts';
 import type { OperationId } from '../../../web/src/platform/operations.ts';
@@ -47,16 +50,20 @@ export const HEALTH_BOUND_MS = 8_000;
 
 // What the sweep of #2217 did with one entry, or with the whole sweep: the
 // closed vocabulary of its log lines. ended: revoked at the server and
-// deleted. deleted-*: deleted, and not shown ended at the server, because the
-// server did not answer /healthz (unreachable), the revocation was not
-// confirmed (unconfirmed), the file could not be opened (unopened), or no
-// saved server owns it (no-profile). not-deleted: it could not be deleted (a
-// get deletes it unread later). replaced: a new sign-in replaced it first.
-// late: it did not finish within its bound. not-listed: the vault could not
-// be searched. skipped: profiles.json could not be read, so no entry's server
-// is known and nothing was done.
+// deleted; ended-not-deleted: revoked, but the file could not be deleted (a
+// get deletes it unread later). deleted-*: deleted, and not shown ended at the
+// server, because the server did not answer /healthz with the health document
+// (unreachable), the revocation was not confirmed (unconfirmed), the file
+// could not be opened (unopened), or no saved server owns it (no-profile).
+// not-deleted: not ended at the server, and it could not be deleted.
+// replaced: something replaced or deleted it before its turn. late: it did
+// not finish within its bound. not-listed: the vault could not be searched (a
+// get deletes such a file unread later, and says so). skipped: profiles.json
+// could not be read, so no entry's server is known and nothing was done. Every
+// outcome but ended and ended-not-deleted puts the profile's notice up.
 export type LegacyOutcome =
   | 'ended'
+  | 'ended-not-deleted'
   | 'deleted-unreachable'
   | 'deleted-unconfirmed'
   | 'deleted-unopened'
@@ -92,6 +99,10 @@ export interface ProfilesDeps {
   readonly compat: CompatPolicy;
   readonly desktopVersion: string;
   readonly readHealth: (origin: string) => Promise<HealthResult>;
+  // The same question, strictly (issue #2217's review): answered only when the
+  // reply is the health document. The sweep opens an older build's entry
+  // only on such an answer.
+  readonly readSweepHealth: (origin: string) => Promise<HealthResult>;
   // Asks an address whether it is a Conch server, with no credential.
   readonly probe: (origin: string) => Promise<ProbeResult>;
   // Tells a server that a credential main holds for a profile that is not
@@ -175,8 +186,12 @@ export class ProfilesService {
   // server ending it (the notice, while that profile is active).
   #listed: Promise<void> = Promise.resolve();
   #swept: Promise<void> = Promise.resolve();
-  readonly #sweeping = new Set<string>();
+  readonly #sweeping = new Map<string, Promise<void>>();
   readonly #unended = new Set<string>();
+  // Profiles whose older build's sign-in the server confirmed ended this run:
+  // a read that later deletes its file (one the sweep could not) needs no
+  // notice.
+  readonly #endedLegacy = new Set<string>();
 
   constructor(deps: ProfilesDeps) {
     this.#deps = deps;
@@ -234,51 +249,67 @@ export class ProfilesService {
       this.#legacyLog('not-listed');
       return;
     }
-    const ids = found.value;
-    for (const id of ids) this.#sweeping.add(id);
-    listed();
-    await Promise.all(
-      ids.map(async (id) => {
+    const ends = found.value.map((id) => {
+      const end = (async () => {
         try {
           this.#legacyLog(await this.#endLegacy(id));
         } finally {
           this.#sweeping.delete(id);
         }
-      }),
-    );
+      })();
+      // Set before anything can ask: the end above has not finished yet.
+      this.#sweeping.set(id, end);
+      return end;
+    });
+    listed();
+    await Promise.all(ends);
   }
 
-  // endLegacy ends one entry sealed with the built-in key, bounded. The
-  // credential exists only inside the use handed to the vault: it goes to
-  // revokeStored and nowhere else.
+  // The longest one entry's end may take: its turn behind earlier work, the
+  // health question, the decrypt, the revocation and the delete.
+  #legacyBound(): number {
+    const vault = this.#deps.vaultBoundMs ?? VAULT_BOUND_MS;
+    return 2 * vault + (this.#deps.healthBoundMs ?? HEALTH_BOUND_MS) + (this.#deps.revokeBoundMs ?? REVOKE_BOUND_MS);
+  }
+
+  // endLegacy ends one entry sealed with the built-in key, bounded. Everything
+  // happens in the profile's vault turn: the health question (bounded, so a
+  // server that hangs holds the turn no longer than the health bound), then
+  // the revocation or not. The credential exists only inside the use handed
+  // to the vault: it goes to revokeStored and nowhere else.
   async #endLegacy(id: string): Promise<LegacyOutcome> {
-    const { vault } = this.#deps;
-    const vaultBound = this.#deps.vaultBoundMs ?? VAULT_BOUND_MS;
     const profile = this.#deps.store.get(id);
-    if (profile === undefined) {
-      // No saved server owns it, so there is no one to tell or ask.
-      const r = await within(vault.endLegacy(id, null), vaultBound);
-      return !r.done ? 'late' : r.value.kind === 'not-legacy' ? 'replaced' : r.value.removed ? 'deleted-no-profile' : 'not-deleted';
-    }
-    const health = await within(
-      this.#deps.readHealth(profile.origin).catch((): HealthResult => ({ kind: 'unreachable' })),
-      this.#deps.healthBoundMs ?? HEALTH_BOUND_MS,
-    );
-    const answered = health.done && health.value.kind === 'answered';
+    // Set by decide, in the turn.
+    const asked = { answered: false };
     const revokeBound = this.#deps.revokeBoundMs ?? REVOKE_BOUND_MS;
-    const revoke = async (token: string): Promise<'ended' | 'unconfirmed' | 'unsent'> => {
-      const r = await within(this.#deps.revokeStored(profile.origin, token), revokeBound);
-      return r.done ? r.value : 'unconfirmed';
+    const decide = async (): Promise<((token: string) => Promise<'ended' | 'unconfirmed' | 'unsent'>) | null> => {
+      // No saved server owns it, so there is no one to tell or ask.
+      if (profile === undefined) return null;
+      const health = await within(
+        this.#deps.readSweepHealth(profile.origin).catch((): HealthResult => ({ kind: 'unreachable' })),
+        this.#deps.healthBoundMs ?? HEALTH_BOUND_MS,
+      );
+      asked.answered = health.done && health.value.kind === 'answered';
+      if (!asked.answered) return null;
+      return async (token) => {
+        const r = await within(this.#deps.revokeStored(profile.origin, token), revokeBound);
+        return r.done ? r.value : 'unconfirmed';
+      };
     };
-    const r = await within(vault.endLegacy(id, answered ? revoke : null), answered ? vaultBound + revokeBound : vaultBound);
-    if (!r.done) return 'late';
-    const ended = r.value;
+    const r = await within(this.#deps.vault.endLegacy(id, decide), this.#legacyBound());
+    const ended = r.done ? r.value : null;
+    if (ended !== null && ended.kind === 'ended' && ended.opened && ended.used === 'ended') {
+      this.#endedLegacy.add(id);
+      return ended.removed ? 'ended' : 'ended-not-deleted';
+    }
+    // Not shown ended at the server, whatever the delete did: a copy of it may
+    // still work there.
+    this.#unended.add(id);
+    if (ended === null) return 'late';
     if (ended.kind === 'not-legacy') return 'replaced';
     if (!ended.removed) return 'not-deleted';
-    if (ended.opened && ended.used === 'ended') return 'ended';
-    // Deleted here, but a copy of it may still work at the server.
-    this.#unended.add(id);
-    if (!answered) return 'deleted-unreachable';
+    if (profile === undefined) return 'deleted-no-profile';
+    if (!asked.answered) return 'deleted-unreachable';
     return ended.opened ? 'deleted-unconfirmed' : 'deleted-unopened';
   }
 
@@ -351,6 +382,14 @@ export class ProfilesService {
         return this.#verified(profile, got.secret, generation);
       case 'absent':
         this.#deps.log('conch-desktop: no saved sign-in for this server', { ring: true });
+        return null;
+      case 'legacyRemoved':
+        // An older build's entry the sweep did not end (it could not search
+        // the vault, or delete the file): deleted unread, so not ended at the
+        // server, unless the sweep had it ended there.
+        if (!this.#endedLegacy.has(profile.id)) this.#unended.add(profile.id);
+        else this.#notice = 'sign-in-again';
+        this.#deps.log('conch-desktop: a sign-in saved by an older build was deleted unread; sign in again', { ring: true });
         return null;
       case 'unusable':
         this.#notice = 'sign-in-again';
@@ -564,6 +603,11 @@ export class ProfilesService {
     // profile's otherwise.
     const target = this.#switcher.current?.profileId === id ? this.#switcher.current : null;
     const known = target?.token() ?? null;
+    // An older build's entry the sweep is ending is ended first (it holds the
+    // profile's vault turn; the reads and the delete below would wait behind
+    // it anyway, and might give up at their bound).
+    const sweeping = this.#sweeping.get(id);
+    if (sweeping !== undefined) await within(sweeping, this.#legacyBound());
     const run = { ended: false };
     if (target !== null) {
       this.#notice = null;

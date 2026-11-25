@@ -6,7 +6,7 @@ import { keepHelpFor, ProfilesService, type ProbeResult, type StoredCheck } from
 import { ProfileStore } from '../../main/profiles/store.ts';
 import { fakeFactory, fakeVault, memoryFiles, ORIGIN_A, ORIGIN_B, type FakeActivation, type FakeVault } from './profiles-support.ts';
 
-async function setup(options: { vault?: FakeVault; probe?: ProbeResult; stepBoundMs?: number; files?: string; vaultBoundMs?: number; verify?: (origin: string, token: string) => StoredCheck; servers?: string[]; override?: boolean; health?: (origin: string) => Promise<HealthResult>; healthBoundMs?: number; revoke?: (origin: string, token: string) => Promise<'ended' | 'unconfirmed' | 'unsent'>; revokeBoundMs?: number; background?: boolean } = {}) {
+async function setup(options: { vault?: FakeVault; probe?: ProbeResult; stepBoundMs?: number; files?: string; vaultBoundMs?: number; verify?: (origin: string, token: string) => StoredCheck; servers?: string[]; override?: boolean; health?: (origin: string) => Promise<HealthResult>; sweepHealth?: (origin: string) => Promise<HealthResult>; healthBoundMs?: number; revoke?: (origin: string, token: string) => Promise<'ended' | 'unconfirmed' | 'unsent'>; revokeBoundMs?: number; background?: boolean } = {}) {
   const log: string[] = [];
   const files = memoryFiles(options.files);
   const store = new ProfileStore(files);
@@ -34,6 +34,11 @@ async function setup(options: { vault?: FakeVault; probe?: ProbeResult; stepBoun
     readHealth: (origin) => {
       asked.push(origin);
       return (options.health ?? (() => Promise.resolve<HealthResult>({ kind: 'answered', version: 'v1.0.0' })))(origin);
+    },
+    // The sweep's strict question (#2217): by default what health says.
+    readSweepHealth: (origin) => {
+      asked.push(origin);
+      return (options.sweepHealth ?? options.health ?? (() => Promise.resolve<HealthResult>({ kind: 'answered', version: 'v1.0.0' })))(origin);
     },
     verifyStored: (origin, token) => {
       verified.push([origin, token]);
@@ -1198,7 +1203,7 @@ describe('the start sweep of sign-ins an older build saved with the built-in key
   }
 
   const sweepLines = (log: readonly string[]): string[] => log.filter((l) => l.includes('older build (v10)'));
-  const LINE = /^log: conch-desktop: a sign-in saved by an older build \(v10\): (ended|deleted-unreachable|deleted-unconfirmed|deleted-unopened|deleted-no-profile|not-deleted|replaced|late|not-listed|skipped)$/;
+  const LINE = /^log: conch-desktop: a sign-in saved by an older build \(v10\): (ended|ended-not-deleted|deleted-unreachable|deleted-unconfirmed|deleted-unopened|deleted-no-profile|not-deleted|replaced|late|not-listed|skipped)$/;
 
   it('when the server answers: the entry is opened only to be revoked as sign-out does, then deleted, and it is never a sign-in', async () => {
     const vault = legacyVault({ [A]: LEGACY });
@@ -1314,13 +1319,19 @@ describe('the start sweep of sign-ins an older build saved with the built-in key
     expect(s.vault.calls.filter((c) => c === 'find-legacy')).toHaveLength(1);
   });
 
-  it('a vault that cannot be searched, or a profile list that cannot be read, is a no-op with one line', async () => {
+  it('a vault that cannot be searched opens nothing; a read then deletes the entry unread, and the profile says it was not ended at the server', async () => {
     const failing = legacyVault({ [A]: LEGACY });
     failing.findFails = true;
     const s = await setup({ vault: failing, files: profilesJson(A) });
-    expect(failing.legacy.has(A)).toBe(true);
     expect(s.revoked).toEqual([]);
+    expect(failing.calls).not.toContain(`decrypt ${A}`);
     expect(sweepLines(s.log)).toEqual(['log: conch-desktop: a sign-in saved by an older build (v10): not-listed']);
+    // A's activation read it: #2214's path deleted it unread (issue #2217's
+    // review, N2: that is not ended at the server either).
+    expect(failing.legacy.has(A)).toBe(false);
+    expect(s.active().spec.token).toBeNull();
+    expect(s.service.view().notice).toBe('legacy-not-ended');
+    expect(s.log).toContain('log: conch-desktop: a sign-in saved by an older build was deleted unread; sign in again');
 
     const vault = legacyVault({ [A]: LEGACY });
     const t = await setup({ vault, files: '{ nope' });
@@ -1329,12 +1340,68 @@ describe('the start sweep of sign-ins an older build saved with the built-in key
     expect(sweepLines(t.log)).toEqual(['log: conch-desktop: a sign-in saved by an older build (v10): skipped']);
   });
 
-  it('an entry that cannot be deleted says so, and gets no notice that it was removed', async () => {
+  // Issue #2217's review, N2: whenever an entry is not confirmed ended at the
+  // server, the profile says so, whatever the delete did.
+  it('an entry that was not ended and cannot be deleted says so, and the profile has the notice', async () => {
+    for (const health of [unreachable, answered]) {
+      const vault = legacyVault({ [A]: LEGACY });
+      vault.legacyRemoveFails = true;
+      const s = await setup({ vault, files: profilesJson(A), health, revoke: () => Promise.resolve('unconfirmed') });
+      expect(s.service.view().notice).toBe('legacy-not-ended');
+      expect(sweepLines(s.log)).toEqual(['log: conch-desktop: a sign-in saved by an older build (v10): not-deleted']);
+    }
+  });
+
+  it('an entry ended at the server but not deleted needs no notice, even when a read deletes it later', async () => {
     const vault = legacyVault({ [A]: LEGACY });
     vault.legacyRemoveFails = true;
-    const s = await setup({ vault, files: profilesJson(A), health: unreachable });
+    const s = await setup({ vault, files: profilesJson(A) });
+    expect(s.revoked).toEqual([[ORIGIN_A, LEGACY]]);
     expect(s.service.view().notice).toBeNull();
-    expect(sweepLines(s.log)).toEqual(['log: conch-desktop: a sign-in saved by an older build (v10): not-deleted']);
+    expect(sweepLines(s.log)).toEqual(['log: conch-desktop: a sign-in saved by an older build (v10): ended-not-deleted']);
+    vault.legacyRemoveFails = false;
+    expect(await s.service.switchTo(B)).toBe(true);
+    expect(await s.service.switchTo(A)).toBe(true);
+    expect(vault.legacy.has(A)).toBe(false);
+    expect(s.service.view().notice).toBe('sign-in-again');
+  });
+
+  it('an end that does not finish within its bound puts the notice up', async () => {
+    const vault = legacyVault({ [A]: LEGACY });
+    const endLegacy = vault.endLegacy.bind(vault);
+    // A turn that never comes back.
+    vault.endLegacy = () => new Promise(() => undefined);
+    const s = await setup({ vault, files: profilesJson(A), vaultBoundMs: 5, healthBoundMs: 5, revokeBoundMs: 5 });
+    vault.endLegacy = endLegacy;
+    expect(s.service.view().notice).toBe('legacy-not-ended');
+    expect(sweepLines(s.log)).toEqual(['log: conch-desktop: a sign-in saved by an older build (v10): late']);
+  });
+
+  it('an entry replaced before its turn puts the notice up: the old sign-in was not ended', async () => {
+    const vault = legacyVault({ [A]: LEGACY });
+    const findLegacy = vault.findLegacy.bind(vault);
+    vault.findLegacy = async () => {
+      const ids = await findLegacy();
+      // Something replaced it between the search and its turn.
+      vault.legacy.delete(A);
+      return ids;
+    };
+    const s = await setup({ vault, files: profilesJson(A) });
+    expect(s.revoked).toEqual([]);
+    expect(s.service.view().notice).toBe('legacy-not-ended');
+    expect(sweepLines(s.log)).toEqual(['log: conch-desktop: a sign-in saved by an older build (v10): replaced']);
+  });
+
+  // Issue #2217's review, N3: the sweep opens an entry only for the health
+  // document, not any 200.
+  it('opens nothing for a server whose strict health read is not an answer, even if the lenient one is', async () => {
+    const vault = legacyVault({ [A]: LEGACY });
+    const s = await setup({ vault, files: profilesJson(A), health: answered, sweepHealth: unreachable });
+    expect(vault.calls).not.toContain(`decrypt ${A}`);
+    expect(s.revoked).toEqual([]);
+    expect(vault.legacy.has(A)).toBe(false);
+    expect(s.service.view().notice).toBe('legacy-not-ended');
+    expect(sweepLines(s.log)).toEqual(['log: conch-desktop: a sign-in saved by an older build (v10): deleted-unreachable']);
   });
 
   it('logs no secret, and only fixed lines from its closed vocabulary', async () => {

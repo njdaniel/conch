@@ -377,6 +377,7 @@ export async function start(): Promise<void> {
     compat: { servers: allowlist?.servers ?? [], override },
     desktopVersion: app.getVersion(),
     readHealth: healthReader(),
+    readSweepHealth: healthReader({ strict: true }),
     probe: prober(log),
     revokeStored: revoker(log),
     verifyStored: verifier(log),

@@ -19,9 +19,12 @@
 // here logs a secret, ciphertext or a path.
 //
 // The sweep of issue #2217 also finds such files at start (findLegacy) and
-// ends each one (endLegacy): opened only to be handed to the caller's one use
-// (the server's revocation), or not opened at all, and then deleted. The
-// secret goes nowhere else: it is not returned, kept or logged.
+// ends each one (endLegacy) in that profile's own turn, so that nothing asked
+// of the profile meanwhile (a remove, a sign-out, a kept sign-in) can delete
+// or overwrite it first: the caller decides within the turn (it asks the
+// server whether it answers), then the file is opened only to be handed to the
+// caller's one use (the server's revocation), or not opened at all, and then
+// deleted. The secret goes nowhere else: it is not returned, kept or logged.
 import type { MainLog } from '../diagnostics.ts';
 import { classify, linuxSeal, type Classification, type SafeStorageProbe } from './classify.ts';
 import {
@@ -50,7 +53,13 @@ export interface VaultDeps {
   readonly log: MainLog;
   // Test seam for the directory fsync (see files.ts).
   readonly syncDir?: (dir: string) => Promise<void>;
+  // How long endLegacy waits for a decrypt before it deletes the entry
+  // unopened (issue #2217): a keyring that never answers must not hold the
+  // profile's turn.
+  readonly legacyDecryptBoundMs?: number;
 }
+
+export const LEGACY_DECRYPT_BOUND_MS = 5_000;
 
 type NotProtected = Extract<Classification, { kind: 'sessionOnly' | 'temporarilyUnavailable' }>;
 
@@ -66,6 +75,10 @@ export type GetResult =
   // Cannot be decrypted or is corrupt. The file is left alone; the user signs
   // in again, and that put replaces it.
   | { readonly kind: 'unusable' }
+  // It was sealed with Chromium's built-in key (by a build before #2077): it
+  // was deleted unread, so it was not ended at the server (issue #2217). The
+  // user signs in again.
+  | { readonly kind: 'legacyRemoved' }
   | NotProtected;
 
 export type RemoveResult = { readonly kind: 'removed' } | { readonly kind: 'failed' };
@@ -75,6 +88,14 @@ export type RemoveResult = { readonly kind: 'removed' } | { readonly kind: 'fail
 // replaced it), and nothing was done. ended: it was sealed with the built-in
 // key; opened says whether it was decrypted and handed to the use (with what
 // the use answered), and removed whether the file is gone.
+//
+// The decide callback endLegacy is given runs inside the profile's turn,
+// once the entry is known to be sealed with the built-in key: it answers the
+// use to hand the secret to, or null to delete the entry unopened. It must not
+// throw, and must be bounded (it holds the turn).
+export type LegacyUse<T> = (secret: string) => Promise<T>;
+export type LegacyDecide<T> = () => Promise<LegacyUse<T> | null>;
+
 export type LegacyEnd<T> =
   | { readonly kind: 'not-legacy' }
   | { readonly kind: 'ended'; readonly opened: false; readonly removed: boolean }
@@ -89,10 +110,11 @@ export interface Vault {
   // Linux (issue #2217); none elsewhere, and none from a root that is missing
   // or not private.
   findLegacy(): Promise<readonly string[]>;
-  // Ends one such entry: with a use, it is decrypted only to be handed to it,
-  // once; with null it is not decrypted. Either way it is then deleted. An
-  // entry not sealed with the built-in key is left alone. use must not throw.
-  endLegacy<T>(profileId: string, use: ((secret: string) => Promise<T>) | null): Promise<LegacyEnd<T>>;
+  // Ends one such entry in the profile's turn: decide is asked for a use; with
+  // one, the entry is decrypted only to be handed to it, once; with null it is
+  // not decrypted. Either way it is then deleted. An entry not sealed with the
+  // built-in key is left alone, and decide is not asked.
+  endLegacy<T>(profileId: string, decide: LegacyDecide<T>): Promise<LegacyEnd<T>>;
 }
 
 export function createVault(deps: VaultDeps): Vault {
@@ -194,7 +216,7 @@ export function createVault(deps: VaultDeps): Vault {
         return { kind: 'unusable' };
       }
       event('built-in-key-removed', profileId);
-      return { kind: 'unusable' };
+      return { kind: 'legacyRemoved' };
     }
     const c = await state();
     if (c.kind !== 'protected') {
@@ -236,7 +258,25 @@ export function createVault(deps: VaultDeps): Vault {
     return { kind: 'removed' };
   }
 
-  async function doEndLegacy<T>(profileId: string, use: ((secret: string) => Promise<T>) | null): Promise<LegacyEnd<T>> {
+  // decrypt within the bound: null when it fails or does not answer in time.
+  async function boundedDecrypt(data: Buffer): Promise<string | null> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<null>((resolve) => {
+      timer = setTimeout(() => {
+        resolve(null);
+      }, deps.legacyDecryptBoundMs ?? LEGACY_DECRYPT_BOUND_MS);
+      timer.unref();
+    });
+    try {
+      return await Promise.race([deps.storage.decryptStringAsync(data).then((opened) => opened.result), late]);
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function doEndLegacy<T>(profileId: string, decide: LegacyDecide<T>): Promise<LegacyEnd<T>> {
     if (deps.platform !== 'linux') return { kind: 'not-legacy' };
     // The same read as a get: readCredential's lstat checks (a plain, private
     // root; a plain directory; a regular file of a sane size), then the mark.
@@ -247,16 +287,19 @@ export function createVault(deps: VaultDeps): Vault {
       return { kind: 'not-legacy' };
     }
     if (read.kind !== 'bytes' || linuxSeal(read.data) !== 'built-in') return { kind: 'not-legacy' };
+    // Asked only now, in the turn: whatever else is asked of this profile
+    // waits until the entry is ended.
+    let use: LegacyUse<T> | null;
+    try {
+      use = await decide();
+    } catch {
+      use = null;
+    }
     let used: { readonly value: T } | null = null;
     if (use !== null && deps.isReady()) {
       // The built-in key opens it whatever the keyring says; nothing it holds
       // is written back (no re-encrypt), returned or logged.
-      let secret: string | null = null;
-      try {
-        secret = (await deps.storage.decryptStringAsync(read.data)).result;
-      } catch {
-        secret = null;
-      }
+      let secret = await boundedDecrypt(read.data);
       if (secret !== null) {
         try {
           used = { value: await use(secret) };
@@ -305,9 +348,9 @@ export function createVault(deps: VaultDeps): Vault {
       }
       return found;
     },
-    async endLegacy(profileId, use) {
+    async endLegacy(profileId, decide) {
       requireId(profileId);
-      return serial(profileId, () => doEndLegacy(profileId, use));
+      return serial(profileId, () => doEndLegacy(profileId, decide));
     },
   };
 }
