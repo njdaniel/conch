@@ -19,12 +19,13 @@
 //
 // NativeVoicePanel supplies the shared Options wrapper. This component owns
 // the helper settings and keeps their state while the disclosure is closed.
-import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react';
 import type { NativeVoiceDevicesResult, NativeVoiceView, VoiceDeviceKey, VoiceOneShotError, VoiceSaveResult } from '../../platform/desktop/bridge';
 import { DesktopOS } from '../../platform/os';
 import type { NativeVoice } from '../../platform/types';
 import { updatePendingWords } from './words';
 import type { VoiceControlTalkMode, VoiceDevice } from '../../schema/generated';
+import { focusOptionsControl } from '../VoicePanel';
 
 export const systemDefault = 'default';
 export const noPipeWire = 'PipeWire is not available';
@@ -93,11 +94,13 @@ export function VoiceOptions({
   source,
   view,
   open,
+  panel,
   onKeySetup,
 }: {
   readonly source: NativeVoice;
   readonly view: NativeVoiceView;
   readonly open: boolean;
+  readonly panel: RefObject<HTMLDivElement | null>;
   readonly onKeySetup?: (binding: 'talk' | 'mute') => void;
 }) {
   const windows = useContext(DesktopOS) === 'win32';
@@ -108,10 +111,20 @@ export function VoiceOptions({
   const [confirmOpen, setConfirmOpen] = useState(false);
   const openMic = useRef<HTMLInputElement>(null);
   const confirmMic = useRef<HTMLButtonElement>(null);
+  const restoreConfirmFocus = useRef(false);
   useLayoutEffect(() => {
-    if (!open) setConfirmOpen(false);
-    else if (confirmOpen) confirmMic.current?.focus();
-  }, [open, confirmOpen]);
+    if (!open) {
+      restoreConfirmFocus.current = false;
+      setConfirmOpen(false);
+    } else if (confirmOpen) {
+      confirmMic.current?.focus();
+    } else if (restoreConfirmFocus.current) {
+      // The confirmation is gone and any pending talk-mode switch has
+      // disabled its radios. Move focus once, before the helper answers.
+      restoreConfirmFocus.current = false;
+      if (panel.current !== null) focusOptionsControl(panel.current, openMic.current);
+    }
+  }, [open, confirmOpen, panel]);
   const alive = useRef(true);
   useEffect(() => {
     alive.current = true;
@@ -162,9 +175,14 @@ export function VoiceOptions({
     }
   };
 
+  const dismissConfirm = () => {
+    restoreConfirmFocus.current = confirmOpen;
+    setConfirmOpen(false);
+  };
+
   const chooseTalk = async (mode: VoiceControlTalkMode) => {
     setNote(null);
-    setConfirmOpen(false);
+    dismissConfirm();
     setBusy('talk');
     try {
       let saved: VoiceSaveResult | undefined;
@@ -263,10 +281,7 @@ export function VoiceOptions({
           <p className="hint" role="alertdialog" aria-label="Use the open microphone">
             Open microphone {openMeans}.{' '}
             <button ref={confirmMic} type="button" className="primary" onClick={() => { void chooseTalk('open'); }}>Use open microphone</button>{' '}
-            <button type="button" onClick={() => {
-              setConfirmOpen(false);
-              openMic.current?.focus();
-            }}>Cancel</button>
+            <button type="button" onClick={dismissConfirm}>Cancel</button>
           </p>
         ) : null}
         {talk === undefined ? <span className="hint">Choose a talk mode{liveTalk ? '' : `; it ${nextTime}`}.</span> : null}

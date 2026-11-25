@@ -220,12 +220,25 @@ describe('native Voice options disclosure (#2195)', () => {
     expect(await screen.findByRole('button', { name: 'Try again' })).toBeTruthy();
   });
 
-  it('stays closed after switching to Chat and back', async () => {
-    const { toggle, show } = await open();
-    show('general', true);
+  it.each(['Chat', 'Channels'])('keeps focus on %s when switching views, and stays closed on return', async (view) => {
+    vi.stubGlobal('innerWidth', 360);
+    const { toggle, show } = await open(new DOMRect(12, 170, 336, 150), 480);
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Close' }));
+    render(<nav className="phone-nav">
+      <button type="button" aria-current="page">Voice</button>
+      <button type="button" onClick={() => { show('general', true); }}><span>{view}</span></button>
+    </nav>);
+    const destination = screen.getByRole('button', { name: view });
+    const label = within(destination).getByText(view);
+    // jsdom needs the browser's default mousedown focus action simulated.
+    if (fireEvent.mouseDown(label)) act(() => { destination.focus(); });
+    fireEvent.click(label, { detail: 1 });
+    expect(document.activeElement).toBe(destination);
+    expect(screen.queryByRole('dialog', { name: 'Voice options' })).toBeNull();
     show('general');
     expect(toggle.getAttribute('aria-expanded')).toBe('false');
     expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    expect(document.activeElement).toBe(destination);
   });
 });
 

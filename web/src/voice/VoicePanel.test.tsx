@@ -885,8 +885,8 @@ describe('what is sent, as the strip says it', () => {
   });
 });
 
-// Issue #2189: Voice options is a panel over the page; Escape and a press
-// outside close it, and Escape puts focus back on its button.
+// Issue #2189: Voice options is a panel over the page. Escape and an outside
+// press in the same view close it and put focus back on its button.
 describe('Voice options as a panel', () => {
   const open = () => {
     const made = panel(inVoice('connected', 'c'), 'c');
@@ -906,12 +906,15 @@ describe('Voice options as a panel', () => {
     expect(document.activeElement).toBe(button);
   });
 
-  it('a press outside closes it, and a press inside does not', () => {
+  it('a press outside closes it and restores focus, and a press inside does not close it', () => {
     const { voice, button } = open();
-    fireEvent.mouseDown(within(voice).getByRole('slider', { name: /Release delay/ }));
+    const slider = within(voice).getByRole('slider', { name: /Release delay/ });
+    slider.focus();
+    fireEvent.mouseDown(slider);
     expect(button.getAttribute('aria-expanded')).toBe('true');
     fireEvent.mouseDown(document.body);
     expect(button.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(button);
   });
 
   it('the button still toggles it', () => {
@@ -1086,6 +1089,8 @@ it('an open anchored panel closes when it would become a sheet, with focus on it
 // coming back never reopens it: the phone's Chat and Channels views (the
 // strip), and leaving voice.
 describe('Voice options closes when it goes out of sight', () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+
   const drawn = (state: VoiceState, strip: boolean) => (
     <VoiceStrip.Provider value={strip ? () => undefined : null}>
       <VoicePanel voice={control(state, [], { kind: 'presence', presence })} viewer={7} people={new Map()} viewed="c" onOpen={() => undefined} />
@@ -1093,14 +1098,26 @@ describe('Voice options closes when it goes out of sight', () => {
   );
   const expanded = () => screen.queryByRole('button', { name: 'Voice options' })?.getAttribute('aria-expanded');
 
-  it('does not come back after the phone goes to Chat and returns to Voice', () => {
-    const { rerender } = render(drawn(inVoice('connected', 'c'), false));
+  it.each(['Chat', 'Channels'])('keeps focus on %s and stays closed on return to Voice', (view) => {
+    const state = inVoice('connected', 'c');
+    vi.spyOn(document.documentElement, 'clientHeight', 'get').mockReturnValue(520);
+    const { rerender } = render(drawn(state, false));
     fireEvent.click(screen.getByRole('button', { name: 'Voice options' }));
-    expect(expanded()).toBe('true');
-    rerender(drawn(inVoice('connected', 'c'), true));
-    rerender(drawn(inVoice('connected', 'c'), false));
-    expect(expanded()).toBe('false');
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Close' }));
+    render(<nav className="phone-nav">
+      <button type="button" aria-current="page">Voice</button>
+      <button type="button" onClick={() => { rerender(drawn(state, true)); }}><span>{view}</span></button>
+    </nav>);
+    const destination = screen.getByRole('button', { name: view });
+    const label = within(destination).getByText(view);
+    // jsdom needs the browser's default mousedown focus action simulated.
+    if (fireEvent.mouseDown(label)) act(() => { destination.focus(); });
+    fireEvent.click(label, { detail: 1 });
+    expect(document.activeElement).toBe(destination);
     expect(document.querySelector('#voice-options')?.hasAttribute('hidden')).toBe(true);
+    rerender(drawn(state, false));
+    expect(expanded()).toBe('false');
+    expect(document.activeElement).toBe(destination);
   });
 
   it('does not come back after leaving voice and joining again', () => {

@@ -1483,9 +1483,13 @@ function inOtherModal(el: Element | null, panel: Element | null): boolean {
 
 const tabbable = 'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])';
 
+function isDrawn(control: HTMLElement): boolean {
+  return (control.offsetParent !== null || control.getClientRects().length > 0) && getComputedStyle(control).visibility === 'visible';
+}
+
 // The controls of the panel that Tab reaches, in order: enabled and drawn.
 function panelTabbables(panel: HTMLElement): HTMLElement[] {
-  const visible = Array.from(panel.querySelectorAll<HTMLElement>(tabbable)).filter((c) => c.offsetParent !== null || c.getClientRects().length > 0);
+  const visible = Array.from(panel.querySelectorAll<HTMLElement>(tabbable)).filter(isDrawn);
   // A radio group is one Tab stop. If none is checked, use the focused
   // radio when already in the group, or the first one when entering it.
   return visible.filter((control) => {
@@ -1494,6 +1498,13 @@ function panelTabbables(panel: HTMLElement): HTMLElement[] {
       c instanceof HTMLInputElement && c.type === 'radio' && c.name === control.name && c.form === control.form);
     return control === (group.find((radio) => radio.checked) ?? group.find((radio) => radio === document.activeElement) ?? group[0]);
   });
+}
+
+// After a nested confirmation closes, the preferred radio can be disabled
+// while its command runs. Keep focus in the disclosure in either case.
+export function focusOptionsControl(panel: HTMLElement, radio: HTMLInputElement | null): void {
+  const target = radio !== null && !radio.matches(':disabled') && isDrawn(radio) ? radio : panelTabbables(panel)[0] ?? panel;
+  target.focus();
 }
 
 // The next control after the button in its own row (Leave voice, say), as Tab
@@ -1540,11 +1551,11 @@ export function useOptionsDisclosure({ hidden, capturing = false, toAbout = fals
   // What the lobby says of the sheet (VoiceSheet), read here for the press
   // below and for the sheet's own handling after it.
   const { report, blocked, behind } = useContext(VoiceSheet);
-  // Voice options is a panel over the page (issue #2189): Escape closes it and
-  // puts focus back on its button; a press outside it closes it. Escape while
-  // the talk key is being chosen only cancels that, as Change talk key says.
+  // Escape and an outside press in the current view close Voice options and
+  // return focus to its button. Escape while the talk key is being chosen
+  // only cancels that, as Change talk key says.
   useEffect(() => {
-    if (!options) return;
+    if (!options || hidden) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' || e.defaultPrevented || capturing) return;
       // Settings or re-authentication is over the panel (behind): Escape is
@@ -1579,14 +1590,16 @@ export function useOptionsDisclosure({ hidden, capturing = false, toAbout = fals
       // them, their Close and their backdrop among them, is theirs, and the
       // panel stays open beneath, to take focus back when they go.
       if (behind) return;
-      if (native) {
-        // Keep the press from giving focus elsewhere after it is restored.
-        // The click still reaches the control, such as Leave or Settings.
-        e.preventDefault();
-        closeOptions();
-      } else {
+      // The phone nav stays reachable beside the sheet. A button for another
+      // view keeps its normal mouse focus when the click hides the dock.
+      if (at instanceof Element && at.closest('.phone-nav button:not([aria-current="page"])') !== null) {
         setOptions(false);
+        return;
       }
+      // Keep the press from giving focus elsewhere after it is restored.
+      // The click still reaches the control, such as Leave or Settings.
+      e.preventDefault();
+      closeOptions();
     };
     document.addEventListener('keydown', onKey);
     document.addEventListener('mousedown', onPress);
@@ -1596,13 +1609,13 @@ export function useOptionsDisclosure({ hidden, capturing = false, toAbout = fals
       document.removeEventListener('mousedown', onPress);
       document.removeEventListener('focusin', onFocus);
     };
-  }, [options, capturing, closeOptions, behind, sheet, native]);
+  }, [options, hidden, capturing, closeOptions, behind, sheet]);
 
   useEffect(() => {
     if (options || !focusBack.current) return;
     focusBack.current = false;
-    optionsButton.current?.focus();
-  }, [options]);
+    if (!hidden) optionsButton.current?.focus();
+  }, [options, hidden]);
 
   // The sheet is modal (role dialog, aria-modal). The voice section makes
   // its controls and notes inert, and the lobby does the same for the rest

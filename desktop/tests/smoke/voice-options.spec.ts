@@ -1,8 +1,8 @@
 // The packaged renderer with a connected helper transcript. The helper is
 // replaced only in a private copy, so this needs neither LiveKit nor audio.
-import { chmodSync, constants, cpSync, readdirSync } from 'node:fs';
+import { chmodSync, constants, cpSync, readdirSync, rmSync, statSync, symlinkSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { chromium, expect, test } from '@playwright/test';
+import { chromium, expect, test, type Locator } from '@playwright/test';
 import { fixture, scratch } from '../unit/voice-support.ts';
 import { startConchd } from './conchd.ts';
 import { APP, launch, livePage } from './launch.ts';
@@ -15,13 +15,53 @@ const waylandAt = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => {
   return { WAYLAND_DISPLAY: join(run, display) };
 };
 
+// The CI job makes dist/linux-unpacked/chrome-sandbox root-owned and setuid,
+// which a copy made by this user cannot be. When the build's is so, the copy
+// points at it (Chromium checks the file it opens, so a link is the same
+// helper), and the copy runs with the Chromium sandbox on exactly as the main
+// app does; a build whose helper is not (a developer's) keeps its own copy,
+// where the namespace sandbox is used. No spec runs with --no-sandbox.
+function shareSandboxHelper(appDir: string): void {
+  const built = join(dirname(APP), 'chrome-sandbox');
+  let st;
+  try {
+    st = statSync(built);
+  } catch {
+    return;
+  }
+  if (st.uid !== 0 || (st.mode & 0o4000) === 0) return;
+  const copy = join(appDir, 'chrome-sandbox');
+  rmSync(copy, { force: true });
+  symlinkSync(built, copy);
+}
+
+// reachable: after the page scrolls the control into view (the phone strip is
+// taller than 480 px), what is under the middle of it is the control.
+async function reachable(control: Locator): Promise<boolean> {
+  await control.scrollIntoViewIfNeeded();
+  return control.evaluate((el) => {
+    const r = el.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) return false;
+    const x = r.left + r.width / 2;
+    const y = r.top + r.height / 2;
+    if (x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) return false;
+    const at = document.elementFromPoint(x, y);
+    return at !== null && (at === el || el.contains(at));
+  });
+}
+
+async function expectInReach(panel: Locator, controls: readonly Locator[]): Promise<void> {
+  await expect(panel).toBeInViewport({ ratio: 1 });
+  for (const control of controls) expect(await reachable(control)).toBe(true);
+}
+
 test('Voice options keeps the dock in reach in the packaged desktop strip (#2195)', async () => {
   test.setTimeout(240_000);
   const files = scratch('/tmp');
   try {
     const appDir = join(files.root, 'app');
     cpSync(dirname(APP), appDir, { recursive: true, mode: constants.COPYFILE_FICLONE });
-    files.helper({ transcript: fixture('voice-control-v2/transcript-negotiation-v2-owner.json'), stopAt: 6 });
+    files.helper({ transcript: fixture('voice-control-v2/transcript-negotiation-v2-owner.json'), stopAt: 6, devices: fixture('voice-devices/voice-devices-v1.json') });
     cpSync(join(files.resources, 'conch-voice'), join(appDir, 'resources', 'conch-voice'));
     // A build made under a group-writable umask is untrusted as a helper's
     // ancestor; close the copy's directories to group and others.
@@ -30,6 +70,7 @@ test('Voice options keeps the dock in reach in the packaged desktop strip (#2195
       for (const e of readdirSync(dir, { withFileTypes: true })) if (e.isDirectory()) close(join(dir, e.name));
     };
     close(appDir);
+    shareSandboxHelper(appDir);
     const server = await startConchd();
     const app = launch({
       debugPort: true,
@@ -71,7 +112,14 @@ test('Voice options keeps the dock in reach in the packaged desktop strip (#2195
         await toggle.click();
         await expect(panel).toBeVisible();
         await expect(panel).toHaveCSS('position', 'fixed');
+        // The helper's device list loads, so the panel is at its full height.
+        await expect(panel.getByLabel('Microphone')).toBeVisible();
+        await expect(panel.getByLabel('Speakers')).toBeVisible();
         await expect(panel.getByText('Listing devices…')).toBeHidden();
+        const talkKey = page.getByRole('button', { name: 'Talk key', exact: true });
+        await expect(talkKey).toBeVisible();
+        const dock = [mute, toggle, leave, talkKey];
+        await expectInReach(panel, dock);
         await mute.click({ trial: true });
         await toggle.click({ trial: true });
         await leave.click({ trial: true });
@@ -92,11 +140,13 @@ test('Voice options keeps the dock in reach in the packaged desktop strip (#2195
         await page.setViewportSize({ width: 360, height: 480 });
         await page.getByRole('navigation', { name: 'Main navigation' }).getByRole('button', { name: 'Voice', exact: true }).click();
         await toggle.click();
-        await expect(panel).toBeInViewport({ ratio: 1 });
+        await expect(panel.getByLabel('Microphone')).toBeVisible();
         const box = await panel.boundingBox();
         const row = await page.locator('.voice-controls').boundingBox();
         if (box === null || row === null) throw new Error('Voice options or the dock controls are missing.');
         expect(box.y + box.height <= row.y || box.y >= row.y + row.height).toBe(true);
+        // The row as it stands is clear of the panel; now scroll to each control.
+        await expectInReach(panel, dock);
         await page.keyboard.press('Escape');
         await expect(panel).toBeHidden();
         await expect(toggle).toBeFocused();

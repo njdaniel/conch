@@ -363,6 +363,7 @@ export function NativeVoicePanel({
             source={source}
             view={view}
             open={options && !hideOptions}
+            panel={panel}
             {...(source.keyDevices === undefined ? {} : {
               onKeySetup: (binding: 'talk' | 'mute') => {
                 setOptions(false);
