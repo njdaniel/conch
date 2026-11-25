@@ -19,6 +19,7 @@ import { copyText } from './clipboard';
 import { credentials } from './credentials';
 import { http } from './http';
 import { DesktopShell } from './Shell';
+import { KeepSignIn } from './ui/KeepSignIn';
 import { sockets } from './sockets';
 import { DesktopSoundSink } from './sounds';
 import { nativeVoice } from './voice';
@@ -107,5 +108,6 @@ export const platform: Platform = {
       ),
   },
   Shell: DesktopShell,
+  SignInKeep: KeepSignIn,
   nativeVoice,
 };

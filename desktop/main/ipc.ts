@@ -108,7 +108,7 @@ export interface IpcDeps {
 
 export type ProfilesApi = Pick<
   ProfilesService,
-  'view' | 'add' | 'rename' | 'remove' | 'switchTo' | 'retry' | 'recover' | 'signOut' | 'signedIn' | 'keptCredential' | 'signInPermitted' | 'active'
+  'view' | 'add' | 'rename' | 'remove' | 'switchTo' | 'retry' | 'setKeep' | 'recover' | 'signOut' | 'signedIn' | 'keptCredential' | 'signInPermitted' | 'active'
 >;
 
 export type InstalledApi = Pick<Installed, 'view' | 'restart'>;
@@ -641,6 +641,18 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
     run: ({ profiles }, [id]) => profiles.switchTo(id as string | null),
   },
   storageRetry: { limit: 30, maxBytes: 0, parse: none, run: ({ profiles }) => profiles.retry() },
+  // The "Keep me signed in on this computer" choice (issue #2077): one
+  // boolean, for the window in force. Off keeps less, so it needs no act of
+  // the person; on asks for one (the click on the box), so that a script in the
+  // page cannot turn keeping back on by itself. An operator's sign-in is never
+  // kept either way.
+  profileKeep: {
+    limit: 30,
+    maxBytes: 16,
+    parse: oneBoolean,
+    run: ({ profiles }, [keep]) => profiles.setKeep(keep as boolean),
+    gesture: ([keep]) => keep === true,
+  },
   profilesRecover: { limit: 10, maxBytes: 0, parse: none, run: ({ profiles }) => profiles.recover() },
   // The feeds (issue #943). A reconnecting feed subscribes at most once a
   // second, and an acknowledgement follows each batch of frames; past these

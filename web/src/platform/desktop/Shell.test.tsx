@@ -20,7 +20,7 @@ function compat(over: Partial<CompatView> = {}): CompatView {
 }
 
 function view(over: Partial<ProfilesView> = {}): ProfilesView {
-  return { profiles: [], active: null, storage: { kind: 'protected' }, recovery: false, notice: null, compat: compat(), platform: 'linux', ...over };
+  return { profiles: [], active: null, storage: { kind: 'protected' }, keep: true, keepHelp: null, recovery: false, notice: null, compat: compat(), platform: 'linux', ...over };
 }
 
 function install(overrides: Partial<ConchDesktopBridge & DesktopInviteBridge>): void {
@@ -55,6 +55,7 @@ function install(overrides: Partial<ConchDesktopBridge & DesktopInviteBridge>): 
     profileRemove: never,
     profileSwitch: never,
     storageRetry: never,
+    profileKeep: never,
     profilesRecover: never,
     uploadFile: never,
     downloadFile: never,

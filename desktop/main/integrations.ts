@@ -52,7 +52,7 @@ function capture(answer: ShareAvailability | 'unknown'): IntegrationRow {
 function storage(status: StorageStatus): IntegrationRow {
   if (status.kind === 'protected') return working('storage');
   if (status.kind === 'unavailable') return { id: 'storage', state: 'unknown', why: 'secret-store-silent' };
-  const why = { unavailable: 'secret-store-missing', 'insecure-backend': 'insecure-backend', 'unknown-backend': 'unknown-backend', 'unsafe-root': 'unsafe-root' } as const;
+  const why = { unavailable: 'secret-store-missing', 'insecure-backend': 'insecure-backend', 'no-keyring': 'no-keyring', 'unknown-backend': 'unknown-backend', 'unsafe-root': 'unsafe-root' } as const;
   return { id: 'storage', state: 'unavailable', why: why[status.reason] };
 }
 

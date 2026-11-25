@@ -11,7 +11,7 @@
 // page then shows the code's step and nothing of the server, and the step
 // ends at the challenge's five minutes. An operator's first setup, from a
 // token made on the host, is its own page (Setup.tsx), reached from here.
-import { useEffect, useRef, useState, type SyntheticEvent } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type SyntheticEvent } from 'react';
 import * as api from './api';
 import { CreateAccount, type AccountProblem } from './CreateAccount';
 import { accountRefusal, heldLine, refusalLine } from './Invite';
@@ -106,14 +106,19 @@ export function SignIn({
 
   // After a refusal focus goes back where the next try is typed, so it needs
   // no mouse: the credential field for a refused credential, the password
-  // for a refused password.
-  useEffect(() => {
+  // for a refused password. A layout effect, so that it lands in the same
+  // commit as the refusal's words, never after them (#2077).
+  useLayoutEffect(() => {
     if (notice === 'rejected' || notice === 'held') field.current?.focus();
     else if (line !== undefined) passwordField.current?.focus();
     else if (notice !== null) (nameField.current ?? field.current)?.focus();
   }, [notice, line]);
 
-  useEffect(() => {
+  // The submitted password leaves the form once the answer is known, in the
+  // same commit that shows a refusal (a layout effect: nobody, a test
+  // included, can see the refusal with the password still in the field,
+  // #2077), or after a bounded wait when the answer does not come.
+  useLayoutEffect(() => {
     if (!passwordSubmitted.current) return;
     const input = passwordField.current;
     if (!checking) {
@@ -285,12 +290,14 @@ export function SignIn({
             />
             <label htmlFor="signin-password">Password</label>
             <input id="signin-password" name="password" ref={passwordField} type="password" autoComplete="current-password" />
+            {/* The desktop shell's keep choice and storage status (#2077); the browser has none. */}
+            {platform.SignInKeep === undefined ? null : <platform.SignInKeep />}
             <button type="submit" aria-busy={checking}>
               {checking ? 'Checking…' : 'Sign in'}
             </button>
             <p className="hint">
               {platform.name === 'desktop'
-                ? 'You can paste a saved password from your password manager. Conch keeps member sign-ins when protected storage is available. Operator sign-ins last for this window.'
+                ? 'You can paste a saved password from your password manager.'
                 : 'Your browser’s password manager can save and fill this sign-in.'}
             </p>
             <p className="hint">
