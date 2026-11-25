@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readFile, readdir, rm, stat, writeFile, mkdir } from 'node:fs/promises';
+import { chmod, lstat, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -489,6 +489,179 @@ describe('logging', () => {
       }
       expect(line).toMatch(/^vault: [a-zA-Z-]+(?: profile=alpha)?$/);
     }
+  });
+});
+
+// Issue #2217: at start, every entry an older build sealed with the built-in
+// key (v10) is found and ended, opened only for its one hand-off to the
+// server's revocation, or not opened at all, and deleted.
+describe('the start sweep of entries sealed with the built-in key', () => {
+  // The file an older build wrote: the built-in key's mark and the fake's body.
+  const legacyFile = (secret: string): string => `v10${BODY}1:${Buffer.from(secret).toString('base64')}`;
+
+  async function plant(id: string, text: string, mode = 0o600): Promise<void> {
+    await mkdir(join(root, 'profiles', id), { recursive: true, mode: 0o700 });
+    await writeFile(credFile(id), text, { mode });
+  }
+
+  it('finds only the entries sealed with the built-in key, and only on Linux', async () => {
+    await plant('alpha', legacyFile(SECRET));
+    await plant('beta', 'v11other');
+    await plant('gamma', `x99${BODY}unknown`);
+    await plant('delta', legacyFile('second-secret'));
+    expect(await vault.findLegacy()).toEqual(['alpha', 'delta']);
+    // Finding opens nothing and changes nothing.
+    expect(storage.calls).toEqual([]);
+    expect(await readFile(credFile('alpha'), 'utf8')).toBe(legacyFile(SECRET));
+    for (const platform of ['win32', 'darwin'] as const) {
+      // Their own protected seals start v10 too.
+      make({}, platform);
+      expect(await vault.findLegacy()).toEqual([]);
+      expect(await vault.endLegacy('alpha', () => Promise.resolve('used'))).toEqual({ kind: 'not-legacy' });
+      expect(await readFile(credFile('alpha'), 'utf8')).toBe(legacyFile(SECRET));
+    }
+  });
+
+  it('a missing vault, or one with no profiles folder, finds nothing', async () => {
+    await rm(root, { recursive: true, force: true });
+    expect(await vault.findLegacy()).toEqual([]);
+    await mkdir(root, { mode: 0o700 });
+    expect(await vault.findLegacy()).toEqual([]);
+  });
+
+  it('with a use: decrypts once, hands the secret only to the use, then deletes the entry', async () => {
+    await plant('alpha', legacyFile(SECRET));
+    await plant('beta', 'v11other');
+    const handed: string[] = [];
+    const ended = await vault.endLegacy('alpha', (secret) => {
+      handed.push(secret);
+      return Promise.resolve('ended' as const);
+    });
+    expect(ended).toEqual({ kind: 'ended', opened: true, used: 'ended', removed: true });
+    expect(handed).toEqual([SECRET]);
+    expect(storage.calls).toEqual(['decrypt']);
+    await expect(stat(join(root, 'profiles', 'alpha'))).rejects.toThrow();
+    // Not returned anywhere, and the other profile is not touched.
+    expect(JSON.stringify(ended)).not.toContain(SECRET);
+    expect(await readFile(credFile('beta'), 'utf8')).toBe('v11other');
+    expect(await vault.get('alpha')).toEqual({ kind: 'absent' });
+  });
+
+  it('with no use: deletes the entry without decrypting it', async () => {
+    await plant('alpha', legacyFile(SECRET));
+    expect(await vault.endLegacy('alpha', null)).toEqual({ kind: 'ended', opened: false, removed: true });
+    expect(storage.calls).toEqual([]);
+    await expect(stat(join(root, 'profiles', 'alpha'))).rejects.toThrow();
+  });
+
+  it('an entry that cannot be opened, or whose use throws, is deleted all the same and reported unopened', async () => {
+    await plant('alpha', legacyFile(SECRET));
+    make({ decryptError: new Error(`bad ${SECRET}`) });
+    let called = false;
+    expect(
+      await vault.endLegacy('alpha', () => {
+        called = true;
+        return Promise.resolve('ended');
+      }),
+    ).toEqual({ kind: 'ended', opened: false, removed: true });
+    expect(called).toBe(false);
+    await expect(stat(join(root, 'profiles', 'alpha'))).rejects.toThrow();
+
+    make();
+    await plant('beta', legacyFile(SECRET));
+    expect(await vault.endLegacy('beta', () => Promise.reject(new Error(SECRET)))).toEqual({ kind: 'ended', opened: false, removed: true });
+    await expect(stat(join(root, 'profiles', 'beta'))).rejects.toThrow();
+  });
+
+  it('a keyring-sealed (v11) entry is never opened or touched, with a use or without', async () => {
+    await vault.put('alpha', SECRET);
+    const before = await readFile(credFile('alpha'));
+    storage.calls = [];
+    let called = false;
+    const use = (): Promise<string> => {
+      called = true;
+      return Promise.resolve('ended');
+    };
+    expect(await vault.findLegacy()).toEqual([]);
+    expect(await vault.endLegacy('alpha', use)).toEqual({ kind: 'not-legacy' });
+    expect(await vault.endLegacy('alpha', null)).toEqual({ kind: 'not-legacy' });
+    expect(called).toBe(false);
+    expect(storage.calls).toEqual([]);
+    expect(await readFile(credFile('alpha'))).toEqual(before);
+    expect(await vault.get('alpha')).toEqual({ kind: 'found', secret: SECRET });
+  });
+
+  it('an entry a new sign-in replaced before its turn is left alone', async () => {
+    await plant('alpha', legacyFile('old-secret'));
+    expect(await vault.findLegacy()).toEqual(['alpha']);
+    // The put is asked first; the sweep's turn comes after it.
+    const put = vault.put('alpha', SECRET);
+    const ended = vault.endLegacy('alpha', () => Promise.resolve('ended'));
+    expect(await put).toEqual({ kind: 'stored' });
+    expect(await ended).toEqual({ kind: 'not-legacy' });
+    expect(await vault.get('alpha')).toEqual({ kind: 'found', secret: SECRET });
+  });
+
+  it('follows no symlink and leaves a foreign or odd file alone', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'conch-vault-outside-'));
+    try {
+      // A credential file that is a symlink to a v10 file elsewhere.
+      await writeFile(join(outside, 'target.bin'), legacyFile(SECRET), { mode: 0o600 });
+      await mkdir(join(root, 'profiles', 'linkfile'), { recursive: true, mode: 0o700 });
+      await symlink(join(outside, 'target.bin'), credFile('linkfile'));
+      // A profile directory that is a symlink to a directory elsewhere.
+      await mkdir(join(outside, 'dir'), { mode: 0o700 });
+      await writeFile(join(outside, 'dir', 'credential.bin'), legacyFile(SECRET), { mode: 0o600 });
+      await symlink(join(outside, 'dir'), join(root, 'profiles', 'linkdir'));
+      // A name that is not a profile id, a file where a directory should be,
+      // and a v10 file too large to be ours.
+      await mkdir(join(root, 'profiles', 'not.an.id'), { mode: 0o700 });
+      await writeFile(join(root, 'profiles', 'not.an.id', 'credential.bin'), legacyFile(SECRET), { mode: 0o600 });
+      await writeFile(join(root, 'profiles', 'plainfile'), legacyFile(SECRET), { mode: 0o600 });
+      await plant('huge', legacyFile(SECRET) + 'x'.repeat(70 * 1024));
+
+      expect(await vault.findLegacy()).toEqual([]);
+      for (const id of ['linkfile', 'linkdir', 'plainfile', 'huge']) {
+        expect(await vault.endLegacy(id, () => Promise.resolve('ended'))).toEqual({ kind: 'not-legacy' });
+      }
+      expect(storage.calls).toEqual([]);
+      expect(await readFile(join(outside, 'target.bin'), 'utf8')).toBe(legacyFile(SECRET));
+      expect(await readFile(join(outside, 'dir', 'credential.bin'), 'utf8')).toBe(legacyFile(SECRET));
+      expect((await lstat(credFile('linkfile'))).isSymbolicLink()).toBe(true);
+      expect((await lstat(join(root, 'profiles', 'linkdir'))).isSymbolicLink()).toBe(true);
+      expect(await readFile(join(root, 'profiles', 'not.an.id', 'credential.bin'), 'utf8')).toBe(legacyFile(SECRET));
+      expect(await readFile(join(root, 'profiles', 'plainfile'), 'utf8')).toBe(legacyFile(SECRET));
+      expect((await stat(credFile('huge'))).size).toBeGreaterThan(64 * 1024);
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('a root that is not private to this user is not searched or touched', async () => {
+    await plant('alpha', legacyFile(SECRET));
+    await chmod(root, 0o755);
+    expect(await vault.findLegacy()).toEqual([]);
+    expect(await vault.endLegacy('alpha', () => Promise.resolve('ended'))).toEqual({ kind: 'not-legacy' });
+    expect(storage.calls).toEqual([]);
+    expect(await readFile(credFile('alpha'), 'utf8')).toBe(legacyFile(SECRET));
+  });
+
+  it('looks at no more than 256 entries of the profiles folder', async () => {
+    for (let i = 0; i < 300; i++) await plant(`p${String(i).padStart(3, '0')}`, legacyFile(SECRET));
+    const found = await vault.findLegacy();
+    expect(found.length).toBe(256);
+  });
+
+  it('logs nothing, so no secret, ciphertext or path', async () => {
+    await plant('alpha', legacyFile(SECRET));
+    await plant('beta', legacyFile(SECRET));
+    await plant('gamma', legacyFile(SECRET));
+    await vault.findLegacy();
+    await vault.endLegacy('alpha', () => Promise.resolve('ended'));
+    await vault.endLegacy('beta', null);
+    make({ decryptError: new Error(`bad ${SECRET} ${root}`) });
+    await vault.endLegacy('gamma', () => Promise.resolve('ended'));
+    expect(logs).toEqual([]);
   });
 });
 

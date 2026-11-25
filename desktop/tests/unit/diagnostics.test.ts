@@ -41,6 +41,7 @@ const ringValues: Readonly<Record<string, readonly string[]>> = {
     'reason', // The fixed missing or refused bound-credential reason.
     'got.reason', // SessionOnlyReason, the vault's closed vocabulary (#2077).
     'why', // SessionOnlyReason, or the fixed words failed / temporarilyUnavailable (#2077).
+    'outcome', // LegacyOutcome, the closed vocabulary of the v10 sweep's lines (#2217).
   ],
   'vault/vault.ts': [
     'name', // Fixed vault event names, including unprotected storage states.

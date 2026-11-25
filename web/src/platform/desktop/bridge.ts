@@ -84,7 +84,10 @@ export type StorageStatus =
 // Something the last sign-in, switch or sign-out has to tell the person.
 // not-kept: the keyring did not take this sign-in, so it lasts until the app
 // closes. sign-in-ended: the server no longer accepts the saved sign-in
-// (signed out elsewhere, revoked or expired), issue #2077.
+// (signed out elsewhere, revoked or expired), issue #2077. legacy-not-ended:
+// a sign-in an older build saved for the active profile, sealed with a key that
+// protects nothing, was deleted but the server could not be asked to end it
+// (issue #2217); the line names the active profile's server.
 export type ProfileNotice =
   | 'operator-window-only'
   | 'sign-in-again'
@@ -94,7 +97,8 @@ export type ProfileNotice =
   | 'account-mismatch'
   | 'revocation-unconfirmed'
   | 'revocation-unsent'
-  | 'teardown-slow';
+  | 'teardown-slow'
+  | 'legacy-not-ended';
 
 // Whether the active server's release is one this app was tested with
 // (issue #946). none: no server is active. supported: it is on the list.

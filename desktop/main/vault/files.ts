@@ -2,12 +2,13 @@
 // the file 0600, replaced atomically (temp file, fsync, rename, fsync of the
 // directory).
 //
-// Input: a root directory and a profile id. Output: bytes in, bytes out. This
+// Input: a root directory and a profile id. Output: bytes in, bytes out, and
+// the list of profile ids for the start sweep of issue #2217. This
 // is the only module under desktop/main that writes a secret's ciphertext to
 // disk (a unit test greps for that). It never sees a plaintext secret and
 // logs nothing.
 import { randomBytes } from 'node:crypto';
-import { chmod, lstat, mkdir, open, readFile, rename, rm } from 'node:fs/promises';
+import { chmod, lstat, mkdir, open, opendir, readFile, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { isProfileId } from '../profiles/ids.ts';
@@ -177,6 +178,42 @@ export async function readCredential(root: string, id: string): Promise<ReadResu
     return { kind: 'corrupt' };
   }
   return { kind: 'bytes', data: await readFile(file) };
+}
+
+// The most directory entries a listing looks at (issue #2217): the store keeps
+// at most 32 profiles, so a folder with more than this holds things that are
+// not ours, and the rest are not looked at.
+const MAX_LISTED = 256;
+
+// profileIds lists the names under <root>/profiles that are profile ids and
+// are directories, at most MAX_LISTED entries looked at, sorted. It follows
+// nothing: a symlink, a file or a name that is not an id is skipped, and each
+// id's file is then read by readCredential with its own lstat checks. A root
+// that is missing, or that is not ours, plain and private, lists none.
+export async function profileIds(root: string): Promise<readonly string[]> {
+  try {
+    if (!(await checkRoot(root))) return [];
+  } catch (err) {
+    if (err instanceof UnsafeRoot) return [];
+    throw err;
+  }
+  const dir = join(root, 'profiles');
+  let st;
+  try {
+    st = await lstat(dir);
+  } catch (err) {
+    if (isCode(err, 'ENOENT') || isCode(err, 'ENOTDIR')) return [];
+    throw err;
+  }
+  if (st.isSymbolicLink() || !st.isDirectory()) return [];
+  const ids: string[] = [];
+  let seen = 0;
+  // Leaving the loop early closes the directory.
+  for await (const entry of await opendir(dir)) {
+    if (++seen > MAX_LISTED) break;
+    if (entry.isDirectory() && validProfileId(entry.name)) ids.push(entry.name);
+  }
+  return ids.sort();
 }
 
 // removeProfile deletes the profile's directory and what is in it. Missing is

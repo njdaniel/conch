@@ -19,6 +19,14 @@
 // or the server is asked about a credential, /healthz must name a release on
 // the allowlist (or the development flag must allow it). The same verdict
 // decides whether a sign-in may happen in the window at all.
+//
+// The sweep of issue #2217 runs once per start, in the background, after the
+// list loads and whatever any server's health: every vault entry an older
+// build sealed with Chromium's built-in key (v10, as good as plain text) is
+// ended. If its server answers /healthz in time, the entry is opened only to
+// be handed to revokeStored, as sign-out does, then deleted; if not, it is
+// deleted unopened and that profile shows a notice saying that the sign-in
+// could not be ended at the server. Each outcome is one fixed log line.
 import type { MainLog } from '../diagnostics.ts';
 import type { CompatView, ProfileAddResult, ProfileNotice, ProfilesView, ProfileView, ShareSoundChoice, StorageStatus } from '../../../web/src/platform/desktop/bridge.ts';
 import type { OperationId } from '../../../web/src/platform/operations.ts';
@@ -36,6 +44,28 @@ export const REVOKE_BOUND_MS = 6_000;
 export const VERIFY_BOUND_MS = 10_000;
 
 export const HEALTH_BOUND_MS = 8_000;
+
+// What the sweep of #2217 did with one entry, or with the whole sweep: the
+// closed vocabulary of its log lines. ended: revoked at the server and
+// deleted. deleted-*: deleted, and not shown ended at the server, because the
+// server did not answer /healthz (unreachable), the revocation was not
+// confirmed (unconfirmed), the file could not be opened (unopened), or no
+// saved server owns it (no-profile). not-deleted: it could not be deleted (a
+// get deletes it unread later). replaced: a new sign-in replaced it first.
+// late: it did not finish within its bound. not-listed: the vault could not
+// be searched. skipped: profiles.json could not be read, so no entry's server
+// is known and nothing was done.
+export type LegacyOutcome =
+  | 'ended'
+  | 'deleted-unreachable'
+  | 'deleted-unconfirmed'
+  | 'deleted-unopened'
+  | 'deleted-no-profile'
+  | 'not-deleted'
+  | 'replaced'
+  | 'late'
+  | 'not-listed'
+  | 'skipped';
 
 // What an activation is opened with: the profile, the credential main found
 // for it (null: signed out), and the way it reports an answer of a required
@@ -139,6 +169,14 @@ export class ProfilesService {
   // that answered with something this app does not understand.
   #verdict: Verdict | null = null;
   #invalid: string | null = null;
+  // The sweep of #2217: whether its search of the vault has finished, the
+  // whole sweep, the profiles whose old entry it is still ending (never read
+  // as a sign-in meanwhile), and those whose entry it deleted without the
+  // server ending it (the notice, while that profile is active).
+  #listed: Promise<void> = Promise.resolve();
+  #swept: Promise<void> = Promise.resolve();
+  readonly #sweeping = new Set<string>();
+  readonly #unended = new Set<string>();
 
   constructor(deps: ProfilesDeps) {
     this.#deps = deps;
@@ -166,11 +204,96 @@ export class ProfilesService {
     return this.#switcher.current;
   }
 
-  // start loads the list, asks the vault what storage is, and activates the
-  // profile that was active last time (or the server list).
+  // swept settles when the sweep of #2217 this start began has finished (it
+  // never rejects). Nothing waits for it but tests.
+  get swept(): Promise<void> {
+    return this.#swept;
+  }
+
+  // sweep starts the one sweep of this start, in the background (see the head
+  // of this file). It never throws and never holds up start.
+  #sweep(): void {
+    let listed = (): void => undefined;
+    this.#listed = new Promise<void>((resolve) => {
+      listed = () => {
+        resolve();
+      };
+    });
+    this.#swept = this.#runSweep(listed).catch(() => undefined).finally(listed);
+  }
+
+  async #runSweep(listed: () => void): Promise<void> {
+    const { store, vault } = this.#deps;
+    if (store.corrupt) {
+      // No entry's server is known: nothing is opened or deleted.
+      this.#legacyLog('skipped');
+      return;
+    }
+    const found = await within(vault.findLegacy().catch(() => null), this.#deps.vaultBoundMs ?? VAULT_BOUND_MS);
+    if (!found.done || found.value === null) {
+      this.#legacyLog('not-listed');
+      return;
+    }
+    const ids = found.value;
+    for (const id of ids) this.#sweeping.add(id);
+    listed();
+    await Promise.all(
+      ids.map(async (id) => {
+        try {
+          this.#legacyLog(await this.#endLegacy(id));
+        } finally {
+          this.#sweeping.delete(id);
+        }
+      }),
+    );
+  }
+
+  // endLegacy ends one entry sealed with the built-in key, bounded. The
+  // credential exists only inside the use handed to the vault: it goes to
+  // revokeStored and nowhere else.
+  async #endLegacy(id: string): Promise<LegacyOutcome> {
+    const { vault } = this.#deps;
+    const vaultBound = this.#deps.vaultBoundMs ?? VAULT_BOUND_MS;
+    const profile = this.#deps.store.get(id);
+    if (profile === undefined) {
+      // No saved server owns it, so there is no one to tell or ask.
+      const r = await within(vault.endLegacy(id, null), vaultBound);
+      return !r.done ? 'late' : r.value.kind === 'not-legacy' ? 'replaced' : r.value.removed ? 'deleted-no-profile' : 'not-deleted';
+    }
+    const health = await within(
+      this.#deps.readHealth(profile.origin).catch((): HealthResult => ({ kind: 'unreachable' })),
+      this.#deps.healthBoundMs ?? HEALTH_BOUND_MS,
+    );
+    const answered = health.done && health.value.kind === 'answered';
+    const revokeBound = this.#deps.revokeBoundMs ?? REVOKE_BOUND_MS;
+    const revoke = async (token: string): Promise<'ended' | 'unconfirmed' | 'unsent'> => {
+      const r = await within(this.#deps.revokeStored(profile.origin, token), revokeBound);
+      return r.done ? r.value : 'unconfirmed';
+    };
+    const r = await within(vault.endLegacy(id, answered ? revoke : null), answered ? vaultBound + revokeBound : vaultBound);
+    if (!r.done) return 'late';
+    const ended = r.value;
+    if (ended.kind === 'not-legacy') return 'replaced';
+    if (!ended.removed) return 'not-deleted';
+    if (ended.opened && ended.used === 'ended') return 'ended';
+    // Deleted here, but a copy of it may still work at the server.
+    this.#unended.add(id);
+    if (!answered) return 'deleted-unreachable';
+    return ended.opened ? 'deleted-unconfirmed' : 'deleted-unopened';
+  }
+
+  // One fixed line per outcome, from the closed LegacyOutcome vocabulary.
+  #legacyLog(outcome: LegacyOutcome): void {
+    this.#deps.log(`conch-desktop: a sign-in saved by an older build (v10): ${outcome}`, { ring: true });
+  }
+
+  // start loads the list, starts the sweep of #2217 without waiting for it,
+  // asks the vault what storage is, and activates the profile that was active
+  // last time (or the server list).
   async start(): Promise<void> {
     const { store } = this.#deps;
     await store.load();
+    this.#sweep();
     this.#storage = await this.#classify();
     const last = store.corrupt || store.active === null ? undefined : store.get(store.active);
     await this.#switcher.switchTo(last ?? null, { reason: 'switch' });
@@ -199,6 +322,15 @@ export class ProfilesService {
       // (a delete that hangs would hold a read behind it). Deleting is tried
       // again in the background.
       void this.#purge(profile.id);
+      return null;
+    }
+    // The sweep of #2217 began before this activation and its search is local;
+    // an entry it is ending is never a sign-in, and is not read here (its turn
+    // in the vault may be waiting on the server).
+    await within(this.#listed, this.#deps.vaultBoundMs ?? VAULT_BOUND_MS);
+    if (!this.#switcher.isCurrent(generation)) return null;
+    if (this.#sweeping.has(profile.id)) {
+      this.#deps.log('conch-desktop: a sign-in saved by an older build is being removed, so it was not used', { ring: true });
       return null;
     }
     const read = await within(
@@ -364,7 +496,9 @@ export class ProfilesService {
       keep: !this.#declinedNow(),
       keepHelp: keepHelpFor(platform),
       recovery: store.corrupt,
-      notice: this.#notice,
+      // The sweep's notice is the active profile's until the person removes
+      // or signs out of it; any other notice of the moment comes first.
+      notice: this.#notice ?? (active !== null && this.#unended.has(active) ? 'legacy-not-ended' : null),
       compat: this.#compatView(),
       platform,
     };
@@ -454,6 +588,7 @@ export class ProfilesService {
     }
     this.#held.delete(id);
     this.#unkept.delete(id);
+    this.#unended.delete(id);
     await within(revoke, this.#deps.revokeBoundMs ?? REVOKE_BOUND_MS);
     this.#signedOut.add(id);
     if (!(await this.#purge(id))) return false;
@@ -502,6 +637,7 @@ export class ProfilesService {
         else if (token !== null && profile !== null) revoke = this.#deps.revokeStored(profile.origin, token);
         this.#held.delete(id);
         this.#unkept.delete(id);
+        this.#unended.delete(id);
         // Until the entry is really gone, this profile does not start from it.
         this.#signedOut.add(id);
         void this.#purge(id);

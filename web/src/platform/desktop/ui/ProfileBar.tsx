@@ -10,7 +10,7 @@ import type { InviteCheck, ProfilesView } from '../bridge';
 import { DevelopmentNote, Incompatible } from './Compat';
 import { DesktopSettings } from './DesktopSettings';
 import { ServerList } from './ServerList';
-import { noticeLines } from './text';
+import { noticeLine } from './text';
 
 const POLL_MS = 2_000;
 
@@ -80,7 +80,7 @@ export function ProfileBar({ initial }: { readonly initial: ProfilesView }) {
         <span className="desktop-bar-account">{current?.account ?? 'not signed in yet'}</span>
         {kept || view.notice === 'operator-window-only' ? null : <span className="desktop-bar-session">sign-in kept until the app closes</span>}
         {/* The open server list already shows the operator note; say it once. */}
-        {view.notice === null || (open && view.notice === 'operator-window-only') ? null : <span className="desktop-bar-notice">{noticeLines[view.notice]}</span>}
+        {view.notice === null || (open && view.notice === 'operator-window-only') ? null : <span className="desktop-bar-notice">{noticeLine(view.notice, current?.host ?? null)}</span>}
         <button
           type="button"
           className="desktop-bar-settings"

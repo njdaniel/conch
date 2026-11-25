@@ -7,7 +7,7 @@ import { bridge } from '../access';
 import type { InviteCheck, ProfileView, ProfilesView } from '../bridge';
 import { InviteLink } from './InviteLink';
 import { StorageStatus } from './StorageStatus';
-import { addRefusalLines, example, noticeLines } from './text';
+import { addRefusalLines, example, noticeLine } from './text';
 
 interface Props {
   readonly view: ProfilesView;
@@ -104,7 +104,7 @@ export function ServerList({ view, onView, heading = false, clientMounted = true
       {heading ? <h2>Servers</h2> : null}
       {view.notice === null ? null : (
         <p role="status" className="notice">
-          {noticeLines[view.notice]}
+          {noticeLine(view.notice, view.profiles.find((p) => p.id === view.active)?.host ?? null)}
         </p>
       )}
       <StorageStatus view={view} onView={onView} />

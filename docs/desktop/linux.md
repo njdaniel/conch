@@ -126,6 +126,10 @@ gave it, sealed by the keyring, in `~/.config/conch-desktop/vault/`.
   or it expired), the next start shows the sign-in form and says the saved
   sign-in has ended. Sign in again.
 - **Uncheck the box** to keep the sign-in only until the app closes.
+- **A sign-in an older Conch kept without a keyring** was sealed with a key
+  that protects nothing. Conch removes it when it starts, and ends it at the
+  server if the server can be reached. If not, the app names the server: sign
+  out of it on your other devices, or ask an operator to end that sign-in.
 - **Operator sign-ins are never kept.** They last for the window, and the
   server ends them after 12 hours or an hour idle. Use a member account for
   everyday use.

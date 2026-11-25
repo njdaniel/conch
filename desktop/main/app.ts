@@ -89,6 +89,10 @@ function refusingVault(): Vault {
     put: () => Promise.resolve(unsafe),
     get: () => Promise.resolve(unsafe),
     remove: () => Promise.resolve({ kind: 'removed' }),
+    // Nothing is read from a root that is not private, so there is nothing
+    // to sweep (#2217).
+    findLegacy: () => Promise.resolve([]),
+    endLegacy: () => Promise.resolve({ kind: 'not-legacy' }),
   };
 }
 
