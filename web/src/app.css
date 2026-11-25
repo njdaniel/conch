@@ -3148,13 +3148,37 @@ label {
   text-align: left;
 }
 
+.share-chooser-menu button[role^='menuitem'] {
+  /* Every row reserves the leading slot the checkmark fills, so choosing an
+     option changes no row's width or height (#2194). */
+  position: relative;
+  padding-inline-start: 1.75rem;
+}
+
 .share-chooser-menu button[aria-checked='true'] {
   border-color: var(--accent);
   color: var(--accent);
-  /* Not font-weight: bold text is wider, so choosing Source wrapped its row and
-     grew the menu under the pointer (#2194). A shadow thickens the strokes at
-     the same width. */
-  text-shadow: 0.4px 0 0 currentColor;
+}
+
+/* The checkmark is the cue that survives forced colors, where the accent
+   becomes a system colour and the rows differ by colour alone. The empty alt
+   text keeps the glyph out of the accessible name; aria-checked is the
+   semantics. */
+.share-chooser-menu button[aria-checked='true']::before {
+  content: '✓' / '';
+  position: absolute;
+  inset-inline-start: 0.625rem;
+  inset-block: 0;
+  display: flex;
+  align-items: center;
+  line-height: 1;
+}
+
+@media (forced-colors: active) {
+  .share-chooser-menu button[aria-checked='true']::before {
+    forced-color-adjust: auto;
+    color: ButtonText;
+  }
 }
 
 .share-chooser-menu .share-chooser-notes {

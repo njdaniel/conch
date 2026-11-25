@@ -194,7 +194,7 @@ export function ShareQualityMenu({ quality, onChoose, disabled, v3 = false }: {
             choosing an option never changes the menu's size, which would move the
             options under the pointer. The inactive text stays in the cell, hidden
             and aria-hidden, for its height only; the slot is a polite live region
-            that exists before either text applies, so the one that does is announced. */}
+            and the active text is the one it exposes. */}
         <div className="share-chooser-notes" role="status">
           <p id={autoNoteId} className="hint" aria-hidden={auto ? undefined : true}>{autoNote}</p>
           <p id={cautionId} className="hint" role="note" aria-hidden={caution === null ? true : undefined}>{caution ?? sourceSixtyNote}</p>

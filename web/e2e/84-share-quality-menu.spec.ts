@@ -140,8 +140,10 @@ test.describe('the share quality menu', { tag: '@voice' }, () => {
         if (at === null) throw new Error('Auto must have a box');
         const x = at.x + at.width / 2;
         const y = at.y + at.height / 2;
+        const underPointer = () => auto.evaluate((el, [px, py]) => el.contains(document.elementFromPoint(px ?? 0, py ?? 0)), [x, y]);
         await page.mouse.click(x, y);
         await page.waitForTimeout(150);
+        expect(await underPointer(), 'Auto is still under the pointer').toBe(true);
         await page.mouse.click(x, y);
         await expect(auto).toBeChecked();
       } finally {
@@ -149,6 +151,32 @@ test.describe('the share quality menu', { tag: '@voice' }, () => {
       }
     });
   }
+
+  test('P2194 under forced colors only the checked option shows a checkmark', async ({ browser }) => {
+    if (vw === undefined) throw new Error('no voice world');
+    const person = await enter(browser, vw, vw.alice, { context: { viewport: { width: 1440, height: 900 } } });
+    try {
+      const { page } = person;
+      await joinVoice(person, 'Join voice');
+      await page.emulateMedia({ forcedColors: 'active' });
+      const voice = page.getByRole('region', { name: 'Voice' });
+      const menu = voice.getByRole('menu', { name: 'Share quality' });
+      await voice.getByRole('button', { name: 'Share quality' }).click();
+      const items = menu.getByRole('menuitemradio');
+      const marks = () => items.evaluateAll((els) => els.map((el) => [el.getAttribute('aria-checked'), getComputedStyle(el, '::before').content, getComputedStyle(el, '::before').visibility]));
+      for (const [checked, content, visibility] of await marks()) {
+        if (checked === 'true') {
+          expect(content).toContain('✓');
+          expect(visibility).toBe('visible');
+        } else {
+          expect(content).not.toContain('✓');
+        }
+      }
+      expect((await marks()).filter(([c]) => c === 'true').length).toBe(2);
+    } finally {
+      await person.close();
+    }
+  });
 
   test('P2188 a short phone menu scrolls by mouse and keyboard', async ({ browser }) => {
     if (vw === undefined) throw new Error('no voice world');
