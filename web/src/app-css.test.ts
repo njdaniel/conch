@@ -46,11 +46,30 @@ describe('CSS :has() hygiene (issue #1931)', () => {
 // covers with it is for .popover or .sheet, which only the web panel sets.
 // Each selector of a comma list counts on its own: one bare .voice-options
 // among them is a rule for the bare class.
+// Splits a selector list on its top-level commas only: not those inside
+// :is(), :where(), :not() or any other parentheses or brackets.
+export function topLevelCommas(list: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let from = 0;
+  for (let i = 0; i < list.length; i++) {
+    const c = list[i];
+    if (c === '(' || c === '[') depth++;
+    else if (c === ')' || c === ']') depth--;
+    else if (c === ',' && depth === 0) {
+      out.push(list.slice(from, i));
+      from = i + 1;
+    }
+  }
+  out.push(list.slice(from));
+  return out;
+}
+
 export function bareFixedSelectors(css: string): string[] {
   const rules = [...css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => ({ selector: (m[1] ?? '').trim(), body: m[2] ?? '' }));
   return rules
     .filter((r) => /position:\s*fixed/.test(r.body))
-    .flatMap((r) => r.selector.split(','))
+    .flatMap((r) => topLevelCommas(r.selector))
     .map((s) => s.trim())
     .filter((s) => /\.voice-options\b/.test(s) && !/\.(popover|sheet)\b/.test(s));
 }
@@ -65,5 +84,11 @@ describe('Voice options overlay rules are for the web panel only (issue #2189)',
   it('catches a bare selector in a comma list', () => {
     expect(bareFixedSelectors('.voice-options, .voice-options.popover { position: fixed; }')).toEqual(['.voice-options']);
     expect(bareFixedSelectors('.voice-options.popover, .voice-options.sheet { position: fixed; }')).toEqual([]);
+  });
+
+  it('does not split inside :is(), :where() or :not()', () => {
+    expect(bareFixedSelectors('.voice-options:is(.a, .b).popover { position: fixed; }')).toEqual([]);
+    expect(bareFixedSelectors('.voice-options:is(.a, .b) { position: fixed; }')).toEqual(['.voice-options:is(.a, .b)']);
+    expect(topLevelCommas('.x:is(.a, .b), .y:where(.c, .d)')).toEqual(['.x:is(.a, .b)', ' .y:where(.c, .d)']);
   });
 });

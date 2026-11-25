@@ -397,42 +397,50 @@ test.describe('Voice options', () => {
     });
   }
 
-  // The anchored panel is a popover: tabbing out of it closes it, with focus on
-  // the next control, which is not left under the panel, covered (it was
-  // possible to type in the composer behind the opaque panel).
-  test('P2189 tabbing out of the anchored panel closes it and focus is not left under it', async ({ browser }) => {
+  // The anchored panel is a popover and a disclosure, driven by real key
+  // presses: Enter on the button opens it and Tab goes into it (and on, through
+  // it), Shift+Tab from its first control goes back to the button with the
+  // panel still open, and Tab past its last control goes to what follows the
+  // button (Leave voice) and closes it, focus not left under the panel.
+  test('P2189 the anchored panel is a keyboard disclosure: Tab in, Shift+Tab back, Tab out', async ({ browser }) => {
     let p: Someone | undefined;
     try {
       p = await enter(browser, vw, vw.alice, { context: { viewport: { width: 1440, height: 900 } } });
       const page = p.page;
       await joinVoice(p, 'Join voice');
       const options = voice(page).getByRole('button', { name: 'Voice options' });
+      const leave = voice(page).getByRole('button', { name: /^Leave voice/ });
       const panel = page.locator('#voice-options');
+      const inPanel = () => page.evaluate(() => document.activeElement?.closest('#voice-options') != null);
       await options.focus();
       await page.keyboard.press('Enter');
       await expect(panel).toBeVisible();
       await expect(panel).not.toHaveClass(/sheet/);
-      const inPanel = () => page.evaluate(() => document.activeElement?.closest('#voice-options') != null);
-      // The panel follows the strip's notes in the tab order: enter it at its
-      // first control, then tab on through to its last.
-      await panel.locator('select:not(:disabled), input:not(:disabled), button:not(:disabled):visible').first().focus();
-      expect(await inPanel(), 'focus is in the panel').toBe(true);
+      expect(await inPanel(), 'Enter on the button puts focus in the panel').toBe(true);
+      // Shift+Tab from the first control: back to the button, panel open.
+      await page.keyboard.press('Shift+Tab');
+      await expect(options).toBeFocused();
       await expect(panel).toBeVisible();
-      // After its last control Tab leaves the page's end (to the browser, headless:
-      // the body) and wraps to its top: the panel is gone once focus lands on a control.
-      const onBody = () => page.evaluate(() => document.activeElement === document.body);
-      for (let i = 0; i < 80 && ((await inPanel()) || (await onBody())); i++) await page.keyboard.press('Tab');
+      // Tab from the button: into the panel, not Leave voice.
+      await page.keyboard.press('Tab');
+      expect(await inPanel(), 'Tab from the button enters the panel').toBe(true);
+      await expect(panel).toBeVisible();
+      // Tab through the panel to its last control: it stays open on the way.
+      let steps = 0;
+      for (; steps < 80; steps++) {
+        const last = await page.evaluate(() => {
+          const els = Array.from(document.querySelectorAll<HTMLElement>('#voice-options select:not(:disabled), #voice-options input:not(:disabled), #voice-options button:not(:disabled), #voice-options a[href]')).filter((e) => e.offsetParent !== null);
+          return els[els.length - 1] === document.activeElement;
+        });
+        if (last) break;
+        await page.keyboard.press('Tab');
+        await expect(panel).toBeVisible();
+      }
+      expect(steps, 'a last control was reached').toBeLessThan(80);
+      await page.keyboard.press('Tab');
+      await expect(leave).toBeFocused();
       await expect(panel).toBeHidden();
       await expect(options).toHaveAttribute('aria-expanded', 'false');
-      const at = await page.evaluate(() => {
-        const el = document.activeElement;
-        if (!(el instanceof HTMLElement) || el === document.body) return null;
-        const r = el.getBoundingClientRect();
-        const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
-        return { visible: r.width > 0 && r.height > 0, uncovered: top === el || el.contains(top) };
-      });
-      expect(at, 'focus is on a control').not.toBeNull();
-      expect(at, 'and it is visible and not covered').toEqual({ visible: true, uncovered: true });
     } finally {
       await p?.close();
     }

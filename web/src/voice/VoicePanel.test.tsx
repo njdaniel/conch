@@ -877,6 +877,26 @@ describe('the anchored Voice options panel and focus leaving it', () => {
     }
   });
 
+  it('stays open when focus goes into another modal dialog (the quick switcher)', () => {
+    const { button, done } = setup();
+    const dialog = document.createElement('div');
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    const field = document.createElement('input');
+    dialog.append(field);
+    document.body.append(dialog);
+    try {
+      const slider = screen.getByRole('slider', { name: /Release delay/ });
+      slider.focus();
+      field.focus();
+      fireEvent.focusIn(field);
+      expect(button.getAttribute('aria-expanded')).toBe('true');
+    } finally {
+      dialog.remove();
+      done();
+    }
+  });
+
   it('stays open when the window loses focus, and when it comes back to the panel', () => {
     const { button, done } = setup();
     try {

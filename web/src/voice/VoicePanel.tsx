@@ -317,7 +317,10 @@ export function VoicePanel({
       const at = e.target;
       if (!(at instanceof Element)) return;
       if (at.closest('.share-chooser') !== null) setOptions(false);
-      else if (!sheet && !behind && optionsPanel.current?.contains(at) !== true && optionsButton.current?.contains(at) !== true) setOptions(false);
+      // Focus going into another modal (the quick switcher, whose field takes
+      // it before the lobby has said it is over the panel) is not leaving it:
+      // the panel stays open beneath, and Escape from that modal returns.
+      else if (!sheet && !behind && optionsPanel.current?.contains(at) !== true && optionsButton.current?.contains(at) !== true && !inOtherModal(at, optionsPanel.current)) setOptions(false);
     };
     const onPress = (e: MouseEvent) => {
       const at = e.target;
@@ -378,11 +381,7 @@ export function VoicePanel({
   // Whether focus is inside another modal (a dialog or aria-modal element that
   // is not the options panel, and not shut away): the panel never takes focus
   // from it, whatever it was that opened it, as a guard beside behind.
-  const inForeignModal = () => {
-    const at = document.activeElement;
-    const modal = at instanceof Element ? at.closest('[role="dialog"], [role="alertdialog"], [aria-modal="true"]') : null;
-    return modal !== null && modal !== optionsPanel.current && modal.closest('[hidden], [inert]') === null;
-  };
+  const inForeignModal = () => inOtherModal(document.activeElement, optionsPanel.current);
   useEffect(() => {
     if (!covered || toAbout || behind || inForeignModal()) return;
     if (optionsPanel.current?.contains(document.activeElement) === true) return;
@@ -423,6 +422,50 @@ export function VoicePanel({
     setToAbout(false);
     about.current?.focus();
   }, [toAbout, options]);
+
+  // Opened with the keyboard, the anchored panel takes focus at its first
+  // control: the panel follows the section's notes in the DOM (it cannot sit
+  // right after its button, inside the bar that a sheet makes inert), so
+  // without this Tab from the button would go to Leave voice and close it. A
+  // sheet takes focus at its Close, and More about sharing at the notes. Opened
+  // with a pointer, focus stays on the button.
+  const byKeyboard = useRef(false);
+  useEffect(() => {
+    if (!options) {
+      byKeyboard.current = false;
+      return;
+    }
+    if (!byKeyboard.current || toAbout) return;
+    byKeyboard.current = false;
+    const panel = optionsPanel.current;
+    if (panel === null || panel.classList.contains('sheet')) return;
+    panelTabbables(panel)[0]?.focus();
+  }, [options, toAbout]);
+  // Tab order of a disclosure, kept inside the anchored panel: Shift+Tab from
+  // its first control goes back to the button (the panel stays open), and Tab
+  // from its last goes on to what follows the button, which closes it.
+  useEffect(() => {
+    const panel = optionsPanel.current;
+    if (!options || sheet || panel === null) return;
+    const onTab = (e: KeyboardEvent) => {
+      if (e.key !== 'Tab' || e.defaultPrevented) return;
+      const list = panelTabbables(panel);
+      const at = document.activeElement;
+      if (e.shiftKey && at === list[0]) {
+        e.preventDefault();
+        optionsButton.current?.focus();
+      } else if (!e.shiftKey && at === list[list.length - 1]) {
+        const after = optionsButton.current === null ? null : tabbablesAfter(optionsButton.current);
+        if (after === null) return;
+        e.preventDefault();
+        after.focus();
+      }
+    };
+    panel.addEventListener('keydown', onTab);
+    return () => {
+      panel.removeEventListener('keydown', onTab);
+    };
+  }, [options, sheet]);
 
   useEffect(() => {
     if (state.phase !== 'idle' || !left.current) return;
@@ -777,7 +820,21 @@ export function VoicePanel({
                     <span className="label">Show video ({cameraCount})</span>
                   </button>
                 ) : null}
-                <button ref={optionsButton} type="button" className="quiet" aria-expanded={options} aria-controls="voice-options" onClick={() => { setOptions(!options); }}>
+                <button ref={optionsButton} type="button" className="quiet" aria-expanded={options} aria-controls="voice-options" onKeyDown={(e) => {
+                  // Tab from the button, with the anchored panel open, enters it, as
+                  // if it followed the button (it follows the notes in the DOM).
+                  const panel = optionsPanel.current;
+                  if (e.key !== 'Tab' || e.shiftKey || !options || sheet || panel === null) return;
+                  const first = panelTabbables(panel)[0];
+                  if (first === undefined) return;
+                  e.preventDefault();
+                  first.focus();
+                }} onClick={(e) => {
+                  // Enter and Space click with no pointer (detail 0): opened so,
+                  // focus goes into the panel (below), as a disclosure's does.
+                  if (!options) byKeyboard.current = e.detail === 0;
+                  setOptions(!options);
+                }}>
                   <Glyph name="options" />
                   <span className="label">Voice options</span>
                 </button>
@@ -1507,6 +1564,30 @@ function CameraOptions({ voice, open, cameraAllowed }: { readonly voice: VoiceCo
       ) : null}
     </>
   );
+}
+
+// Whether el is inside a dialog or aria-modal element that is not the panel
+// and not shut away: another modal has the focus (the switcher, Settings).
+function inOtherModal(el: Element | null, panel: Element | null): boolean {
+  const modal = el === null ? null : el.closest('[role="dialog"], [role="alertdialog"], [aria-modal="true"]');
+  return modal !== null && modal !== panel && modal.closest('[hidden], [inert]') === null;
+}
+
+const tabbable = 'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])';
+
+// The controls of the panel that Tab reaches, in order: enabled and drawn.
+function panelTabbables(panel: HTMLElement): HTMLElement[] {
+  return Array.from(panel.querySelectorAll<HTMLElement>(tabbable)).filter((c) => c.offsetParent !== null || c.getClientRects().length > 0);
+}
+
+// The next control after the button in its own row (Leave voice, say), as Tab
+// would reach it, or null.
+function tabbablesAfter(button: HTMLElement): HTMLElement | null {
+  const row = button.parentElement;
+  if (row === null) return null;
+  const all = Array.from(row.querySelectorAll<HTMLElement>(tabbable));
+  const next = all[all.indexOf(button) + 1];
+  return next ?? null;
 }
 
 // Voice options: the less used choices, out of the strip. A panel over the
