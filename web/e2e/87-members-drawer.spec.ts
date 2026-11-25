@@ -23,11 +23,29 @@ for (const [name, width, height] of [
     await members(page).focus();
     await page.keyboard.press('Enter');
     await expect(list(page)).toBeFocused();
-    for (const key of ['Tab', 'Shift+Tab']) {
-      for (let i = 0; i < 30; i++) {
-        await page.keyboard.press(key);
-        expect(await inDrawer(page), `${key} #${String(i + 1)} left the drawer, at ${await page.evaluate(() => document.activeElement?.outerHTML.slice(0, 120) ?? 'nothing')}`).toBe(true);
-      }
+    // The drawer's stops, in Tab order from the list itself, until Tab comes
+    // round to it again: focus reaches controls inside and wraps at both ends.
+    const first = await page.evaluateHandle(() => document.activeElement);
+    const stops = [first];
+    for (let i = 0; i < 200; i++) {
+      await page.keyboard.press('Tab');
+      expect(await inDrawer(page), `Tab #${String(i + 1)} left the drawer, at ${await page.evaluate(() => document.activeElement?.outerHTML.slice(0, 120) ?? 'nothing')}`).toBe(true);
+      const now = await page.evaluateHandle(() => document.activeElement);
+      if (await page.evaluate(([a, b]) => a === b, [now, first] as const)) break;
+      stops.push(now);
+    }
+    expect(stops.length, 'Tab reached a control inside the drawer').toBeGreaterThan(1);
+    expect(stops.length, 'Tab came round to the list').toBeLessThan(200);
+    // Tab from the last stop landed on the first (the loop's break), and
+    // Shift+Tab from the first lands on the last.
+    await page.keyboard.press('Shift+Tab');
+    const last = stops[stops.length - 1];
+    if (last === undefined) throw new Error('no stops');
+    expect(await page.evaluate(([a, b]) => a === b, [await page.evaluateHandle(() => document.activeElement), last] as const), 'Shift+Tab from the first stop lands on the last').toBe(true);
+    // And on, backwards, never out.
+    for (let i = 0; i < 30; i++) {
+      await page.keyboard.press('Shift+Tab');
+      expect(await inDrawer(page), `Shift+Tab #${String(i + 1)} left the drawer`).toBe(true);
     }
     await page.keyboard.press('Escape');
     await expect(list(page)).toBeHidden();

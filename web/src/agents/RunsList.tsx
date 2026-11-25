@@ -9,6 +9,8 @@ import { clockSeconds, runSpan, spanText } from './format';
 import { visibleRuns, type RunFilter } from './state';
 import type { Agents } from './useAgents';
 import { useNow } from './useNow';
+import { useContext } from 'react';
+import { LeaveDrawer } from '../pageModal';
 
 const filters: readonly RunFilter[] = ['all', 'open', 'ended'];
 
@@ -39,6 +41,7 @@ function RunRow({ run, name, now, onOpen }: {
 }
 
 export function RunsList({ agents }: { readonly agents: Agents }) {
+  const leaveDrawer = useContext(LeaveDrawer);
   const { state, members } = agents;
   const view = state.runs;
   const shown = visibleRuns(view);
@@ -83,6 +86,7 @@ export function RunsList({ agents }: { readonly agents: Agents }) {
               name={authorName(members, run.principal_id)}
               now={now}
               onOpen={() => {
+                leaveDrawer();
                 agents.openRun(run.id, run.session_id, run);
               }}
             />

@@ -332,6 +332,10 @@ test.describe('Voice options', () => {
       await options.click();
       await expect(panel).toBeVisible();
       const members = page.getByRole('button', { name: 'Members' });
+      // The resize above must have settled with the panel still open: that is
+      // the state the narrowing below is tested from.
+      await expect(options).toHaveAttribute('aria-expanded', 'true');
+      await expect(panel).toBeVisible();
       await members.focus();
       await page.keyboard.press('Enter');
       const list = page.getByRole('region', { name: 'Members list' });

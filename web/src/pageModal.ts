@@ -47,3 +47,10 @@ export function useReportOverlay(open: boolean): void {
     };
   }, [open, report]);
 }
+
+// Said by the lobby to what is drawn inside the Members panel: called before an
+// action there shows something in the centre of the page (Open run), so that,
+// where the panel is a modal drawer over the page, it closes first and the
+// target, not the drawer, gets the page. A side column, which is not modal,
+// is left as it is.
+export const LeaveDrawer = createContext<() => void>(() => undefined);

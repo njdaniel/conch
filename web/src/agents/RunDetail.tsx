@@ -239,7 +239,7 @@ export function RunDetail({ agents, now, onGoToMessage }: { readonly agents: Age
   const items = timeline(detail.activity, detail.interventions);
 
   return (
-    <article aria-label="Run detail" className="ag-run">
+    <article aria-label="Run detail" className="ag-run" tabIndex={-1} data-centre-target>
       <header>
         <button
           type="button"

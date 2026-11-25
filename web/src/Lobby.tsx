@@ -11,7 +11,7 @@ import { headingId } from './Conversation';
 import { Avatar, Glyph } from './Icons';
 import { ServerVersion, TemporaryBanner } from './ServerVersion';
 import { AddPerson, JoiningSettings, SettingsOpen, type JoiningRequest } from './joiningSettings';
-import { OverlayReport, setPageModal } from './pageModal';
+import { LeaveDrawer, OverlayReport, setPageModal } from './pageModal';
 import { MicTestShown, phoneViews, ShowChat, useAppHeight, usePhone, VoiceLive, VoiceSheet, VoiceStrip, type PhoneView } from './phone';
 import { DesktopOS } from './platform/os';
 import type { ChannelV0 } from './schema/channel';
@@ -384,13 +384,74 @@ export function Lobby({
   // Focus goes back to Members once the panel has closed: until then the
   // button is inert behind it, and cannot take focus.
   const membersClosed = useRef(false);
+  // The drawer was closed by an action that shows something in the centre
+  // (LeaveDrawer): focus goes there, not to Members.
+  const toCentre = useRef(false);
+  const centre = useRef<HTMLElement>(null);
+  // What the focus recovery below reads, as of the last render.
+  const over = useRef({ over: false, blocked: false });
+  over.current = { over: membersOver, blocked: settingsOpen || asking || overlays > 0 };
+  // While the drawer is modal and nothing is over it, focus that ends up
+  // nowhere usable (the body, nothing, a subtree that is inert) comes back to
+  // the drawer: a row that remounted under focus, re-authentication that went
+  // away. Usable focus, and a modal of another kind, are left alone.
+  const recoverFocus = useCallback(() => {
+    if (!over.current.over || over.current.blocked) return;
+    const at = document.activeElement;
+    if (at !== null && at !== document.body && at.closest('[inert]') === null) return;
+    membersBody.current?.focus();
+  }, []);
+  // The channel the drawer was opened on.
+  const openedOn = useRef<string | null>(null);
+  const wasOver = useRef(false);
   useEffect(() => {
-    if (membersOver) membersBody.current?.focus();
+    const entered = membersOver && !wasOver.current;
+    wasOver.current = membersOver;
+    if (entered) {
+      openedOn.current = channels.selected;
+      membersBody.current?.focus();
+    } else if (membersOver) recoverFocus();
     else if (membersClosed.current) {
       membersClosed.current = false;
       membersButton.current?.focus();
+    } else if (toCentre.current) {
+      toCentre.current = false;
+      const target = centre.current?.querySelector<HTMLElement>('[data-centre-target]') ?? null;
+      (target ?? centre.current)?.focus();
     }
-  }, [membersOver]);
+  }, [membersOver, asking, recoverFocus]);
+  // A row that remounts under focus drops it with no event to hear.
+  useEffect(() => {
+    const body = membersBody.current;
+    if (!membersOver || body === null || typeof MutationObserver === 'undefined') return;
+    const watch = new MutationObserver(recoverFocus);
+    watch.observe(body, { childList: true, subtree: true });
+    return () => {
+      watch.disconnect();
+    };
+  }, [membersOver, recoverFocus]);
+  // Another channel (or none) is shown than the one the drawer was opened on:
+  // it closes rather than stay over a page it has made inert. Only a change
+  // after the opening counts: a shown channel that was still settling when the
+  // drawer opened (none, then the first one) is taken as the one it opened on,
+  // and showing the same channel again changes nothing. The wide side column
+  // stays open across channels.
+  useEffect(() => {
+    if (!over.current.over) return;
+    if (openedOn.current === null) {
+      openedOn.current = channels.selected;
+      return;
+    }
+    if (channels.selected === openedOn.current) return;
+    const at = document.activeElement;
+    if (at === null || at === document.body || membersBody.current?.contains(at) === true) membersClosed.current = true;
+    setPanelOpen(false);
+  }, [channels.selected]);
+  const leaveDrawer = useCallback(() => {
+    if (!over.current.over) return;
+    toCentre.current = true;
+    setPanelOpen(false);
+  }, []);
   // Arriving (signing in, or a sign-in restored on reload) leaves focus on
   // the page's body, where the next Tab starts from the top: the first time a
   // conversation is shown, focus goes to its heading (issue #590). Only then:
@@ -590,7 +651,7 @@ export function Lobby({
           </nav>
             {channels.loaded && visit === undefined && channels.channels.length > 0 ? <GroupsPanel controls={arranged} /> : null}
           </div>
-          <main className="centre" inert={membersOver}>
+          <main ref={centre} tabIndex={-1} className="centre" inert={membersOver}>
             <div ref={setStage} className="stage" />
             <section ref={conversationEl} aria-label="Conversation" className="conversation">
               {temporary === true ? <TemporaryBanner /> : null}
@@ -613,6 +674,9 @@ export function Lobby({
               aria-label="Members list"
               role="region"
               onKeyDown={membersOver ? onMembersKey : undefined}
+              onBlur={membersOver ? (event) => {
+                if (event.relatedTarget === null) queueMicrotask(recoverFocus);
+              } : undefined}
             >
               {membersOver ? (
                 <button type="button" className="icon-button close" onClick={closeMembers}>
@@ -620,7 +684,7 @@ export function Lobby({
                   <span className="label">Close</span>
                 </button>
               ) : null}
-              {panel}
+              <LeaveDrawer.Provider value={leaveDrawer}>{panel}</LeaveDrawer.Provider>
             </div>
           </aside>
           {membersOver ? <div className="backdrop" onClick={closeMembers} /> : null}
