@@ -3448,6 +3448,36 @@ label {
   color: var(--on-accent);
 }
 
+.share-controls .stop .label {
+  /* "Stop watching" keeps its words wherever the row is below the picture
+     and the other labels are hidden (phone widths); the overlay's own rule,
+     more specific, hides it with the others. */
+  position: static;
+  width: auto;
+  height: auto;
+  overflow: visible;
+  clip-path: none;
+}
+
+/* The tap that starts the sound (ShareView): centred on the picture and above
+   the focus button, in every layout but the compact row. A frame too short
+   for it shrinks to the frame (a smaller pill) and clips its words rather
+   than the button. */
+.share-frame .share-tap {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 3;
+  box-sizing: border-box;
+  max-width: calc(100% - 0.5rem);
+  max-height: calc(100% - 0.25rem);
+  min-height: min(2.75rem, calc(100% - 0.25rem));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  translate: -50% -50%;
+  white-space: nowrap;
+}
+
 .share-controls {
   display: flex;
   flex-wrap: wrap;
@@ -3732,10 +3762,10 @@ label {
 /* The title's readout is one line in the open call view, cut with an ellipsis
    (the whole text is still read out): its length, and so its wrapping, depends
    on the font, and a three-line title took the picture's floor from a phone
-   on wider fonts (the stage then scrolled). It gives way before the title's
-   own text does. */
+   on wider fonts (the stage then scrolled). It takes only what the title's
+   own text leaves, so that text stays on one line. */
 .call-view.call-single-share .share-title .share-readout {
-  flex: 0 1000 auto;
+  flex: 1 1 0%;
   min-width: 4rem;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3797,8 +3827,11 @@ label {
 
   .call-view.call-single-share .share-controls button:focus-visible,
   .call-view.call-single-share .share-controls input:focus-visible {
-    outline: 3px solid #ffffff;
+    /* A dark ring outside a white one: over a white picture the row's top
+       edge, where the gradient is clear, still has contrast. */
+    outline: 3px solid #000000;
     outline-offset: -3px;
+    box-shadow: inset 0 0 0 6px #ffffff;
   }
 
   .call-view.call-single-share .share-controls .volume {
@@ -3845,36 +3878,40 @@ label {
     border-radius: 50%;
   }
 
-  /* Faded: shown again by a pointer move, a tap, or focus inside (a hidden
-     control is still tabbable, so reaching one shows the row). Opacity, not
+  /* Faded: shown again by a pointer move, a tap, or keyboard focus inside (a
+     hidden control is still tabbable, so reaching one shows the row; one
+     pressed by a pointer keeps focus but not the row). Opacity, not
      display, so the row is in the tab order; no pointer events, so a tap on
      the picture under it is the picture's. */
-  .call-view.call-single-share .share-view.idle .share-controls:not(:focus-within) {
+  .call-view.call-single-share .share-view.idle .share-controls:not(:has(:focus-visible)) {
     opacity: 0;
     pointer-events: none;
   }
 
+  /* The press that woke the row (ShareView adds .waking until it ends) is the
+     picture's: the row is back in view but takes nothing until that press
+     is over, so a tap on a faded control does not press it. */
+  .call-view.call-single-share .share-view.waking .share-controls {
+    pointer-events: none;
+  }
+
   /* The sound's tap is the picture's own, centred in what the controls' row
-     leaves of it (the row is 52 px: 3.25rem). */
+     leaves of it (the row is 56 px: 3.5rem), and never above the 44 px
+     target's own half. */
   .call-view.call-single-share .share-frame .share-tap {
-    position: absolute;
-    top: calc(50% - 1.625rem);
-    left: 50%;
-    z-index: 3;
-    translate: -50% -50%;
-    white-space: nowrap;
+    top: max(calc(50% - 1.75rem), 1.375rem);
   }
 
   /* The status hint is in the middle of what the controls' row leaves of the
      frame, never under the row; the tap sits lower when both show. */
   .call-view.call-single-share .share-frame .hint {
-    inset: calc(50% - 1.625rem) 0 auto;
+    inset: calc(50% - 1.75rem) 0 auto;
     translate: 0 -50%;
     text-align: center;
   }
 
   .call-view.call-single-share .share-frame .hint ~ .share-tap {
-    top: calc(50% + 0.125rem);
+    top: max(calc(50% + 0.125rem), 1.375rem);
   }
 }
 

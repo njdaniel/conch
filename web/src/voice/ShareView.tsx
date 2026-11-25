@@ -184,19 +184,42 @@ export function ShareView({
   // rules): the view offers one.
   const [blocked, setBlocked] = useState(false);
   // The controls drawn over the picture (single share, open call view: CSS
-  // says where) fade after IDLE_MS without a pointer on the share, and return
-  // on a pointer move or a tap. Focus inside them keeps them (CSS :focus-within).
+  // says where) fade after controlsIdleMs without a pointer on the share, and
+  // return on a pointer move or a tap. Keyboard focus inside them keeps them
+  // (CSS :focus-visible; a control pressed by a pointer keeps focus but not
+  // the row).
   const [idle, setIdle] = useState(false);
+  // The press that brings a faded row back is the picture's, not a control's:
+  // on touch the row would otherwise be pressable before that tap's click is
+  // aimed. The row stays unpressable (CSS .waking) until the press has ended.
+  const [waking, setWaking] = useState(false);
   const idleTimer = useRef<number | null>(null);
   const wake = useCallback(() => {
     setIdle(false);
     if (idleTimer.current !== null) window.clearTimeout(idleTimer.current);
     idleTimer.current = window.setTimeout(() => { setIdle(true); }, controlsIdleMs);
   }, []);
+  const pressDown = () => {
+    if (faded) setWaking(true);
+    wake();
+  };
+  const wakingTimer = useRef<number | null>(null);
+  const woken = () => {
+    if (wakingTimer.current !== null) window.clearTimeout(wakingTimer.current);
+    wakingTimer.current = null;
+    setWaking(false);
+  };
+  // A touch's click is aimed after its pointerup, so the row stays unpressable
+  // until that click has come (or, with none, a moment).
+  const pressEnd = () => {
+    if (wakingTimer.current !== null) window.clearTimeout(wakingTimer.current);
+    wakingTimer.current = window.setTimeout(woken, 400);
+  };
   useEffect(() => {
     wake();
     return () => {
       if (idleTimer.current !== null) window.clearTimeout(idleTimer.current);
+      if (wakingTimer.current !== null) window.clearTimeout(wakingTimer.current);
     };
   }, [wake]);
 
@@ -264,7 +287,7 @@ export function ShareView({
   ) : null;
 
   return (
-    <section aria-label="Shared screen" className={faded ? 'share-view idle' : 'share-view'} onPointerMove={wake} onPointerDown={wake}>
+    <section aria-label="Shared screen" className={`share-view${faded ? ' idle' : ''}${waking ? ' waking' : ''}`} onPointerMove={wake} onPointerDown={pressDown} onPointerUp={pressEnd} onPointerCancel={pressEnd} onClick={waking ? woken : undefined}>
       <p className="share-title">
         <Glyph name="screen" />
         {name} · {reconnecting ? 'Reconnecting' : 'LIVE'}{quality === null || quality === undefined ? null : <> · {quality}</>}{audio ? ' · with sound' : ''}
@@ -306,7 +329,7 @@ export function ShareView({
           </>
         )}
         {compact ? popOut : null}
-        <button type="button" onClick={() => { client.watchStream(principal, false); }}>
+        <button type="button" className="stop" onClick={() => { client.watchStream(principal, false); }}>
           <Glyph name="close" />
           <span className="label">Stop watching</span>
         </button>
