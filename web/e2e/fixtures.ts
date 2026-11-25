@@ -316,3 +316,22 @@ export async function expectStateReadable(page: Page, word: string): Promise<voi
   expect(found.buttons.filter((b) => b.hit), `${word} meets a button`).toEqual([]);
   expect(found.covered, `${word} is covered`).toEqual([false, false, false]);
 }
+
+// What the voice strip's status phrase says (issue #2198, UI-talk-3), for
+// `.voice-tx`: "Sending" only while audio leaves the page, and one of the
+// "not sending" phrases otherwise (push to talk, open mic or muted).
+export const sendingText = /^(Sending|Open mic: sending)$/;
+export const notSendingText = /^(Push to talk|Open mic|Muted): not sending$/;
+
+// rosterChip is the person's own chip in the In voice list when it says they
+// send audio: one badge, "speaking" when the level says so, else "sending"
+// (issue #2198, UI-talk-4). It is the chip whose name is exactly theirs, so
+// another name that ends in theirs is not matched; assert it with
+// toHaveCount(1), or toHaveCount(0) for no badge.
+export const rosterChip = (list: Locator, name: string): Locator => {
+  const exact = new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\s|$)`);
+  return list
+    .getByRole('listitem')
+    .filter({ has: list.page().locator('.who', { hasText: exact }) })
+    .filter({ has: list.page().locator('.tag', { hasText: /\b(sending|speaking)\b/ }) });
+};
