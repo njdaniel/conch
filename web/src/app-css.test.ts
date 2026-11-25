@@ -39,3 +39,17 @@ describe('CSS :has() hygiene (issue #1931)', () => {
     expect(hasNestedHas(readFileSync('src/app.css', 'utf8'))).toBe(false);
   });
 });
+
+// Issue #2189: the web Voice options panel is a popover (position fixed, a
+// sheet on a phone). The desktop app's own panel (voice/native) shares the
+// .voice-options class and is drawn as before: every rule that positions or
+// covers with it is for .popover or .sheet, which only the web panel sets.
+describe('Voice options overlay rules are for the web panel only (issue #2189)', () => {
+  const css = readFileSync('src/app.css', 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+  const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => ({ selector: (m[1] ?? '').trim(), body: m[2] ?? '' }));
+  it('no rule that fixes a .voice-options panel applies to the bare class', () => {
+    const fixed = rules.filter((r) => /\.voice-options\b/.test(r.selector) && /position:\s*fixed/.test(r.body));
+    expect(fixed.length).toBeGreaterThan(0);
+    for (const r of fixed) expect(r.selector, r.selector).toMatch(/\.(popover|sheet)\b/);
+  });
+});

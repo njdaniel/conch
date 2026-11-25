@@ -811,6 +811,36 @@ it('an open anchored panel closes when it would become a sheet, with focus on it
   }
 });
 
+// Issue #2189: every way Voice options goes out of sight closes it, so that
+// coming back never reopens it: the phone's Chat and Channels views (the
+// strip), and leaving voice.
+describe('Voice options closes when it goes out of sight', () => {
+  const drawn = (state: VoiceState, strip: boolean) => (
+    <VoiceStrip.Provider value={strip ? () => undefined : null}>
+      <VoicePanel voice={control(state, [], { kind: 'presence', presence })} viewer={7} people={new Map()} viewed="c" onOpen={() => undefined} />
+    </VoiceStrip.Provider>
+  );
+  const expanded = () => screen.queryByRole('button', { name: 'Voice options' })?.getAttribute('aria-expanded');
+
+  it('does not come back after the phone goes to Chat and returns to Voice', () => {
+    const { rerender } = render(drawn(inVoice('connected', 'c'), false));
+    fireEvent.click(screen.getByRole('button', { name: 'Voice options' }));
+    expect(expanded()).toBe('true');
+    rerender(drawn(inVoice('connected', 'c'), true));
+    rerender(drawn(inVoice('connected', 'c'), false));
+    expect(expanded()).toBe('false');
+    expect(document.querySelector('#voice-options')?.hasAttribute('hidden')).toBe(true);
+  });
+
+  it('does not come back after leaving voice and joining again', () => {
+    const { rerender } = render(drawn(inVoice('connected', 'c'), false));
+    fireEvent.click(screen.getByRole('button', { name: 'Voice options' }));
+    rerender(drawn(initialVoice, false));
+    rerender(drawn(inVoice('connected', 'c'), false));
+    expect(expanded()).toBe('false');
+  });
+});
+
 // Issue #590 (F09, F20): Hold to talk works from the keyboard while it has
 // focus, the hint says where the talk key does not work, and Leave voice
 // hands focus to Join voice instead of dropping it.
@@ -1954,7 +1984,7 @@ describe('the phone strip under Chat and Channels (issue #1028)', () => {
     expect(voice.querySelector('.voice-notes')?.hasAttribute('hidden')).toBe(false);
   });
 
-  it('keeps Voice options as they were left across the strip and the Voice view', () => {
+  it('closes Voice options when the strip hides them, and leaves them closed in the Voice view (issue #2189)', () => {
     const voiceControl = control(inVoice('connected', 'channel-a'), [], crowd);
     const page = (opens: (() => void) | null) => (
       <VoiceStrip.Provider value={opens}>
@@ -1969,7 +1999,7 @@ describe('the phone strip under Chat and Channels (issue #1028)', () => {
     rerender(page(() => undefined));
     expect(options()).toBe(true);
     rerender(page(null));
-    expect(options()).toBe(false);
+    expect(options()).toBe(true);
   });
 
   it('is not the strip out of voice: Join voice is the Voice view\'s, and the lobby hides the dock', () => {

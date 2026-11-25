@@ -354,6 +354,49 @@ test.describe('Voice options', () => {
     }
   });
 
+  // Voice options closes by every way it goes out of sight, so coming back to
+  // the Voice view never reopens a modal sheet nobody pressed for (codex's two
+  // repros: Chat and back; Chat, Members, and back).
+  for (const [name, withMembers] of [['Chat and back', false], ['Chat, Members and back', true]] as const) {
+    test(`P2189 the sheet stays closed after the phone goes to Chat and back: ${name}`, async ({ browser }) => {
+      let p: Someone | undefined;
+      try {
+        p = await enter(browser, vw, vw.alice, { context: { viewport: { width: 390, height: 520 }, hasTouch: true, isMobile: true } });
+        const page = p.page;
+        await joinVoice(p, 'Join voice');
+        const nav = page.getByRole('navigation', { name: 'Main navigation' });
+        const options = voice(page).getByRole('button', { name: 'Voice options' });
+        const panel = page.locator('#voice-options');
+        await nav.getByRole('button', { name: 'Voice' }).click();
+        await options.focus();
+        await page.keyboard.press('Enter');
+        await expect(panel).toHaveClass(/sheet/);
+        const chat = nav.getByRole('button', { name: 'Chat' });
+        await chat.focus();
+        await page.keyboard.press('Enter');
+        await expect(panel).toBeHidden();
+        if (withMembers) {
+          const members = page.getByRole('button', { name: 'Members' });
+          // By keyboard throughout: a pointer press outside would close the
+          // hidden panel on its own, which is not the path under test.
+          if ((await members.getAttribute('aria-expanded')) !== 'true') {
+            await members.focus();
+            await page.keyboard.press('Enter');
+          }
+          await expect(members).toHaveAttribute('aria-expanded', 'true');
+        }
+        await nav.getByRole('button', { name: 'Voice' }).focus();
+        await page.keyboard.press('Enter');
+        await expect(options).toHaveAttribute('aria-expanded', 'false');
+        await expect(panel).toBeHidden();
+        expect(await page.evaluate(() => document.activeElement?.closest('#voice-options') != null), 'focus was not moved into a sheet').toBe(false);
+        expect(await page.locator('[inert]').count(), 'nothing is inert').toBe(0);
+      } finally {
+        await p?.close();
+      }
+    });
+  }
+
   // Over an open sheet Ctrl+K leaves the page alone (the sheet is a dialog, and
   // the shortcuts do not run over another dialog): the sheet keeps its focus,
   // and Escape closes the sheet with focus back on its button.

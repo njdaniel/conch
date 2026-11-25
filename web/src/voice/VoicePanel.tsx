@@ -190,7 +190,10 @@ export function VoicePanel({
   // any other (the talk key capture ends with it); focus goes to the button
   // only if it was inside the panel, and is left alone otherwise.
   const shrinkOptions = useCallback(() => {
-    focusBack.current = optionsPanel.current?.contains(document.activeElement) === true;
+    // The button may be inert or covered at that moment (a modal over it): then
+    // focus stays where it is.
+    const button = optionsButton.current;
+    focusBack.current = optionsPanel.current?.contains(document.activeElement) === true && button !== null && button.closest('[inert]') === null;
     setOptions(false);
   }, []);
   // Whether the open panel is a bottom sheet (set by Options from its place).
@@ -352,6 +355,16 @@ export function VoicePanel({
   useEffect(() => {
     if (blocked && options) setOptions(false);
   }, [blocked, options]);
+  // Voice options is closed by every way it goes out of sight, so that coming
+  // back never reopens it, and a sheet is never opened but by a press: the
+  // phone's Chat and Channels views and the strip they make of the section
+  // (strip), and leaving voice, or the call ending (no longer in voice). The
+  // panel is not unmounted for these, so its open state is closed here, with
+  // the same close as any other; focus is not moved, as the panel is out of
+  // sight and what hid it has its own.
+  useEffect(() => {
+    if (options && (strip || !inVoice)) setOptions(false);
+  }, [options, strip, inVoice]);
   // Whether focus is inside another modal (a dialog or aria-modal element that
   // is not the options panel, and not shut away): the panel never takes focus
   // from it, whatever it was that opened it, as a guard beside behind.
@@ -1560,7 +1573,7 @@ function Options({ panel, onClose, onShrink, sheet, onSheet, voice, open, sharab
     <div
       ref={panel}
       id="voice-options"
-      className="voice-options"
+      className="voice-options popover"
       hidden={!open}
       tabIndex={-1}
       role={sheet ? 'dialog' : undefined}

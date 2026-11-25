@@ -3246,8 +3246,9 @@ label {
    #2189), so opening it moves nothing under it. Fixed, so the dock's own
    scroll does not clip it; VoicePanel sets --vo-left, --vo-width and
    --vo-bottom from the section's box. Taller than the room above the section,
-   it scrolls inside itself. */
-.voice-options:not([hidden]) {
+   it scrolls inside itself. Only the web panel (popover): the desktop app's
+   own Voice options (voice/native) is drawn as before. */
+.voice-options.popover:not([hidden]) {
   position: fixed;
   left: var(--vo-left, 0);
   bottom: calc(var(--vo-bottom, 0px) + var(--s1));
@@ -3301,7 +3302,7 @@ label {
   border-top: 1px solid var(--border);
 }
 
-.voice-options:not([hidden]) {
+.voice-options.popover:not([hidden]) {
   margin-top: 0;
   border-top: 1px solid var(--border-strong);
 }
