@@ -1,7 +1,8 @@
 // Voice options of the desktop strip (issue #1379, D3-8 of #771), driven by a
 // fake native voice: no helper, no bridge, no network.
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { afterEach, describe, expect, it } from 'vitest';
+import { useRef, type ComponentProps } from 'react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { NativeVoiceDevicesResult, NativeVoiceHelper, NativeVoiceView, VoiceCommandResult, VoiceSaveResult } from '../../platform/desktop/bridge';
 import { DesktopOS } from '../../platform/os';
 import type { NativeVoice } from '../../platform/types';
@@ -9,7 +10,10 @@ import type { VoiceControlPTT, VoiceControlPTTProblem, VoiceDevice } from '../..
 import { pttProblemWords, pttWords } from './words';
 import { micMissing, nextTime, noPipeWire, openMeans, speakersMissing, VoiceOptions } from './VoiceOptions';
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 const idle: NativeVoiceView = { status: 'idle', generation: 0, channel: null, retryable: false };
 const helper = (over: Partial<NativeVoiceHelper> = {}): NativeVoiceHelper => ({ version: 2, phase: 'connected', capture: 'on', playback: 'on', transmitting: false, muted: false, deafened: false, blocked: [], talkMode: 'push_to_talk', ptt: 'ready', ...over });
@@ -51,8 +55,13 @@ class Fake {
   };
 }
 
+function OptionsUnderTest(props: Omit<ComponentProps<typeof VoiceOptions>, 'panel'>) {
+  const panel = useRef<HTMLDivElement>(null);
+  return <div ref={panel} tabIndex={-1}><VoiceOptions {...props} panel={panel} /></div>;
+}
+
 async function open(fake: Fake, view: NativeVoiceView = idle) {
-  const r = render(<VoiceOptions source={fake.nv} view={view} open />);
+  const r = render(<OptionsUnderTest source={fake.nv} view={view} open />);
   await waitFor(() => { expect(screen.queryByText('Listing devices…')).toBeNull(); });
   return r;
 }
@@ -60,17 +69,6 @@ async function open(fake: Fake, view: NativeVoiceView = idle) {
 const mic = () => screen.getByLabelText<HTMLSelectElement>('Microphone');
 const speakers = () => screen.getByLabelText<HTMLSelectElement>('Speakers');
 const texts = (s: HTMLSelectElement) => Array.from(s.options).map((o) => o.text.replace(/[\u2068\u2069]/gu, ''));
-
-// Issue #2189: the web panel's overlay (popover) and sheet classes are not the
-// desktop app's: its panel renders as it did, in the dock's flow.
-describe('VoiceOptions is not the web popover', () => {
-  it('carries neither the popover nor the sheet class, and no Close', async () => {
-    await open(new Fake());
-    const panel = document.querySelector('#voice-options');
-    expect(panel?.className).toBe('voice-options');
-    expect(panel?.querySelector('.voice-options-close')).toBeNull();
-  });
-});
 
 describe('VoiceOptions saved choices', () => {
   it('preselects the saved microphone and speakers on first open', async () => {
@@ -120,7 +118,7 @@ describe('VoiceOptions devices', () => {
   it('describes an unavailable Windows device list without naming PipeWire', async () => {
     const fake = new Fake();
     fake.list = { ok: true, pipewire: 'unavailable', synced: true, microphones: [], speakers: [] };
-    render(<DesktopOS.Provider value="win32"><VoiceOptions source={fake.nv} view={idle} open /></DesktopOS.Provider>);
+    render(<DesktopOS.Provider value="win32"><OptionsUnderTest source={fake.nv} view={idle} open /></DesktopOS.Provider>);
     expect(await screen.findByText('Audio devices could not be listed on Windows.')).toBeTruthy();
     expect(screen.queryByText(noPipeWire)).toBeNull();
   });
@@ -156,7 +154,7 @@ describe('VoiceOptions devices', () => {
     });
     await waitFor(() => { expect(fake.calls).toContain('save audio.input=alsa_input.pci'); });
     expect(screen.queryByText('switching…')).toBeNull();
-    r.rerender(<VoiceOptions source={fake.nv} view={running({ capture: 'on' })} open />);
+    r.rerender(<OptionsUnderTest source={fake.nv} view={running({ capture: 'on' })} open />);
     expect(screen.getByText('Microphone is on')).toBeTruthy();
     expect(screen.getByText('Speakers are on')).toBeTruthy();
   });
@@ -233,22 +231,46 @@ describe('VoiceOptions talk mode', () => {
   });
 
   it.each([2, 3] as const)('confirms, switches and saves open microphone in one request with helper v%s', async (version) => {
+    vi.spyOn(HTMLElement.prototype, 'offsetParent', 'get').mockReturnValue(document.body);
     const fake = new Fake();
     const { rerender } = await open(fake, running({ version }));
-    fireEvent.click(screen.getByRole('radio', { name: 'Open microphone' }));
+    const openMic = screen.getByRole<HTMLInputElement>('radio', { name: 'Open microphone' });
+    fireEvent.click(openMic);
     const box = screen.getByRole('alertdialog');
     expect(within(box).getByText(new RegExp(openMeans, 'u'))).toBeTruthy();
     expect(fake.calls).toEqual([]);
-    fireEvent.click(within(box).getByRole('button', { name: 'Cancel' }));
+    const cancel = within(box).getByRole('button', { name: 'Cancel' });
+    cancel.focus();
+    fireEvent.click(cancel);
     expect(fake.calls).toEqual([]);
     expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(document.activeElement).toBe(openMic);
+    fireEvent.click(openMic);
+    fireEvent.click(screen.getByRole('button', { name: 'Use open microphone' }));
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(openMic.matches(':disabled')).toBe(true);
+    expect(document.activeElement).toBe(mic());
+    await waitFor(() => { expect(fake.calls).toEqual(['setTalkMode open and save']); });
+    await waitFor(() => { expect(screen.queryByText('switching…')).toBeNull(); });
+    rerender(<OptionsUnderTest source={fake.nv} view={running({ version, talkMode: 'open' })} open />);
+    expect(openMic.checked).toBe(true);
+    expect(document.activeElement).toBe(mic());
+    expect(screen.queryByText('Could not keep that choice for next time.')).toBeNull();
+  });
+
+  it('focuses the panel when the open-microphone switch fails and no control is enabled', async () => {
+    vi.spyOn(HTMLElement.prototype, 'offsetParent', 'get').mockReturnValue(document.body);
+    const fake = new Fake();
+    fake.list = { ok: true, pipewire: 'unavailable', synced: true, microphones: [], speakers: [] };
+    vi.spyOn(fake.nv, 'setTalkMode').mockResolvedValue({ ok: false, error: 'busy' });
+    const { container } = await open(fake, running());
     fireEvent.click(screen.getByRole('radio', { name: 'Open microphone' }));
     fireEvent.click(screen.getByRole('button', { name: 'Use open microphone' }));
-    await waitFor(() => { expect(fake.calls).toEqual(['setTalkMode open and save']); });
-    rerender(<VoiceOptions source={fake.nv} view={running({ version, talkMode: 'open' })} open />);
-    await waitFor(() => { expect(screen.queryByText('switching…')).toBeNull(); });
-    expect(screen.getByRole<HTMLInputElement>('radio', { name: 'Open microphone' }).checked).toBe(true);
-    expect(screen.queryByText('Could not keep that choice for next time.')).toBeNull();
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(document.activeElement).toBe(container.firstElementChild);
+    expect(await screen.findByText('Voice could not switch; try again.')).toBeTruthy();
+    expect(screen.getByRole('radio', { name: 'Push to talk', checked: true })).toBeTruthy();
+    expect(document.activeElement).toBe(container.firstElementChild);
   });
 
   it('reports a save failure separately from the live switch', async () => {
@@ -276,7 +298,7 @@ describe('VoiceOptions talk mode', () => {
     const fake = new Fake();
     for (const ptt of ptts) {
       for (const problem of [undefined, ...problems]) {
-        const { unmount } = render(<VoiceOptions source={fake.nv} view={running({ ptt, pttProblem: problem, blocked: ['key_device_lost'] })} open />);
+        const { unmount } = render(<OptionsUnderTest source={fake.nv} view={running({ ptt, pttProblem: problem, blocked: ['key_device_lost'] })} open />);
         await waitFor(() => { expect(screen.queryByText('Listing devices…')).toBeNull(); });
         unmount();
       }

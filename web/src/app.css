@@ -3351,8 +3351,8 @@ label {
    #2189), so opening it moves nothing under it. Fixed, so the dock's own
    scroll does not clip it; VoicePanel sets --vo-left, --vo-width and
    --vo-bottom from the section's box. Taller than the room above the section,
-   it scrolls inside itself. Only the web panel (popover): the desktop app's
-   own Voice options (voice/native) is drawn as before. */
+   it scrolls inside itself. The desktop uses the same panel and places it
+   against its toggle's controls row (issue #2195). */
 .voice-options.popover:not([hidden]) {
   position: fixed;
   left: var(--vo-left, 0);
@@ -3377,7 +3377,7 @@ label {
   display: none;
 }
 
-.voice-options.sheet .voice-options-close {
+.voice-options:is(.sheet, .native) .voice-options-close {
   display: block;
   flex-basis: auto;
   margin-left: auto;
@@ -3394,6 +3394,31 @@ label {
   max-height: min(80vh, calc(100vh - var(--vo-sheet-bottom, 0px) - var(--s2)));
   max-height: min(80dvh, calc(100dvh - var(--vo-sheet-bottom, 0px) - var(--s2)));
   border-radius: 0.5rem 0.5rem 0 0;
+}
+
+/* In the desktop Voice view the row can be high in the viewport. Use the room
+   on the chosen side of it, even for a modal sheet, so the dock controls and
+   phone navigation stay uncovered as the helper's device list changes. */
+.voice-options.native:not([hidden]) {
+  left: var(--vo-left, 0);
+  bottom: calc(var(--vo-bottom, 0px) + var(--s1));
+  width: min(var(--vo-width, 100%), 100% - var(--vo-left, 0px));
+  max-height: calc(var(--vo-room, 0px) - var(--s2));
+  overflow-wrap: anywhere;
+}
+
+.voice-options.native.below:not([hidden]) {
+  top: calc(var(--vo-top, 0px) + var(--s1));
+  bottom: auto;
+}
+
+.voice-options.native .voice-device {
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.voice-options.native .voice-device select {
+  max-width: 100%;
 }
 
 .voice-options:not([hidden]),
