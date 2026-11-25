@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
+import { windowOf } from './fakewindow';
 import { SPOILER_FILE_PREFIX } from './schema/file';
 import { attachmentNames, forgetFileNames, rememberFileName } from './spoilerFiles';
 
@@ -965,6 +966,24 @@ describe('inviting from a channel', () => {
     expect(panel.getByText(step)).toBeDefined();
     const posts = fetchMock.mock.calls.filter(([path, init]) => path === '/v2/invites' && init?.method === 'POST');
     expect(posts.map(([, init]) => init?.body)).toEqual([JSON.stringify({ kind: 'member' })]);
+  });
+
+  // The invite panel is painted over the page, as the Members drawer is below
+  // the wide breakpoint: it is hidden while the drawer is up, not closed, so
+  // the link just made, which is shown only once, is there when the drawer goes.
+  it('keeps the link it just made while the Members drawer is over the page', async () => {
+    windowOf(false);
+    const { panel } = await openFrom('dev');
+    fireEvent.click(panel.getByRole('button', { name: 'Make link' }));
+    const link = await panel.findByLabelText<HTMLInputElement>('Invite link');
+    const url = link.value;
+    expect(url).toContain('conch_inv_');
+    fireEvent.click(screen.getByRole('button', { name: 'Members' }));
+    const members = screen.getByRole('region', { name: 'Members list' });
+    expect(document.getElementById('invites-body')?.hasAttribute('hidden')).toBe(true);
+    fireEvent.keyDown(members, { key: 'Escape' });
+    expect(document.getElementById('invites-body')?.hasAttribute('hidden')).toBe(false);
+    expect(panel.getByLabelText<HTMLInputElement>('Invite link').value).toBe(url);
   });
 
   it('opens the generic panel after closing a channel invite', async () => {

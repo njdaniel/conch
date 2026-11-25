@@ -316,10 +316,11 @@ test.describe('Voice options', () => {
     }
   });
 
-  // codex's repro: with the keyboard open Members and a profile card over the
-  // anchored panel, then narrow. The panel closes, the card keeps focus,
-  // nothing is inert, and Escape closes the card.
-  test('P2189 a profile card opened over the anchored panel keeps focus when the window narrows', async ({ browser }) => {
+  // codex's repro: with the keyboard open Members (focus leaving the anchored
+  // panel closes it) and a profile card in it, then narrow. The card keeps
+  // focus, it and the drawer are not inert, and Escape closes the card with
+  // focus back inside the drawer.
+  test('P2189 a profile card opened in Members, after focus left the anchored panel for it, keeps focus when the window narrows', async ({ browser }) => {
     let p: Someone | undefined;
     try {
       p = await enter(browser, vw, vw.alice, { context: { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true } });
@@ -332,10 +333,17 @@ test.describe('Voice options', () => {
       await options.click();
       await expect(panel).toBeVisible();
       const members = page.getByRole('button', { name: 'Members' });
+      await expect(options).toHaveAttribute('aria-expanded', 'true');
+      await expect(panel).toBeVisible();
+      // Focus moving to Members leaves the panel, a popover: it closes where
+      // focus went (#2192), before the drawer is even open. That is by design.
       await members.focus();
+      await expect(options).toHaveAttribute('aria-expanded', 'false');
+      await expect(panel).toBeHidden();
       await page.keyboard.press('Enter');
       const list = page.getByRole('region', { name: 'Members list' });
       await expect(list).toBeVisible();
+      await expect(options).toHaveAttribute('aria-expanded', 'false');
       const person = list.getByRole('button', { name: new RegExp(vw.alice.name) }).first();
       await person.focus();
       await page.keyboard.press('Enter');
@@ -346,9 +354,17 @@ test.describe('Voice options', () => {
       await expect(card).toBeVisible();
       const inCard = () => page.evaluate(() => document.activeElement?.closest('.profile-card') != null);
       expect(await inCard(), 'the card keeps focus').toBe(true);
-      expect(await page.locator('[inert]').count(), 'nothing is left inert').toBe(0);
+      // Members is drawn over the page now (issue #2196): the page behind it is
+      // inert, and the card and the drawer are not.
+      expect(await page.evaluate(() => document.querySelector('.profile-card')?.closest('[inert]') ?? null), 'the card is not inert').toBeNull();
+      expect(await list.evaluate((el) => el.closest('[inert]')), 'the drawer is not inert').toBeNull();
+      await expect(options).toHaveAttribute('aria-expanded', 'false');
       await page.keyboard.press('Escape');
       await expect(card).toHaveCount(0);
+      // The card's name button takes focus back, inside the drawer, which is
+      // still open.
+      await expect(list).toBeVisible();
+      expect(await list.evaluate((el) => el.contains(document.activeElement)), 'focus is back inside the drawer').toBe(true);
     } finally {
       await p?.close();
     }
@@ -380,10 +396,17 @@ test.describe('Voice options', () => {
           // By keyboard throughout: a pointer press outside would close the
           // hidden panel on its own, which is not the path under test.
           if ((await members.getAttribute('aria-expanded')) !== 'true') {
+            // The top bar is inert while the sheet is still going out, and a
+            // focus on an inert button does nothing: wait for it to clear.
+            await expect(page.locator('.topbar')).not.toHaveAttribute('inert');
             await members.focus();
             await page.keyboard.press('Enter');
           }
           await expect(members).toHaveAttribute('aria-expanded', 'true');
+          // The drawer is modal (issue #2196) and the navigation inert behind
+          // it: it closes, by keyboard, before the Voice view is chosen.
+          await page.keyboard.press('Escape');
+          await expect(members).toHaveAttribute('aria-expanded', 'false');
         }
         await nav.getByRole('button', { name: 'Voice' }).focus();
         await page.keyboard.press('Enter');

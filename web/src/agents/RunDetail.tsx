@@ -249,7 +249,7 @@ export function RunDetail({ agents, now, onGoToMessage }: { readonly agents: Age
         >
           Back to conversation
         </button>
-        <h2>Run #{detail.runId}</h2>
+        <h2 tabIndex={-1} data-centre-target>Run #{detail.runId}</h2>
       </header>
       {run === null ? (
         <p role="status">Loading…</p>

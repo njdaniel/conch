@@ -3,6 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from './api';
 import { MemberRow, Members, type MemberControlsProps } from './Members';
 import type { Entry } from './agents/join';
+import { windowOf } from './fakewindow';
+import { Lobby } from './Lobby';
+import { initialChannels } from './state/channels';
 import { longPressMs } from './MessageMenu';
 import type { ChannelMemberV1 } from './schema/channel';
 
@@ -675,5 +678,49 @@ describe('a person profile card', () => {
     view.rerender(<Members {...p} members={memberList.filter((member) => member.principal_id !== 2)} people={people.filter((person) => person.id !== 2)} />);
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(document.activeElement).toBe(heading);
+  });
+});
+
+// Issue #2196: Members drawn over the page below the wide breakpoint is a
+// modal drawer; a profile card opened in it keeps focus there.
+describe('Members in the modal drawer', () => {
+  it('keeps focus in the drawer through a profile card, which returns it to its name, and Escape returns it to Members', () => {
+    windowOf(false);
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(new Response('{}', { status: 200 }))));
+    render(
+      <Lobby
+        origin="http://127.0.0.1:8080"
+        name="ada"
+        me={2}
+        channels={initialChannels}
+        unread={new Map()}
+        connection="connected"
+        conversation={<p>conversation</p>}
+        panel={<Members {...props('member')} people={people} />}
+        voice={null}
+        invites={null}
+        onOpen={() => undefined}
+        onRetry={() => undefined}
+        onSignOut={() => undefined}
+        onSignOutEverywhere={() => undefined}
+        signOutProblem={null}
+      />,
+    );
+    const button = screen.getByRole('button', { name: 'Members' });
+    fireEvent.click(button);
+    const drawer = screen.getByRole('region', { name: 'Members list' });
+    const opener = within(row('ada')).getByRole('button', { name: 'ada' });
+    fireEvent.click(opener);
+    const card = screen.getByRole('dialog', { name: 'ada' });
+    expect(card.closest('[inert]')).toBeNull();
+    expect(drawer.contains(document.activeElement)).toBe(true);
+    expect(document.activeElement).toBe(within(card).getByRole('button', { name: 'Close' }));
+    fireEvent.keyDown(card, { key: 'Escape' });
+    expect(screen.queryByRole('dialog', { name: 'ada' })).toBeNull();
+    expect(screen.getByRole('region', { name: 'Members list' })).toBe(drawer);
+    expect(document.activeElement).toBe(opener);
+    fireEvent.keyDown(drawer, { key: 'Escape' });
+    expect(document.activeElement).toBe(button);
+    vi.unstubAllGlobals();
   });
 });

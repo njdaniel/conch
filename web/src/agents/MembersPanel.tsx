@@ -3,7 +3,8 @@
 // the members list joined with the latest roster frame. Every name, task,
 // runtime and model is another person's or agent's text and is rendered as a
 // text node.
-import { useEffect, useRef, useState } from 'react';
+import { useContext, useEffect, useRef, useState } from 'react';
+import { LeaveDrawer } from '../pageModal';
 import { MemberRow, Members, type MemberControlsProps } from '../Members';
 import { Avatar } from '../Icons';
 import { IdentityMarks } from '../Identity';
@@ -114,6 +115,8 @@ const unavailable: Record<'ended' | 'unavailable', string> = {
 type PanelControls = Omit<MemberControlsProps, 'members' | 'refreshMembers'>;
 
 export function MembersPanel({ agents, now, controls }: { readonly agents: Agents; readonly now: number; readonly controls: PanelControls | null }) {
+  // A run opens in the centre: a modal drawer closes first.
+  const leaveDrawer = useContext(LeaveDrawer);
   const { state, session, members } = agents;
   const [expanded, setExpanded] = useState<ReadonlySet<number>>(new Set());
   const panel = useRef<HTMLDivElement>(null);
@@ -193,7 +196,10 @@ export function MembersPanel({ agents, now, controls }: { readonly agents: Agent
                   }}
                   sessionRuns={state.sessionRuns}
                   now={now}
-                  onOpen={agents.openRun}
+                  onOpen={(run, session, known) => {
+                    leaveDrawer();
+                    agents.openRun(run, session, known);
+                  }}
                   controls={memberControls}
                   onProfileDisappear={profileDisappear}
                 />
