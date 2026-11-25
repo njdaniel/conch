@@ -11,7 +11,7 @@ import { initialVoice, VoiceClient, type Phase, type Processing, type VoiceState
 import { FakeClock } from './fakes';
 import { ownPageNote, soundNote, type ShareFeatures, type ShareQuality } from './share';
 import { ShareQualityMenu, sourceSixtyNote } from './ShareQualityMenu';
-import { resetSharePreview } from './ShareView';
+import { resetSharePreview, SelfShareView } from './ShareView';
 import { useState } from 'react';
 import { MicTestShown, VoiceLive, VoiceSheet, VoiceStrip } from '../phone';
 import { StageHost } from '../stage';
@@ -2701,6 +2701,16 @@ describe('the sharer\'s preview', () => {
     } finally {
       spy.mockRestore();
     }
+  });
+
+  it('keeps the toggle\'s name in the compact strip, where it is an icon with the words as its title', () => {
+    const { client } = panel(joined, 'c', sharing);
+    cleanup();
+    render(<SelfShareView client={client} compact />);
+    const toggle = screen.getByRole('button', { name: 'Hide preview of your screen' });
+    expect(toggle.classList.contains('icon')).toBe(true);
+    expect(toggle.getAttribute('title')).toBe('Hide preview');
+    expect(screen.getByRole('button', { name: 'Stop sharing' })).toBeTruthy();
   });
 
   it('has none of a watched share\'s controls', () => {

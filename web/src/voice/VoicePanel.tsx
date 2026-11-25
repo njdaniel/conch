@@ -642,7 +642,7 @@ export function VoicePanel({
       watched,
       startedAt: stream.startedAt,
       render: (focus, compact, onToggleLayout) => {
-        if (me) return <SelfShareView client={client} quality={quality} />;
+        if (me) return <SelfShareView client={client} quality={quality} compact={compact} />;
         if (!watched) return (
           <section aria-label={`${name}'s stream`} className="share-view">
             <p className="share-title"><Glyph name="screen" />{name} · LIVE{quality === null ? null : <> · {quality}</>}</p>

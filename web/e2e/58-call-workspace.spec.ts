@@ -957,43 +957,74 @@ test.describe('the persistent call workspace', () => {
       };
     }), { message: `${where}: the preview plays the local capture`, timeout: 30_000 }).toEqual({ sameTrack: true, playing: true, muted: true, sound: 0 });
   };
-  // The geometry of the sharer's stage: the video inside the stage and the
-  // call view, contained, and no scrolling of the view.
-  const checkOwn = async (page: Page, where: string, expectVideo: boolean) => {
-    const g = await ownStage(page).evaluate((own) => {
+  const measureOwn = (page: Page) => ownStage(page).evaluate((own) => {
       const stage = own.closest('.stage');
-      const view = own.closest('.call-view') ?? stage;
+      const view = own.closest('.call-view, .call-stage') ?? stage;
+      const tile = own.closest('li') ?? own;
       const video = own.querySelector('video');
       const frame = own.querySelector('.share-frame');
       const controls = own.querySelector('.share-controls');
       if (stage === null || view === null || controls === null) throw new Error('no stage layout boxes');
-      const within = (element: Element, outer: Element) => {
+      const inside = (element: Element, outer: Element) => {
         const box = element.getBoundingClientRect();
         const bounds = outer.getBoundingClientRect();
         return box.width > 0 && box.height > 0 && box.left >= bounds.left - 1 && box.right <= bounds.right + 1 &&
           box.top >= bounds.top - 1 && box.bottom <= bounds.bottom + 1;
       };
+      const onScreen = (element: Element) => {
+        const box = element.getBoundingClientRect();
+        return box.width > 0 && box.height > 0 && box.left >= -1 && box.top >= -1 && box.right <= window.innerWidth + 1 && box.bottom <= window.innerHeight + 1 && inside(element, view);
+      };
+      const buttons = [...controls.querySelectorAll('button')];
+      const scroller = document.scrollingElement;
       return {
+        tile: [Math.round(tile.getBoundingClientRect().width), Math.round(tile.getBoundingClientRect().height)],
+        controlsSize: [Math.round(controls.getBoundingClientRect().width), Math.round(controls.getBoundingClientRect().height)],
         hasVideo: video !== null,
         hasFrame: frame !== null,
         fit: video === null ? '' : getComputedStyle(video).objectFit,
-        videoInStage: video !== null && within(video, stage) && within(video, view),
+        videoInTile: video !== null && inside(video, tile) && inside(video, view),
         videoHeight: video?.getBoundingClientRect().height ?? 0,
-        controlsInStage: within(controls, stage) && within(controls, view),
+        controlsInTile: inside(controls, tile),
+        buttons: buttons.map((b) => b.textContent.trim() || b.getAttribute('aria-label')),
+        buttonsOnScreen: buttons.length === 2 && buttons.every(onScreen),
         scrolls: view.scrollHeight > view.clientHeight + 1,
+        pageScrolls: scroller === null ? false : scroller.scrollHeight > scroller.clientHeight + 1,
+        overflow: scroller === null ? 0 : scroller.scrollHeight - scroller.clientHeight,
       };
-    });
-    const details = JSON.stringify(g);
-    expect.soft(g.hasVideo, `${where}: the preview is ${expectVideo ? 'drawn' : 'gone'}\n${details}`).toBe(expectVideo);
-    expect.soft(g.hasFrame, `${where}: the frame is ${expectVideo ? 'drawn' : 'gone'}\n${details}`).toBe(expectVideo);
+  });
+  // The geometry of the sharer's tile (#2197): the preview is a thumbnail that
+  // stays inside its tile, the page and the call view never scroll where
+  // main's do not, and Stop sharing and the toggle are fully on screen.
+  const checkOwn = async (page: Page, where: string, expectVideo: boolean) => {
+    // The tile without its preview is what main drew: the preview may add no
+    // scrolling to it (a layout that scrolls without it, such as a grid of many
+    // tiles in a short window, is not the preview's doing).
+    let base = { overflow: 0, scrolls: false };
     if (expectVideo) {
-      expect.soft(g.fit, where).toBe('contain');
-      expect.soft(g.videoInStage, `${where}: the preview is inside the stage\n${details}`).toBe(true);
-      expect.soft(g.videoHeight, `${where}: the preview has a picture's height\n${details}`).toBeGreaterThanOrEqual(80);
+      await ownStage(page).getByRole('button', { name: 'Hide preview of your screen' }).click();
+      const hiddenTile = await measureOwn(page);
+      base = { overflow: hiddenTile.overflow, scrolls: hiddenTile.scrolls };
+      await ownStage(page).getByRole('button', { name: 'Show preview of your screen' }).click();
+      await expect(preview(page)).toHaveCount(1);
     }
-    expect.soft(g.controlsInStage, `${where}: the controls are inside the stage\n${details}`).toBe(true);
-    expect.soft(g.scrolls, `${where}: the call view needs no scrolling\n${details}`).toBe(false);
+    const g = await measureOwn(page);
+    const details = `${where}\n${JSON.stringify(g)}`;
+    expect.soft(g.hasVideo, `the preview is ${expectVideo ? 'drawn' : 'gone'}: ${details}`).toBe(expectVideo);
+    expect.soft(g.hasFrame, `the frame is ${expectVideo ? 'drawn' : 'gone'}: ${details}`).toBe(expectVideo);
+    if (expectVideo) {
+      expect.soft(g.fit, details).toBe('contain');
+      expect.soft(g.videoInTile, `the preview is inside its tile: ${details}`).toBe(true);
+      expect.soft(g.videoHeight, `the preview has a picture's height: ${details}`).toBeGreaterThanOrEqual(48);
+    }
+    expect.soft(g.controlsInTile, `the controls are inside the tile: ${details}`).toBe(true);
+    if (base.overflow === 0) expect.soft(g.buttonsOnScreen, `Stop sharing and the toggle are fully shown: ${details}`).toBe(true);
+    // Never scrolling where the tile without its preview does not.
+    expect.soft(g.overflow, `the page scrolls no more than without the preview (${String(base.overflow)}): ${details}`).toBeLessThanOrEqual(base.overflow);
+    if (!base.scrolls) expect.soft(g.scrolls, `the call view needs no scrolling: ${details}`).toBe(false);
+    return g;
   };
+  const desktopSizes = [[1440, 900], [1366, 768], [1280, 720]] as const;
 
   test('P2197 the sharer sees a live preview of the outgoing screen, inside the stage, which can be hidden and shown', async ({ browser }) => {
     test.setTimeout(180_000);
@@ -1003,7 +1034,6 @@ test.describe('the persistent call workspace', () => {
       people.push(a);
       await join(a);
       await share(a);
-      await expect(ownStage(a.page)).toContainText('You · LIVE');
       await expectPlaysCapture(a.page, '1440×900');
       await checkOwn(a.page, '1440×900', true);
       // No sound of the share is played back to the sharer.
@@ -1044,6 +1074,125 @@ test.describe('the persistent call workspace', () => {
       await expect(own).toHaveCount(0, { timeout: 30_000 });
       await expect(a.page.locator('video[aria-label="Preview of your screen"]')).toHaveCount(0);
       await expectClean(a);
+    } finally {
+      for (const p of people) await leave(p);
+    }
+  });
+
+  test('P2197 the sharer\'s preview fits every desktop size, alone, with a camera and beside another share', async ({ browser }) => {
+    test.setTimeout(240_000);
+    const people: Person[] = [];
+    try {
+      const a = await person(browser, vw.alice, { viewport: { width: 1440, height: 900 } }, keepCapture);
+      people.push(a);
+      await join(a);
+      await share(a);
+      await expectPlaysCapture(a.page, 'alone');
+      for (const [w, h] of desktopSizes) {
+        await a.page.setViewportSize({ width: w, height: h });
+        await checkOwn(a.page, `alone ${String(w)}×${String(h)}`, true);
+      }
+      await a.page.setViewportSize({ width: 1215, height: 900 });
+      await drawDesktopStrip(a.page);
+      await checkOwn(a.page, 'alone 1215×900 under the desktop strip', true);
+      await a.page.evaluate(() => { document.querySelector('.desktop-bar')?.remove(); });
+
+      await camera(a, true);
+      for (const [w, h] of desktopSizes) {
+        await a.page.setViewportSize({ width: w, height: h });
+        await checkOwn(a.page, `with a camera ${String(w)}×${String(h)}`, true);
+      }
+      await camera(a, false);
+
+      const b = await person(browser, vw.bob, { viewport: { width: 1440, height: 900 } });
+      people.push(b);
+      await join(b);
+      await share(b);
+      await expect(tile(a.page, 'bob')).toBeVisible({ timeout: 30_000 });
+      for (const [w, h] of desktopSizes) {
+        await a.page.setViewportSize({ width: w, height: h });
+        await checkOwn(a.page, `beside another share ${String(w)}×${String(h)}`, true);
+      }
+    } finally {
+      for (const p of people) await leave(p);
+    }
+  });
+
+  test('P2197 the sharer\'s preview fits a phone alone and beside another share, and the page does not scroll', async ({ browser }) => {
+    test.setTimeout(240_000);
+    const people: Person[] = [];
+    try {
+      const c = await person(browser, vw.carol, { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 }, keepCapture);
+      people.push(c);
+      await join(c);
+      await share(c);
+      await expectPlaysCapture(c.page, 'phone');
+      for (const [w, h] of [[390, 844], [360, 640]] as const) {
+        await c.page.setViewportSize({ width: w, height: h });
+        await checkOwn(c.page, `phone alone ${String(w)}×${String(h)}`, true);
+      }
+      const b = await person(browser, vw.bob, { viewport: { width: 1440, height: 900 } });
+      people.push(b);
+      await join(b);
+      await share(b);
+      await expect(tile(c.page, 'bob')).toBeVisible({ timeout: 30_000 });
+      for (const [w, h] of [[390, 844], [360, 640]] as const) {
+        await c.page.setViewportSize({ width: w, height: h });
+        await checkOwn(c.page, `phone beside another share ${String(w)}×${String(h)}`, true);
+      }
+    } finally {
+      for (const p of people) await leave(p);
+    }
+  });
+
+  // The preview plays the raw capture, never through the SDK's attach(): that
+  // registers livekit-client's visibility handler, which on a phone restarts a
+  // disabled, muted or ended track with getUserMedia({ video }), putting the
+  // camera into the share while the page says it shares the screen.
+  test('P2197 the preview never lets a phone\'s visibility change swap the camera into the share', async ({ browser }) => {
+    test.setTimeout(120_000);
+    const people: Person[] = [];
+    try {
+      const iphone = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
+      const count = async (page: Page): Promise<void> => {
+        await page.addInitScript(() => {
+          const w = window as unknown as { __videoAsks: number };
+          w.__videoAsks = 0;
+          const devices = navigator.mediaDevices;
+          const user = devices.getUserMedia.bind(devices);
+          devices.getUserMedia = (constraints?: MediaStreamConstraints) => {
+            if (constraints?.video !== undefined && constraints.video !== false) w.__videoAsks++;
+            return user(constraints);
+          };
+        });
+        await keepCapture(page);
+      };
+      const c = await person(browser, vw.carol, { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, userAgent: iphone }, count);
+      people.push(c);
+      await join(c);
+      await share(c);
+      await expectPlaysCapture(c.page, 'iPhone');
+      const asks = (): Promise<number> => c.page.evaluate(() => (window as unknown as { __videoAsks: number }).__videoAsks);
+      expect(await asks()).toBe(0);
+      // The page goes to the background and returns while the capture is
+      // disabled, as a phone's lock can leave it.
+      await c.page.evaluate(async () => {
+        const w = window as unknown as { __capture: MediaStream | null };
+        let state: DocumentVisibilityState = 'visible';
+        Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => state });
+        const track = w.__capture?.getVideoTracks()[0];
+        if (track === undefined) throw new Error('no capture');
+        track.enabled = false;
+        state = 'hidden';
+        document.dispatchEvent(new Event('visibilitychange'));
+        await new Promise((resolve) => setTimeout(resolve, 6000));
+        state = 'visible';
+        document.dispatchEvent(new Event('visibilitychange'));
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        track.enabled = true;
+      });
+      expect(await asks(), 'no camera was asked for').toBe(0);
+      await expectPlaysCapture(c.page, 'iPhone after the page came back');
     } finally {
       for (const p of people) await leave(p);
     }

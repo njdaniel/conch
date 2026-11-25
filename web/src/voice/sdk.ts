@@ -1837,8 +1837,15 @@ class LiveKitAdapter implements Room {
   // letGoShareSelf takes the current capture off the sharer's preview, so no
   // last frame stays on it once the share is stopped, kept or replaced.
   private letGoShareSelf(): void {
-    if (this.shareSelfView === null) return;
-    for (const t of this.screen) if (t.source === Track.Source.ScreenShare) t.detach(this.shareSelfView);
+    if (this.shareSelfView !== null) this.shareSelfView.srcObject = null;
+  }
+
+  // showShareSelf plays the raw capture into the preview. It never goes through
+  // the SDK's attach() on the screen track: that registers the SDK's visibility
+  // handler, which on a phone restarts a muted or ended track with the camera
+  // (a camera request), swapping it into the share.
+  private showShareSelf(track: LocalTrack): void {
+    if (this.shareSelfView !== null) this.shareSelfView.srcObject = new MediaStream([track.mediaStreamTrack]);
   }
 
   // attachShareSelf plays this page's own screen picture, muted, into the
@@ -1849,7 +1856,7 @@ class LiveKitAdapter implements Room {
     this.shareSelfView = el;
     if (el === null) return;
     const track = this.screen.find((t) => t.source === Track.Source.ScreenShare);
-    if (track !== undefined) track.attach(el);
+    if (track !== undefined) this.showShareSelf(track);
   }
 
   // holdScreen makes a capture this connection's share, picked here or kept
@@ -1862,7 +1869,7 @@ class LiveKitAdapter implements Room {
     this.captureEnded = false;
     const video = tracks.find((t) => t.source === Track.Source.ScreenShare);
     if (video === undefined) return;
-    if (this.shareSelfView !== null) video.attach(this.shareSelfView);
+    this.showShareSelf(video);
     this.unwatchScreen = watchScreenCapture(video.mediaStreamTrack, (stalled) => {
       this.events?.onScreenStalled?.(stalled);
     });

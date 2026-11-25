@@ -431,8 +431,12 @@ export type SelfShareClient = Pick<VoiceClient, 'attachShareSelf' | 'stopShare'>
 // Hide preview collapses it to the title and Stop sharing. The controls are in
 // a row below the picture: none of a watched share's (mute, volume, full
 // screen, pop out) applies to one's own share, so none wakes or fades.
-export function SelfShareView({ client, quality }: {
+export function SelfShareView({ client, quality, compact = false }: {
   readonly client: SelfShareClient;
+  // In the compact strip, and in a narrow window, the toggle is an icon (its
+  // name is the same, its title the words), so that Stop sharing keeps its
+  // width and the row does not wrap in a narrow tile.
+  readonly compact?: boolean;
   // The declared quality, as in the watched title.
   readonly quality?: string | null;
 }) {
@@ -454,7 +458,10 @@ export function SelfShareView({ client, quality }: {
       )}
       <div className="share-controls">
         <button type="button" onClick={() => { client.stopShare(); }}>Stop sharing</button>
-        <button type="button" aria-label={`${label} of your screen`} onClick={() => { setPreviewHidden(!hidden); }}>{label}</button>
+        <button type="button" className={`preview-toggle${compact ? ' icon' : ''}`} aria-label={`${label} of your screen`} title={label} onClick={() => { setPreviewHidden(!hidden); }}>
+          <Glyph name="screen" />
+          <span className="words">{label}</span>
+        </button>
       </div>
     </section>
   );

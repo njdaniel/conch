@@ -110,18 +110,24 @@ composer. The composer is on screen without scrolling at 390×844 and 360×740
 
 **The sharer's own stage (issue #2197).** While sharing, the sharer's tile shows
 a live preview of the outgoing screen so that they can see what they are
-sharing: the local screen-share video track (no subscription, no second capture,
-no upload) in a muted, inline `<video>`, in the same frame as a watched share
-(contained, never cropped, inside the stage; alone in the open call view it
-fills the stage as a single share does, and in a grid or the strip it is a tile).
-The title stays "You · LIVE · quality". Its controls are Stop sharing and
-**Hide preview** / **Show preview** in a row below the picture; none of a watched
-share's (Mute, Share volume, Full screen, Pop out, Tap to play sound) applies to
-one's own share, and nothing fades or wakes. The share's sound is never played
-back to the sharer. Hiding detaches the track and leaves the tile as it was
-before the preview (title and Stop sharing); the choice lasts for the page
-session, in memory, and covers every layout. The preview follows the current
-capture: it is emptied when the share stops or is replaced, so no last frame
+sharing. It is a confirmation thumbnail, not a stage: the raw local capture (no
+subscription, no second capture, no upload, and never the SDK's `attach()`,
+whose visibility handler restarts a muted or ended track with the camera on a
+phone) in a muted, inline `<video>`, in a fixed 16:9 box (6 rem wide) beside the
+title and the controls, picture contained, never cropped. The tile is no taller
+than the title and row of buttons it had without a picture, so the page and the
+call view scroll no more than before, alone, beside a camera or beside another
+share, at every window size checked in 58-call-workspace (1440×900, 1215×900
+under the strip, 1366×768, 1280×720, 390×844 and 360×640). The title stays "You ·
+LIVE · quality". Its controls are Stop sharing and **Hide preview** / **Show
+preview** in the same row (an icon, named the same, on a narrow window and in the
+compact strip, so the row does not wrap); none of a watched share's (Mute, Share
+volume, Full screen, Pop out, Tap to play sound) applies to one's own share, and
+nothing fades or wakes. The share's sound is never played back to the sharer.
+Hiding removes the picture and leaves the tile as it was before the preview
+(title and Stop sharing); the choice lasts for the page session, in memory, and
+covers every layout. The preview follows the current capture: it is emptied when
+the share stops, is kept for the next connection or is replaced, so no last frame
 stays. The desktop app's own share has no browser track and shows no preview.
 
 **Media continuity.** The voice section is rendered once, in the strip, and

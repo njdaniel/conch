@@ -15,7 +15,6 @@ import { CameraTest, previewNote } from './CameraTest';
 import { initialVoice, VoiceClient, type VoiceState } from './connection';
 import { FakeClock } from './fakes';
 import type { ShareFeatures } from './share';
-import { resetSharePreview } from './ShareView';
 import type { Snapshot, VoiceControl } from './useVoice';
 import { VoicePanel } from './VoicePanel';
 
@@ -263,20 +262,6 @@ describe('the call view', () => {
     expect(own.textContent).toContain('You · LIVE');
     expect(within(own).getByRole('button', { name: 'Stop sharing' })).toBeTruthy();
     expect(within(own).queryByRole('button', { name: 'Watch' })).toBeNull();
-  });
-
-  // The sharer's preview (#2197) fills a lone stage as a watched share does; hidden, the
-  // tile is the plain one it was.
-  it('the sharer\'s own preview alone takes the single-share stage, and hidden it does not', () => {
-    panel(inVoice({ viewing: true, share: { kind: 'sharing', audio: true } }), { sharer: 7, cameras: [] });
-    // Only the stream is left to show.
-    fireEvent.click(screen.getByRole('button', { name: 'Hide non-video participants' }));
-    const own = screen.getByRole('region', { name: 'Your stream' });
-    const view = () => own.closest('.call-view, .call-stage');
-    if (view()?.classList.contains('call-single-share') !== true) throw new Error('the lone preview should take the single-share stage');
-    fireEvent.click(within(own).getByRole('button', { name: 'Hide preview of your screen' }));
-    expect(view()?.classList.contains('call-single-share')).toBe(false);
-    resetSharePreview();
   });
 
   it('streams share the nine-tile budget without being dropped', () => {
