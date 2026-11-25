@@ -32,18 +32,18 @@ illustrative, and none of them is reproduced.
 | Messages: avatar, name, time, body | `15:24 bob: text` | Initial, name, an Agent pill, time on a header line; body below; a run of messages by one author within five minutes shows the header once | The text `HH:MM name [agent]: body` is still there for screen readers and the tests; repeated headers are hidden on screen only. |
 | Composer with + and send | "To:" select, a label, a textarea, a wide button | One box: the audience select and the audience label ("Message #x", "Whisper to …", "Message net …", in amber when narrower than the channel) above the text, and Send | No "+": there are no attachments. |
 | Right: "Online — 6" with presence dots | Plain list | People with initials, a dot and the word (online / stale / offline); agents with an Agent badge and status; runs below | No language lines: Conch has no language field. |
-| Bottom strip: you, Not in voice, Microphone inactive | Voice in the right column | A full-width voice strip at the bottom: "Not in voice", "Microphone off", who is in voice, Join voice / Watch only | "Microphone off", not "inactive", and only while nothing is captured (UX-11). Your identity is in the top bar. |
+| Bottom strip: you, Not in voice, Microphone inactive | Voice in the right column | A full-width voice strip at the bottom: "Not in voice", who is in voice, Join voice / Watch only; "Microphone off" is said once, in the Watch only hint | "Microphone off", not "inactive", and only while nothing is captured (UX-11); no second line of it in the strip (#2198). Your identity is in the top bar. |
 
 ### Voice lounge (`voice-lounge.png`)
 
 | Element | Now | Why |
 | --- | --- | --- |
-| Large participant tiles, speaking ring and waveform | Roster chips in the strip: initial, name, and "transmitting", "speaking", "sharing" as words; a ring around the initial while speaking | A tile grid would take the conversation's place; the alpha keeps text central. No waveform: the client knows who speaks, not each person's level. |
+| Large participant tiles, speaking ring and waveform | Roster chips in the strip: initial, name, and one word for sending audio ("speaking" when the level says so, else "sending"; never both), "sharing" as words; a ring around the initial while speaking | A tile grid would take the conversation's place; the alpha keeps text central. No waveform: the client knows who speaks, not each person's level. |
 | Per-tile microphone icons | Not shown | Presence says who transmits, not who is muted. |
 | Live captions, translation picker, "Not saved" | Not shown | Out of scope (UX-17). |
 | "Hold Mouse 4 to talk" | **Hold to talk**, and under it "Talk key: ` (backtick). It works only while this tab has focus." | UX-10: the browser cannot promise global PTT. On a touch screen the key line is hidden; Voice options still says it. |
 | Deafen, Share screen, Captions, Leave | Mute, Deafen, Share screen / Stop sharing, Watch, **Voice options**, **Leave voice** (the one red control) | Only what exists. |
-| — | "Microphone in use" (amber) while connected or reconnecting with the microphone, apart from "Transmitting" / "Not transmitting" | Capture is not transmission (UX-11). |
+| — | One status phrase for what others hear, `<mode>: <what others hear>`: "Push to talk: not sending", "Sending" (key held, audio leaving the page), "Waiting for the server" (key held, not yet sending), "Open mic: sending" / "Open mic: not sending", "Muted: not sending". "Sending" is the only highlighted state, and it is said in words. "This page is using your microphone." is a plain line in Voice options while the microphone is held; there is no amber chip in the strip (the compact header's tooltip keeps "Microphone in use"). The talk key and sharing notes are behind an "About talking and sharing" info button (closed to begin with, nothing remembered); the talk key stays in Hold to talk's title and description. "<name> stopped sharing." is a status notice in the stage's place for 5 s. A phone's watch header says "Watching NAME's screen" once, on the switcher's label, and the title row keeps the channel name. | Capture is not transmission (UX-11); #2198. |
 | — | **Voice options**: push to talk or open microphone, the talk key, the open-microphone level, and the talk-key and phone notes | The less used choices, one click away. |
 
 ### Movie night (`movie-night.png`)
@@ -81,7 +81,29 @@ height is what its header, the log's minimum and the composer measure with the
 fonts actually in use (the log has `contain: size`, so its messages never count);
 the stage gets the rest. In the watch view the title and the controls keep
 their height and the picture's row gives way, down to 3rem; with less room than
-that the stage scrolls. Nothing is a fixed reserve, so other font metrics (CI's
+that the stage scrolls. A single share in the open call view (issue #2187) is drawn like a video
+player: its controls are one row of icon buttons (Mute share, Share volume,
+Full screen, Stop watching; their names are read out as before) on the
+picture's bottom edge, over a dark gradient that is the same in both themes
+(icons, slider track and thumb are at least 3:1 against it). The row fades out
+after 3 s without a pointer on the share, and returns on a pointer move, a tap
+on the picture, or keyboard focus inside it (a faded control is opacity 0 and
+still in the tab order; a control a pointer pressed keeps focus but not the
+row); it stays shown while the share is not playing (waiting for the picture
+or the stream, or for the tap that starts the sound). The press that brings a
+faded row back is a pure wake where the row fades (the single-share
+overlay; elsewhere the first press is the control's): its click is swallowed, so it presses no
+control and enlarges or focuses nothing, and the row takes no press while it
+fades in. "Tap to play sound" is a button on the middle of the picture, never
+in the row, in every layout but the compact row (a short picture gets a
+smaller pill), and the status hint is above the row. The picture's frame takes what the view leaves
+under the title, down to 6rem, with the video contained in it, and the row
+covers at most its own 56 px. The stage's own size is unchanged. At 560 px
+tall and under (the page scrolls as a document), in a grid of several tiles,
+in the compact strip and in the closed phone Chat stage, the controls stay in
+a row below, with their words (Stop watching as words alone, without its icon,
+so the phone's row stays one line; a strip tile's row, which has no words,
+shows the bare icon). Nothing is a fixed reserve, so other font metrics (CI's
 runner wraps the share controls onto two rows) move the picture, not the
 composer. The composer is on screen without scrolling at 390×844 and 360×740
 (checked in 12-screen-share, and by hand with every rem made 19 px).
@@ -116,7 +138,7 @@ so form controls and scroll bars match.
 | `--accent` / `--accent-hover` | `#6fd69b` / `#8ee3b1` | Connected, the open channel, speaking, primary buttons |
 | `--accent-bg` / `--on-accent` | `#183324` / `#0d1912` | Fill behind accent text; text on an accent button |
 | `--danger` / `--danger-bg` | `#ff8a80` / `#3a1c1c` | Leave, refusals, Failed |
-| `--warn` | `#e8c06a` | Reconnecting, stale, Not confirmed, Microphone in use, a narrowed audience |
+| `--warn` | `#e8c06a` | Reconnecting, stale, Not confirmed, a narrowed audience (the microphone is no amber chip any more, #2198) |
 | `--focus` | `#8ec5ff` | Focus outline (2 px, offset 2 px) |
 | `--hue-0` … `--hue-5` | six muted hues | Initials, chosen by principal id; white letter |
 
