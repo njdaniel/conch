@@ -971,6 +971,72 @@ describe('NativeVoicePanel', () => {
   });
 });
 
+describe.each(['talk', 'mute'] as const)('%s key setup focus (#2220)', (binding) => {
+  function activate(button: HTMLElement) {
+    button.focus();
+    fireEvent.keyDown(button, { key: 'Enter', code: 'Enter' });
+    // jsdom does not synthesize the click from a button's keyboard activation.
+    fireEvent.click(button, { detail: 0 });
+  }
+
+  function open(fromOptions = true) {
+    const fake = new Fake(running());
+    const saveTalkBinding = vi.fn(() => Promise.resolve({ ok: true } as const));
+    const source: NativeVoice = { ...fake.nv,
+      keyDevices: () => Promise.resolve({ ok: true, devices: [{ id: 'k1', name: 'Keyboard', kind: 'keyboard', readable: true }], disclosure: [] }),
+      saveTalkBinding,
+    };
+    render(<NativeVoicePanel source={source} signedIn channel="general" viewer={1} people={people} voiceAllowed channels={channels} onUnauthorized={() => undefined} onOpen={() => undefined} />);
+    const toggle = screen.getByRole('button', { name: 'Voice options' });
+    if (fromOptions) activate(toggle);
+    activate(screen.getByRole('button', { name: fromOptions ? `Set up ${binding} key` : 'Talk key' }));
+    const setup = screen.getByRole('region', { name: fromOptions && binding === 'mute' ? 'Mute key' : 'Talk key' });
+    return { toggle, setup, saveTalkBinding };
+  }
+
+  it('focuses the first control on keyboard open', async () => {
+    const { setup } = open();
+    expect(document.activeElement).toBe(within(setup).getByRole('button', { name: 'Close' }));
+    await within(setup).findByRole('combobox');
+    expect(setup.contains(document.activeElement)).toBe(true);
+  });
+
+  it('restores the toggle after saving', async () => {
+    const { setup, toggle, saveTalkBinding } = open();
+    const picker = await within(setup).findByRole('combobox');
+    fireEvent.change(picker, { target: { value: 'F13' } });
+    activate(within(setup).getByRole('button', { name: 'Save' }));
+    await waitFor(() => { expect(document.activeElement).toBe(toggle); });
+    expect(saveTalkBinding).toHaveBeenCalledTimes(1);
+    expect(setup.isConnected).toBe(false);
+    expect(screen.getByText(/Saved: .*F13/)).toBeTruthy();
+  });
+
+  it.each(['cancel', 'Escape'])('restores the toggle after %s', async (action) => {
+    const { setup, toggle, saveTalkBinding } = open();
+    const close = within(setup).getByRole('button', { name: 'Close' });
+    await within(setup).findByRole('combobox');
+    close.focus();
+    if (action === 'Escape') fireEvent.keyDown(close, { key: 'Escape' });
+    else {
+      // Tab has left automatic key capture, so Enter acts on Close.
+      fireEvent.keyDown(close, { key: 'Tab', code: 'Tab' });
+      activate(close);
+    }
+    expect(document.activeElement).toBe(toggle);
+    expect(setup.isConnected).toBe(false);
+    expect(saveTalkBinding).not.toHaveBeenCalled();
+  });
+
+  if (binding === 'talk') {
+    it('restores the Talk key shortcut when it reappears', () => {
+      const { setup } = open(false);
+      activate(within(setup).getByRole('button', { name: 'Close' }));
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Talk key' }));
+    });
+  }
+});
+
 it('keeps the Talk key label in open mode when the helper loses the key', async () => {
   const lost = { ptt: 'lost', pttProblem: 'read_failed' } as const;
   const f = new Fake(running({ ...lost, talkMode: 'open' }));
@@ -1012,12 +1078,17 @@ it('opens the shared Windows capture from Voice options to save a mute key', asy
   const onBound = vi.fn();
   render(<NativeVoicePanel source={source} onBound={onBound} signedIn channel="general" viewer={1} people={people} voiceAllowed channels={channels} onUnauthorized={() => undefined} onOpen={() => undefined} />);
   fireEvent.click(screen.getByRole('button', { name: 'Voice options' }));
-  fireEvent.click(screen.getByRole('button', { name: 'Set up mute key' }));
-  fireEvent.click(await screen.findByRole('button', { name: 'Set mute key' }));
+  const opener = screen.getByRole('button', { name: 'Set up mute key' });
+  opener.focus();
+  fireEvent.click(opener, { detail: 1 });
+  const capture = await screen.findByRole('button', { name: 'Set mute key' });
+  expect(document.activeElement).toBe(capture);
+  fireEvent.click(capture);
   fireEvent.mouseDown(window, { button: 4 });
   fireEvent.click(screen.getByRole('button', { name: 'Save' }));
   await waitFor(() => {
     expect(saveTalkBinding).toHaveBeenCalledWith({ windowsCode: 'Mouse5', generation: f.nv.snapshot().generation, binding: 'mute' });
   });
+  expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Voice options' }));
   expect(onBound).not.toHaveBeenCalled();
 });

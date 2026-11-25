@@ -108,11 +108,12 @@ describe('TalkKeySetup', () => {
     expect(f.saveTalkBinding).not.toHaveBeenCalled();
   });
 
-  it('Escape cancels the capture', async () => {
-    await open();
-    press('Escape');
-    expect(screen.getByText('none chosen')).toBeTruthy();
-    expect(screen.queryByText(/Press the key/)).toBeNull();
+  it('Escape closes setup during automatic capture', async () => {
+    const f = await open();
+    const close = screen.getByRole('button', { name: 'Close' });
+    fireEvent.keyDown(close, { key: 'Escape', code: 'Escape' });
+    expect(f.onClose).toHaveBeenCalledOnce();
+    expect(f.saveTalkBinding).not.toHaveBeenCalled();
   });
 
   it('Tab leaves automatic capture without consuming navigation or binding a key', async () => {

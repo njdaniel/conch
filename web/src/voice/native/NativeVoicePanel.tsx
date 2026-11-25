@@ -9,7 +9,7 @@
 // Share and watch (issue #1582, D4-05 of #772) are the screen companion's, not
 // the helper's: NativeShare draws the control, the indicator, the notes and
 // the others' streams from the companion's state, and leaves voice alone.
-import { useContext, useEffect, useRef, useState } from 'react';
+import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { isArchived } from '../../archived';
 import { Glyph } from '../../Icons';
 import { VoiceStrip } from '../../phone';
@@ -30,7 +30,7 @@ import { VoiceOptions } from './VoiceOptions';
 import { NativeStreams, ShareButton, ShareNotes, ShareSoundMute, shareDisabledReason } from './NativeShare';
 import type { Companion } from './useCompanion';
 import { useShareSound } from './useShareSound';
-import { TalkKeySetup } from './TalkKeySetup';
+import { savedBindingWords, TalkKeySetup } from './TalkKeySetup';
 
 // How long the duplicate-identity warning waits for a second Join.
 export const confirmWithin = 10_000;
@@ -145,6 +145,9 @@ export function NativeVoicePanel({
   const sound = useShareSound(source, companion, view);
   const session = hasSession(view);
   const [setup, setSetup] = useState<'talk' | 'mute' | null>(null);
+  const closeSetup = useCallback(() => { setSetup(null); }, []);
+  const talkSetupButton = useRef<HTMLButtonElement>(null);
+  const setupOpener = useRef<HTMLButtonElement | 'shortcut' | 'options' | null>(null);
   const joined = session ? view.channel : null;
   const shown = joined ?? (signedIn ? channel : null);
   const snapshot = usePresence({ channel: shown, joined, voiceAllowed, onUnauthorized });
@@ -202,6 +205,18 @@ export function NativeVoicePanel({
   const outsideVoiceView = useContext(VoiceStrip) !== null;
   const hideOptions = outsideVoiceView || view.status === 'unavailable' || view.status === 'stopping' || actions === undefined;
   const { options, setOptions, covered, button: optionButton, panel, onClose, onShrink, sheet, onSheet } = useOptionsDisclosure({ hidden: hideOptions, native: true });
+  // Restore focus after the shortcut has remounted or the options panel has hidden.
+  useLayoutEffect(() => {
+    if (setup !== null || setupOpener.current === null) return;
+    const from = setupOpener.current;
+    setupOpener.current = null;
+    const opener = from === 'shortcut' ? talkSetupButton.current : from === 'options' ? null : from;
+    if (opener?.isConnected && opener.closest('[hidden], [inert]') === null) {
+      opener.focus();
+      if (document.activeElement === opener) return;
+    }
+    optionButton.ref.current?.focus();
+  }, [setup, optionButton.ref]);
   // The idle dock also offers device choices for the next join. Ending a
   // session closes the current disclosure before those choices can be opened.
   useEffect(() => {
@@ -366,6 +381,8 @@ export function NativeVoicePanel({
             panel={panel}
             {...(source.keyDevices === undefined ? {} : {
               onKeySetup: (binding: 'talk' | 'mute') => {
+                const focused = document.activeElement;
+                setupOpener.current = focused instanceof HTMLButtonElement && panel.current?.contains(focused) ? focused : 'options';
                 setOptions(false);
                 setSetup(binding);
               },
@@ -390,7 +407,10 @@ export function NativeVoicePanel({
         {!session && warned !== null && warned === channel ? <p role="status" className="hint">{duplicateWarning}</p> : null}
         {!session && !unavailable && channel !== null && presence === null && idle === null ? <p className="hint">Checking whether voice is available.</p> : null}
         {unavailable || source.keyDevices === undefined || setup ? null : (
-          <button type="button" className="more" onClick={() => { setSetup('talk'); }}>
+          <button ref={talkSetupButton} type="button" className="more" onClick={() => {
+            setupOpener.current = 'shortcut';
+            setSetup('talk');
+          }}>
             {needsTalkSetup ? 'Set up the talk key' : 'Talk key'}
           </button>
         )}
@@ -415,11 +435,14 @@ export function NativeVoicePanel({
             source={source}
             joined={session}
             onSaved={(label, nextJoinOnly) => {
-              if (setup !== 'talk') return;
-              if (nextJoinOnly === true) setPreviousBinding((old) => old ?? { generation: view.generation, label: binding });
-              onBound?.(label);
+              if (setup === 'talk') {
+                if (nextJoinOnly === true) setPreviousBinding((old) => old ?? { generation: view.generation, label: binding });
+                onBound?.(label);
+              }
+              setNote(savedBindingWords(setup, label, session));
+              closeSetup();
             }}
-            onClose={() => { setSetup(null); }}
+            onClose={closeSetup}
           />
         ) : null}
       </div>
