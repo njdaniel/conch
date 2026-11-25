@@ -20,7 +20,7 @@ const waylandAt = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => {
 // points at it (Chromium checks the file it opens, so a link is the same
 // helper), and the copy runs with the Chromium sandbox on exactly as the main
 // app does; a build whose helper is not (a developer's) keeps its own copy,
-// where the namespace sandbox is used. No spec runs with --no-sandbox.
+// where the namespace sandbox is used. No spec turns the Chromium sandbox off.
 function shareSandboxHelper(appDir: string): void {
   const built = join(dirname(APP), 'chrome-sandbox');
   let st;
@@ -132,8 +132,18 @@ test('Voice options keeps the dock in reach in the packaged desktop strip (#2195
         await expect(panel).toBeHidden();
         await expect(toggle).toBeFocused();
 
+        // A press outside on something that takes focus (the conversation
+        // heading is focusable) closes the panel and leaves focus where the
+        // press put it; a press on blank, unfocusable space (the dock's "In
+        // voice in #general" line) closes it and returns focus to the toggle
+        // (#2195 round 3).
         await toggle.click();
         await heading.click();
+        await expect(panel).toBeHidden();
+        await expect(heading).toBeFocused();
+
+        await toggle.click();
+        await page.getByText('In voice in #general', { exact: true }).click({ timeout: 10_000 });
         await expect(panel).toBeHidden();
         await expect(toggle).toBeFocused();
 

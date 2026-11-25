@@ -1529,11 +1529,11 @@ export function useOptionsDisclosure({ hidden, capturing = false, toAbout = fals
   // its own toggle, not an outside press (issue #2189).
   const optionsButton = useRef<HTMLButtonElement>(null);
   const optionsPanel = useRef<HTMLDivElement>(null);
-  // Explicit dismissal puts focus back on the button once the panel is gone
-  // (the button can be inert while a sheet is open).
-  const focusBack = useRef(false);
+  // The toggle can be inert while a sheet is open. Restore focus after the
+  // panel closes, and for an outside press wait for the browser's default.
+  const focusBack = useRef<'dismiss' | 'outside' | null>(null);
   const closeOptions = useCallback(() => {
-    focusBack.current = true;
+    focusBack.current = 'dismiss';
     setOptions(false);
   }, []);
   // A layout change may hide the anchor or call for a modal sheet (issue
@@ -1543,7 +1543,7 @@ export function useOptionsDisclosure({ hidden, capturing = false, toAbout = fals
     // The button may be inert or covered at that moment (a modal over it): then
     // focus stays where it is.
     const button = optionsButton.current;
-    focusBack.current = optionsPanel.current?.contains(document.activeElement) === true && button !== null && button.closest('[inert]') === null;
+    focusBack.current = optionsPanel.current?.contains(document.activeElement) === true && button !== null && button.closest('[inert]') === null ? 'dismiss' : null;
     setOptions(false);
   }, []);
   // Whether the open panel is a bottom sheet (set by Options from its place).
@@ -1551,9 +1551,8 @@ export function useOptionsDisclosure({ hidden, capturing = false, toAbout = fals
   // What the lobby says of the sheet (VoiceSheet), read here for the press
   // below and for the sheet's own handling after it.
   const { report, blocked, behind } = useContext(VoiceSheet);
-  // Escape and an outside press in the current view close Voice options and
-  // return focus to its button. Escape while the talk key is being chosen
-  // only cancels that, as Change talk key says.
+  // Escape and an outside press close Voice options. Escape while the talk
+  // key is being chosen only cancels that, as Change talk key says.
   useEffect(() => {
     if (!options || hidden) return;
     const onKey = (e: KeyboardEvent) => {
@@ -1590,16 +1589,10 @@ export function useOptionsDisclosure({ hidden, capturing = false, toAbout = fals
       // them, their Close and their backdrop among them, is theirs, and the
       // panel stays open beneath, to take focus back when they go.
       if (behind) return;
-      // The phone nav stays reachable beside the sheet. A button for another
-      // view keeps its normal mouse focus when the click hides the dock.
-      if (at instanceof Element && at.closest('.phone-nav button:not([aria-current="page"])') !== null) {
-        setOptions(false);
-        return;
-      }
-      // Keep the press from giving focus elsewhere after it is restored.
-      // The click still reaches the control, such as Leave or Settings.
-      e.preventDefault();
-      closeOptions();
+      // Let the browser set focus or start a selection, and let the click
+      // reach the pressed control. The lobby handles focus on view changes.
+      focusBack.current = 'outside';
+      setOptions(false);
     };
     document.addEventListener('keydown', onKey);
     document.addEventListener('mousedown', onPress);
@@ -1612,9 +1605,23 @@ export function useOptionsDisclosure({ hidden, capturing = false, toAbout = fals
   }, [options, hidden, capturing, closeOptions, behind, sheet]);
 
   useEffect(() => {
-    if (options || !focusBack.current) return;
-    focusBack.current = false;
-    if (!hidden) optionsButton.current?.focus();
+    if (options) return;
+    const reason = focusBack.current;
+    focusBack.current = null;
+    if (hidden || reason === null) return;
+    if (reason === 'dismiss') {
+      optionsButton.current?.focus();
+      return;
+    }
+    // After the press's default action, only recover focus from the page
+    // body or the closed panel. An input or button that took focus keeps it.
+    const timer = window.setTimeout(() => {
+      const at = document.activeElement;
+      const button = optionsButton.current;
+      if (button === null || button.closest('[hidden], [inert]') !== null) return;
+      if (at === null || at === document.body || optionsPanel.current?.contains(at) === true) button.focus();
+    }, 0);
+    return () => { window.clearTimeout(timer); };
   }, [options, hidden]);
 
   // The sheet is modal (role dialog, aria-modal). The voice section makes
@@ -1634,7 +1641,8 @@ export function useOptionsDisclosure({ hidden, capturing = false, toAbout = fals
   }, [blocked, options]);
   // Close whenever the panel goes out of sight, such as switching to Chat
   // or leaving voice. Returning to the section starts with it closed. The
-  // view or control that hid it owns focus.
+  // lobby recovers focus on view switches, and Leave voice has its own
+  // handoff when it goes away.
   useEffect(() => {
     if (options && hidden) setOptions(false);
   }, [options, hidden]);

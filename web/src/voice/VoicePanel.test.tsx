@@ -2,7 +2,7 @@
 // and Watch only name the channel they join, Watch only says the room is
 // heard, and the channel voice is in is a way back to it while another is on
 // screen. Driven by a fake VoiceControl: no SDK, no network, no device.
-import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ChannelV0 } from '../schema/channel';
 import type { VoicePresenceV2 } from '../schema/voice';
@@ -885,8 +885,8 @@ describe('what is sent, as the strip says it', () => {
   });
 });
 
-// Issue #2189: Voice options is a panel over the page. Escape and an outside
-// press in the same view close it and put focus back on its button.
+// Issue #2189: Voice options is a panel over the page. Escape closes it and
+// puts focus back on its button.
 describe('Voice options as a panel', () => {
   const open = () => {
     const made = panel(inVoice('connected', 'c'), 'c');
@@ -906,15 +906,12 @@ describe('Voice options as a panel', () => {
     expect(document.activeElement).toBe(button);
   });
 
-  it('a press outside closes it and restores focus, and a press inside does not close it', () => {
+  it('a press inside does not close it', () => {
     const { voice, button } = open();
     const slider = within(voice).getByRole('slider', { name: /Release delay/ });
     slider.focus();
     fireEvent.mouseDown(slider);
     expect(button.getAttribute('aria-expanded')).toBe('true');
-    fireEvent.mouseDown(document.body);
-    expect(button.getAttribute('aria-expanded')).toBe('false');
-    expect(document.activeElement).toBe(button);
   });
 
   it('the button still toggles it', () => {
@@ -1137,14 +1134,65 @@ describe('the anchored Voice options panel and focus leaving it', () => {
     const voice = control(inVoice('connected', 'c'), [], { kind: 'presence', presence });
     const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ top: 700, left: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 700, toJSON: () => ({}) });
     const height = vi.spyOn(document.documentElement, 'clientHeight', 'get').mockReturnValue(800);
-    const other = document.createElement('input');
-    document.body.append(other);
-    render(<VoicePanel voice={voice} viewer={7} people={new Map()} viewed="c" onOpen={() => undefined} />);
+    render(
+      <>
+        <p>Selectable chat text</p>
+        <input aria-label="Message" />
+        <div data-testid="blank-space" />
+        <VoicePanel voice={voice} viewer={7} people={new Map()} viewed="c" onOpen={() => undefined} />
+      </>,
+    );
+    const other = screen.getByRole('textbox', { name: 'Message' });
     const button = screen.getByRole('button', { name: 'Voice options' });
     fireEvent.click(button);
     expect(document.querySelector('#voice-options')?.classList.contains('sheet')).toBe(false);
-    return { button, other, done: () => { rect.mockRestore(); height.mockRestore(); other.remove(); } };
+    return { button, other, done: () => { rect.mockRestore(); height.mockRestore(); } };
   };
+
+  it('dismisses on an outside press without preventing text selection', () => {
+    const { button, done } = setup();
+    try {
+      const text = screen.getByText('Selectable chat text');
+      const press = createEvent.mouseDown(text);
+      fireEvent(text, press);
+      expect(press.defaultPrevented).toBe(false);
+      expect(button.getAttribute('aria-expanded')).toBe('false');
+    } finally {
+      done();
+    }
+  });
+
+  it('dismisses on a press that focuses an outside input and keeps focus there', async () => {
+    const { button, other, done } = setup();
+    try {
+      screen.getByRole('slider', { name: /Release delay/ }).focus();
+      // jsdom needs the default mousedown focus action simulated.
+      if (fireEvent.mouseDown(other)) other.focus();
+      expect(button.getAttribute('aria-expanded')).toBe('false');
+      expect(document.activeElement).toBe(other);
+      await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 0)); });
+      expect(document.activeElement).toBe(other);
+    } finally {
+      done();
+    }
+  });
+
+  it('dismisses on a press on blank space and restores focus after the press default', async () => {
+    const { button, done } = setup();
+    try {
+      const slider = screen.getByRole('slider', { name: /Release delay/ });
+      slider.focus();
+      // A blank press blurs the focused control without focusing a new one.
+      act(() => {
+        if (fireEvent.mouseDown(screen.getByTestId('blank-space'))) slider.blur();
+      });
+      expect(button.getAttribute('aria-expanded')).toBe('false');
+      expect(document.activeElement === document.body).toBe(true);
+      await waitFor(() => { expect(document.activeElement).toBe(button); });
+    } finally {
+      done();
+    }
+  });
 
   it('closes when focus goes to something else, and leaves focus there', () => {
     const { button, other, done } = setup();

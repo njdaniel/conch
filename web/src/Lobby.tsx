@@ -233,6 +233,7 @@ export function Lobby({
   // strip, or nowhere.
   const dock = useRef<HTMLDivElement>(null);
   const voiceTab = useRef<HTMLButtonElement>(null);
+  const channelsHeading = useRef<HTMLHeadingElement>(null);
   // The strip's state button opens the Voice view (issue #1028). It is not
   // drawn there, so focus goes to the Voice button, now the current view's.
   const openVoice = useCallback(() => {
@@ -480,6 +481,36 @@ export function Lobby({
     if (document.activeElement === null || document.activeElement === document.body) heading.focus();
   }, [showing]);
 
+  // Safari can click a button without focusing it. On leaving Voice, wait
+  // until the dock changes and the sheet releases the inert page before
+  // recovering focus that fell to the body or stayed in a hidden control.
+  const previousView = useRef(view);
+  const viewButton = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    if (voiceSheet && view !== 'voice') return;
+    const leftVoice = previousView.current === 'voice' && view !== 'voice';
+    previousView.current = view;
+    if (!leftVoice) return;
+    const button = viewButton.current;
+    viewButton.current = null;
+    if (!phone || behind) return;
+    const at = document.activeElement;
+    if (at !== null && at !== document.body) {
+      const hiddenInDock = dock.current?.contains(at) === true &&
+        (at.closest('[hidden]') !== null || at.getClientRects().length === 0 || getComputedStyle(at).visibility !== 'visible');
+      if (!hiddenInDock) return;
+    }
+    const destination = button ?? (view === 'chat' ? document.getElementById(headingId) ?? centre.current : channelsHeading.current);
+    if (destination === null) return;
+    // The centre takes no tabindex of its own (a press on it must not focus
+    // it, issue #2196): it gets one only for this focus, and loses it on blur.
+    if (destination === centre.current && !destination.hasAttribute('tabindex')) {
+      destination.tabIndex = -1;
+      destination.addEventListener('blur', () => { destination.removeAttribute('tabindex'); }, { once: true });
+    }
+    destination.focus();
+  }, [phone, view, voiceSheet, behind]);
+
   function closeSettings() {
     setSettingsOpen(false);
     setConfirming(null);
@@ -611,7 +642,7 @@ export function Lobby({
             />
             ) : null}
           <nav aria-label="Channels">
-            <h2>Channels</h2>
+            <h2 ref={channelsHeading} tabIndex={-1}>Channels</h2>
             {channels.loaded ? (
               <>
                 <ChannelList
@@ -728,7 +759,8 @@ export function Lobby({
                 type="button"
                 aria-current={view === v ? 'page' : undefined}
                 aria-describedby={v === 'voice' && live ? 'nav-voice-live' : undefined}
-                onClick={() => {
+                onClick={(event) => {
+                  if (view === 'voice' && v !== 'voice') viewButton.current = event.currentTarget;
                   setView(v);
                 }}
               >

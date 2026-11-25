@@ -1,6 +1,6 @@
 // The desktop voice strip (issue #1376, D3-5 of #771), driven by a fake native
 // voice and a fake presence socket: no helper, no browser engine, no network.
-import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, createEvent, fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../../api';
 import { VoiceStrip } from '../../phone';
@@ -149,14 +149,49 @@ describe('native Voice options disclosure (#2195)', () => {
     return { fake, toggle, retry, show };
   }
 
-  it.each(['Escape', 'outside press', 'Close'])('closes on %s and restores the toggle focus', async (action) => {
+  it.each(['Escape', 'Close'])('closes on %s and restores the toggle focus', async (action) => {
     const { toggle, retry } = await open();
     retry.focus();
     if (action === 'Escape') fireEvent.keyDown(retry, { key: 'Escape' });
-    else if (action === 'outside press') fireEvent.mouseDown(document.body);
     else fireEvent.click(screen.getByRole('button', { name: 'Close' }));
     expect(toggle.getAttribute('aria-expanded')).toBe('false');
     expect(document.activeElement).toBe(toggle);
+  });
+
+  it('dismisses on an outside press without preventing text selection', async () => {
+    const { toggle } = await open();
+    render(<p>Selectable chat text</p>);
+    const text = screen.getByText('Selectable chat text');
+    const press = createEvent.mouseDown(text);
+    fireEvent(text, press);
+    expect(press.defaultPrevented).toBe(false);
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('dismisses on a press that focuses an outside input and keeps focus there', async () => {
+    const { toggle, retry } = await open();
+    render(<input aria-label="Message" />);
+    const field = screen.getByRole('textbox', { name: 'Message' });
+    retry.focus();
+    // jsdom needs the default mousedown focus action simulated.
+    if (fireEvent.mouseDown(field)) field.focus();
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(field);
+    await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 0)); });
+    expect(document.activeElement).toBe(field);
+  });
+
+  it('dismisses on a press on blank space and restores focus after the press default', async () => {
+    const { toggle, retry } = await open();
+    render(<div data-testid="blank-space" />);
+    retry.focus();
+    // A blank press blurs the focused control without focusing a new one.
+    act(() => {
+      if (fireEvent.mouseDown(screen.getByTestId('blank-space'))) retry.blur();
+    });
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement === document.body).toBe(true);
+    await waitFor(() => { expect(document.activeElement).toBe(toggle); });
   });
 
   it('Tabs into the panel, Shift+Tabs back, and Tabs out to Leave voice', async () => {
