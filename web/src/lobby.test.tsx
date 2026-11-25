@@ -30,14 +30,14 @@ function lobby(voice: ReactNode = <Probe name="voice" />, os: string | null = nu
   return render(lobbyTree(voice, os, overlay));
 }
 
-function lobbyTree(voice: ReactNode, os: string | null, overlay?: ReactNode) {
+function lobbyTree(voice: ReactNode, os: string | null, overlay?: ReactNode, loaded = false) {
   return (
     <DesktopOS.Provider value={os}><Lobby
       overlay={overlay}
       origin="http://127.0.0.1:8080"
       name="ada"
       me={2}
-      channels={initialChannels}
+      channels={loaded ? { ...initialChannels, loaded: true } : initialChannels}
       unread={new Map()}
       connection="connected"
       conversation={<Probe name="conversation" />}
@@ -313,6 +313,22 @@ describe('the voice options sheet and the lobby', () => {
     expect(document.activeElement).not.toBe(settings);
     rerender(lobbyTree(<Sheet open={false} />, null));
     expect(document.activeElement).toBe(settings);
+  });
+
+  // The quick switcher is drawn into the body: the sheet is told it is behind.
+  it('tells the sheet it is behind while the quick switcher is open', () => {
+    windowOf(true);
+    function Behind() {
+      return <p>{useContext(VoiceSheet).behind ? 'behind' : 'clear'}</p>;
+    }
+    render(lobbyTree(<Behind />, null, undefined, true));
+    expect(screen.getByText('clear')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: /Find a channel/ }));
+    expect(screen.getByRole('dialog', { name: 'Find a channel' })).toBeTruthy();
+    expect(screen.getByText('behind')).toBeTruthy();
+    fireEvent.keyDown(screen.getByRole('combobox', { name: 'Find a channel' }), { key: 'Escape' });
+    expect(screen.queryByRole('dialog', { name: 'Find a channel' })).toBeNull();
+    expect(screen.getByText('clear')).toBeTruthy();
   });
 
   it('re-authentication clearing leaves usable focus the person already has', () => {

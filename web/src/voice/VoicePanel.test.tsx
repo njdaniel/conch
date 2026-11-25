@@ -744,6 +744,31 @@ it('Voice options stays open under a press, and under Escape, while Settings is 
   }
 });
 
+// Issue #2189: whatever modal has focus, the sheet does not take it. A foreign
+// aria-modal dialog (one the lobby was never told of) holds it against the
+// sheet opening.
+it('Voice options does not take focus from another open modal dialog', () => {
+  const voice = control(inVoice('connected', 'c'), [], { kind: 'presence', presence });
+  const top = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0, toJSON: () => ({}) });
+  const height = vi.spyOn(document.documentElement, 'clientHeight', 'get').mockReturnValue(800);
+  try {
+    render(
+      <>
+        <div role="dialog" aria-modal="true" aria-label="Elsewhere"><input aria-label="Field" /></div>
+        <VoicePanel voice={voice} viewer={7} people={new Map()} viewed="c" onOpen={() => undefined} />
+      </>,
+    );
+    const field = screen.getByLabelText('Field');
+    field.focus();
+    fireEvent.click(screen.getByRole('button', { name: 'Voice options' }));
+    expect(document.querySelector('#voice-options')?.classList.contains('sheet')).toBe(true);
+    expect(document.activeElement).toBe(field);
+  } finally {
+    top.mockRestore();
+    height.mockRestore();
+  }
+});
+
 // Issue #590 (F09, F20): Hold to talk works from the keyboard while it has
 // focus, the hint says where the talk key does not work, and Leave voice
 // hands focus to Join voice instead of dropping it.

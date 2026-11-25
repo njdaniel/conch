@@ -288,6 +288,36 @@ test.describe('Voice options', () => {
     }
   });
 
+  // The quick switcher (Ctrl+K) is a modal drawn into the body. Over open
+  // Voice options, the panel turning into a sheet (the window narrows) does not
+  // take focus from it, and Escape closes the switcher and not the panel.
+  test('P2189 the sheet does not take focus from the channel switcher when the window narrows', async ({ browser }) => {
+    let p: Someone | undefined;
+    try {
+      p = await enter(browser, vw, vw.alice, { context: { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true } });
+      const page = p.page;
+      await joinVoice(p, 'Join voice');
+      await page.getByRole('navigation', { name: 'Main navigation' }).getByRole('button', { name: 'Voice' }).click();
+      await page.setViewportSize({ width: 1440, height: 900 });
+      const options = voice(page).getByRole('button', { name: 'Voice options' });
+      const panel = page.locator('#voice-options');
+      await options.click();
+      await expect(panel).toBeVisible();
+      await expect(panel).not.toHaveClass(/sheet/);
+      await page.keyboard.press('Control+k');
+      const switcher = page.getByRole('dialog', { name: 'Find a channel' });
+      await expect(switcher).toBeVisible();
+      await page.setViewportSize({ width: 390, height: 520 });
+      await expect(panel).toHaveClass(/sheet/);
+      await expect(switcher.getByRole('combobox')).toBeFocused();
+      await page.keyboard.press('Escape');
+      await expect(switcher).toHaveCount(0);
+      await expect(panel).toBeVisible();
+    } finally {
+      await p?.close();
+    }
+  });
+
   // The sheet turning into the panel above the strip (the window grows) hides
   // its Close: focus held there moves to a visible control in the panel.
   test('P2189 focus on the sheet\'s Close moves into the panel when the sheet becomes the anchored panel', async ({ browser }) => {

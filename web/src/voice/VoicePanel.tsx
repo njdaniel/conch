@@ -343,8 +343,16 @@ export function VoicePanel({
   useEffect(() => {
     if (blocked && options) setOptions(false);
   }, [blocked, options]);
+  // Whether focus is inside another modal (a dialog or aria-modal element that
+  // is not the options panel, and not shut away): the panel never takes focus
+  // from it, whatever it was that opened it, as a guard beside behind.
+  const inForeignModal = () => {
+    const at = document.activeElement;
+    const modal = at instanceof Element ? at.closest('[role="dialog"], [role="alertdialog"], [aria-modal="true"]') : null;
+    return modal !== null && modal !== optionsPanel.current && modal.closest('[hidden], [inert]') === null;
+  };
   useEffect(() => {
-    if (!covered || toAbout || behind) return;
+    if (!covered || toAbout || behind || inForeignModal()) return;
     if (optionsPanel.current?.contains(document.activeElement) === true) return;
     optionsPanel.current?.querySelector<HTMLElement>('.voice-options-close')?.focus();
     // Behind: Settings was opened over the sheet and has closed again, and the
@@ -354,7 +362,7 @@ export function VoicePanel({
   // hides its Close: focus held there moves to the panel's first control.
   const wasCovered = useRef(false);
   useEffect(() => {
-    if (wasCovered.current && !covered && options) {
+    if (wasCovered.current && !covered && options && !inForeignModal()) {
       const at = document.activeElement;
       if (at === null || at === document.body || at.classList.contains('voice-options-close')) {
         // The first control that is enabled and drawn, else the panel itself

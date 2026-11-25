@@ -11,7 +11,7 @@ import { headingId } from './Conversation';
 import { Avatar, Glyph } from './Icons';
 import { ServerVersion, TemporaryBanner } from './ServerVersion';
 import { AddPerson, JoiningSettings, SettingsOpen, type JoiningRequest } from './joiningSettings';
-import { setPageModal } from './pageModal';
+import { OverlayReport, setPageModal } from './pageModal';
 import { MicTestShown, phoneViews, ShowChat, useAppHeight, usePhone, VoiceLive, VoiceSheet, VoiceStrip, type PhoneView } from './phone';
 import { DesktopOS } from './platform/os';
 import type { ChannelV0 } from './schema/channel';
@@ -300,9 +300,16 @@ export function Lobby({
   // for the sheet.
   const [sheetOpen, setSheetOpen] = useState(false);
   const voiceSheet = sheetOpen && !asking;
-  // Settings or re-authentication is up over the sheet: told to it as behind,
-  // so it takes focus back when the modal over it goes.
-  const sheetLink = useMemo(() => ({ report: setSheetOpen, blocked: asking, behind: settingsOpen || asking }), [asking, settingsOpen]);
+  // Modals drawn outside the lobby's own (the quick switcher, in the body) say
+  // they are open through OverlayReport; they are counted here.
+  const [overlays, setOverlays] = useState(0);
+  const reportOverlay = useCallback((open: boolean) => {
+    setOverlays((n) => Math.max(0, n + (open ? 1 : -1)));
+  }, []);
+  // Settings, re-authentication or one of those is up over the sheet: told to
+  // it as behind, so it takes focus back when the modal over it goes.
+  const behind = settingsOpen || asking || overlays > 0;
+  const sheetLink = useMemo(() => ({ report: setSheetOpen, blocked: asking, behind }), [asking, behind]);
   // What the lobby does not draw but the page does (the desktop strip, the
   // update notices) is inert for the same modals: said here, once, to them.
   const modalNow = settingsOpen || asking || voiceSheet;
@@ -414,6 +421,7 @@ export function Lobby({
   return (
     <JoiningSettings.Provider value={joining}>
     <SettingsOpen.Provider value={settingsOpen}>
+    <OverlayReport.Provider value={reportOverlay}>
     <AddPerson.Provider value={onAddPerson === undefined ? null : addPerson}>
       <div ref={lobbyEl} className={`${phone ? `lobby phone view-${view}${live ? ' in-voice' : ''}` : 'lobby'}${band === undefined ? '' : ' has-band'}`}>
         {/* While Settings is open the rest of the page is inert: the panel is
@@ -732,6 +740,7 @@ export function Lobby({
         {overlay}
       </div>
     </AddPerson.Provider>
+    </OverlayReport.Provider>
     </SettingsOpen.Provider>
     </JoiningSettings.Provider>
   );
