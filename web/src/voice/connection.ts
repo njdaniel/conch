@@ -250,6 +250,9 @@ export interface ShareSink {
 }
 
 // What the client needs of one LiveKit room connection.
+// What a capture is of, as the browser reports it (displaySurface).
+export type ShareSurface = 'monitor' | 'window' | 'browser';
+
 export interface Room extends ShareRoom, CameraRoom {
   // The dock reads these track-scoped sources only while diagnostics is open.
   diagnosticsSources?: () => readonly DiagnosticsSource[];
@@ -332,6 +335,9 @@ export interface Room extends ShareRoom, CameraRoom {
   // (#2197), or into none: it follows the capture, and is empty once the
   // share is stopped.
   attachShareSelf: (el: HTMLVideoElement | null) => void;
+  // What the capture is of (a whole screen, a window, a tab), as the browser
+  // says, or null: named in the sharer's title.
+  shareSurface: () => ShareSurface | null;
   // Receiving cameras: whether the call view is open (the person's choice),
   // whether the video is shown here now (setShown: false in the phone layout
   // outside the Voice view, where no camera is received), who holds a camera
@@ -1546,6 +1552,10 @@ export class VoiceClient {
 
   // attachShareSelf plays the sharer's own screen into the preview, on this
   // connection and every one after it (#2197).
+  shareSurface(): ShareSurface | null {
+    return this.room?.shareSurface() ?? null;
+  }
+
   attachShareSelf(el: HTMLVideoElement | null): void {
     this.shareSelfView = el;
     this.room?.attachShareSelf(el);

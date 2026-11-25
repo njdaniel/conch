@@ -11,7 +11,7 @@ import { Glyph } from '../Icons';
 import { platform } from '../platform';
 import { fullscreenVideo } from './fullscreen';
 import { usePictureInPicture } from './pictureInPicture';
-import type { VoiceClient, VoiceState } from './connection';
+import type { ShareSurface, VoiceClient, VoiceState } from './connection';
 import { askedText, nextShortfall, noShortfall, shareReadout, type ShortfallState } from './sdk';
 import type { SettledQuality, ShareDirection, ShareSample } from './share';
 
@@ -402,9 +402,8 @@ const setPreviewHidden = (hidden: boolean): void => {
   previewHidden = hidden;
   for (const listener of previewListeners) listener();
 };
-// Whether the preview is hidden now. The call view reads it too: a lone
-// preview takes the stage as a single watched share does, and a hidden one is
-// the plain tile it was.
+// Whether the preview is hidden now: it is the choice of the sharer's tile in
+// every layout, so it is read from the page session's one place.
 export function useSharePreviewHidden(): boolean {
   return useSyncExternalStore(
     (listener) => {
@@ -420,22 +419,35 @@ export function resetSharePreview(): void {
 }
 
 // What the sharer's tile needs of the client.
-export type SelfShareClient = Pick<VoiceClient, 'attachShareSelf' | 'stopShare'>;
+export type SelfShareClient = Pick<VoiceClient, 'attachShareSelf' | 'stopShare' | 'shareSurface'>;
 
-// SelfShareView is the sharer's own stage (#2197): the same frame as a watched
-// share (contained, never cropped, inside the stage) holding a live preview of
-// the outgoing screen, so they can see what they are sharing. The picture is
-// the local capture, muted (the sharing sound is never played back) and with no
-// subscription or upload of its own; the client follows it through the
-// capture's stopping or replacing, so no frame is left after Stop sharing.
-// Hide preview collapses it to the title and Stop sharing. The controls are in
-// a row below the picture: none of a watched share's (mute, volume, full
-// screen, pop out) applies to one's own share, so none wakes or fades.
+// What the capture is of, in the sharer's title: the thumbnail is too small to
+// tell two similar windows apart, so the title says the kind of surface. Left
+// out when the browser does not say.
+export function surfaceWords(surface: ShareSurface | null): string | null {
+  switch (surface) {
+    case 'monitor': return 'your entire screen';
+    case 'window': return 'a window';
+    case 'browser': return 'a tab';
+    default: return null;
+  }
+}
+
+// SelfShareView is the sharer's own tile (#2197): a small live preview of the
+// outgoing screen beside the title and the controls, so they can see what they
+// are sharing. The picture is the raw local capture, muted (the sharing sound
+// is never played back) and with no subscription or upload of its own; the
+// client follows it through the capture's stopping or replacing, so no frame is
+// left after Stop sharing. The title names the kind of surface shared. Hide
+// preview collapses the tile to the title and Stop sharing. None of a watched
+// share's controls (mute, volume, full screen, pop out) applies to one's own
+// share, so none wakes or fades. The tile is the container its toggle is sized
+// by: icon alone when it is narrow (CSS).
 export function SelfShareView({ client, quality, compact = false }: {
   readonly client: SelfShareClient;
-  // In the compact strip, and in a narrow window, the toggle is an icon (its
-  // name is the same, its title the words), so that Stop sharing keeps its
-  // width and the row does not wrap in a narrow tile.
+  // In the compact strip the toggle is an icon (its name is the same, its
+  // title the words); a narrow tile does the same by its own width (CSS), so
+  // that the row does not wrap.
   readonly compact?: boolean;
   // The declared quality, as in the watched title.
   readonly quality?: string | null;
@@ -448,9 +460,14 @@ export function SelfShareView({ client, quality, compact = false }: {
     return () => { client.attachShareSelf(null); };
   }, [client, hidden]);
   const label = hidden ? 'Show preview' : 'Hide preview';
+  const surface = surfaceWords(client.shareSurface());
+  const words = `You · LIVE${surface === null ? '' : ` · ${surface}`}${quality === null || quality === undefined ? '' : ` · ${quality}`}`;
   return (
-    <section aria-label="Your stream" className={`share-view${hidden ? '' : ' self'}`}>
-      <p className="share-title"><Glyph name="screen" />You · LIVE{quality === null || quality === undefined ? null : <> · {quality}</>}</p>
+    <section aria-label="Your stream" className={`share-view own${hidden ? '' : ' self'}`}>
+      <p className="share-title">
+        <Glyph name="screen" />
+        <span className="share-words" title={words}>{words}</span>
+      </p>
       {hidden ? null : (
         <div className="share-frame">
           <video ref={video} aria-label="Preview of your screen" playsInline autoPlay muted />
@@ -459,7 +476,7 @@ export function SelfShareView({ client, quality, compact = false }: {
       <div className="share-controls">
         <button type="button" onClick={() => { client.stopShare(); }}>Stop sharing</button>
         <button type="button" className={`preview-toggle${compact ? ' icon' : ''}`} aria-label={`${label} of your screen`} title={label} onClick={() => { setPreviewHidden(!hidden); }}>
-          <Glyph name="screen" />
+          <Glyph name={hidden ? 'eye' : 'eyeOff'} />
           <span className="words">{label}</span>
         </button>
       </div>

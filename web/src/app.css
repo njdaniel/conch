@@ -3549,7 +3549,14 @@ label {
   white-space: nowrap;
 }
 
-@media (max-width: 600px) {
+/* The sharer's tile is its own container: a narrow tile (a grid cell, the
+   strip) shows the toggle as an icon alone, so the row never wraps and the
+   tile is no taller than it was without the toggle. */
+.share-view.own {
+  container-type: inline-size;
+}
+
+@container (max-width: 23rem) {
   .preview-toggle svg {
     display: inline;
   }
@@ -3564,12 +3571,38 @@ label {
   }
 }
 
+.share-view.own .share-title {
+  min-width: 0;
+}
+
+/* One line: the words are cut with an ellipsis (the whole text is the
+   title's), so naming the surface never makes the tile taller. */
+.share-view.own .share-words {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.share-view.own .share-controls button {
+  white-space: nowrap;
+}
+
+/* Compact with no picture: the row is the tile's, not the narrow first column's. */
+.compact .share-view.own:not(.self) .share-controls {
+  grid-column: 1 / -1;
+}
+
 /* In the compact strip the tile's own row rules (below) hold. */
 .compact .share-view.self .share-frame,
 .compact .share-view.self .share-controls {
   grid-column: auto;
   grid-row: auto;
   width: auto;
+}
+
+.compact .share-view.self .share-controls {
+  padding-top: 0;
 }
 
 .compact .share-view.self .share-frame {

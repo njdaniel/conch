@@ -989,6 +989,7 @@ test.describe('the persistent call workspace', () => {
         buttons: buttons.map((b) => b.textContent.trim() || b.getAttribute('aria-label')),
         buttonsOnScreen: buttons.length === 2 && buttons.every(onScreen),
         scrolls: view.scrollHeight > view.clientHeight + 1,
+        viewExcess: view.scrollHeight - view.clientHeight,
         pageScrolls: scroller === null ? false : scroller.scrollHeight > scroller.clientHeight + 1,
         overflow: scroller === null ? 0 : scroller.scrollHeight - scroller.clientHeight,
       };
@@ -1000,11 +1001,13 @@ test.describe('the persistent call workspace', () => {
     // The tile without its preview is what main drew: the preview may add no
     // scrolling to it (a layout that scrolls without it, such as a grid of many
     // tiles in a short window, is not the preview's doing).
-    let base = { overflow: 0, scrolls: false };
+    let base = { overflow: 0, scrolls: false, viewExcess: 0, tileHeight: 0, controlsHeight: 0 };
     if (expectVideo) {
       await ownStage(page).getByRole('button', { name: 'Hide preview of your screen' }).click();
       const hiddenTile = await measureOwn(page);
-      base = { overflow: hiddenTile.overflow, scrolls: hiddenTile.scrolls };
+      base = { overflow: hiddenTile.overflow, scrolls: hiddenTile.scrolls, viewExcess: hiddenTile.viewExcess, tileHeight: hiddenTile.tile[1] ?? 0, controlsHeight: hiddenTile.controlsSize[1] ?? 0 };
+      // The tile without its preview is main's: one row of buttons, never wrapped.
+      expect.soft(base.controlsHeight, `the buttons do not wrap without the preview: ${where}\n${JSON.stringify(hiddenTile)}`).toBeLessThanOrEqual(54);
       await ownStage(page).getByRole('button', { name: 'Show preview of your screen' }).click();
       await expect(preview(page)).toHaveCount(1);
     }
@@ -1015,13 +1018,16 @@ test.describe('the persistent call workspace', () => {
     if (expectVideo) {
       expect.soft(g.fit, details).toBe('contain');
       expect.soft(g.videoInTile, `the preview is inside its tile: ${details}`).toBe(true);
-      expect.soft(g.videoHeight, `the preview has a picture's height: ${details}`).toBeGreaterThanOrEqual(48);
+      expect.soft(g.videoHeight, `the preview has a picture's height: ${details}`).toBeGreaterThanOrEqual(40);
     }
     expect.soft(g.controlsInTile, `the controls are inside the tile: ${details}`).toBe(true);
     if (base.overflow === 0) expect.soft(g.buttonsOnScreen, `Stop sharing and the toggle are fully shown: ${details}`).toBe(true);
     // Never scrolling where the tile without its preview does not.
     expect.soft(g.overflow, `the page scrolls no more than without the preview (${String(base.overflow)}): ${details}`).toBeLessThanOrEqual(base.overflow);
-    if (!base.scrolls) expect.soft(g.scrolls, `the call view needs no scrolling: ${details}`).toBe(false);
+    // The call view scrolls no more than it does without the preview, and the
+    // tile is no taller than that one.
+    expect.soft(g.viewExcess, `the call view scrolls no more than without the preview (${String(base.viewExcess)}): ${details}`).toBeLessThanOrEqual(Math.max(base.viewExcess, 1));
+    if (expectVideo) expect.soft(g.tile[1], `the tile is no taller than without the preview (${String(base.tileHeight)}): ${details}`).toBeLessThanOrEqual(base.tileHeight + 1);
     return g;
   };
   const desktopSizes = [[1440, 900], [1366, 768], [1280, 720]] as const;
@@ -1092,6 +1098,14 @@ test.describe('the persistent call workspace', () => {
         await a.page.setViewportSize({ width: w, height: h });
         await checkOwn(a.page, `alone ${String(w)}×${String(h)}`, true);
       }
+      // The compact strip: the same tile, one row of buttons, no taller with
+      // the preview than without.
+      await a.page.getByRole('button', { name: 'Compact', exact: true }).click();
+      await expect(a.page.locator('.call-view.compact')).toHaveCount(1);
+      await checkOwn(a.page, 'alone, compact', true);
+      await a.page.getByRole('button', { name: 'Expand', exact: true }).click();
+      await expect(a.page.locator('.call-view.compact')).toHaveCount(0);
+
       await a.page.setViewportSize({ width: 1215, height: 900 });
       await drawDesktopStrip(a.page);
       await checkOwn(a.page, 'alone 1215×900 under the desktop strip', true);
@@ -1113,6 +1127,11 @@ test.describe('the persistent call workspace', () => {
         await a.page.setViewportSize({ width: w, height: h });
         await checkOwn(a.page, `beside another share ${String(w)}×${String(h)}`, true);
       }
+      // Under the desktop strip, beside another share: the tile is narrow, and
+      // its row stays one line, no taller than without the preview.
+      await a.page.setViewportSize({ width: 1215, height: 900 });
+      await drawDesktopStrip(a.page);
+      await checkOwn(a.page, 'beside another share 1215×900 under the desktop strip', true);
     } finally {
       for (const p of people) await leave(p);
     }

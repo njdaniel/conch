@@ -125,7 +125,7 @@ import {
 import { platform } from '../platform';
 import type { DisconnectCause } from './disconnect';
 import type { Camera, CameraProfile, KeptCamera } from './camera';
-import type { CameraTrack, Microphone, Output, Processing, Room, RoomEvents, ShareSink } from './connection';
+import type { CameraTrack, Microphone, Output, Processing, Room, RoomEvents, ShareSink, ShareSurface } from './connection';
 import { personOf, principalOf, publisherOf } from './presence';
 import { LogRing, Redactor } from './redact';
 import { autoFrameRate, defaultShareQuality, provisionalQuality, resolveAuto, settleQuality, type Captured, type KeptScreen, type SettledQuality, type SettledResolution, type ShareDirection, type ShareQuality, type ShareSample } from './share';
@@ -1846,6 +1846,14 @@ class LiveKitAdapter implements Room {
   // (a camera request), swapping it into the share.
   private showShareSelf(track: LocalTrack): void {
     if (this.shareSelfView !== null) this.shareSelfView.srcObject = new MediaStream([track.mediaStreamTrack]);
+  }
+
+  // shareSurface is what the capture is of, as the browser reports it: a
+  // whole screen, a window or a tab; null when it is not known.
+  shareSurface(): ShareSurface | null {
+    const track = this.screen.find((t) => t.source === Track.Source.ScreenShare);
+    const surface = track?.mediaStreamTrack.getSettings().displaySurface;
+    return surface === 'monitor' || surface === 'window' || surface === 'browser' ? surface : null;
   }
 
   // attachShareSelf plays this page's own screen picture, muted, into the

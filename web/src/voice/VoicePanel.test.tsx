@@ -2713,6 +2713,31 @@ describe('the sharer\'s preview', () => {
     expect(screen.getByRole('button', { name: 'Stop sharing' })).toBeTruthy();
   });
 
+  it.each([
+    { surface: 'monitor', words: 'You · LIVE · your entire screen · 1080p' },
+    { surface: 'window', words: 'You · LIVE · a window · 1080p' },
+    { surface: 'browser', words: 'You · LIVE · a tab · 1080p' },
+    { surface: null, words: 'You · LIVE · 1080p' },
+  ] as const)('names a $surface capture in the title', ({ surface, words }) => {
+    const { client } = panel(joined, 'c', sharing);
+    cleanup();
+    vi.spyOn(client, 'shareSurface').mockReturnValue(surface);
+    render(<SelfShareView client={client} quality="1080p" />);
+    expect(screen.getByRole('region', { name: 'Your stream' }).querySelector('.share-title')?.textContent).toBe(words);
+  });
+
+  it('draws a different icon for hiding and for showing', () => {
+    panel(joined, 'c', sharing);
+    const icon = () => screen.getByRole('button', { name: /preview of your screen$/ }).querySelector('svg')?.innerHTML;
+    const title = screen.getByRole('region', { name: 'Your stream' }).querySelector('.share-title svg')?.innerHTML;
+    const hide = icon();
+    fireEvent.click(screen.getByRole('button', { name: 'Hide preview of your screen' }));
+    const show = icon();
+    expect(hide).not.toBe(show);
+    expect(hide).not.toBe(title);
+    expect(show).not.toBe(title);
+  });
+
   it('has none of a watched share\'s controls', () => {
     panel(joined, 'c', sharing);
     const own = screen.getByRole('region', { name: 'Your stream' });

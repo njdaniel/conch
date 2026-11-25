@@ -353,6 +353,7 @@ class StubRoom implements Room {
     return Promise.reject(this.switchError);
   };
   attachSelf = (): void => undefined;
+  shareSurface = (): null => null;
   shareSelves: (HTMLVideoElement | null)[] = [];
   attachShareSelf = (el: HTMLVideoElement | null): void => {
     this.shareSelves.push(el);
