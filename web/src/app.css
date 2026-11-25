@@ -3411,7 +3411,8 @@ label {
 }
 
 /* Its title and controls keep their height; the picture's row gives way,
-   down to 4rem. */
+   down to 3rem. (A single share in the open call view has a 6rem floor and
+   its controls over the picture: see call-single-share.) */
 .share-view {
   display: grid;
   flex: 0 1 auto;
@@ -3499,6 +3500,49 @@ label {
 .call-frame .call-pip[aria-pressed='true'] {
   background: var(--accent);
   color: var(--on-accent);
+}
+
+.share-controls .stop .label {
+  /* "Stop watching" keeps its words wherever the row is below the picture
+     and the other labels are hidden (phone widths); the overlay's own rule,
+     more specific, hides it with the others. */
+  position: static;
+  width: auto;
+  height: auto;
+  overflow: visible;
+  clip-path: none;
+  /* Wraps as the row's words did (the hidden labels are nowrap). */
+  white-space: normal;
+}
+
+/* Words without the icon below the picture, as the row had them: with both it
+   is wider than the phone's row and wraps (a 360 px Chat stage). The overlay
+   and a strip tile, which have no words, show the icon alone. */
+.share-controls .stop svg {
+  display: none;
+}
+
+.call-share.in-strip .share-controls .stop svg {
+  display: inline;
+}
+
+/* The tap that starts the sound (ShareView): centred on the picture and above
+   the focus button, in every layout but the compact row. A frame too short
+   for it shrinks to the frame (a smaller pill) and clips its words rather
+   than the button. */
+.share-frame .share-tap {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 3;
+  box-sizing: border-box;
+  max-width: calc(100% - 0.5rem);
+  max-height: calc(100% - 0.25rem);
+  min-height: min(2.75rem, calc(100% - 0.25rem));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  translate: -50% -50%;
+  white-space: nowrap;
 }
 
 .share-controls {
@@ -3737,6 +3781,221 @@ label {
   padding: 0;
   background: none;
   border: 0;
+}
+
+/* A single watched share in the open call view fits inside the stage it is
+   given (issue #2187), like a video player: the controls are icon buttons on
+   the picture's bottom edge, on a dark gradient, in the grid cell the picture
+   is in, so the picture takes the view's height less only the title. The
+   stage's own size is not changed here. The chain from the view down to the
+   share is flexed so that the share is as tall as the view leaves it; the
+   frame takes what is left under the title, down to 6rem, and the video is
+   contained in it, never cropped. The controls fade out after a few seconds
+   without a pointer on the share (ShareView adds .idle) and return on a move,
+   a tap or focus; their names are still read out. A closed call (call-stage),
+   the other layouts and a window 560 px tall and under keep the controls in a
+   row below the picture. */
+.call-view.call-single-share > .call-grid,
+.call-view.call-single-share > .call-grid > .call-share {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.call-view.call-single-share .share-view {
+  flex: 1 1 auto;
+  grid-template-rows: auto minmax(6rem, 1fr);
+  min-height: 0;
+}
+
+/* The frame is its grid row, and its video takes the frame's height (its caps
+   above and below still apply), centred. A flex item, so no percentage needs
+   a definite height above it. */
+.call-view.call-single-share .share-frame {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  /* The frame and the controls share one cell, so both are placed. */
+  grid-row: 2;
+  grid-column: 1;
+  min-height: 0;
+}
+
+.call-view.call-single-share .share-title {
+  grid-row: 1;
+}
+
+/* The title's readout is one line in the open call view, cut with an ellipsis
+   (the whole text is still read out): its length, and so its wrapping, depends
+   on the font, and a three-line title took the picture's floor from a phone
+   on wider fonts (the stage then scrolled). It takes only what the title's
+   own text leaves, so that text stays on one line. */
+.call-view.call-single-share .share-title .share-readout {
+  flex: 1 1 0%;
+  min-width: 4rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.call-view.call-single-share .share-frame video {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+}
+
+/* The controls are the frame's bottom edge: the same cell, above the focus
+   button and the pop-out. One row of icon buttons (the names are visually
+   hidden, not removed) and the volume slider, which gives way first and is
+   dropped on a very narrow window. White on the gradient's end (85% black) is
+   above AA for text on any picture, and every icon, the slider's track and
+   its thumb are at least 3:1 against it (WCAG 1.4.11), in both themes: the
+   gradient is not themed. At 560 px tall and under, the page scrolls as a
+   document and the controls stay in a row below the picture. */
+@media (min-height: 561px) {
+  .call-view.call-single-share .share-controls {
+    grid-row: 2;
+    grid-column: 1;
+    align-self: end;
+    z-index: 2;
+    flex-wrap: nowrap;
+    padding: var(--s1) var(--s2);
+    color: #ffffff;
+    background: linear-gradient(to top, rgb(0 0 0 / 85%) 60%, rgb(0 0 0 / 0%));
+    border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+    transition: opacity 0.2s;
+  }
+
+  .call-view.call-single-share .share-controls .label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .call-view.call-single-share .share-controls .stop svg {
+    display: inline;
+  }
+
+  .call-view.call-single-share .share-controls button {
+    flex: 0 0 auto;
+    padding: 0;
+    color: #ffffff;
+    background: transparent;
+    border: 0;
+  }
+
+  .call-view.call-single-share .share-controls button:hover:not(:disabled) {
+    background: rgb(255 255 255 / 20%);
+  }
+
+  .call-view.call-single-share .share-controls button[aria-pressed='true'] {
+    background: rgb(255 255 255 / 30%);
+  }
+
+  .call-view.call-single-share .share-controls button:focus-visible,
+  .call-view.call-single-share .share-controls input:focus-visible {
+    /* A dark ring outside a white one: over a white picture the row's top
+       edge, where the gradient is clear, still has contrast. */
+    outline: 3px solid #000000;
+    outline-offset: -3px;
+    box-shadow: inset 0 0 0 6px #ffffff;
+  }
+
+  .call-view.call-single-share .share-controls .volume {
+    flex: 1 1 3rem;
+    min-width: 0;
+  }
+
+  /* A slider drawn for the gradient: the page's accent is dark in its light
+     theme and fell to about 2.4:1 against it. */
+  .call-view.call-single-share .share-controls input[type='range'] {
+    width: 100%;
+    min-width: 0;
+    background: transparent;
+    appearance: none;
+  }
+
+  .call-view.call-single-share .share-controls input[type='range']::-webkit-slider-runnable-track {
+    height: 4px;
+    background: rgb(255 255 255 / 75%);
+    border-radius: 2px;
+  }
+
+  .call-view.call-single-share .share-controls input[type='range']::-moz-range-track {
+    height: 4px;
+    background: rgb(255 255 255 / 75%);
+    border-radius: 2px;
+  }
+
+  .call-view.call-single-share .share-controls input[type='range']::-webkit-slider-thumb {
+    width: 16px;
+    height: 16px;
+    margin-top: -6px;
+    background: #ffffff;
+    border: 2px solid #000000;
+    border-radius: 50%;
+    appearance: none;
+  }
+
+  .call-view.call-single-share .share-controls input[type='range']::-moz-range-thumb {
+    width: 12px;
+    height: 12px;
+    background: #ffffff;
+    border: 2px solid #000000;
+    border-radius: 50%;
+  }
+
+  /* Faded: shown again by a pointer move, a tap, or keyboard focus inside (a
+     hidden control is still tabbable, so reaching one shows the row; one
+     pressed by a pointer keeps focus but not the row). Opacity, not
+     display, so the row is in the tab order; no pointer events, so a tap on
+     the picture under it is the picture's. */
+  .call-view.call-single-share .share-view.idle .share-controls:not(:has(:focus-visible)) {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  /* The press that woke the row (ShareView adds .waking until it ends) is the
+     picture's: the row is back in view but takes nothing until that press
+     is over, so a tap on a faded control does not press it. */
+  .call-view.call-single-share .share-view.waking .share-controls {
+    pointer-events: none;
+  }
+
+  /* The sound's tap is the picture's own, centred in what the controls' row
+     leaves of it (the row is 56 px: 3.5rem), and never above the 44 px
+     target's own half. */
+  .call-view.call-single-share .share-frame .share-tap {
+    top: max(calc(50% - 1.75rem), 1.375rem);
+  }
+
+  /* The status hint is in the middle of what the controls' row leaves of the
+     frame, never under the row; the tap sits lower when both show. */
+  .call-view.call-single-share .share-frame .hint {
+    inset: calc(50% - 1.75rem) 0 auto;
+    translate: 0 -50%;
+    text-align: center;
+  }
+
+  .call-view.call-single-share .share-frame .hint ~ .share-tap {
+    top: max(calc(50% + 0.125rem), 1.375rem);
+  }
+}
+
+@media (min-height: 561px) and (max-width: 300px) {
+  .call-view.call-single-share .share-controls .volume {
+    display: none;
+  }
+}
+
+@media (min-height: 561px) and (prefers-reduced-motion: reduce) {
+  .call-view.call-single-share .share-controls {
+    transition: none;
+  }
 }
 
 /* A compact call is one fixed-height, docked strip. Its tiles share that row

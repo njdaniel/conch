@@ -81,7 +81,7 @@ export interface Tile {
   readonly kind?: 'person' | 'share';
   readonly watched?: boolean;
   readonly startedAt?: string;
-  readonly render?: (focus: () => void, compact: boolean, onExpand?: () => void) => ReactElement;
+  readonly render?: (focus: (() => void) | undefined, compact: boolean, onExpand?: () => void) => ReactElement;
 }
 
 // callTiles is who gets a person tile: everyone in voice while they and the
@@ -390,6 +390,8 @@ export function CallView({ client, state, tiles, hidden, open, viewed = state.ch
   const focus = main !== null;
   const grid = gridOf(shown.length, narrow);
   const listClass = !open ? 'call-pass' : focus ? 'call-grid focus' : `call-grid cols-${String(grid.columns)} rows-${String(grid.rows)}`;
+  const singleShare = !compact && shown.length === 1 && shown[0]?.kind === 'share' && shown[0].watched === true;
+  const viewClass = [open ? 'call-view' : 'call-stage', compact ? 'compact' : '', singleShare ? 'call-single-share' : ''].filter(Boolean).join(' ');
   const hasSelf = tiles.some((t) => t.kind !== 'share' && t.me);
   const switchable = tiles.filter((t) => t.kind === 'share' && !t.me);
   const sharingNames = tiles.filter((t) => t.kind === 'share').map((t) => t.name);
@@ -408,7 +410,7 @@ export function CallView({ client, state, tiles, hidden, open, viewed = state.ch
   };
 
   return (
-    <section ref={view} tabIndex={open ? -1 : undefined} aria-label={open ? 'Video call' : undefined} className={open ? (compact ? 'call-view compact' : 'call-view') : (compact ? 'call-stage compact' : 'call-stage')} onKeyDown={open ? onKey : undefined}>
+    <section ref={view} tabIndex={open ? -1 : undefined} aria-label={open ? 'Video call' : undefined} className={viewClass} onKeyDown={open ? onKey : undefined}>
       {/* The layout toggle is the header's wherever the header is drawn: in
           the open view, and in a phone's compact strip under Chat and
           Channels. A phone's expanded stage there is the stream alone, and
@@ -467,7 +469,9 @@ export function CallView({ client, state, tiles, hidden, open, viewed = state.ch
               ref={(el) => { if (el === null) items.current.delete(key); else items.current.set(key, el); }}
               className={[t.kind === 'share' ? 'call-share' : 'call-tile', main === null ? (focus ? 'in-strip' : '') : isMain ? 'main' : 'in-strip', t.kind !== 'share' && state.speaking.has(t.principal) ? 'speaking' : ''].filter((c) => c !== '').join(' ')}
             >
-              {t.kind === 'share' && t.render !== undefined ? t.render(() => { enlarge(t); }, compact, !open && isMain && !narrow ? changeLayout : undefined) : (
+              {/* Focus belongs to the open call view. In Chat the share is
+                  already the stage's only picture. */}
+              {t.kind === 'share' && t.render !== undefined ? t.render(open ? () => { enlarge(t); } : undefined, compact, !open && isMain && !narrow ? changeLayout : undefined) : (
                 <TileView
                   client={client}
                   tile={t}

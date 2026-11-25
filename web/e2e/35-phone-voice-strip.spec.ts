@@ -403,6 +403,13 @@ test.describe('the phone voice strip with LiveKit', () => {
         // stream at once (voice-multi-share.md §7.1; was off under the
         // one-share rule, O5).
         await expect(voice.getByRole('button', { name: 'Share screen' })).toBeEnabled();
+        // The share's controls are icons on its picture that fade when it has
+        // been left alone (#2187). A tap on the faded row brings it back and
+        // presses nothing, so a person taps the picture first, as this does
+        // (top left, clear of the pop-out), and then Stop watching.
+        const picture = await shareView(page).locator('.share-frame').boundingBox();
+        if (picture === null) throw new Error('no share frame');
+        await page.touchscreen.tap(picture.x + picture.width / 4, picture.y + picture.height / 4);
         await shareView(page).getByRole('button', { name: 'Stop watching' }).tap();
         await expect(shareView(page)).toHaveCount(0);
         await watchButton(page).tap();
