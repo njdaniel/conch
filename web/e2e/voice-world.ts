@@ -12,7 +12,7 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Page } from '@playwright/test';
-import type { BrowserLogEntry } from './console-lines';
+import type { BrowserLogEntry, LiveKitJoinEvent } from './console-lines';
 import { listIdentities, listTracks, roomCount, untilAnswered, type NoAnswer, type PublishedTrack } from './livekit-admin';
 import { tokensInSignal } from './signal-tokens';
 import { repoRoot, safePath, type World } from './world';
@@ -357,6 +357,44 @@ room:
     stop();
     throw err;
   }
+}
+
+// Start before clicking Join and read after the refreshed token arrives.
+// One CDP session keeps the network events and Chromium's own log in order.
+export async function watchLiveKitJoin(page: Page, vw: VoiceWorld): Promise<() => Promise<readonly LiveKitJoinEvent[]>> {
+  const cdp = await page.context().newCDPSession(page);
+  const events: LiveKitJoinEvent[] = [];
+  await cdp.send('Log.enable');
+  cdp.on('Log.entryAdded', ({ entry: { source, level, text } }) => {
+    events.push({ kind: 'log', entry: { source, level, text } });
+  });
+  cdp.on('Network.requestWillBeSent', ({ requestId, request }) => {
+    const url = new URL(request.url);
+    if (url.origin === vw.origin && request.method === 'POST' && /^\/v1\/channels\/[^/]+\/voice\/session$/.test(url.pathname)) {
+      events.push({ kind: 'session' });
+    }
+    events.push({ kind: 'request', id: requestId, url: request.url });
+  });
+  cdp.on('Network.webSocketCreated', ({ requestId, url }) => {
+    events.push({ kind: 'request', id: requestId, url });
+  });
+  cdp.on('Network.responseReceived', ({ requestId, response }) => {
+    events.push({ kind: 'response', id: requestId, status: response.status });
+  });
+  cdp.on('Network.webSocketHandshakeResponseReceived', ({ requestId, response }) => {
+    events.push({ kind: 'response', id: requestId, status: response.status });
+  });
+  cdp.on('Network.responseReceivedExtraInfo', ({ requestId, statusCode }) => {
+    // Chromium can omit responseReceived when CORS blocks the response.
+    if (statusCode >= 500 && statusCode < 600) events.push({ kind: 'response', id: requestId, status: statusCode });
+  });
+  await cdp.send('Network.enable');
+  return async () => {
+    await cdp.send('Runtime.evaluate', { expression: '0' });
+    const joined = [...events];
+    await cdp.detach();
+    return joined;
+  };
 }
 
 // What a page said and was given, for the checks that no secret shows, and

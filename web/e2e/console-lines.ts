@@ -46,8 +46,8 @@
 // itself, keeps its token, so expectClean still rejects it; and what is left
 // of an allowed line (the join_request, for one) is still checked for every
 // other secret.
-// The token-refresh test uses v1FallbackOnly during the initial join (issue
-// #2150), where only a 404 handshake on /rtc/v1 is expected.
+// The token-refresh test supplies only the Log entry corroborated by the
+// network events of the initial join (issue #2150).
 
 // One entry the browser logged itself (DevTools Log.entryAdded): its source
 // ("network", "javascript", "violation", ...), its level and its text.
@@ -57,18 +57,94 @@ export interface BrowserLogEntry {
   readonly text: string;
 }
 
+export type LiveKitJoinEvent =
+  | { readonly kind: 'session' }
+  | { readonly kind: 'request'; readonly id: string; readonly url: string }
+  | { readonly kind: 'response'; readonly id: string; readonly status: number }
+  | { readonly kind: 'log'; readonly entry: BrowserLogEntry };
+
+const handshakeRejection = 'Error during WebSocket handshake: Unexpected response code: ';
+const handshake404 = new RegExp(`^WebSocket connection to '([^'\\s]+)' failed: ${handshakeRejection}404$`);
+
+// A Conch session request starts a join. The SDK may switch once from
+// /rtc/v1 to /rtc with the same token after a handshake 404. Another session
+// request or any other additional signal socket is a retry.
+export function liveKitJoinFallbackLog(events: readonly LiveKitJoinEvent[], livekitOrigin: string): BrowserLogEntry[] {
+  const wsOrigin = new URL(livekitOrigin.replace(/^http/, 'ws')).origin;
+  const httpOrigin = wsOrigin.replace(/^ws/, 'http');
+  const requests = new Map<string, { path: string; fallback: boolean; socket: boolean }>();
+  let sessions = 0;
+  let firstSocket: { id: string; path: string; token: string | null } | undefined;
+  let v1Rejected = false;
+  let fallbackSocketStarted = false;
+  let fallbackSucceeded = false;
+  let rejectionLog: BrowserLogEntry | undefined;
+
+  for (const event of events) {
+    switch (event.kind) {
+      case 'session':
+        if (++sessions > 1) throw new Error('a second Conch join attempt requested a voice session');
+        break;
+      case 'request': {
+        const url = new URL(event.url);
+        const path = url.pathname;
+        const socket = url.origin === wsOrigin && (path === '/rtc' || path === '/rtc/v1');
+        if (!socket && (url.origin !== httpOrigin || !/^\/rtc(?:\/v1)?(?:\/validate)?$/.test(path))) {
+          // Chromium reuses a request ID across redirects.
+          requests.delete(event.id);
+          break;
+        }
+        const token = url.searchParams.get('access_token');
+        const fallback = v1Rejected && token !== null && token !== '' && token === firstSocket?.token &&
+          (socket ? path === '/rtc' : path === '/rtc/validate');
+        requests.set(event.id, { path, fallback, socket });
+        if (!socket) break;
+        if (firstSocket === undefined) {
+          firstSocket = { id: event.id, path, token };
+        } else {
+          if (!fallback || fallbackSocketStarted) throw new Error('a second LiveKit join attempt opened a signal socket');
+          fallbackSocketStarted = true;
+        }
+        break;
+      }
+      case 'response': {
+        const request = requests.get(event.id);
+        if (request === undefined) break;
+        const { status } = event;
+        if (status >= 500 && status < 600) throw new Error(`LiveKit ${request.path} returned HTTP ${String(status)} during the join`);
+        if (event.id === firstSocket?.id && request.path === '/rtc/v1' && status === 404) v1Rejected = true;
+        if (request.fallback && (request.socket ? status === 101 : status >= 200 && status < 300)) fallbackSucceeded = true;
+        break;
+      }
+      case 'log': {
+        const { entry } = event;
+        // Chromium reports rejected handshakes in its network log even when
+        // it doesn't deliver a WebSocket handshake response event. The log
+        // may shorten the join request query, so match by origin, path and token.
+        if (entry.source !== 'network' || entry.level !== 'error' || firstSocket?.path !== '/rtc/v1' || !firstSocket.token) break;
+        const address = handshake404.exec(entry.text)?.[1];
+        if (address === undefined || !URL.canParse(address)) break;
+        const url = new URL(address);
+        if (url.origin === wsOrigin && url.pathname === firstSocket.path && url.searchParams.get('access_token') === firstSocket.token) {
+          v1Rejected = true;
+          rejectionLog ??= entry;
+        }
+        break;
+      }
+    }
+  }
+  return sessions === 1 && fallbackSucceeded && rejectionLog !== undefined ? [rejectionLog] : [];
+}
+
 export function withoutJoinTokenInSocketRefusals(
   lines: readonly string[],
   browserLog: readonly BrowserLogEntry[],
   livekitOrigin: string,
-  { v1FallbackOnly = false }: { readonly v1FallbackOnly?: boolean } = {},
 ): string[] {
   const origin = livekitOrigin.replace(/^http/, 'ws').replace(/\/+$/, '');
   const escaped = origin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const path = v1FallbackOnly ? '/rtc/v1' : '/rtc(?:/v1)?';
-  const handshake = 'Error during WebSocket handshake: Unexpected response code: ';
-  const ending = v1FallbackOnly ? `${handshake}404` : `(?:Error in connection establishment: net::ERR_[A-Z_]+|${handshake}[0-9]{3})`;
-  const shape = new RegExp(`^(error: WebSocket connection to '${escaped}${path}\\?access_token=)[^&'\\s]*(&[^'\\s]*)?(' failed: ${ending})$`);
+  const ending = `(?:Error in connection establishment: net::ERR_[A-Z_]+|${handshakeRejection}[0-9]{3})`;
+  const shape = new RegExp(`^(error: WebSocket connection to '${escaped}/rtc(?:/v1)?\\?access_token=)[^&'\\s]*(&[^'\\s]*)?(' failed: ${ending})$`);
   // How many times the browser's network source logged each line, written as
   // watchPage writes a console line.
   const fromNetwork = new Map<string, number>();

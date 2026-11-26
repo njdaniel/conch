@@ -1,7 +1,7 @@
 // Chromium's failed-socket allowances and what expectClean says of a line it
 // refuses (issue #1955). These unit tests need no browser or network.
 import { describe, expect, it } from 'vitest';
-import { secretLines, withoutJoinTokenInSocketRefusals, type BrowserLogEntry } from './console-lines';
+import { liveKitJoinFallbackLog, secretLines, withoutJoinTokenInSocketRefusals, type BrowserLogEntry, type LiveKitJoinEvent } from './console-lines';
 
 const origin = 'ws://127.0.0.1:22197';
 const tail = "' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED";
@@ -17,8 +17,73 @@ const logged = (line: string, source = 'network'): BrowserLogEntry => {
 // The lines as allowed when the browser itself logged each of them.
 const fromBrowser = (lines: string[]) => withoutJoinTokenInSocketRefusals(lines, lines.map((l) => logged(l)), origin);
 
+const v1Url = `${origin}/rtc/v1?access_token=eyJjoin&join_request=CAES%3D`;
 const refused = `error: WebSocket connection to '${origin}/rtc/v1?access_token=eyJjoin&join_request=CAES%3D${tail}`;
-const gone = `error: WebSocket connection to '${origin}/rtc/v1?access_token=eyJjoin&join_request=CAES%3D${rejected('404')}`;
+const gone = `error: WebSocket connection to '${v1Url}${rejected('404')}`;
+
+const httpOrigin = origin.replace(/^ws/, 'http');
+const failedV1: LiveKitJoinEvent[] = [
+  { kind: 'session' },
+  { kind: 'request', id: 'v1', url: v1Url },
+  { kind: 'log', entry: logged(gone) },
+];
+const fallbackSocket: LiveKitJoinEvent = { kind: 'request', id: 'fallback', url: `${origin}/rtc?access_token=eyJjoin` };
+const scrubJoin = (events: readonly LiveKitJoinEvent[], lines: readonly string[] = [gone]) =>
+  withoutJoinTokenInSocketRefusals(lines, liveKitJoinFallbackLog(events, origin), origin);
+
+describe('LiveKit join fallback', () => {
+  it.each([
+    ['a legacy socket upgrade', fallbackSocket, 101],
+    ['a legacy validation response', { kind: 'request', id: 'fallback', url: `${httpOrigin}/rtc/validate?access_token=eyJjoin` }, 200],
+  ] as const)('excuses the 404 once there is %s', (_what, request, status) => {
+    const shortened = gone.replace('CAES%3D', 'CAE...%3D');
+    const pending: LiveKitJoinEvent[] = [
+      ...failedV1.slice(0, -1),
+      { kind: 'log', entry: logged(shortened) },
+      { kind: 'request', id: 'validate', url: v1Url.replace(origin, httpOrigin).replace('/rtc/v1?', '/rtc/v1/validate?') },
+      { kind: 'response', id: 'validate', status: 404 },
+      request,
+    ];
+    expect(scrubJoin([...pending, { kind: 'response', id: 'fallback', status }], [shortened, shortened])).toEqual([shortened.replace('eyJjoin', ''), shortened]);
+    expect(scrubJoin(pending, [shortened])).toEqual([shortened]);
+  });
+
+  it.each(['/rtc/v1/validate', '/rtc/validate'])('fails on a 500 from %s even if a socket later upgrades', (path) => {
+    expect(() => scrubJoin([
+      ...failedV1,
+      { kind: 'request', id: 'validate', url: `${httpOrigin}${path}?access_token=eyJjoin` },
+      { kind: 'response', id: 'validate', status: 500 },
+      fallbackSocket,
+      { kind: 'response', id: 'fallback', status: 101 },
+    ])).toThrow(`LiveKit ${path} returned HTTP 500 during the join`);
+  });
+
+  it('fails on a 503 during a fallback handshake', () => {
+    expect(() => scrubJoin([
+      ...failedV1, fallbackSocket, { kind: 'response', id: 'fallback', status: 503 },
+    ])).toThrow('LiveKit /rtc returned HTTP 503 during the join');
+  });
+
+  it('keeps the 404 when there is no fallback', () => {
+    expect(scrubJoin(failedV1)).toEqual([gone]);
+  });
+
+  it.each([
+    ['Conch requests a new session', { kind: 'session' }],
+    ['the SDK opens /rtc/v1 again', { kind: 'request', id: 'retry', url: v1Url }],
+  ] as const)('fails a retried join when %s', (_what, retry) => {
+    expect(() => scrubJoin([
+      ...failedV1, retry, fallbackSocket, { kind: 'response', id: 'fallback', status: 101 },
+    ])).toThrow(/second .*join attempt/);
+  });
+
+  it('keeps the 404 when validation started before the rejection or used another token', () => {
+    const validation = { kind: 'request', id: 'validate', url: `${httpOrigin}/rtc/validate?access_token=eyJjoin` } as const;
+    const response = { kind: 'response', id: 'validate', status: 200 } as const;
+    expect(scrubJoin([validation, ...failedV1, response])).toEqual([gone]);
+    expect(scrubJoin([...failedV1, { ...validation, url: validation.url.replace('eyJjoin', 'eyJother') }, response])).toEqual([gone]);
+  });
+});
 
 describe('withoutJoinTokenInSocketRefusals', () => {
   it.each([
@@ -95,7 +160,10 @@ describe('withoutJoinTokenInSocketRefusals', () => {
     const lines = [gone, gone, refused, legacy404, v1Error, otherOrigin404, http404, forged, 'log: eyJjoin', 'log: eyJrefreshed'];
     const browserLog = [gone, refused, legacy404, v1Error, otherOrigin404, http404].map((line) => logged(line));
     browserLog.push(logged(forged, 'javascript'));
-    const out = withoutJoinTokenInSocketRefusals(lines, browserLog, origin, { v1FallbackOnly: true });
+    const out = scrubJoin([
+      ...failedV1, fallbackSocket, { kind: 'response', id: 'fallback', status: 101 },
+      ...browserLog.slice(1).map((entry) => ({ kind: 'log', entry } as const)),
+    ], lines);
     expect(out).toEqual([gone.replace('eyJjoin', ''), ...lines.slice(1)]);
     const leaks = secretLines(out, browserLog, ['eyJjoin', 'eyJrefreshed']);
     expect(leaks).toContain('page console: log: [secret #0]');

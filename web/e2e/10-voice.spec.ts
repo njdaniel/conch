@@ -8,10 +8,10 @@
 // page says voice is not set up and asks for no device.
 import type { Browser, BrowserContextOptions, Locator, Page } from '@playwright/test';
 import type { PostMessageRequestV2 } from '../src/schema/generated';
-import { withoutJoinTokenInSocketRefusals } from './console-lines';
+import { liveKitJoinFallbackLog, withoutJoinTokenInSocketRefusals } from './console-lines';
 import { rosterChip, notSendingText, sendingText, closeAll, channelButton, chooseMicrophone, conversation, credentialField, expect, expectFits, mainNav, messages, phones, rememberPushToTalk, showView, signIn, statusLine, test } from './fixtures';
 import { enter, expectClean as expectCleanPage, inbound, keepConnections } from './people';
-import { dockerAvailable, startVoiceWorld, watchPage, type Member, type VoiceWorld } from './voice-world';
+import { dockerAvailable, startVoiceWorld, watchLiveKitJoin, watchPage, type Member, type VoiceWorld } from './voice-world';
 
 // The longest the roster may take to stop saying "transmitting" after the
 // first press since a join is released: see the test that uses it.
@@ -1934,12 +1934,15 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
     const a = await person(browser, 'alice');
     try {
       await a.watch.settled();
-      const logFrom = a.watch.browserLog.length;
+      const readJoin = await watchLiveKitJoin(a.page, vw);
       const voice = voiceRegion(a.page);
       await voice.getByRole('button', { name: 'Join voice' }).click();
       await expect(voice).toContainText('Connected in', { timeout: 60_000 });
       await expect.poll(() => livekitTokens(a).length, { timeout: 30_000, message: 'a token LiveKit gave the page after the join' }).toBeGreaterThan(0);
       await a.watch.settled();
+      // Only a successful /rtc fallback in this join can excuse the network
+      // log of a /rtc/v1 handshake 404. Fail on a 5xx or a retry in the window.
+      const fallbackLog = liveKitJoinFallbackLog(await readJoin(), vw.livekitOrigin);
       const join = conchdJoinToken(a);
       if (join === undefined) throw new Error('no join token was captured from the session answer');
       const refreshed = livekitTokens(a).at(-1) ?? '';
@@ -1949,22 +1952,16 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
       expect(refreshed === join, 'the refreshed token is not the join token conchd issued').toBe(false);
       expect(a.watch.conchdTokens.includes(refreshed), 'the refreshed token is none conchd issued').toBe(false);
       expect(vw.secrets.includes(refreshed), "the refreshed token is in the world's secrets").toBe(true);
-      // LiveKit can retry on /rtc after a /rtc/v1 handshake 404. As in the
-      // room rotation test (#2074), use Chromium's network log from the
-      // operation that can trigger the retry, ending at the successful join
-      // and token refresh.
-      const browserLog = [...a.watch.browserLog];
-      const fallbackLog = browserLog.slice(logFrom);
       const allowFallback = (lines: readonly string[]) =>
-        withoutJoinTokenInSocketRefusals(lines, fallbackLog, vw.livekitOrigin, { v1FallbackOnly: true });
+        withoutJoinTokenInSocketRefusals(lines, fallbackLog, vw.livekitOrigin);
       await expectClean({
         ...a,
         watch: { ...a.watch, get console() { return allowFallback(a.watch.console); } },
       });
       const baseline = [...a.watch.console];
       const clean = allowFallback(baseline);
-      // LiveKit can inspect an HTTP response from /rtc/v1/validate during
-      // fallback. Check transport failures here, as well as socket upgrades.
+      // The browser also logs transport failures for requests and handshakes
+      // that never received an HTTP response.
       const networkFailures = a.watch.browserLog
         .filter(({ source, level, text }) => source === 'network' && level === 'error' &&
           /^(?:WebSocket connection to |Failed to load resource: net::ERR_)/.test(text))
