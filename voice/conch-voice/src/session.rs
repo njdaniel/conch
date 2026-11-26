@@ -2050,6 +2050,7 @@ impl<T: Transport> Session<T> {
         Snapshot::new(phase, reason, retry_in, capture, status, key)
             .with_playback_and_mode(playback, self.ptt.talk_mode())
             .with_share(self.share.view(), self.share.muted())
+            .with_share_streams(self.share.streams())
     }
 
     /// The phase a managed owner is shown, with its reason and how long until `conchd` is

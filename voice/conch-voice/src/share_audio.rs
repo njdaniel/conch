@@ -53,7 +53,9 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::sdk::{RoomHandle, SdkError, ShareAudioFeed, ShareAudioTrack};
-use crate::share_capture::{Engine, FRAME_QUEUE, Report, Reported, ShareCounters, ShareSource};
+use crate::share_capture::{
+    Engine, FRAME_QUEUE, Report, Reported, ShareCounters, ShareSource, StreamDecision,
+};
 
 /// How long publishing the share's track may take. Past it the publish counts as refused.
 pub const PUBLISH_LIMIT: Duration = Duration::from_secs(2);
@@ -263,6 +265,7 @@ pub struct ShareAudio<R: RoomHandle> {
     counters: Arc<ShareCounters>,
     /// What the owner was last shown as settled.
     shown: ShareView,
+    streams: Option<Arc<[StreamDecision]>>,
     /// Commands whose acks wait for the share to settle.
     held: usize,
     /// Of those, the ones whose wait is over.
@@ -290,6 +293,7 @@ impl<R: RoomHandle> ShareAudio<R> {
             reporting,
             counters: Arc::default(),
             shown: ShareView::OFF,
+            streams: None,
             held: 0,
             resolved: 0,
         }
@@ -299,6 +303,11 @@ impl<R: RoomHandle> ShareAudio<R> {
     #[must_use]
     pub fn view(&self) -> ShareView {
         self.shown
+    }
+
+    /// The current engine's stream decisions, while the share sound is running.
+    pub(crate) fn streams(&self) -> Option<Arc<[StreamDecision]>> {
+        self.streams.clone()
     }
 
     /// The share's mute, as the owner asked for it.
@@ -326,6 +335,9 @@ impl<R: RoomHandle> ShareAudio<R> {
     }
 
     fn set(&mut self, status: Status<R>) {
+        if !matches!(status, Status::Running(Report::Sources(_))) {
+            self.streams = None;
+        }
         let was = std::mem::replace(&mut self.status, status);
         if let Status::Publishing { mut published, .. } = was {
             abandon::<R>(&mut published);
@@ -602,7 +614,11 @@ impl<R: RoomHandle> ShareAudio<R> {
                 self.wanted = None;
                 self.set(Status::Refused(Problem::PublishRefused));
             }
-            Wake::Report(Reported { generation, report }) => {
+            Wake::Report(Reported {
+                generation,
+                report,
+                streams,
+            }) => {
                 if self.engine.as_ref().map(Engine::generation) != Some(generation) {
                     return;
                 }
@@ -615,6 +631,7 @@ impl<R: RoomHandle> ShareAudio<R> {
                     }
                     report => {
                         if matches!(self.status, Status::Starting { .. } | Status::Running(_)) {
+                            self.streams = streams;
                             self.set(Status::Running(report));
                         }
                     }
@@ -971,6 +988,7 @@ mod tests {
                     sec_pid: Some(9000),
                     application_process_id: None,
                     application_name: None,
+                    media_name: None,
                 })
                 .collect();
         }

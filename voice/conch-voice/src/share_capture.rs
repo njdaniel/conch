@@ -38,7 +38,7 @@
 //!   ([`ShareCounters::late_stops`]), and never left open: [`ShareCounters::open`] goes back
 //!   to zero only when every capture has closed. An engine that is dropped stops.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -51,7 +51,9 @@ use conch_voice_audio::{
 };
 use tokio::sync::mpsc;
 
-use crate::share_eligibility::{NoTree, ProcessTree, StreamFacts, eligible};
+use crate::share_eligibility::{
+    Deferral, Exclusion, NoTree, ProcessTree, Rule, StreamFacts, Verdict, judge,
+};
 
 /// PipeWire's graph (Linux only).
 #[cfg(target_os = "linux")]
@@ -245,12 +247,103 @@ pub enum Report {
 }
 
 /// A report, with the engine it came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reported {
     /// The engine's number.
     pub generation: u64,
     /// What it said.
     pub report: Report,
+    /// The local view of the streams, while the capture route is running.
+    pub streams: Option<Arc<[StreamDecision]>>,
+}
+
+/// Display data for a single stream. Registry and process identifiers stay in the engine.
+#[derive(Clone, PartialEq, Eq)]
+pub struct StreamDecision {
+    pub(crate) application: String,
+    pub(crate) media: String,
+    pub(crate) reason: StreamReason,
+}
+
+impl fmt::Debug for StreamDecision {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StreamDecision")
+            .field("reason", &self.reason)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StreamReason {
+    Captured,
+    Excluded(Exclusion),
+    Deferred(Deferral),
+    AwaitingApplication,
+    WrongFormat,
+    Ended,
+}
+
+impl StreamReason {
+    pub(crate) fn word(self) -> &'static str {
+        match self {
+            Self::Captured => "captured",
+            Self::Excluded(Exclusion::OwnPlayback) => "call_playback",
+            Self::Excluded(Exclusion::ClientInTree) => "conch_client",
+            Self::Excluded(Exclusion::ApplicationInTree) => "conch_application",
+            Self::Excluded(Exclusion::ApplicationName) => "conch_name",
+            Self::Deferred(Deferral::NoClientPid) => "unknown_owner",
+            Self::Deferred(Deferral::NoSerial) => "missing_target",
+            Self::AwaitingApplication => "awaiting_application",
+            Self::WrongFormat => "wrong_format",
+            Self::Ended => "stream_ended",
+        }
+    }
+}
+
+const MAX_DISPLAY_STREAMS: usize = 50;
+// Two labels per row and room for the ordinary state within the 4096-byte line.
+const MAX_LABEL_JSON_BYTES: usize = 24;
+
+fn display_label(label: Option<&str>) -> String {
+    let label = label.unwrap_or_default();
+    if label.contains(['/', '\\']) {
+        return String::new();
+    }
+    let mut bytes = 0;
+    label
+        .trim()
+        .chars()
+        .filter(|c| {
+            !c.is_control() && !matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        })
+        .take_while(|c| {
+            bytes += c.len_utf8() + usize::from(*c == '"');
+            bytes <= MAX_LABEL_JSON_BYTES
+        })
+        .collect()
+}
+
+struct Candidate {
+    application: String,
+    media: String,
+    verdict: Verdict,
+}
+
+impl Candidate {
+    fn reason(&self, captures: &BTreeMap<u64, Box<dyn Capture>>) -> StreamReason {
+        match self.verdict {
+            Verdict::Excluded(why) => StreamReason::Excluded(why),
+            Verdict::Deferred(why) => StreamReason::Deferred(why),
+            Verdict::Eligible(serial) => {
+                match captures.get(&serial).map(|capture| capture.health()) {
+                    Some(Health::Streaming | Health::Waiting) => StreamReason::Captured,
+                    Some(Health::WrongFormat) => StreamReason::WrongFormat,
+                    Some(Health::Ended) => StreamReason::Ended,
+                    None => StreamReason::AwaitingApplication,
+                }
+            }
+        }
+    }
 }
 
 /// What the captures have done, for the log and the tests. Counts only.
@@ -305,6 +398,7 @@ impl Engine {
             lost: false,
             seen: None,
             captures: BTreeMap::new(),
+            candidates: Vec::new(),
             pending: BTreeMap::new(),
             held_since: None,
             problem: None,
@@ -435,6 +529,7 @@ struct Worker {
     /// The registry's generation last evaluated.
     seen: Option<u64>,
     captures: BTreeMap<u64, Box<dyn Capture>>,
+    candidates: Vec<Candidate>,
     /// Eligible streams whose application pid is not known yet, with when each was first
     /// seen so: captured once [`APP_PID_GRACE`] has passed without one (`reconcile`).
     pending: BTreeMap<u64, Instant>,
@@ -443,7 +538,7 @@ struct Worker {
     /// Why nothing is captured, while that is so.
     problem: Option<Report>,
     /// The report last sent.
-    sent: Option<Report>,
+    sent: Option<Reported>,
     generation: u64,
     frames: mpsc::Sender<StereoFrame>,
     reports: mpsc::UnboundedSender<Reported>,
@@ -507,6 +602,7 @@ impl Worker {
         let _ = self.reports.send(Reported {
             generation: self.generation,
             report: Report::Closed,
+            streams: None,
         });
     }
 
@@ -546,19 +642,35 @@ impl Worker {
 
     /// Opens a capture of every eligible stream not yet captured and closes every other.
     fn reconcile(&mut self, streams: &[StreamFacts], stop: &AtomicBool) {
-        let tree = (self.tree)();
-        let wanted = match eligible(
-            streams,
-            tree.as_ref().map_err(|no| *no),
-            self.own_pid,
-            &self.name,
-        ) {
-            Ok(wanted) => wanted,
+        let (tree, own_pid) = match (self.tree)()
+            .and_then(|tree| Ok((tree, self.own_pid.ok_or(NoTree::OwnPidUnknown)?)))
+        {
+            Ok(facts) => facts,
             Err(no) => {
                 self.fail(Report::NoProcessTree, no.reason());
                 return;
             }
         };
+        let rule = Rule {
+            own_pid,
+            tree: &tree,
+            application_name: &self.name,
+        };
+        let mut wanted = BTreeSet::new();
+        self.candidates.clear();
+        for stream in streams {
+            let verdict = judge(stream, rule);
+            if let Verdict::Eligible(serial) = verdict {
+                wanted.insert(serial);
+            }
+            if self.candidates.len() < MAX_DISPLAY_STREAMS {
+                self.candidates.push(Candidate {
+                    application: display_label(stream.application_name.as_deref()),
+                    media: display_label(stream.media_name.as_deref()),
+                    verdict,
+                });
+            }
+        }
         if wanted.len() > MAX_CAPTURES {
             log::warn!(
                 "share audio: {} streams may be captured, more than {MAX_CAPTURES}",
@@ -570,7 +682,7 @@ impl Worker {
         let gone: Vec<u64> = self
             .captures
             .keys()
-            .filter(|serial| wanted.binary_search(serial).is_err())
+            .filter(|serial| !wanted.contains(serial))
             .copied()
             .collect();
         let closing: Vec<Box<dyn Capture>> = gone
@@ -628,6 +740,7 @@ impl Worker {
         }
         self.problem = Some(problem);
         self.pending.clear();
+        self.candidates.clear();
         self.close_all();
     }
 
@@ -683,14 +796,42 @@ impl Worker {
         } else if self.held_since.get_or_insert_with(Instant::now).elapsed() < MAX_COUNT_HOLD {
             return;
         }
-        let now = self.now();
-        if self.sent != Some(now) {
-            self.sent = Some(now);
-            let _ = self.reports.send(Reported {
-                generation: self.generation,
-                report: now,
-            });
+        let report = self.now();
+        let decisions = self.candidates.iter().map(|s| {
+            (
+                s.application.as_str(),
+                s.media.as_str(),
+                s.reason(&self.captures),
+            )
+        });
+        if let Some(sent) = &self.sent
+            && sent.report == report
+            && decisions
+                .clone()
+                .eq(sent.streams.iter().flat_map(|streams| {
+                    streams
+                        .iter()
+                        .map(|s| (s.application.as_str(), s.media.as_str(), s.reason))
+                }))
+        {
+            return;
         }
+        let streams = matches!(report, Report::Sources(_)).then(|| {
+            decisions
+                .map(|(application, media, reason)| StreamDecision {
+                    application: application.to_owned(),
+                    media: media.to_owned(),
+                    reason,
+                })
+                .collect()
+        });
+        let reported = Reported {
+            generation: self.generation,
+            report,
+            streams,
+        };
+        self.sent = Some(reported.clone());
+        let _ = self.reports.send(reported);
     }
 }
 
@@ -778,6 +919,7 @@ impl SyntheticGraph {
                 sec_pid: Some(own_pid),
                 application_process_id: Some(own_pid),
                 application_name: Some("conch-voice".to_owned()),
+                media_name: None,
             },
             SYNTHETIC_OWN_TONE_HZ,
         )];
@@ -790,6 +932,7 @@ impl SyntheticGraph {
                     sec_pid: Some(pid),
                     application_process_id: Some(pid),
                     application_name: Some(format!("synthetic-{at}")),
+                    media_name: None,
                 },
                 *hz,
             ));
@@ -873,7 +1016,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::share_eligibility::ProcessTree;
+    use crate::share_eligibility::{ProcessTree, eligible};
 
     const OWN: u32 = 4100;
     const PARENT: u32 = 4000;
@@ -977,6 +1120,7 @@ mod tests {
             sec_pid: Some(9000 + serial as u32),
             application_process_id: None,
             application_name: Some(format!("app-{serial}")),
+            media_name: None,
         }
     }
 
@@ -1066,6 +1210,7 @@ mod tests {
             sec_pid: Some(OWN),
             application_process_id: Some(OWN),
             application_name: Some("conch-voice".into()),
+            media_name: None,
         };
         let mut run = running(vec![own.clone(), other(2), other(3)]);
         until_report(&mut run.reports, Report::Sources(2));

@@ -114,6 +114,7 @@ import {
   type VoiceShareAudioScope,
 } from '../../../web/src/schema/generated.ts';
 import type { Validator } from '../../../web/src/schema/validate.ts';
+import type { ShareStreamDecision, ShareStreamReason } from '../../../web/src/platform/desktop/bridge.ts';
 
 export const SCHEMA_V1 = voiceControlAckV1Schema;
 export const SCHEMA_V2 = voiceControlStartV2Schema;
@@ -700,7 +701,7 @@ export type EventV2 =
 
 export type EventV3 =
   | { readonly kind: 'ack'; readonly seq: number; readonly ack: VoiceControlAckV3 }
-  | { readonly kind: 'state'; readonly seq: number; readonly state: VoiceControlStateV3 }
+  | { readonly kind: 'state'; readonly seq: number; readonly state: VoiceControlStateV3; readonly streams?: readonly ShareStreamDecision[] }
   | { readonly kind: 'protocol_error'; readonly seq: number; readonly error: VoiceControlProtocolErrorV3 }
   | { readonly kind: 'unknown'; readonly seq: number };
 
@@ -834,6 +835,38 @@ export function parseEventV2(line: Uint8Array): Parsed<{ event: EventV2 }> {
   }
 }
 
+const STREAM_REASONS: readonly ShareStreamReason[] = [
+  'captured', 'call_playback', 'conch_client', 'conch_application', 'conch_name',
+  'unknown_owner', 'missing_target', 'awaiting_application', 'wrong_format', 'stream_ended',
+];
+
+function displayLabel(value: Json | undefined): string | undefined {
+  if (value?.t !== 'str' || Buffer.byteLength(value.v) > 24) return undefined;
+  for (const c of value.v) {
+    if (c < ' ' || (c >= '\u007f' && c <= '\u009f')
+      || (c >= '\u202a' && c <= '\u202e') || (c >= '\u2066' && c <= '\u2069')
+      || c === '/' || c === '\\') return undefined;
+  }
+  return value.v;
+}
+
+// An optional desktop diagnostic on the v3 state. Older owners ignore the
+// field and older helpers omit it. Invalid diagnostics leave the state usable.
+function shareStreamDecisions(value: Json | undefined): ShareStreamDecision[] | undefined {
+  if (value?.t !== 'arr' || value.items.length > 50) return undefined;
+  const streams: ShareStreamDecision[] = [];
+  for (const row of value.items) {
+    if (row.t !== 'arr' || row.items.length !== 3) return undefined;
+    const [app, name, decision] = row.items;
+    const application = displayLabel(app);
+    const media = displayLabel(name);
+    const reason = decision?.t === 'str' ? STREAM_REASONS.find((known) => known === decision.v) : undefined;
+    if (application === undefined || media === undefined || reason === undefined) return undefined;
+    streams.push({ application, media, reason });
+  }
+  return streams;
+}
+
 // parseEventV3 is ParseVoiceControlEventV3: every event of a v3 session after
 // the hello. A v3 state is v2's, every rule unchanged, and four fields about
 // the share's sound that are always written; a v1 or v2 line is
@@ -868,7 +901,8 @@ export function parseEventV3(line: Uint8Array): Parsed<{ event: EventV3 }> {
       const problem = r.optWord('share_audio_problem');
       if (problem !== undefined) state.share_audio_problem = problem as VoiceControlShareAudioProblem;
       const why = r.missing === '' ? (stateProblem(state, state) ?? shareAudioProblem(state) ?? checked(voiceControlStateV3, state)) : null;
-      return done(r, why, { event: { kind, seq, state } });
+      const streams = state.share_audio === 'on' ? shareStreamDecisions(fields.get('share_audio_streams')) : undefined;
+      return done(r, why, { event: { kind, seq, state, ...(streams === undefined ? {} : { streams }) } });
     }
     case 'protocol_error': {
       const error: VoiceControlProtocolErrorV3 = { schema: SCHEMA_V3, kind, seq, code: r.str('code') as VoiceControlErrorCode };

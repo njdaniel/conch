@@ -3,7 +3,7 @@
 //!
 //! Input: `dmn-audio`'s node table (`NodeTable::streams_with_metadata`: each application
 //! output stream's `object.serial`, its owning client's `pipewire.sec.pid`, and its advisory
-//! `application.process.id` and `application.name`, as `dmn-audio` reads them; nothing here
+//! `application.process.id`, `application.name` and `media.name`, as `dmn-audio` reads them; nothing here
 //! reads a property of a node itself). Output: a [`Graph`] the share's engine uses, whose
 //! captures are `dmn-audio`'s `StreamCapture` of one stream by its serial at 48 kHz in two
 //! channels, and nothing else: no other capture type of `dmn-audio` is named in this file.
@@ -76,11 +76,12 @@ impl Graph for PipeWireGraph {
         }
         let streams = table
             .streams_with_metadata()
-            .map(|(_, metadata)| StreamFacts {
+            .map(|(stream, metadata)| StreamFacts {
                 serial: metadata.serial,
                 sec_pid: metadata.sec_pid,
                 application_process_id: metadata.application_process_id,
                 application_name: metadata.application_name,
+                media_name: Some(stream.media_name.clone()),
             })
             .collect();
         Look::Changed(Registry {

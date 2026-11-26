@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { Lifecycle } from '../../main/lifecycle.ts';
 import { shareTeardown } from '../../main/share-hook.ts';
+import { parseEventV3 } from '../../main/voice/protocol.ts';
 import {
   CONSENT_RETRY_MS,
   PUBLISH_RETRY_MS,
@@ -17,6 +18,7 @@ import {
 } from '../../main/voice/share-audio.ts';
 import { VOICE_CONTROL_CAPTURE_STOP_MS } from '../../../web/src/schema/generated.ts';
 import { ANSWER, DOC, STARTED, consent, deferred, expectNeverApplicationScope, expectStopThenWithdraw, ok, refusal, rig, settle, trace, type Rig } from './share-audio.support.ts';
+import { transcript } from './voice-support.ts';
 
 afterEach(() => {
   vi.useRealTimers();
@@ -70,6 +72,53 @@ describe('the switch', () => {
 });
 
 describe('the order: consent, then command', () => {
+  it('decodes only bounded stream labels and known reasons in active helper states', () => {
+    const state = transcript('voice-control-v3/transcript-share-audio.json')
+      .find(({ message }) => message?.['kind'] === 'state' && message['share_audio'] === 'on')?.message;
+    expect(state).toBeDefined();
+    const read = (rows: unknown) => parseEventV3(Buffer.from(JSON.stringify({ ...state, share_audio_streams: rows })));
+    const message = read([
+      ['Firefox', 'Music', 'captured'],
+      ['Conch', 'Remote voice', 'call_playback'],
+    ]);
+    expect(message).toMatchObject({
+      ok: true,
+      event: { streams: [
+        { application: 'Firefox', media: 'Music', reason: 'captured' },
+        { application: 'Conch', media: 'Remote voice', reason: 'call_playback' },
+      ] },
+    });
+    for (const rows of [
+      Array.from({ length: 51 }, () => ['', '', 'captured']),
+      [['Firefox', 'Music', 'invented']],
+      [['Firefox', 'Music', 'captured', 42]],
+      [['Firefox', '/private/recording.wav', 'captured']],
+    ]) {
+      expect(read(rows)).toMatchObject({ ok: true });
+      expect(read(rows)).not.toHaveProperty('event.streams');
+    }
+  });
+
+  it('shows the helper’s stream decisions only for the current commanded share', async () => {
+    const r = rig();
+    const streams = [{ application: 'Firefox', media: 'Music', reason: 'captured' as const }];
+    const audio = { state: 'on' as const, muted: false, sources: 1, streams };
+    r.sup.audio = audio;
+    await r.live();
+    expect(r.seen()).not.toHaveProperty('streams');
+    r.sup.onCapture = () => {
+      r.sup.audio = audio;
+      r.sup.emit();
+      return { ok: true };
+    };
+    const started = await r.sound?.start(DOC);
+    expect(started).toMatchObject({ ok: true });
+    expect(r.seen()).toHaveProperty('streams', streams);
+    expect(r.voice.state().helper?.shareAudio).not.toHaveProperty('streams');
+    r.sound?.captureGranted(DOC);
+    expect(r.seen()).not.toHaveProperty('streams');
+  });
+
   it('records the consent for the person with the one scope, and only then tells the helper, with main’s own name', async () => {
     const r = rig();
     await r.live();

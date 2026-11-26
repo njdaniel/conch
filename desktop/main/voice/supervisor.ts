@@ -93,6 +93,7 @@ import {
   type Version,
   type Want,
 } from './protocol.ts';
+import type { ShareStreamDecision } from '../../../web/src/platform/desktop/bridge.ts';
 import { defaultSpawn, findHelper, HelperError, helperArgs, helperEnv, spawnHelper, type FindDeps, type HelperRefusal, type SpawnFn, type UntrustedCause } from './spawn.ts';
 
 // What the helper says it is doing, as the UI may show it.
@@ -121,6 +122,7 @@ export interface ShareAudioView {
   readonly muted: boolean;
   readonly problem?: VoiceControlShareAudioProblem;
   readonly sources: number;
+  readonly streams?: readonly ShareStreamDecision[];
 }
 
 // Why a start did not get as far as a running session.
@@ -265,7 +267,7 @@ class Run {
   }
 }
 
-function viewOf(state: VoiceControlStateV1 | VoiceControlStateV2 | VoiceControlStateV3, helperVersion: string): HelperView {
+function viewOf(state: VoiceControlStateV1 | VoiceControlStateV2 | VoiceControlStateV3, helperVersion: string, streams: readonly ShareStreamDecision[] | undefined): HelperView {
   const v3 = state.schema === SCHEMA_V3 ? state : null;
   const v2 = v3 ?? (state.schema === SCHEMA_V2 ? state : null);
   return {
@@ -290,6 +292,7 @@ function viewOf(state: VoiceControlStateV1 | VoiceControlStateV2 | VoiceControlS
             muted: v3.share_audio_muted,
             ...(v3.share_audio_problem === undefined ? {} : { problem: v3.share_audio_problem }),
             sources: v3.share_audio_sources,
+            ...(streams === undefined ? {} : { streams }),
           },
         }),
   };
@@ -789,7 +792,7 @@ export class Supervisor {
         return;
       case 'state': {
         const previous = run.view;
-        run.view = viewOf(ev.state, run.hello?.helper_version ?? '');
+        run.view = viewOf(ev.state, run.hello?.helper_version ?? '', 'streams' in ev ? ev.streams : undefined);
         // Log only checked protocol vocabulary. Raw input, device names and
         // helper stderr are unnecessary to distinguish a removal from a stall.
         const { ptt, pttProblem, talkMode } = run.view;

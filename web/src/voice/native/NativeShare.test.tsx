@@ -540,6 +540,24 @@ describe('with main’s switch off (no share sound in the view)', () => {
   });
 });
 
+it('shows stream names and decisions only while the share has sound', () => {
+  const view = {
+    choice: 'system_excluding_call' as const,
+    streams: [
+      { application: 'Firefox', media: 'Music', reason: 'captured' as const },
+      { application: 'Conch', media: 'Remote voice', reason: 'call_playback' as const },
+    ],
+  };
+  const { sound } = soundUi({ view, live: true, audio: { state: 'on', muted: false, sources: 1 } });
+  const live = sharingState();
+  const { rerender } = withSound(live, sound);
+  fireEvent.click(screen.getByText('What’s being shared'));
+  expect(screen.getByText(/Firefox.*Music/).textContent).toContain('Captured');
+  expect(screen.getByText(/Conch.*Remote voice/).textContent).toContain('Excluded · Call playback');
+  rerender(<ShareNotes companion={live} joined="general" reason={null} sound={{ ...sound, view: { ...view, choice: 'none' } }} />);
+  expect(screen.queryByText('What’s being shared')).toBeNull();
+});
+
 describe('the toggle, before the picker', () => {
   it('is “Share with sound”, on by default, and replaces the silent note', () => {
     const { sound } = soundUi();

@@ -3,7 +3,8 @@
 //!
 //! Input: the application output streams the audio system lists, as plain values
 //! ([`StreamFacts`]: an `object.serial`, the owning client's `pipewire.sec.pid`, the
-//! advisory `application.process.id` and `application.name`), and the process table
+//! advisory `application.process.id` and `application.name`, and the display-only
+//! `media.name`), and the process table
 //! (`/proc/<pid>/stat`, read by [`Proc`], or a fake in the tests). Output: the serials that
 //! may be captured, or [`NoTree`] when what to leave out cannot be worked out. Owns: nothing
 //! but the rule. It opens nothing and connects to nothing; the captures are
@@ -29,7 +30,7 @@
 //! helper is not its parent's child gives [`NoTree`], and [`eligible`] then names no stream
 //! at all. It never answers "I could not tell what to leave out" by capturing everything.
 //!
-//! Nothing here logs, and [`StreamFacts`]'s `Debug` does not show an application's name.
+//! Nothing here logs, and [`StreamFacts`]'s `Debug` leaves out both display labels.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -47,6 +48,8 @@ pub struct StreamFacts {
     pub application_process_id: Option<u32>,
     /// `application.name`: advisory.
     pub application_name: Option<String>,
+    /// `media.name`: display metadata, never used to decide eligibility.
+    pub media_name: Option<String>,
 }
 
 /// Shows which facts are known, and no application's name.
@@ -450,6 +453,7 @@ mod tests {
             sec_pid: Some(sec_pid),
             application_process_id: Some(sec_pid),
             application_name: Some(format!("app-{serial}")),
+            media_name: None,
         }
     }
 

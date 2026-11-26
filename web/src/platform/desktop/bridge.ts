@@ -410,8 +410,7 @@ export interface NativeVoiceHelper {
   readonly pttProblem?: VoiceControlPTTProblem;
   // The helper's confirmed state of the screen share's sound (a v3 helper
   // only; issue #1854): never what the page asked for. "With sound" is shown
-  // only for state 'on'. No application, process or device is ever in it: a
-  // count of streams and a closed reason, nothing more.
+  // only for state 'on'. It carries a count of streams and a closed reason.
   readonly shareAudio?: NativeShareAudio;
 }
 
@@ -435,6 +434,24 @@ export type ShareSoundChoice = Extract<VoiceShareAudioScope, 'system_excluding_c
 // publish was refused after one repeat, or the helper cannot carry it.
 export type ShareSoundReason = 'old-helper' | 'old-server' | 'consent-failed' | 'no-pipewire' | 'no-process-tree' | 'publish-refused' | 'unavailable';
 
+export type ShareStreamReason =
+  | 'captured'
+  | 'call_playback'
+  | 'conch_client'
+  | 'conch_application'
+  | 'conch_name'
+  | 'unknown_owner'
+  | 'missing_target'
+  | 'awaiting_application'
+  | 'wrong_format'
+  | 'stream_ended';
+
+export interface ShareStreamDecision {
+  readonly application: string;
+  readonly media: string;
+  readonly reason: ShareStreamReason;
+}
+
 // Main's part of the share's sound, in its view. Absent when the Linux
 // share-sound switch is off, which main reads once and the page cannot set:
 // the page then offers no toggle and says what it said before.
@@ -443,6 +460,8 @@ export interface ShareSoundView {
   // Set when no route is available now (the toggle is disabled with the
   // reason) or the share's sound failed (the words, the share going on silent).
   readonly unavailable?: ShareSoundReason;
+  // The live Linux capture's display labels and rule decisions.
+  readonly streams?: readonly ShareStreamDecision[];
 }
 
 export interface NativeVoiceView {

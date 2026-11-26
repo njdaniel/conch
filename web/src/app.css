@@ -6983,6 +6983,21 @@ button.link {
   gap: var(--s2);
 }
 
+.share-stream-diagnostics[open] {
+  flex-basis: 100%;
+}
+
+.share-stream-diagnostics summary {
+  cursor: pointer;
+}
+
+.share-stream-diagnostics ul {
+  max-block-size: 12rem;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  margin-block: var(--s1);
+}
+
 /* Full screen leaves the stage's phone, focused and compact size limits
    behind (#1898). The max-size overrides must beat those layout selectors,
    including the phone's 18vh picture cap and the focused tile's 30vh cap. */

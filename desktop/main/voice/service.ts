@@ -196,6 +196,7 @@ const NOT_SIGNED_IN = 'not-signed-in';
 export const UPDATE_PENDING = 'update-pending';
 
 function helperOf(h: HelperView): NativeVoiceHelper {
+  const audio = h.shareAudio;
   return {
     version: h.version,
     phase: h.phase,
@@ -210,7 +211,12 @@ function helperOf(h: HelperView): NativeVoiceHelper {
     ...(h.talkMode === undefined ? {} : { talkMode: h.talkMode }),
     ptt: h.ptt,
     ...(h.pttProblem === undefined ? {} : { pttProblem: h.pttProblem }),
-    ...(h.shareAudio === undefined ? {} : { shareAudio: { ...h.shareAudio } }),
+    ...(audio === undefined ? {} : { shareAudio: {
+      state: audio.state,
+      muted: audio.muted,
+      sources: audio.sources,
+      ...(audio.problem === undefined ? {} : { problem: audio.problem }),
+    } }),
   };
 }
 
@@ -304,6 +310,12 @@ export class VoiceService {
 
   setShareAudioMute(muted: boolean): Promise<CommandResult> {
     return this.deps.supervisor.setShareAudioMute?.(muted) ?? Promise.resolve({ ok: false, error: 'unsupported' });
+  }
+
+  shareAudioStreams() {
+    const state = this.deps.supervisor.state;
+    const audio = state.status === 'running' ? state.helper.shareAudio : undefined;
+    return audio?.state === 'on' ? audio.streams : undefined;
   }
 
   // Main's share sound rides on the view, when it is attached.
