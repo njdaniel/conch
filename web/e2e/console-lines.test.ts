@@ -1,6 +1,5 @@
-// The one console allowance of expectClean (issues #1760 and #1915), and what
-// it says of a line it refuses (issue #1955). A unit test: no browser, no
-// network.
+// Chromium's failed-socket allowances and what expectClean says of a line it
+// refuses (issue #1955). These unit tests need no browser or network.
 import { describe, expect, it } from 'vitest';
 import { secretLines, withoutJoinTokenInSocketRefusals, type BrowserLogEntry } from './console-lines';
 
@@ -85,6 +84,23 @@ describe('withoutJoinTokenInSocketRefusals', () => {
       'page console: log: [secret #0]',
       `browser log (network): ${line.replace('eyJjoin', '[secret #0]')}`,
     ]);
+  });
+
+  it('allows only the browser’s /rtc/v1 fallback during the join', () => {
+    const legacy404 = gone.replace('/rtc/v1?', '/rtc?');
+    const v1Error = gone.replace(rejected('404'), rejected('500'));
+    const otherOrigin404 = gone.replace(origin, 'ws://127.0.0.1:1');
+    const http404 = 'error: Failed to load resource: the server responded with a status of 404 (Not Found)';
+    const forged = gone.replace('eyJjoin', 'eyJrefreshed');
+    const lines = [gone, gone, refused, legacy404, v1Error, otherOrigin404, http404, forged, 'log: eyJjoin', 'log: eyJrefreshed'];
+    const browserLog = [gone, refused, legacy404, v1Error, otherOrigin404, http404].map((line) => logged(line));
+    browserLog.push(logged(forged, 'javascript'));
+    const out = withoutJoinTokenInSocketRefusals(lines, browserLog, origin, { v1FallbackOnly: true });
+    expect(out).toEqual([gone.replace('eyJjoin', ''), ...lines.slice(1)]);
+    const leaks = secretLines(out, browserLog, ['eyJjoin', 'eyJrefreshed']);
+    expect(leaks).toContain('page console: log: [secret #0]');
+    expect(leaks).toContain('page console: log: [secret #1]');
+    expect(leaks.some((line) => /eyJjoin|eyJrefreshed/.test(line))).toBe(false);
   });
 
   it('keeps another secret in an allowed line', () => {

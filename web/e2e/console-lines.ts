@@ -1,6 +1,6 @@
 // What Chromium itself writes to a page's console when LiveKit refuses a
-// connection (issue #1760) or rejects its handshake (issue #1915), and the one
-// allowance expectClean makes for it.
+// connection (issue #1760) or rejects its handshake (issues #1915 and #2150),
+// and how expectClean can check those lines.
 // Input: console lines, the entries the browser logged itself, and LiveKit's
 // origin. Output: the lines with the join token taken out of those line
 // shapes, where the browser's network source wrote them. It owns the shapes
@@ -46,6 +46,8 @@
 // itself, keeps its token, so expectClean still rejects it; and what is left
 // of an allowed line (the join_request, for one) is still checked for every
 // other secret.
+// The token-refresh test uses v1FallbackOnly during the initial join (issue
+// #2150), where only a 404 handshake on /rtc/v1 is expected.
 
 // One entry the browser logged itself (DevTools Log.entryAdded): its source
 // ("network", "javascript", "violation", ...), its level and its text.
@@ -55,11 +57,18 @@ export interface BrowserLogEntry {
   readonly text: string;
 }
 
-export function withoutJoinTokenInSocketRefusals(lines: readonly string[], browserLog: readonly BrowserLogEntry[], livekitOrigin: string): string[] {
+export function withoutJoinTokenInSocketRefusals(
+  lines: readonly string[],
+  browserLog: readonly BrowserLogEntry[],
+  livekitOrigin: string,
+  { v1FallbackOnly = false }: { readonly v1FallbackOnly?: boolean } = {},
+): string[] {
   const origin = livekitOrigin.replace(/^http/, 'ws').replace(/\/+$/, '');
   const escaped = origin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const ending = '(?:Error in connection establishment: net::ERR_[A-Z_]+|Error during WebSocket handshake: Unexpected response code: [0-9]{3})';
-  const shape = new RegExp(`^(error: WebSocket connection to '${escaped}/rtc(?:/v1)?\\?access_token=)[^&'\\s]*(&[^'\\s]*)?(' failed: ${ending})$`);
+  const path = v1FallbackOnly ? '/rtc/v1' : '/rtc(?:/v1)?';
+  const handshake = 'Error during WebSocket handshake: Unexpected response code: ';
+  const ending = v1FallbackOnly ? `${handshake}404` : `(?:Error in connection establishment: net::ERR_[A-Z_]+|${handshake}[0-9]{3})`;
+  const shape = new RegExp(`^(error: WebSocket connection to '${escaped}${path}\\?access_token=)[^&'\\s]*(&[^'\\s]*)?(' failed: ${ending})$`);
   // How many times the browser's network source logged each line, written as
   // watchPage writes a console line.
   const fromNetwork = new Map<string, number>();
