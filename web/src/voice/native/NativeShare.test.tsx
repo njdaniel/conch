@@ -541,14 +541,18 @@ describe('with main’s switch off (no share sound in the view)', () => {
 });
 
 it('shows stream names and decisions only while the share has sound', () => {
-  const view = {
-    choice: 'system_excluding_call' as const,
-    streams: [
-      { application: 'Firefox', media: 'Music', reason: 'captured' as const },
-      { application: 'Conch', media: 'Remote voice', reason: 'call_playback' as const },
-    ],
-  };
-  const { sound } = soundUi({ view, live: true, audio: { state: 'on', muted: false, sources: 1 } });
+  const view = { choice: 'system_excluding_call' as const };
+  const { sound } = soundUi({
+    view,
+    live: true,
+    audio: {
+      state: 'on', muted: false, sources: 1,
+      streams: [
+        { application: 'Firefox', media: 'Music', reason: 'captured' },
+        { application: 'Conch', media: 'Remote voice', reason: 'call_playback' },
+      ],
+    },
+  });
   const live = sharingState();
   const { rerender } = withSound(live, sound);
   fireEvent.click(screen.getByText('What’s being shared'));

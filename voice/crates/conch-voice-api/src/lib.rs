@@ -93,13 +93,15 @@ pub use control_v2::{
     parse_event_v2,
 };
 pub use control_v3::{
-    VOICE_CONTROL_MAX_APPLICATION_NAME_BYTES, VOICE_CONTROL_MAX_SHARE_AUDIO_SOURCES,
+    VOICE_CONTROL_MAX_APPLICATION_NAME_BYTES, VOICE_CONTROL_MAX_SHARE_AUDIO_LABEL_BYTES,
+    VOICE_CONTROL_MAX_SHARE_AUDIO_SOURCES, VOICE_CONTROL_MAX_SHARE_AUDIO_STREAMS,
     VOICE_CONTROL_SCHEMA_V3, VoiceControlAckV3, VoiceControlCommandKindV3, VoiceControlCommandV3,
     VoiceControlEventV3, VoiceControlGetStateV3, VoiceControlLeaveV3, VoiceControlProtocolErrorV3,
     VoiceControlSetDeafenV3, VoiceControlSetDevicesV3, VoiceControlSetMuteV3,
     VoiceControlSetShareAudioMuteV3, VoiceControlSetShareAudioV3, VoiceControlSetTalkModeV3,
-    VoiceControlShareAudio, VoiceControlShareAudioProblem, VoiceControlStartV3,
-    VoiceControlStateV3, VoiceShareAudioScope, parse_command_v3, parse_event_v3,
+    VoiceControlShareAudio, VoiceControlShareAudioProblem, VoiceControlShareAudioStreamReason,
+    VoiceControlShareAudioStreamV3, VoiceControlStartV3, VoiceControlStateV3, VoiceShareAudioScope,
+    parse_command_v3, parse_event_v3,
 };
 pub use error::{Error, Refusal, code};
 pub use login::{TOKEN_ENV, credentials_path, default_config_dir, resolve_token, stored_servers};

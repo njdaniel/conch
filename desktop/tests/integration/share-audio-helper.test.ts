@@ -348,7 +348,7 @@ async function rig(s: Scratch, env: NodeJS.ProcessEnv, livekit: string): Promise
       log: (line) => logs.push(line),
     });
     sound = made;
-    voice.attachShareSound({ view: () => made.view(), leaving: () => made.leaving() });
+    voice.attachShareSound(made);
   }
   return {
     sup,
@@ -491,6 +491,11 @@ describe.runIf(have && lkReason === null)('the share sound with the real conch-v
     await until(() => audio() === 'on', 15_000, 'the helper to say the share sound is on');
     expect(helper()?.shareAudio).toMatchObject({ state: 'on', muted: false });
     expect(helper()?.shareAudio?.sources ?? 0).toBeGreaterThan(0);
+    await until(
+      () => r.voice.state().helper?.shareAudio?.streams?.some((stream) => stream.reason === 'captured') === true,
+      15_000,
+      'the live share status to report the captured tone',
+    );
     expect(r.voice.state().shareSound).toEqual({ choice: 'system_excluding_call' });
 
     // The track is on the real server.
@@ -523,7 +528,7 @@ describe.runIf(have && lkReason === null)('the share sound with the real conch-v
     // The DELETE reached conchd after the helper had already said off.
     expect(r.conchd.helperAt.get('DELETE')).toBe('off');
     expect(audio()).toBe('off');
-    expect(helper()?.shareAudio).toMatchObject({ state: 'off', sources: 0 });
+    expect(r.voice.state().helper?.shareAudio).toEqual({ state: 'off', muted: false, sources: 0 });
     const gone = Date.now() + 15_000;
     while ((await serverSources()).includes('SCREEN_SHARE_AUDIO')) {
       if (Date.now() > gone) throw new Error('the server still holds the ScreenshareAudio track after the stop');

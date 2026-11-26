@@ -1562,13 +1562,13 @@ async fn the_live_share_reports_bounded_stream_names_and_decisions() {
     assert_eq!(
         current()["share_audio_streams"],
         json!([
-            ["conch-voice", "", "call_playback"],
-            ["Chromium", "", "conch_application"],
-            [NAME, "", "conch_name"],
-            ["", "", "unknown_owner"],
-            ["player-0", "A song", "captured"],
-            ["Desktop renderer", "", "conch_client"],
-            ["", "", "missing_target"]
+            {"application": "conch-voice", "media": "", "reason": "call_playback"},
+            {"application": "Chromium", "media": "", "reason": "conch_application"},
+            {"application": NAME, "media": "", "reason": "conch_name"},
+            {"application": "", "media": "", "reason": "unknown_owner"},
+            {"application": "player-0", "media": "A song", "reason": "captured"},
+            {"application": "Desktop renderer", "media": "", "reason": "conch_client"},
+            {"application": "", "media": "", "reason": "missing_target"}
         ])
     );
     {
@@ -1577,7 +1577,8 @@ async fn the_live_share_reports_bounded_stream_names_and_decisions() {
         graph.1[4].media_name = Some("Another song".into());
     }
     wait_for("the new media name with the same source count", || {
-        current()["share_audio_streams"][4] == json!(["player-0", "Another song", "captured"])
+        current()["share_audio_streams"][4]
+            == json!({"application": "player-0", "media": "Another song", "reason": "captured"})
     })
     .await;
     world.play(60);
@@ -1586,6 +1587,16 @@ async fn the_live_share_reports_bounded_stream_names_and_decisions() {
         current()["share_audio_streams"].as_array().unwrap().len(),
         50
     );
+    {
+        let mut graph = world.0.streams.lock().unwrap();
+        graph.0 += 1;
+        graph.1.clear();
+    }
+    until_v3(&rig, "no streams", |state| {
+        share_is(state, "on", Some("no_sources"), 0)
+    })
+    .await;
+    assert!(current().get("share_audio_streams").is_none());
     rig.send(&share_off(3));
     ack_v3(&rig, 3).await;
     assert!(

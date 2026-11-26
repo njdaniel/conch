@@ -222,12 +222,13 @@ var validators = map[string]func(string) bool{
 	"VoiceTransmitState":       validOf[VoiceTransmitState](),
 
 	// The versioned share-audio and diagnostics vocabularies.
-	"VoiceControlCommandKindV3":     validOf[VoiceControlCommandKindV3](),
-	"VoiceControlCommandKindV4":     validOf[VoiceControlCommandKindV4](),
-	"VoiceControlEventKindV4":       validOf[VoiceControlEventKindV4](),
-	"VoiceControlGateWhyV4":         validOf[VoiceControlGateWhyV4](),
-	"VoiceControlShareAudio":        validOf[VoiceControlShareAudio](),
-	"VoiceControlShareAudioProblem": validOf[VoiceControlShareAudioProblem](),
+	"VoiceControlCommandKindV3":          validOf[VoiceControlCommandKindV3](),
+	"VoiceControlCommandKindV4":          validOf[VoiceControlCommandKindV4](),
+	"VoiceControlEventKindV4":            validOf[VoiceControlEventKindV4](),
+	"VoiceControlGateWhyV4":              validOf[VoiceControlGateWhyV4](),
+	"VoiceControlShareAudio":             validOf[VoiceControlShareAudio](),
+	"VoiceControlShareAudioProblem":      validOf[VoiceControlShareAudioProblem](),
+	"VoiceControlShareAudioStreamReason": validOf[VoiceControlShareAudioStreamReason](),
 
 	// Roles and permissions (ADR-014, issue #1012).
 	"Permission":         validOf[Permission](),

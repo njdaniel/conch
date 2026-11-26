@@ -170,6 +170,13 @@ var Vocabularies = map[string][]string{
 		VoiceControlShareAudioProblemUnsupported, VoiceControlShareAudioProblemNotConnected,
 		VoiceControlShareAudioProblemNoSources,
 	),
+	"VoiceControlShareAudioStreamReason": values(
+		VoiceControlShareAudioStreamCaptured, VoiceControlShareAudioStreamCallPlayback,
+		VoiceControlShareAudioStreamConchClient, VoiceControlShareAudioStreamConchApplication,
+		VoiceControlShareAudioStreamConchName, VoiceControlShareAudioStreamUnknownOwner,
+		VoiceControlShareAudioStreamMissingTarget, VoiceControlShareAudioStreamAwaitingApplication,
+		VoiceControlShareAudioStreamWrongFormat, VoiceControlShareAudioStreamEnded,
+	),
 	"VoiceControlTalkMode": values(VoiceControlTalkModePushToTalk, VoiceControlTalkModeOpen),
 	"VoiceDevicesConfig": values(
 		VoiceDevicesConfigOK, VoiceDevicesConfigMissing, VoiceDevicesConfigRefused, VoiceDevicesConfigNone,

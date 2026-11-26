@@ -472,7 +472,7 @@ impl Snapshot {
 
     pub(crate) fn with_share_streams(mut self, streams: Option<Arc<[StreamDecision]>>) -> Self {
         if self.share_audio == VoiceControlShareAudio::On {
-            self.share_audio_streams = streams;
+            self.share_audio_streams = streams.filter(|streams| !streams.is_empty());
         }
         self
     }
@@ -597,32 +597,23 @@ impl Snapshot {
             share_audio_muted: self.share_audio_muted,
             share_audio_problem: self.share_audio_problem,
             share_audio_sources: self.share_audio_sources,
+            share_audio_streams: self
+                .share_audio_streams
+                .as_deref()
+                .unwrap_or_default()
+                .to_vec(),
         }
     }
 
     fn line_v3(&self, seq: i64) -> Result<String, ApiError> {
-        let mut line = to_line(&self.event_v3(seq))?;
-        // Older owners ignore this optional field. Keeping it on the same
-        // state binds the list to the capture status and get_state resync.
-        if let Some(streams) = &self.share_audio_streams {
-            let mut field = String::from(",\"share_audio_streams\":[");
-            for (index, stream) in streams.iter().enumerate() {
-                let row =
-                    serde_json::json!([stream.application, stream.media, stream.reason.word()])
-                        .to_string();
-                if line.len() + field.len() + row.len() + 2 > VOICE_CONTROL_MAX_LINE_BYTES {
-                    break;
-                }
-                if index != 0 {
-                    field.push(',');
-                }
-                field.push_str(&row);
+        let mut state = self.event_v3(seq);
+        // Keep as many decisions as fit within the ordinary state line limit.
+        loop {
+            let line = to_line(&state);
+            if line.is_ok() || state.share_audio_streams.pop().is_none() {
+                return line;
             }
-            line.pop();
-            line.push_str(&field);
-            line.push_str("]}");
         }
-        Ok(line)
     }
 }
 

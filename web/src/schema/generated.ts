@@ -27,6 +27,8 @@ export const VOICE_CONTROL_MAX_VERSIONS = 8;
 export const VOICE_CONTROL_MAX_HELPER_VERSION_BYTES = 64;
 export const VOICE_CONTROL_MAX_SERVER_BYTES = 1024;
 export const VOICE_CONTROL_MAX_CHANNEL_BYTES = 400;
+export const VOICE_CONTROL_MAX_SHARE_AUDIO_STREAMS = 50;
+export const VOICE_CONTROL_MAX_SHARE_AUDIO_LABEL_BYTES = 24;
 export const VOICE_CONTROL_MAX_RETRY_IN_MS = 600000;
 export const VOICE_CONTROL_V4_MIN_LEVEL_DB = -96;
 export const VOICE_CONTROL_V4_MAX_LOSS_BASIS_POINTS = 10000;
@@ -2543,6 +2545,45 @@ export const voiceControlAckV3 = object<VoiceControlAckV3>({
   error: optional(voiceControlErrorCode),
 });
 
+// schema.VoiceControlShareAudioStreamReason
+export type VoiceControlShareAudioStreamReason =
+  | 'captured'
+  | 'call_playback'
+  | 'conch_client'
+  | 'conch_application'
+  | 'conch_name'
+  | 'unknown_owner'
+  | 'missing_target'
+  | 'awaiting_application'
+  | 'wrong_format'
+  | 'stream_ended';
+
+export const voiceControlShareAudioStreamReason = vocab<VoiceControlShareAudioStreamReason>({
+  captured: true,
+  call_playback: true,
+  conch_client: true,
+  conch_application: true,
+  conch_name: true,
+  unknown_owner: true,
+  missing_target: true,
+  awaiting_application: true,
+  wrong_format: true,
+  stream_ended: true,
+});
+
+// schema.VoiceControlShareAudioStreamV3
+export interface VoiceControlShareAudioStreamV3 {
+  application: string;
+  media: string;
+  reason: VoiceControlShareAudioStreamReason;
+}
+
+export const voiceControlShareAudioStreamV3 = object<VoiceControlShareAudioStreamV3>({
+  application: str,
+  media: str,
+  reason: voiceControlShareAudioStreamReason,
+});
+
 // schema.VoiceControlShareAudio
 export type VoiceControlShareAudio = 'off' | 'on' | 'unavailable';
 
@@ -2595,6 +2636,7 @@ export interface VoiceControlStateV3 {
   share_audio_muted: boolean;
   share_audio_problem?: VoiceControlShareAudioProblem;
   share_audio_sources: number;
+  share_audio_streams?: VoiceControlShareAudioStreamV3[];
 }
 
 export const voiceControlStateV3 = object<VoiceControlStateV3>({
@@ -2617,6 +2659,7 @@ export const voiceControlStateV3 = object<VoiceControlStateV3>({
   share_audio_muted: bool,
   share_audio_problem: optional(voiceControlShareAudioProblem),
   share_audio_sources: int,
+  share_audio_streams: optional(array(voiceControlShareAudioStreamV3)),
 });
 
 // schema.VoiceControlProtocolErrorV3

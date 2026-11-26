@@ -74,7 +74,7 @@
 // application name: reasons only.
 import type { MainLog } from '../diagnostics.ts';
 import { VOICE_CONTROL_CAPTURE_STOP_MS, voicePresenceV2, voicePresenceV2Schema, type VoiceCompanionAudioRequestV1, type VoiceControlShareAudioProblem, type VoicePresenceV2 } from '../../../web/src/schema/generated.ts';
-import type { NativeVoiceView, ShareSoundChooseResult, ShareSoundChoice, ShareSoundReason, ShareSoundStartResult, ShareSoundView, ShareStreamDecision, VoiceCommandResult } from '../../../web/src/platform/desktop/bridge.ts';
+import type { NativeVoiceView, ShareSoundChooseResult, ShareSoundChoice, ShareSoundReason, ShareSoundStartResult, ShareSoundView, VoiceCommandResult } from '../../../web/src/platform/desktop/bridge.ts';
 import { fromServer } from '../../../web/src/schema/validate.ts';
 import type { Exchange, Send } from '../api/client.ts';
 import { currentName, isNotFound, isMoved, type CurrentName } from './channel-follow.ts';
@@ -132,7 +132,6 @@ const PROBLEM_REASONS: Readonly<Partial<Record<VoiceControlShareAudioProblem, Sh
 export interface ShareSoundVoice {
   // The view without main's share sound: the helper's confirmed state.
   plain(): NativeVoiceView;
-  shareAudioStreams(): readonly ShareStreamDecision[] | undefined;
   subscribe(listener: (view: NativeVoiceView) => void): () => void;
   setShareAudio(want: { readonly capturing: false } | { readonly capturing: true; readonly applicationName: string }): Promise<CommandResult>;
   setShareAudioMute(muted: boolean): Promise<CommandResult>;
@@ -243,7 +242,7 @@ export class ShareSound {
 
   constructor(deps: ShareSoundDeps) {
     this.#deps = deps;
-    this.#lastView = JSON.stringify(this.view());
+    this.#lastView = JSON.stringify([this.view(), this.allowsStreams()]);
     this.#off = deps.voice.subscribe(() => {
       this.#onVoice();
     });
@@ -287,7 +286,7 @@ export class ShareSound {
 
   // ---------------------------------------------------------------- view
 
-  // The choice, any fixed reason, and the current pick's stream decisions.
+  // The saved choice and any fixed reason.
   // Only the helper's confirmed state (helper.shareAudio) says "with sound".
   // A record whose capture is no longer the live one (the share ended and the
   // page's end did not come) reports no failure: it is no share's any more.
@@ -295,15 +294,19 @@ export class ShareSound {
     const choice = this.#deps.choice() ?? 'system_excluding_call';
     const owned = this.#owned;
     const reason = owned === null || !this.#captured(owned.share) ? this.#route() : owned.problem;
-    const streams = choice === LINUX_SHARE_AUDIO_SCOPE && owned?.pick === this.#pick
-      && owned.commanded && owned.wanted && this.#captured(owned.share) && this.#sameShare(owned)
-      ? this.#deps.voice.shareAudioStreams()
-      : undefined;
-    return { choice, ...(reason === undefined ? {} : { unavailable: reason }), ...(streams === undefined ? {} : { streams }) };
+    return { choice, ...(reason === undefined ? {} : { unavailable: reason }) };
+  }
+
+  // Only show diagnostics for the current pick that this ShareSound commanded.
+  allowsStreams(): boolean {
+    const choice = this.#deps.choice() ?? LINUX_SHARE_AUDIO_SCOPE;
+    const owned = this.#owned;
+    return choice === LINUX_SHARE_AUDIO_SCOPE && owned?.pick === this.#pick
+      && owned.commanded && owned.wanted && this.#captured(owned.share) && this.#sameShare(owned);
   }
 
   #changed(): void {
-    const now = JSON.stringify(this.view());
+    const now = JSON.stringify([this.view(), this.allowsStreams()]);
     if (now === this.#lastView) return;
     this.#lastView = now;
     this.#deps.voice.shareSoundChanged();

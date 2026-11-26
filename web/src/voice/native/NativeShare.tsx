@@ -13,7 +13,7 @@
 // which takes the client as a prop.
 import { useContext, useRef, type ReactNode } from 'react';
 import { DesktopOS } from '../../platform/os';
-import type { ShareStreamReason } from '../../platform/desktop/bridge';
+import type { VoiceControlShareAudioStreamReason } from '../../schema/generated';
 import { Glyph } from '../../Icons';
 import type { Person } from '../../useLiveChannel';
 import { companionDefaultQuality, companionQualityChoices, companionQuality, shareQualityRefusedNote } from '../connection';
@@ -109,7 +109,7 @@ export function ShareSoundMute({ sound }: { readonly sound: ShareSoundUi }) {
   );
 }
 
-const streamReasons: Record<ShareStreamReason, string> = {
+const streamReasons: Record<VoiceControlShareAudioStreamReason, string> = {
   captured: 'Captured · Eligible playback',
   call_playback: 'Excluded · Call playback',
   conch_client: 'Excluded · Conch process',
@@ -123,18 +123,16 @@ const streamReasons: Record<ShareStreamReason, string> = {
 };
 
 function ShareSoundStreams({ sound }: { readonly sound: ShareSoundUi }) {
-  const { streams, choice } = sound.view;
-  if (!sound.live || sound.audio?.state !== 'on' || choice === 'none' || streams === undefined) return null;
+  const streams = sound.audio?.streams;
+  if (!sound.live || sound.audio?.state !== 'on' || sound.view.choice === 'none' || !streams?.length) return null;
   return (
     <details className="share-stream-diagnostics">
       <summary>What’s being shared</summary>
-      {streams.length === 0 ? <p className="hint">No audio streams detected.</p> : (
-        <ul>
-          {streams.map(({ application, media, reason }, index) => (
-            <li key={index}>{`${application || 'Unknown application'} · ${media || 'Unnamed stream'} · ${streamReasons[reason]}`}</li>
-          ))}
-        </ul>
-      )}
+      <ul>
+        {streams.map(({ application, media, reason }, index) => (
+          <li key={index}>{`${application || 'Unknown application'} · ${media || 'Unnamed stream'} · ${streamReasons[reason]}`}</li>
+        ))}
+      </ul>
     </details>
   );
 }

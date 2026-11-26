@@ -6,7 +6,7 @@
 //! capture of one of them by its serial), the Conch process tree ([`ReadTree`]), and the
 //! application name of the owner's command. Output: one [`StereoFrame`] every 10 ms on a
 //! bounded channel, for the track's audio source, and a [`Report`] whenever what is being
-//! captured changes: how many streams, or why none can be. Owns: an [`Engine`]'s thread,
+//! captured changes, with bounded stream decisions or a failure reason. Owns: an [`Engine`]'s thread,
 //! every capture it opened, and their closing.
 //!
 //! What it keeps:
@@ -45,7 +45,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc as std_mpsc};
 use std::time::{Duration, Instant};
 
-use conch_voice_api::VOICE_CONTROL_MAX_SHARE_AUDIO_SOURCES;
+pub use conch_voice_api::VoiceControlShareAudioStreamV3 as StreamDecision;
+use conch_voice_api::{
+    VOICE_CONTROL_MAX_SHARE_AUDIO_LABEL_BYTES, VOICE_CONTROL_MAX_SHARE_AUDIO_SOURCES,
+    VOICE_CONTROL_MAX_SHARE_AUDIO_STREAMS, VoiceControlShareAudioStreamReason as StreamReason,
+};
 use conch_voice_audio::{
     FRAME_LEN, FRAME_MS, SAMPLE_RATE, STEREO_SILENCE, StereoFrame, StereoMixer,
 };
@@ -257,53 +261,6 @@ pub struct Reported {
     pub streams: Option<Arc<[StreamDecision]>>,
 }
 
-/// Display data for a single stream. Registry and process identifiers stay in the engine.
-#[derive(Clone, PartialEq, Eq)]
-pub struct StreamDecision {
-    pub(crate) application: String,
-    pub(crate) media: String,
-    pub(crate) reason: StreamReason,
-}
-
-impl fmt::Debug for StreamDecision {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("StreamDecision")
-            .field("reason", &self.reason)
-            .finish_non_exhaustive()
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StreamReason {
-    Captured,
-    Excluded(Exclusion),
-    Deferred(Deferral),
-    AwaitingApplication,
-    WrongFormat,
-    Ended,
-}
-
-impl StreamReason {
-    pub(crate) fn word(self) -> &'static str {
-        match self {
-            Self::Captured => "captured",
-            Self::Excluded(Exclusion::OwnPlayback) => "call_playback",
-            Self::Excluded(Exclusion::ClientInTree) => "conch_client",
-            Self::Excluded(Exclusion::ApplicationInTree) => "conch_application",
-            Self::Excluded(Exclusion::ApplicationName) => "conch_name",
-            Self::Deferred(Deferral::NoClientPid) => "unknown_owner",
-            Self::Deferred(Deferral::NoSerial) => "missing_target",
-            Self::AwaitingApplication => "awaiting_application",
-            Self::WrongFormat => "wrong_format",
-            Self::Ended => "stream_ended",
-        }
-    }
-}
-
-const MAX_DISPLAY_STREAMS: usize = 50;
-// Two labels per row and room for the ordinary state within the 4096-byte line.
-const MAX_LABEL_JSON_BYTES: usize = 24;
-
 fn display_label(label: Option<&str>) -> String {
     let label = label.unwrap_or_default();
     if label.contains(['/', '\\']) {
@@ -318,7 +275,7 @@ fn display_label(label: Option<&str>) -> String {
         })
         .take_while(|c| {
             bytes += c.len_utf8() + usize::from(*c == '"');
-            bytes <= MAX_LABEL_JSON_BYTES
+            bytes <= VOICE_CONTROL_MAX_SHARE_AUDIO_LABEL_BYTES
         })
         .collect()
 }
@@ -332,13 +289,17 @@ struct Candidate {
 impl Candidate {
     fn reason(&self, captures: &BTreeMap<u64, Box<dyn Capture>>) -> StreamReason {
         match self.verdict {
-            Verdict::Excluded(why) => StreamReason::Excluded(why),
-            Verdict::Deferred(why) => StreamReason::Deferred(why),
+            Verdict::Excluded(Exclusion::OwnPlayback) => StreamReason::CallPlayback,
+            Verdict::Excluded(Exclusion::ClientInTree) => StreamReason::ConchClient,
+            Verdict::Excluded(Exclusion::ApplicationInTree) => StreamReason::ConchApplication,
+            Verdict::Excluded(Exclusion::ApplicationName) => StreamReason::ConchName,
+            Verdict::Deferred(Deferral::NoClientPid) => StreamReason::UnknownOwner,
+            Verdict::Deferred(Deferral::NoSerial) => StreamReason::MissingTarget,
             Verdict::Eligible(serial) => {
                 match captures.get(&serial).map(|capture| capture.health()) {
                     Some(Health::Streaming | Health::Waiting) => StreamReason::Captured,
                     Some(Health::WrongFormat) => StreamReason::WrongFormat,
-                    Some(Health::Ended) => StreamReason::Ended,
+                    Some(Health::Ended) => StreamReason::StreamEnded,
                     None => StreamReason::AwaitingApplication,
                 }
             }
@@ -663,7 +624,7 @@ impl Worker {
             if let Verdict::Eligible(serial) = verdict {
                 wanted.insert(serial);
             }
-            if self.candidates.len() < MAX_DISPLAY_STREAMS {
+            if self.candidates.len() < VOICE_CONTROL_MAX_SHARE_AUDIO_STREAMS {
                 self.candidates.push(Candidate {
                     application: display_label(stream.application_name.as_deref()),
                     media: display_label(stream.media_name.as_deref()),

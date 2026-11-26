@@ -98,6 +98,7 @@ export interface VoiceSupervisor {
 // that is leaving takes no command).
 export interface ShareSoundSource {
   view(): ShareSoundView | undefined;
+  allowsStreams(): boolean;
   leaving(): Promise<void>;
 }
 
@@ -312,16 +313,17 @@ export class VoiceService {
     return this.deps.supervisor.setShareAudioMute?.(muted) ?? Promise.resolve({ ok: false, error: 'unsupported' });
   }
 
-  shareAudioStreams() {
-    const state = this.deps.supervisor.state;
-    const audio = state.status === 'running' ? state.helper.shareAudio : undefined;
-    return audio?.state === 'on' ? audio.streams : undefined;
-  }
-
-  // Main's share sound rides on the view, when it is attached.
-  private withSound(view: NativeVoiceView): NativeVoiceView {
-    const sound = this.sound?.view();
-    return sound === undefined ? view : { ...view, shareSound: sound };
+  // Add the saved choice and, for the current pick, the helper's diagnostics.
+  private withSound(view: NativeVoiceView, state = this.deps.supervisor.state): NativeVoiceView {
+    const sound = this.sound;
+    if (sound === null) return view;
+    const shareSound = sound.view();
+    const result = shareSound === undefined ? view : { ...view, shareSound };
+    const { helper } = view;
+    if (view.status !== 'running' || state.status !== 'running' || helper?.shareAudio?.state !== 'on' || !sound.allowsStreams()) return result;
+    const streams = state.helper.shareAudio?.streams;
+    if (!streams?.length) return result;
+    return { ...result, helper: { ...helper, shareAudio: { ...helper.shareAudio, streams } } };
   }
 
   // setLockMuted records (or clears) that main muted the person at a lock,
@@ -371,7 +373,7 @@ export class VoiceService {
     this.override = null;
     // The note ends with the mute or the session.
     if (this.lockMuted && (s.status !== 'running' || !s.helper.muted)) this.lockMuted = false;
-    this.emit(this.withSound(this.withLockNote(this.view(s))));
+    this.emit(this.withSound(this.withLockNote(this.view(s)), s));
   }
 
   private emit(view: NativeVoiceView): void {

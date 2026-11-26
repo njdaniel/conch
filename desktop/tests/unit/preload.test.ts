@@ -580,6 +580,32 @@ describe('the preload’s share sound (issue #1854)', () => {
     expect(seen).toEqual([withSound, failed]);
   });
 
+  it('delivers live share-audio status with bounded stream decisions and drops only a bad list', () => {
+    const { bridge, sendVoice } = wired();
+    const seen: unknown[] = [];
+    bridge.onVoiceState((v) => seen.push(v));
+    const stream = { application: 'Firefox', media: 'Music 🎵', reason: 'captured' };
+    const good = { ...running, helper: { ...helper, shareAudio: audio }, shareSound: { choice: 'system_excluding_call' } };
+    const withStreams = (streams: unknown, shareAudio = audio) => ({ ...good, helper: { ...helper, shareAudio: { ...shareAudio, streams } } });
+
+    sendVoice(withStreams([stream]));
+    const badLists = [
+      [], null, {}, Array(51).fill(stream),
+      [{ ...stream, reason: 'invented' }],
+      [{ ...stream, media: '/private/file' }],
+      [{ ...stream, media: 'é'.repeat(13) }],
+      [{ ...stream, pid: 42 }],
+    ];
+    for (const streams of badLists) sendVoice(withStreams(streams));
+    const off = { state: 'off', muted: false, sources: 0 };
+    sendVoice(withStreams([stream], off));
+
+    expect(seen).toEqual([
+      withStreams([stream]), ...badLists.map(() => good),
+      { ...good, helper: { ...helper, shareAudio: off } },
+    ]);
+  });
+
   it('drops a view whose share sound is not exactly that', () => {
     const { bridge, sendVoice } = wired();
     const seen: unknown[] = [];

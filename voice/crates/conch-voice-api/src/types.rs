@@ -37,7 +37,8 @@ use crate::error::Error;
 ///
 /// Each field is named with its rule: `required` (absent is an error), `optional` (absent
 /// is the type's default), `maybe` (an `Option` that is `None` when absent, and whose
-/// value, when present, must not be `null`), or `strict_audience` (an optional audience
+/// value, when present, must not be `null`), `recoverable` (a diagnostic that defaults
+/// on absence or a decoding error), or `strict_audience` (an optional audience
 /// that refuses fields it does not declare). A key that is no field is `ignored` or
 /// `refused`, as the caller says. A field given twice is an error. None of the errors
 /// repeats anything from the document.
@@ -103,11 +104,24 @@ macro_rules! wire_object {
     (@maybe $field:ident $access:ident) => {
         $field
     };
+    (@recoverable $field:ident $access:ident) => {
+        match $field {
+            Some($crate::types::Recoverable::Valid(value)) => value,
+            _ => Default::default(),
+        }
+    };
     (@strict_audience $field:ident $access:ident) => {
         $crate::types::from_strict_audience($field)
     };
 }
 pub(crate) use wire_object;
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub(crate) enum Recoverable<T> {
+    Valid(T),
+    Ignored(serde::de::IgnoredAny),
+}
 
 /// Implements `Deserialize` for an enum of words so that it decodes from a JSON string
 /// that is exactly one of them, and from nothing else.

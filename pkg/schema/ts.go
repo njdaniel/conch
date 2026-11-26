@@ -88,6 +88,8 @@ var TSConstants = []TSConstant{
 	{Name: "VOICE_CONTROL_MAX_HELPER_VERSION_BYTES", Value: VoiceControlMaxHelperVersionBytes},
 	{Name: "VOICE_CONTROL_MAX_SERVER_BYTES", Value: VoiceControlMaxServerBytes},
 	{Name: "VOICE_CONTROL_MAX_CHANNEL_BYTES", Value: VoiceControlMaxChannelBytes},
+	{Name: "VOICE_CONTROL_MAX_SHARE_AUDIO_STREAMS", Value: VoiceControlMaxShareAudioStreams},
+	{Name: "VOICE_CONTROL_MAX_SHARE_AUDIO_LABEL_BYTES", Value: VoiceControlMaxShareAudioLabelBytes},
 	{Name: "VOICE_CONTROL_MAX_RETRY_IN_MS", Value: VoiceControlMaxRetryInMS},
 	{Name: "VOICE_CONTROL_V4_MIN_LEVEL_DB", Value: VoiceControlV4MinLevelDB},
 	{Name: "VOICE_CONTROL_V4_MAX_LOSS_BASIS_POINTS", Value: VoiceControlV4MaxLossBasisPoints},
@@ -322,6 +324,7 @@ var TSTypes = []TSType{
 	{Value: VoiceControlSetShareAudioV3{}, Schema: VoiceControlSchemaV3},
 	{Value: VoiceControlSetShareAudioMuteV3{}, Schema: VoiceControlSchemaV3},
 	{Value: VoiceControlAckV3{}, Schema: VoiceControlSchemaV3},
+	{Value: VoiceControlShareAudioStreamV3{}},
 	{Value: VoiceControlStateV3{}, Schema: VoiceControlSchemaV3},
 	{Value: VoiceControlProtocolErrorV3{}, Schema: VoiceControlSchemaV3},
 	// v4 (issues #2039 and #2085): a start that names a channel or a private
@@ -858,12 +861,13 @@ var TSVocabularyModes = map[string]TSVocabularyMode{
 
 	// Strict, for the same reason: the v3 share-audio and v4 diagnostics
 	// vocabularies and their versioned command and event kinds.
-	"VoiceControlCommandKindV3":     TSStrict,
-	"VoiceControlCommandKindV4":     TSStrict,
-	"VoiceControlEventKindV4":       TSStrict,
-	"VoiceControlGateWhyV4":         TSStrict,
-	"VoiceControlShareAudio":        TSStrict,
-	"VoiceControlShareAudioProblem": TSStrict,
+	"VoiceControlCommandKindV3":          TSStrict,
+	"VoiceControlCommandKindV4":          TSStrict,
+	"VoiceControlEventKindV4":            TSStrict,
+	"VoiceControlGateWhyV4":              TSStrict,
+	"VoiceControlShareAudio":             TSStrict,
+	"VoiceControlShareAudioProblem":      TSStrict,
+	"VoiceControlShareAudioStreamReason": TSStrict,
 
 	// Phone push and notification preferences (issue #1712). Strict: the
 	// policy and the platform, which a client writes itself, and the end

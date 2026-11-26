@@ -1,9 +1,13 @@
 package schema
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Version 3 of the managed voice-helper control protocol (issue #1851, parent
@@ -15,7 +19,8 @@ import (
 //   - set_share_audio: capture and publish the share's sound, or stop;
 //   - set_share_audio_mute: mute the published track, which stays published;
 //   - four fields of the state that say what came of it: share_audio,
-//     share_audio_muted, share_audio_problem and share_audio_sources.
+//     share_audio_muted, share_audio_problem and share_audio_sources;
+//   - optional share_audio_streams diagnostics while share_audio is on (#2083).
 //
 // Why a version and not additions to v2: by the rule v2 was made under
 // (voice_control_v2.go), a helper refuses a command of a kind it does not
@@ -25,12 +30,9 @@ import (
 // or a v2 line in a v3 session is unknown_schema, and a v3 line in a v1 or a
 // v2 session is too.
 //
-// What v1 and v2 leave out, v3 leaves out too: no secret, no free text from
-// the helper (the application name the owner sends is never repeated, and the
-// state names no application and no stream, only how many), and no command
-// that opens the transmit gate. The share's sound is not the microphone:
-// neither command touches the gate, and transmitting does not depend on any
-// of the four fields.
+// v3 carries no secrets and has no command that opens the transmit gate.
+// The share's sound is independent of microphone transmission. The optional
+// stream diagnostics carry bounded display labels from the audio system.
 //
 // A share-audio command that cannot be carried out is refused into the state,
 // never by a protocol error: a scope this platform cannot capture, a session
@@ -45,9 +47,9 @@ import (
 // and v2 command, here and in the generated TypeScript, and a value added to
 // it would be a value every one of those published types newly accepts. The
 // words on the wire are the same either way. The events' kinds, the error
-// codes and every vocabulary of the state are shared with v1 and v2 as they
-// stand; v3 lines are read with ParseVoiceControlCommandV3 and
-// ParseVoiceControlEventV3, by the framing rules of the other two. The golden
+// codes retain their existing vocabularies. v3 lines are read with
+// ParseVoiceControlCommandV3 and ParseVoiceControlEventV3, by the framing
+// rules of the other two. The golden
 // and conformance fixtures are in testdata/voice-control-v3/.
 
 // VoiceControlSchemaV3 is the versioned name every v3 message but the hello
@@ -62,6 +64,10 @@ const (
 	// VoiceControlMaxShareAudioSources is the largest share_audio_sources a
 	// state may carry.
 	VoiceControlMaxShareAudioSources = 1024
+	// VoiceControlMaxShareAudioStreams bounds the optional diagnostic list.
+	VoiceControlMaxShareAudioStreams = 50
+	// VoiceControlMaxShareAudioLabelBytes bounds a diagnostic display label.
+	VoiceControlMaxShareAudioLabelBytes = 24
 )
 
 // VoiceControlCommandKindV3 is what a v3 command asks for. The first seven
@@ -186,6 +192,58 @@ func (p VoiceControlShareAudioProblem) Valid() bool {
 	default:
 		return false
 	}
+}
+
+// VoiceControlShareAudioStreamReason is the decision made for a playback stream.
+type VoiceControlShareAudioStreamReason string
+
+const (
+	VoiceControlShareAudioStreamCaptured            VoiceControlShareAudioStreamReason = "captured"
+	VoiceControlShareAudioStreamCallPlayback        VoiceControlShareAudioStreamReason = "call_playback"
+	VoiceControlShareAudioStreamConchClient         VoiceControlShareAudioStreamReason = "conch_client"
+	VoiceControlShareAudioStreamConchApplication    VoiceControlShareAudioStreamReason = "conch_application"
+	VoiceControlShareAudioStreamConchName           VoiceControlShareAudioStreamReason = "conch_name"
+	VoiceControlShareAudioStreamUnknownOwner        VoiceControlShareAudioStreamReason = "unknown_owner"
+	VoiceControlShareAudioStreamMissingTarget       VoiceControlShareAudioStreamReason = "missing_target"
+	VoiceControlShareAudioStreamAwaitingApplication VoiceControlShareAudioStreamReason = "awaiting_application"
+	VoiceControlShareAudioStreamWrongFormat         VoiceControlShareAudioStreamReason = "wrong_format"
+	VoiceControlShareAudioStreamEnded               VoiceControlShareAudioStreamReason = "stream_ended"
+)
+
+// Valid reports whether r is a recognized stream decision.
+func (r VoiceControlShareAudioStreamReason) Valid() bool {
+	switch r {
+	case VoiceControlShareAudioStreamCaptured, VoiceControlShareAudioStreamCallPlayback,
+		VoiceControlShareAudioStreamConchClient, VoiceControlShareAudioStreamConchApplication,
+		VoiceControlShareAudioStreamConchName, VoiceControlShareAudioStreamUnknownOwner,
+		VoiceControlShareAudioStreamMissingTarget, VoiceControlShareAudioStreamAwaitingApplication,
+		VoiceControlShareAudioStreamWrongFormat, VoiceControlShareAudioStreamEnded:
+		return true
+	default:
+		return false
+	}
+}
+
+// VoiceControlShareAudioStreamV3 carries display labels and the stream's decision.
+// Either label may be empty. Labels must omit path separators, control characters
+// and bidi embedding, override and isolate controls.
+type VoiceControlShareAudioStreamV3 struct {
+	Application string                             `json:"application"`
+	Media       string                             `json:"media"`
+	Reason      VoiceControlShareAudioStreamReason `json:"reason"`
+}
+
+func (s VoiceControlShareAudioStreamV3) valid() bool {
+	return s.Reason.Valid() &&
+		validShareAudioStreamLabel(s.Application) && validShareAudioStreamLabel(s.Media)
+}
+
+func validShareAudioStreamLabel(label string) bool {
+	return len(label) <= VoiceControlMaxShareAudioLabelBytes && utf8.ValidString(label) &&
+		strings.IndexFunc(label, func(r rune) bool {
+			return unicode.IsControl(r) || r == '/' || r == '\\' ||
+				(r >= '\u202a' && r <= '\u202e') || (r >= '\u2066' && r <= '\u2069')
+		}) == -1
 }
 
 // VoiceControlStartV3 is the first command of a v3 session (owner to
@@ -386,7 +444,7 @@ type VoiceControlSetShareAudioV3 struct {
 	// under, which the helper leaves out of the capture so that the call is
 	// not shared back into itself: 1 to VoiceControlMaxApplicationNameBytes
 	// bytes of printable ASCII. Required when Capturing, absent otherwise.
-	// The helper never repeats it in anything it writes.
+	// The helper uses this command value for capture policy.
 	ApplicationName string `json:"application_name,omitempty"`
 }
 
@@ -487,9 +545,8 @@ func (a VoiceControlAckV3) Validate() error {
 }
 
 // VoiceControlStateV3 is a whole-state snapshot (helper to owner): every
-// field of VoiceControlStateV2, unchanged and by the same rules, and four
-// about the sound of the owner's screen share. It names no device, no
-// application and no stream.
+// field of VoiceControlStateV2, unchanged and by the same rules, plus the
+// status of the owner's screen share audio.
 type VoiceControlStateV3 struct {
 	Schema string                `json:"schema"`
 	Kind   VoiceControlEventKind `json:"kind"`
@@ -533,9 +590,11 @@ type VoiceControlStateV3 struct {
 	ShareAudioProblem VoiceControlShareAudioProblem `json:"share_audio_problem,omitempty"`
 	// ShareAudioSources is how many applications' streams are being mixed
 	// into the share's sound now: 0 to VoiceControlMaxShareAudioSources.
-	// Always written. A count and nothing else: which applications is never
-	// said.
+	// Always written.
 	ShareAudioSources int64 `json:"share_audio_sources"`
+	// ShareAudioStreams is an optional, possibly partial list of stream
+	// decisions for active capture. Writers omit it when empty or off.
+	ShareAudioStreams []VoiceControlShareAudioStreamV3 `json:"share_audio_streams,omitempty"`
 }
 
 func (VoiceControlStateV3) voiceControlMessage() {}
@@ -559,7 +618,7 @@ func (s VoiceControlStateV3) v2() VoiceControlStateV2 {
 
 // Validate reports whether the snapshot is well-formed and consistent. The
 // rules are VoiceControlStateV2.Validate's, every one and unchanged, and
-// these about the four fields v3 adds:
+// these about share audio:
 //
 //   - share_audio is off in starting and in the final phases: nothing is
 //     published before the session has joined or after it has ended;
@@ -569,9 +628,10 @@ func (s VoiceControlStateV3) v2() VoiceControlStateV2 {
 //   - share_audio_sources is 0 unless share_audio is on, and with on it is 0
 //     exactly when the problem is no_sources: the two say the same thing and
 //     must agree, as muted and its block reason must;
-//   - share_audio_muted may be true whatever the rest says.
+//   - share_audio_muted may be true whatever the rest says;
+//   - share_audio_streams may list up to 50 decisions while share_audio is on.
 //
-// Nothing ties the four to transmitting, to blocked or to capture: the
+// Nothing ties these fields to transmitting, to blocked or to capture: the
 // share's sound is not the microphone.
 func (s VoiceControlStateV3) Validate() error {
 	if err := validateVoiceControlEventHeadIn(VoiceControlSchemaV3, s.Schema, s.Kind, VoiceControlEventState, s.Seq); err != nil {
@@ -612,6 +672,9 @@ func (s VoiceControlStateV3) Validate() error {
 	}
 	if s.ShareAudio != VoiceControlShareAudioOn && s.ShareAudioSources != 0 {
 		return errors.New("schema: voice control state share_audio_sources must be 0 unless share_audio is on")
+	}
+	if !validShareAudioStreams(s.ShareAudio, s.ShareAudioStreams) {
+		return errors.New("schema: voice control state has invalid share_audio_streams")
 	}
 	return nil
 }
@@ -811,6 +874,49 @@ func (c VoiceControlCommandV3) ID() int64 {
 	return 0
 }
 
+// readShareAudioStreams ignores malformed diagnostics so that the core
+// capture status stays usable.
+func readShareAudioStreams(raw json.RawMessage, audio VoiceControlShareAudio) []VoiceControlShareAudioStreamV3 {
+	if audio != VoiceControlShareAudioOn || raw == nil {
+		return nil
+	}
+	var rows []json.RawMessage
+	if err := json.Unmarshal(raw, &rows); err != nil || len(rows) == 0 || len(rows) > VoiceControlMaxShareAudioStreams {
+		return nil
+	}
+	streams := make([]VoiceControlShareAudioStreamV3, 0, len(rows))
+	for _, row := range rows {
+		fields, err := decodeVoiceControlObject(row)
+		if err != nil || len(fields) != 3 {
+			return nil
+		}
+		app, hasApp := fieldString(fields, "application")
+		media, hasMedia := fieldString(fields, "media")
+		reason, hasReason := fieldString(fields, "reason")
+		stream := VoiceControlShareAudioStreamV3{Application: app, Media: media, Reason: VoiceControlShareAudioStreamReason(reason)}
+		if !hasApp || !hasMedia || !hasReason || !stream.valid() {
+			return nil
+		}
+		streams = append(streams, stream)
+	}
+	return streams
+}
+
+func validShareAudioStreams(audio VoiceControlShareAudio, streams []VoiceControlShareAudioStreamV3) bool {
+	if len(streams) == 0 {
+		return true
+	}
+	if audio != VoiceControlShareAudioOn || len(streams) > VoiceControlMaxShareAudioStreams {
+		return false
+	}
+	for _, stream := range streams {
+		if !stream.valid() {
+			return false
+		}
+	}
+	return true
+}
+
 // ParseVoiceControlEventV3 reads one v3 event line, without its line feed,
 // with the framing rules and the order of refusals of ParseVoiceControlEvent.
 // A v1 or a v2 line is unknown_schema. A hello in v3 is invalid: the hello is
@@ -877,6 +983,7 @@ func ParseVoiceControlEventV3(line []byte) (VoiceControlEventV3, error) {
 		s.ShareAudioMuted = r.bool("share_audio_muted")
 		s.ShareAudioProblem = VoiceControlShareAudioProblem(r.optWord("share_audio_problem"))
 		s.ShareAudioSources = r.int("share_audio_sources")
+		s.ShareAudioStreams = readShareAudioStreams(fields["share_audio_streams"], s.ShareAudio)
 		ev.State, msg = s, s
 	case VoiceControlEventProtocolError:
 		e := &VoiceControlProtocolErrorV3{Schema: VoiceControlSchemaV3, Kind: kind, Seq: seq}
