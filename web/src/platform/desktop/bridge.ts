@@ -28,6 +28,7 @@ import type {
   VoiceControlReason,
   VoiceControlShareAudio,
   VoiceControlShareAudioProblem,
+  VoiceControlShareAudioStreamV3,
   VoiceControlTalkMode,
   VoiceDevice,
   VoiceDevicesPipeWire,
@@ -410,8 +411,7 @@ export interface NativeVoiceHelper {
   readonly pttProblem?: VoiceControlPTTProblem;
   // The helper's confirmed state of the screen share's sound (a v3 helper
   // only; issue #1854): never what the page asked for. "With sound" is shown
-  // only for state 'on'. No application, process or device is ever in it: a
-  // count of streams and a closed reason, nothing more.
+  // only for state 'on'.
   readonly shareAudio?: NativeShareAudio;
 }
 
@@ -422,6 +422,8 @@ export interface NativeShareAudio {
   // Why 'unavailable', or 'no_sources' beside 'on' (nothing is playing).
   readonly problem?: VoiceControlShareAudioProblem;
   readonly sources: number;
+  // Display labels and decisions for the current Linux share with sound.
+  readonly streams?: readonly VoiceControlShareAudioStreamV3[];
 }
 
 // The per-profile choice (issue #1854, #1552): the scope everything but the

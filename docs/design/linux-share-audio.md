@@ -128,7 +128,7 @@ Why this respects rather than breaks the boundary: model B drew the line to keep
 
 For the proposed #1999 route, see the v4 contract and v3 fallback in §19.4 and §19.6.
 
-A new version, by v2's rule (§2.9): a v3 session is v2 plus the following; the hello offers `v1`, `v2`, `v3`; the version is fixed for the session; a v3 line in a v2 session is `unknown_schema`. Nothing in v1 or v2 changes. Every shape lives in `pkg/schema/voice_control_v3.go` with golden and conformance fixtures under `testdata/voice-control-v3/`, generated TypeScript (`web/src/schema/`, for main) and Rust conformance in `conch-voice-control`, under the `schema-change` skill. Flat structs, string enums, no free text from the helper, no command that opens the microphone's gate.
+A new version, by v2's rule (§2.9): a v3 session is v2 plus the following; the hello offers `v1`, `v2`, `v3`; the version is fixed for the session; a v3 line in a v2 session is `unknown_schema`. Nothing in v1 or v2 changes. Every shape lives in `pkg/schema/voice_control_v3.go` with golden and conformance fixtures under `testdata/voice-control-v3/`, generated TypeScript (`web/src/schema/`, for main) and Rust conformance in `conch-voice-api`, under the `schema-change` skill. The helper carries bounded display labels in the optional stream diagnostics. The control protocol has no command that opens the microphone's gate.
 
 **Commands (owner to helper), desired state like `set_mute`:**
 
@@ -137,7 +137,7 @@ A new version, by v2's rule (§2.9): a v3 session is v2 plus the following; the 
 | `set_share_audio` | `capturing: bool`; `scope: VoiceShareAudioScope` (the existing vocabulary, `application` or `system_excluding_call`), required when `capturing`; `application_name: string` (1–128 bytes, printable, no control characters; the desktop's registered `application.name`, for §5.2 rule 3), required when `capturing` | Capture and publish the share's sound, or stop. Idempotent. Refused into the state, never by a protocol error: `unsupported_scope` for `application` on Linux; `unsupported` when the session has no `companion_identity`; `not_connected` outside phase `connected` |
 | `set_share_audio_mute` | `muted: bool` | Mute the published share-audio track (LiveKit `mute`: the track stays published, viewers see it muted). Independent of `set_mute` (microphone) and `set_deafen` |
 
-**State (`state` event) gains, always written:**
+**State (`state` event) gains:**
 
 | Field | Type | Meaning |
 | --- | --- | --- |
@@ -145,6 +145,7 @@ A new version, by v2's rule (§2.9): a v3 session is v2 plus the following; the 
 | `share_audio_muted` | bool | the mute above |
 | `share_audio_problem` | `""`, `no_pipewire`, `no_process_tree`, `publish_refused`, `unsupported_scope`, `unsupported`, `not_connected`, `no_sources` | why `unavailable`; empty otherwise. `no_sources` is informational: eligible streams are zero right now (nothing is playing), the track is published and silent, `share_audio` is `on` |
 | `share_audio_sources` | int, 0–1024 | eligible streams being mixed now; for the strip's "sound from 3 apps" |
+| `share_audio_streams` | optional array, up to 50 entries | local display labels and decisions while `share_audio` is `on` (#2083). The helper omits an empty list and may shorten it to fit the control line. See [the v3 schema](../../pkg/schema/voice_control_v3.go) for label bounds and reasons. |
 
 **Validation rules (added to v2's):** `share_audio` is `off` in `starting` and the final phases; `share_audio_problem` is non-empty exactly when `share_audio` is `unavailable`, except `no_sources`, which may accompany `on`; `share_audio_sources` is 0 unless `share_audio` is `on`; `share_audio_muted` may be true in any phase (a desired state, like `muted`). `transmitting` is unaffected by any of these: the share's sound is not the microphone and never touches the gate.
 

@@ -595,7 +595,7 @@ export async function start(): Promise<void> {
     captureGranted = () => {
       made.captureGranted(live.gate.generation);
     };
-    voice.attachShareSound({ view: () => made.view(), leaving: () => made.leaving() });
+    voice.attachShareSound(made);
   }
   teardownHooks.media(
     'share',

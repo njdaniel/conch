@@ -332,7 +332,7 @@ export function rig(opts: RigOptions = {}): Rig {
     };
     const made = new ShareSound(deps);
     sound = made;
-    voice.attachShareSound({ view: () => made.view(), leaving: () => made.leaving() });
+    voice.attachShareSound(made);
   }
   const r: Rig = {
     events,

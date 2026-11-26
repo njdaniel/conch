@@ -1,0 +1,29 @@
+{
+  "schema": "conch.voice_control.v3",
+  "kind": "state",
+  "seq": 7,
+  "phase": "connected",
+  "capture": "on",
+  "playback": "on",
+  "transmitting": false,
+  "muted": false,
+  "deafened": false,
+  "blocked": [],
+  "talk_mode": "push_to_talk",
+  "ptt": "ready",
+  "share_audio": "on",
+  "share_audio_muted": false,
+  "share_audio_sources": 1,
+  "share_audio_streams": [
+    {
+      "application": "Firefox",
+      "media": "Music",
+      "reason": "captured"
+    },
+    {
+      "application": "Conch",
+      "media": "Remote voice",
+      "reason": "call_playback"
+    }
+  ]
+}

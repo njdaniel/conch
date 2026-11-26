@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -60,7 +61,7 @@ var voiceControlV4Golden = func() []struct {
 		{file: "event-call-quality-no-metrics.json", event: true, new: func() any { return new(VoiceControlCallQualityV4) }},
 	}
 	for _, g := range voiceControlV3Golden {
-		if g.file == "command-start.json" || g.v1 {
+		if g.file == "command-start.json" || g.file == voiceControlV3Streams || g.v1 {
 			continue
 		}
 		var n func() any
@@ -208,10 +209,11 @@ func TestVoiceControlV4GoldenFixtures(t *testing.T) {
 }
 
 // TestVoiceControlV4GoldenFixturesAreV3s pins the carried-over wire shapes:
-// v3 states gain processing and every v3 command still has a v4 equivalent.
+// v4 states carry processing, and the optional stream diagnostics are v3 only.
+// Every v3 command still has a v4 equivalent.
 func TestVoiceControlV4GoldenFixturesAreV3s(t *testing.T) {
 	for _, g := range voiceControlV3Golden {
-		if g.file == "command-start.json" || g.v1 {
+		if g.file == "command-start.json" || g.file == voiceControlV3Streams || g.v1 {
 			continue
 		}
 		want := strings.ReplaceAll(string(readVoiceControlV3Fixture(t, g.file)), VoiceControlSchemaV3, VoiceControlSchemaV4)
@@ -761,6 +763,9 @@ func TestVoiceControlV4FieldSets(t *testing.T) {
 			}
 		}
 		if _, isState := m.(VoiceControlStateV4); isState {
+			want = slices.DeleteFunc(want, func(field string) bool {
+				return strings.HasPrefix(field, "share_audio_streams,")
+			})
 			want = append(want, "processing VoiceControlProcessingV4")
 		}
 		if !reflect.DeepEqual(got, want) {

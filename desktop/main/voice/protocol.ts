@@ -23,6 +23,7 @@ import {
   VOICE_CONTROL_MAX_HELPER_VERSION_BYTES,
   VOICE_CONTROL_MAX_ID,
   VOICE_CONTROL_MAX_LINE_BYTES,
+  VOICE_CONTROL_MAX_SHARE_AUDIO_STREAMS,
   VOICE_CONTROL_MAX_RETRY_IN_MS,
   VOICE_CONTROL_MAX_SERVER_BYTES,
   VOICE_CONTROL_MAX_VERSIONS,
@@ -104,6 +105,7 @@ import {
   type VoiceControlSetTalkModeV3,
   type VoiceControlShareAudio,
   type VoiceControlShareAudioProblem,
+  type VoiceControlShareAudioStreamV3,
   type VoiceControlStartV1,
   type VoiceControlStartV2,
   type VoiceControlStartV3,
@@ -114,6 +116,7 @@ import {
   type VoiceShareAudioScope,
 } from '../../../web/src/schema/generated.ts';
 import type { Validator } from '../../../web/src/schema/validate.ts';
+import { isShareAudioStreams } from '../../shared/share-audio-streams.ts';
 
 export const SCHEMA_V1 = voiceControlAckV1Schema;
 export const SCHEMA_V2 = voiceControlStartV2Schema;
@@ -834,9 +837,26 @@ export function parseEventV2(line: Uint8Array): Parsed<{ event: EventV2 }> {
   }
 }
 
+// The labels are optional diagnostics. A bad list leaves the capture status usable.
+function shareAudioStreams(value: Json | undefined, line: Uint8Array): VoiceControlShareAudioStreamV3[] | undefined {
+  if (value?.t !== 'arr' || value.items.length === 0 || value.items.length > VOICE_CONTROL_MAX_SHARE_AUDIO_STREAMS) return undefined;
+  const text = utf8.decode(line); // eventHead already checked the framing.
+  const streams: unknown[] = [];
+  for (const row of value.items) {
+    if (row.t !== 'obj') return undefined;
+    try {
+      const fields = new Reader(text.slice(row.start, row.end)).object();
+      streams.push(Object.fromEntries([...fields].map(([key, field]) => [key, field.t === 'str' ? field.v : null])));
+    } catch {
+      return undefined;
+    }
+  }
+  return isShareAudioStreams(streams) ? streams : undefined;
+}
+
 // parseEventV3 is ParseVoiceControlEventV3: every event of a v3 session after
-// the hello. A v3 state is v2's, every rule unchanged, and four fields about
-// the share's sound that are always written; a v1 or v2 line is
+// the hello. A v3 state adds share-audio status and optional diagnostics to
+// v2's state. A v1 or v2 line in a v3 session is
 // unknown_schema, and a hello in v3 is invalid (it is v1's, read before the
 // version is chosen).
 export function parseEventV3(line: Uint8Array): Parsed<{ event: EventV3 }> {
@@ -867,6 +887,8 @@ export function parseEventV3(line: Uint8Array): Parsed<{ event: EventV3 }> {
       };
       const problem = r.optWord('share_audio_problem');
       if (problem !== undefined) state.share_audio_problem = problem as VoiceControlShareAudioProblem;
+      const streams = state.share_audio === 'on' ? shareAudioStreams(fields.get('share_audio_streams'), line) : undefined;
+      if (streams !== undefined) state.share_audio_streams = streams;
       const why = r.missing === '' ? (stateProblem(state, state) ?? shareAudioProblem(state) ?? checked(voiceControlStateV3, state)) : null;
       return done(r, why, { event: { kind, seq, state } });
     }

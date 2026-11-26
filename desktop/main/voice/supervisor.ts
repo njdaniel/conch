@@ -69,6 +69,7 @@ import {
   type VoiceControlReason,
   type VoiceControlShareAudio,
   type VoiceControlShareAudioProblem,
+  type VoiceControlShareAudioStreamV3,
   type VoiceControlStateV1,
   type VoiceControlStateV2,
   type VoiceControlStateV3,
@@ -121,6 +122,7 @@ export interface ShareAudioView {
   readonly muted: boolean;
   readonly problem?: VoiceControlShareAudioProblem;
   readonly sources: number;
+  readonly streams?: readonly VoiceControlShareAudioStreamV3[];
 }
 
 // Why a start did not get as far as a running session.
@@ -290,6 +292,7 @@ function viewOf(state: VoiceControlStateV1 | VoiceControlStateV2 | VoiceControlS
             muted: v3.share_audio_muted,
             ...(v3.share_audio_problem === undefined ? {} : { problem: v3.share_audio_problem }),
             sources: v3.share_audio_sources,
+            ...(v3.share_audio_streams === undefined ? {} : { streams: v3.share_audio_streams }),
           },
         }),
   };

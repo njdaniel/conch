@@ -202,6 +202,7 @@ class Owned {
   constructor(
     readonly share: ShareRef,
     readonly token: number,
+    readonly pick: number,
   ) {}
 }
 
@@ -241,7 +242,7 @@ export class ShareSound {
 
   constructor(deps: ShareSoundDeps) {
     this.#deps = deps;
-    this.#lastView = JSON.stringify(this.view());
+    this.#lastView = JSON.stringify([this.view(), this.allowsStreams()]);
     this.#off = deps.voice.subscribe(() => {
       this.#onVoice();
     });
@@ -272,6 +273,7 @@ export class ShareSound {
     // A new pick is learned afresh by presence.
     this.#pick++;
     this.#watch = null;
+    this.#changed();
     this.#schedulePresence();
   }
 
@@ -284,20 +286,27 @@ export class ShareSound {
 
   // ---------------------------------------------------------------- view
 
-  // view is main's part of the voice view: the profile's choice and, at most,
-  // one fixed reason. "With sound" is not here: only the helper's confirmed
-  // state (helper.shareAudio) says that.
+  // The saved choice and any fixed reason.
+  // Only the helper's confirmed state (helper.shareAudio) says "with sound".
   // A record whose capture is no longer the live one (the share ended and the
   // page's end did not come) reports no failure: it is no share's any more.
   view(): ShareSoundView {
     const choice = this.#deps.choice() ?? 'system_excluding_call';
     const owned = this.#owned;
     const reason = owned === null || !this.#captured(owned.share) ? this.#route() : owned.problem;
-    return reason === undefined ? { choice } : { choice, unavailable: reason };
+    return { choice, ...(reason === undefined ? {} : { unavailable: reason }) };
+  }
+
+  // Only show diagnostics for the current pick that this ShareSound commanded.
+  allowsStreams(): boolean {
+    const choice = this.#deps.choice() ?? LINUX_SHARE_AUDIO_SCOPE;
+    const owned = this.#owned;
+    return choice === LINUX_SHARE_AUDIO_SCOPE && owned?.pick === this.#pick
+      && owned.commanded && owned.wanted && this.#captured(owned.share) && this.#sameShare(owned);
   }
 
   #changed(): void {
-    const now = JSON.stringify(this.view());
+    const now = JSON.stringify([this.view(), this.allowsStreams()]);
     if (now === this.#lastView) return;
     this.#lastView = now;
     this.#deps.voice.shareSoundChanged();
@@ -332,12 +341,12 @@ export class ShareSound {
     if (this.#deps.choice() !== 'system_excluding_call') return { ok: false, error: 'not-offered' };
     let o = this.#owned;
     // A second ask while the first is still running is the same moment.
-    if (o !== null && o.share.id === share.id && o.starting !== null) return this.#report(o, await o.starting);
+    if (o !== null && o.pick === this.#pick && o.share.id === share.id && o.starting !== null) return this.#report(o, await o.starting);
     // Any record of this companion's still here is of an earlier share of it
     // (the page's end did not arrive): it ends first, in order. The capture
     // just checked is this share's, so that end keeps it.
     if (o !== null) void this.#end(o, 'unused', true);
-    o = new Owned(share, ++this.#serial);
+    o = new Owned(share, ++this.#serial, this.#pick);
     this.#owned = o;
     const mine = o;
     const run = this.#enable(mine);
@@ -382,9 +391,9 @@ export class ShareSound {
     }
     if (!this.#captured(share)) return { ok: true, share: null };
     let o = this.#owned;
-    if (o === null || o.share.id !== share.id) {
+    if (o === null || o.pick !== this.#pick || o.share.id !== share.id) {
       if (o !== null) void this.#end(o, 'unused', true);
-      o = new Owned(share, ++this.#serial);
+      o = new Owned(share, ++this.#serial, this.#pick);
       this.#owned = o;
     }
     o.wanted = true;

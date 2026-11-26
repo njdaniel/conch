@@ -13,6 +13,7 @@
 // which takes the client as a prop.
 import { useContext, useRef, type ReactNode } from 'react';
 import { DesktopOS } from '../../platform/os';
+import type { VoiceControlShareAudioStreamReason } from '../../schema/generated';
 import { Glyph } from '../../Icons';
 import type { Person } from '../../useLiveChannel';
 import { companionDefaultQuality, companionQualityChoices, companionQuality, shareQualityRefusedNote } from '../connection';
@@ -55,8 +56,8 @@ const cautionId = 'native-share-caution';
 const soundWhyId = 'native-share-sound-why';
 
 // ShareSoundToggle is the standing choice for the share's sound, shown before
-// the picker and during a share (issue #1854): "Share with sound", on by
-// default; unchecked is "share without sound", one click. It always shows
+// the picker and during a share when main offers sound (issue #1854).
+// Unchecked is "share without sound", one click. It always shows
 // main's choice, the one the next share acts on: a box that read otherwise
 // would let the person believe a share is silent that is not. With no route
 // (the helper has none, or the server cannot record the consent) it is
@@ -105,6 +106,35 @@ export function ShareSoundMute({ sound }: { readonly sound: ShareSoundUi }) {
       <Glyph name="speaker" />
       <span className="label">{shareSoundMuteLabel(audio.muted)}</span>
     </button>
+  );
+}
+
+const streamReasons: Record<VoiceControlShareAudioStreamReason, string> = {
+  captured: 'Captured · Eligible playback',
+  call_playback: 'Excluded · Call playback',
+  conch_client: 'Excluded · Conch process',
+  conch_application: 'Excluded · Conch application process',
+  conch_name: 'Excluded · Conch application name',
+  unknown_owner: 'Excluded · Stream owner is unknown',
+  missing_target: 'Excluded · Stream target is unavailable',
+  awaiting_application: 'Excluded · Waiting for application metadata',
+  wrong_format: 'Excluded · Unsupported audio format',
+  stream_ended: 'Excluded · Stream ended',
+  format_not_supported: 'Excluded · Audio format not supported',
+};
+
+function ShareSoundStreams({ sound }: { readonly sound: ShareSoundUi }) {
+  const streams = sound.audio?.streams;
+  if (!sound.live || sound.audio?.state !== 'on' || sound.view.choice === 'none' || !streams?.length) return null;
+  return (
+    <details className="share-stream-diagnostics">
+      <summary>What’s being shared</summary>
+      <ul>
+        {streams.map(({ application, media, reason }, index) => (
+          <li key={index}>{`${application || 'Unknown application'} · ${media || 'Unnamed stream'} · ${streamReasons[reason]}`}</li>
+        ))}
+      </ul>
+    </details>
   );
 }
 
@@ -220,6 +250,7 @@ export function ShareNotes({
       {share.kind === 'sharing' ? <ShareCaptureWarning stalled={state.shareCaptureStalled} client={client} /> : null}
       {!windows && !offered && live ? <p className="hint">{silentShareWhile}</p> : null}
       {showToggle ? <ShareSoundToggle sound={sound} /> : null}
+      {showToggle && live ? <ShareSoundStreams sound={sound} /> : null}
       {sound !== undefined && soundReason !== undefined && (share.kind === 'idle' ? reason === null : live || starting) ? (
         <p id={soundWhyId} role="status" className="hint">
           {shareSoundWords[soundReason]}

@@ -42,6 +42,7 @@ import {
   voiceControlShareAudioProblem,
   voiceControlTalkMode,
 } from '../../web/src/schema/generated.ts';
+import { isShareAudioStreams } from '../shared/share-audio-streams.ts';
 import { channelOf, NOTIFICATION_SUPPORT, TAG_MAX, type Envelope, type FeedEvent, type InvokedFunction } from '../shared/bridge-names.ts';
 
 export type Invoke = (channel: string, ...args: unknown[]) => Promise<unknown>;
@@ -86,12 +87,12 @@ const isCount = (value: unknown): value is number => typeof value === 'number' &
 const isVocab = (check: (value: unknown) => string[], value: unknown): boolean => check(value).length === 0;
 
 // The helper's confirmed share-sound state (v3): the generated vocabularies
-// and a bounded count, no other key.
+// and a bounded count. The optional stream list is sanitized separately.
 function isShareAudio(value: unknown): boolean {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const a = value as Record<string, unknown>;
   return (
-    only(a, ['state', 'muted', 'problem', 'sources']) &&
+    only(a, ['state', 'muted', 'problem', 'sources', 'streams']) &&
     isVocab(voiceControlShareAudio, a['state']) &&
     typeof a['muted'] === 'boolean' &&
     (absent(a['problem']) || isVocab(voiceControlShareAudioProblem, a['problem'])) &&
@@ -135,8 +136,7 @@ function isHelper(value: unknown): boolean {
   );
 }
 
-// A voice message is exactly a NativeVoiceView: nothing else, and no key it
-// does not have, reaches the page.
+// Check the voice view before sanitizing its optional stream list.
 function isNativeVoiceView(value: unknown): value is NativeVoiceView {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const v = value as Record<string, unknown>;
@@ -153,6 +153,15 @@ function isNativeVoiceView(value: unknown): value is NativeVoiceView {
     (absent(v['mutedByLock']) || v['mutedByLock'] === true) &&
     (absent(v['shareSound']) || isShareSound(v['shareSound']))
   );
+}
+
+function withoutInvalidStreams(view: NativeVoiceView): NativeVoiceView {
+  const { helper } = view;
+  const audio = helper?.shareAudio;
+  if (helper === undefined || audio === undefined || !Object.hasOwn(audio, 'streams')) return view;
+  const { streams, ...status } = audio;
+  if (audio.state === 'on' && isShareAudioStreams(streams)) return view;
+  return { ...view, helper: { ...helper, shareAudio: status } };
 }
 
 // An update message is exactly an InstalledView: a boolean and a short string
@@ -249,9 +258,10 @@ export function createBridge(
   const voiceListeners = new Set<(view: NativeVoiceView) => void>();
   listenVoice((message) => {
     if (!isNativeVoiceView(message)) return;
+    const view = withoutInvalidStreams(message);
     for (const listener of [...voiceListeners]) {
       try {
-        listener(message);
+        listener(view);
       } catch (error) {
         queueMicrotask(() => {
           throw error;
