@@ -2556,7 +2556,8 @@ export type VoiceControlShareAudioStreamReason =
   | 'missing_target'
   | 'awaiting_application'
   | 'wrong_format'
-  | 'stream_ended';
+  | 'stream_ended'
+  | 'format_not_supported';
 
 export const voiceControlShareAudioStreamReason = vocab<VoiceControlShareAudioStreamReason>({
   captured: true,
@@ -2569,6 +2570,7 @@ export const voiceControlShareAudioStreamReason = vocab<VoiceControlShareAudioSt
   awaiting_application: true,
   wrong_format: true,
   stream_ended: true,
+  format_not_supported: true,
 });
 
 // schema.VoiceControlShareAudioStreamV3

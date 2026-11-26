@@ -16,9 +16,12 @@
 //! from another), and the engine reaches PipeWire afresh while the share's sound is wanted.
 
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use conch_voice_audio::{STEREO_FRAME_LEN, StereoFrame};
-use dmn_audio::{CaptureState, PipeWireContext, StreamCapture, StreamReader, StreamStatus};
+use dmn_audio::{
+    CaptureState, PipeWireContext, StreamCapture, StreamError, StreamReader, StreamStatus,
+};
 
 use crate::share_capture::{
     BACKLOG_FRAMES, Capture, CaptureSpec, Captures, Graph, Health, Look, OpenFailed, OpenGraph,
@@ -121,7 +124,12 @@ struct PipeWireCapture {
 }
 
 /// How a capture is doing, from what `dmn-audio` reports of it.
-fn health(state: CaptureState, delivered: Option<(u32, u32)>, want: (u32, u32)) -> Health {
+pub(super) fn health(
+    state: CaptureState,
+    delivered: Option<(u32, u32)>,
+    want: (u32, u32),
+    check_error: impl FnOnce() -> Result<(), StreamError>,
+) -> Health {
     match state {
         CaptureState::Streaming => match delivered {
             Some(format) if format == want => Health::Streaming,
@@ -129,7 +137,18 @@ fn health(state: CaptureState, delivered: Option<(u32, u32)>, want: (u32, u32)) 
             None => Health::Waiting,
         },
         CaptureState::Idle | CaptureState::Connecting => Health::Waiting,
-        CaptureState::Disconnected | CaptureState::Error => Health::Ended,
+        CaptureState::Disconnected => Health::Ended,
+        CaptureState::Error => match check_error() {
+            Err(
+                StreamError::RateMismatch { .. }
+                | StreamError::ChannelMismatch { .. }
+                | StreamError::Format(_),
+            ) => Health::FormatNotSupported,
+            // The format can recover between the state read and the check.
+            Ok(()) => Health::Streaming,
+            Err(StreamError::NotStreaming { .. }) => Health::Waiting,
+            Err(_) => Health::Ended,
+        },
     }
 }
 
@@ -165,12 +184,14 @@ impl Capture for PipeWireCapture {
             self.status.state(),
             self.status.delivered_format(),
             self.want,
+            // A zero timeout reads the typed failure without waiting for negotiations.
+            || self.capture.wait_streaming(Duration::ZERO),
         )
     }
 
     fn take(&mut self, frame: &mut StereoFrame) -> Taken {
-        let usable = self.health() == Health::Streaming;
-        // The frame doubles as the scratch of what is dropped: it is written whole after.
+        let usable = self.status.state() == CaptureState::Streaming
+            && self.status.delivered_format() == Some(self.want);
         let mut scratch = [0.0; STEREO_FRAME_LEN];
         take_from(&mut self.reader, usable, frame, &mut scratch)
     }
@@ -187,7 +208,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_capture_is_mixed_only_while_it_streams_in_the_shares_format() {
+    fn capture_health_reflects_state_and_delivered_format() {
         let want = (48_000, 2);
         let cases = [
             (
@@ -213,7 +234,9 @@ mod tests {
         ];
         for (state, delivered, wanted) in cases {
             assert_eq!(
-                health(state, delivered, want),
+                health(state, delivered, want, || Err(StreamError::Stream(
+                    "stream broke".into()
+                ))),
                 wanted,
                 "{state:?} {delivered:?}"
             );

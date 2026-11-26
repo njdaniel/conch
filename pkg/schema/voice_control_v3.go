@@ -208,6 +208,7 @@ const (
 	VoiceControlShareAudioStreamAwaitingApplication VoiceControlShareAudioStreamReason = "awaiting_application"
 	VoiceControlShareAudioStreamWrongFormat         VoiceControlShareAudioStreamReason = "wrong_format"
 	VoiceControlShareAudioStreamEnded               VoiceControlShareAudioStreamReason = "stream_ended"
+	VoiceControlShareAudioStreamFormatNotSupported  VoiceControlShareAudioStreamReason = "format_not_supported"
 )
 
 // Valid reports whether r is a recognized stream decision.
@@ -217,7 +218,8 @@ func (r VoiceControlShareAudioStreamReason) Valid() bool {
 		VoiceControlShareAudioStreamConchClient, VoiceControlShareAudioStreamConchApplication,
 		VoiceControlShareAudioStreamConchName, VoiceControlShareAudioStreamUnknownOwner,
 		VoiceControlShareAudioStreamMissingTarget, VoiceControlShareAudioStreamAwaitingApplication,
-		VoiceControlShareAudioStreamWrongFormat, VoiceControlShareAudioStreamEnded:
+		VoiceControlShareAudioStreamWrongFormat, VoiceControlShareAudioStreamEnded,
+		VoiceControlShareAudioStreamFormatNotSupported:
 		return true
 	default:
 		return false

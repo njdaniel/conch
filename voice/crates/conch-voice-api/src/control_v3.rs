@@ -441,6 +441,7 @@ vocabulary!(
     AwaitingApplication = "awaiting_application",
     WrongFormat = "wrong_format",
     StreamEnded = "stream_ended",
+    FormatNotSupported = "format_not_supported",
 });
 
 /// One stream decision, with local display labels that are omitted from debug output.

@@ -176,6 +176,7 @@ var Vocabularies = map[string][]string{
 		VoiceControlShareAudioStreamConchName, VoiceControlShareAudioStreamUnknownOwner,
 		VoiceControlShareAudioStreamMissingTarget, VoiceControlShareAudioStreamAwaitingApplication,
 		VoiceControlShareAudioStreamWrongFormat, VoiceControlShareAudioStreamEnded,
+		VoiceControlShareAudioStreamFormatNotSupported,
 	),
 	"VoiceControlTalkMode": values(VoiceControlTalkModePushToTalk, VoiceControlTalkModeOpen),
 	"VoiceDevicesConfig": values(

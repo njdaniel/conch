@@ -120,6 +120,7 @@ const streamReasons: Record<VoiceControlShareAudioStreamReason, string> = {
   awaiting_application: 'Excluded · Waiting for application metadata',
   wrong_format: 'Excluded · Unsupported audio format',
   stream_ended: 'Excluded · Stream ended',
+  format_not_supported: 'Excluded · Audio format not supported',
 };
 
 function ShareSoundStreams({ sound }: { readonly sound: ShareSoundUi }) {
