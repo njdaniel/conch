@@ -1866,12 +1866,14 @@ export function Options({ panel, onClose, onShrink, sheet, onSheet, open, anchor
       watch?.disconnect();
     };
   }, [open, panel, onSheet, onShrink, anchor]);
+  // Make a closing native launcher inert before key setup checks focus.
   return (
     <div
       ref={panel}
       id="voice-options"
       className={anchor === undefined ? 'voice-options popover' : 'voice-options popover native'}
       hidden={!open}
+      inert={anchor !== undefined && !open}
       tabIndex={-1}
       role={sheet ? 'dialog' : undefined}
       aria-modal={sheet ? true : undefined}

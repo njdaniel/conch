@@ -29,14 +29,22 @@ async function open(f = fake(), joined = false) {
   const onSaved = vi.fn();
   const onClose = vi.fn();
   render(<TalkKeySetup source={f.nv} joined={joined} onSaved={onSaved} onClose={onClose} />);
-  await screen.findByText(/Press the key or Mouse 4 now/);
+  await screen.findByText(/Press the key/);
   return { ...f, onSaved, onClose };
 }
-const press = (code: string) => { fireEvent.keyDown(window, { code }); };
+const press = (code: string) => { fireEvent.keyDown(document.activeElement ?? document.body, { code }); };
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe('TalkKeySetup', () => {
+  it('focuses the prompt when automatic capture starts', async () => {
+    await open();
+    const prompt = screen.getByText(/Press the key/);
+    expect(document.activeElement).toBe(prompt);
+    expect(prompt.getAttribute('role')).toBe('status');
+    expect(prompt.tabIndex).toBe(-1);
+  });
+
   it('captures first and explains the exposure before showing a device rule', async () => {
     await open(fake({ ok: true, devices: [locked], disclosure }));
     expect(screen.queryByText(disclosure[0] ?? '')).toBeNull();
@@ -102,23 +110,31 @@ describe('TalkKeySetup', () => {
     expect(screen.getByText(cantUse)).toBeTruthy();
     press('CapsLock');
     expect(screen.getByText('Caps Lock', { selector: 'bdi' })).toBeTruthy();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Set talk key' }));
     // Capture has ended: the next key changes nothing.
     press('KeyQ');
     expect(screen.getByText('Caps Lock', { selector: 'bdi' })).toBeTruthy();
     expect(f.saveTalkBinding).not.toHaveBeenCalled();
   });
 
-  it('Escape cancels the capture', async () => {
-    await open();
-    press('Escape');
-    expect(screen.getByText('none chosen')).toBeTruthy();
-    expect(screen.queryByText(/Press the key/)).toBeNull();
+  it('Escape closes setup during automatic capture', async () => {
+    const f = await open();
+    const close = screen.getByRole('button', { name: 'Close' });
+    close.focus();
+    // Capture must consume Escape before it reaches even a native target
+    // listener. The setup's React handler also closes it when capture is off.
+    const reachedTarget = vi.fn();
+    close.addEventListener('keydown', reachedTarget);
+    fireEvent.keyDown(close, { key: 'Escape', code: 'Escape' });
+    expect(reachedTarget).not.toHaveBeenCalled();
+    expect(f.onClose).toHaveBeenCalledOnce();
+    expect(f.saveTalkBinding).not.toHaveBeenCalled();
   });
 
   it('Tab leaves automatic capture without consuming navigation or binding a key', async () => {
     await open();
     const tab = new KeyboardEvent('keydown', { code: 'Tab', cancelable: true });
-    fireEvent(window, tab);
+    fireEvent(screen.getByText(/Press the key/), tab);
     expect(tab.defaultPrevented).toBe(false);
     expect(screen.getByText('none chosen')).toBeTruthy();
     expect(screen.queryByText(/Press the key/)).toBeNull();
@@ -139,9 +155,9 @@ describe('TalkKeySetup', () => {
 
   it('binds Shift when pressed and released on its own', async () => {
     const f = await open();
-    fireEvent.keyDown(window, { code: 'ShiftRight', shiftKey: true });
+    fireEvent.keyDown(document.activeElement ?? document.body, { code: 'ShiftRight', shiftKey: true });
     expect(screen.getByText('none chosen')).toBeTruthy();
-    fireEvent.keyUp(window, { code: 'ShiftRight' });
+    fireEvent.keyUp(document.activeElement ?? document.body, { code: 'ShiftRight' });
     expect(screen.getByText('Right Shift', { selector: 'bdi' })).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => { expect(f.saveTalkBinding).toHaveBeenCalledWith({ deviceId: 'k1', code: 54 }); });
@@ -281,13 +297,14 @@ describe('TalkKeySetup', () => {
 
   it('forgets a pending Shift on window blur and on a click', async () => {
     await open();
-    fireEvent.keyDown(window, { code: 'ShiftLeft' });
+    const prompt = screen.getByText(/Press the key/);
+    fireEvent.keyDown(prompt, { code: 'ShiftLeft' });
     fireEvent.blur(window);
-    fireEvent.keyUp(window, { code: 'ShiftLeft' });
+    fireEvent.keyUp(prompt, { code: 'ShiftLeft' });
     expect(screen.getByText('none chosen')).toBeTruthy();
-    fireEvent.keyDown(window, { code: 'ShiftLeft' });
+    fireEvent.keyDown(prompt, { code: 'ShiftLeft' });
     fireEvent.mouseDown(window, { button: 0 });
-    fireEvent.keyUp(window, { code: 'ShiftLeft' });
+    fireEvent.keyUp(prompt, { code: 'ShiftLeft' });
     expect(screen.getByText('none chosen')).toBeTruthy();
     expect(screen.getByText(/Press the key/)).toBeTruthy();
   });

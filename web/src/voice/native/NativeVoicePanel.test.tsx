@@ -1,11 +1,12 @@
 // The desktop voice strip (issue #1376, D3-5 of #771), driven by a fake native
 // voice and a fake presence socket: no helper, no browser engine, no network.
 import { act, cleanup, createEvent, fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/react';
+import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../../api';
 import { VoiceStrip } from '../../phone';
 import { setSoundAudience, sounds } from '../../sounds';
-import type { NativeVoiceHelper, NativeVoiceView } from '../../platform/desktop/bridge';
+import type { NativeVoiceHelper, NativeVoiceView, VoiceKeyDevicesResult, VoiceTalkBindingResult } from '../../platform/desktop/bridge';
 import type { NativeVoice, NativeVoiceError, NativeVoiceOutcome } from '../../platform/types';
 import type { ChannelV0 } from '../../schema/channel';
 import { voicePresenceV3Schema, type VoicePresence, type VoicePresenceV2, type VoicePresenceV3 } from '../../schema/voice';
@@ -971,6 +972,312 @@ describe('NativeVoicePanel', () => {
   });
 });
 
+function activate(button: HTMLElement, code: 'Enter' | 'Space' = 'Enter') {
+  button.focus();
+  const key = code === 'Space' ? ' ' : 'Enter';
+  if (!fireEvent.keyDown(button, { key, code })) return;
+  if (code === 'Space' && !fireEvent.keyUp(button, { key, code })) return;
+  // jsdom does not synthesize the click from a button's keyboard activation.
+  fireEvent.click(button, { detail: 0 });
+}
+
+function keySetupSource(fake: Fake, platform: 'linux' | 'win32') {
+  const saveTalkBinding = vi.fn<NonNullable<NativeVoice['saveTalkBinding']>>().mockResolvedValue({ ok: true });
+  const source: NativeVoice = { ...fake.nv,
+    keyDevices: () => Promise.resolve({ ok: true, platform: platform === 'win32' ? platform : undefined, devices: [{ id: 'k1', name: 'Keyboard', kind: 'keyboard', readable: true }], disclosure: [] }),
+    saveTalkBinding,
+  };
+  return { source, saveTalkBinding };
+}
+
+it.each(['linux', 'win32'] as const)('keeps letters in the composer during %s discovery and capture', async (platform) => {
+  const fake = new Fake(running());
+  const { source } = keySetupSource(fake, platform);
+  const devices = await source.keyDevices?.();
+  let resolve!: (result: VoiceKeyDevicesResult) => void;
+  const listing = new Promise<VoiceKeyDevicesResult>((done) => { resolve = done; });
+  const keyDevices = () => listing;
+  render(<>
+    <input aria-label="Chat message" />
+    <NativeVoicePanel source={{ ...source, keyDevices }} signedIn channel="general" viewer={1} people={people} voiceAllowed channels={channels} onUnauthorized={() => undefined} onOpen={() => undefined} />
+  </>);
+  activate(screen.getByRole('button', { name: 'Talk key' }));
+  expect(screen.getByText('Reading what is available…')).toBeTruthy();
+  const chat = screen.getByRole<HTMLInputElement>('textbox', { name: 'Chat message' });
+  const clickChat = () => {
+    if (fireEvent.mouseDown(chat)) chat.focus();
+    fireEvent.mouseUp(chat);
+    fireEvent.click(chat);
+  };
+  const typeLetter = (key: 'a' | 'b') => {
+    const target = document.activeElement ?? document.body;
+    // jsdom does not insert the character after an uncancelled keydown.
+    if (fireEvent.keyDown(target, { key, code: `Key${key.toUpperCase()}` }) && target === chat) {
+      fireEvent.input(chat, { target: { value: chat.value + key } });
+    }
+  };
+  clickChat();
+  if (devices === undefined) throw new Error('missing device listing');
+  await act(async () => {
+    resolve(devices);
+    await listing;
+  });
+  const picker = screen.getByRole<HTMLSelectElement>('combobox', { name: 'Or pick one' });
+  typeLetter('a');
+  expect(document.activeElement).toBe(chat);
+  expect(chat.value).toBe('a');
+  expect(picker.value).toBe('');
+
+  if (platform === 'win32') {
+    activate(screen.getByRole('button', { name: 'Set talk key' }));
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBe(document.activeElement);
+    clickChat();
+  }
+  typeLetter('b');
+  expect(document.activeElement).toBe(chat);
+  expect(chat.value).toBe('ab');
+  expect(fireEvent.mouseDown(chat, { button: 3 })).toBe(true);
+  expect(picker.value).toBe('');
+
+  // Re-entering the setup lets the pending capture take a binding.
+  const capture = platform === 'linux' ? screen.getByText(/Press the key/) : screen.getByRole('button', { name: 'Cancel' });
+  capture.focus();
+  expect(fireEvent.keyDown(chat, { key: 'c', code: 'KeyC' })).toBe(true);
+  expect(fireEvent.keyDown(capture, { key: 'F12', code: 'F12' })).toBe(false);
+  expect(picker.value).toBe('F12');
+});
+
+it.each(['linux', 'win32'] as const)('keeps focus on an outside input across %s setup transitions', async (platform) => {
+  const fake = new Fake(running());
+  const { source, saveTalkBinding } = keySetupSource(fake, platform);
+  render(<>
+    <input aria-label="Chat message" />
+    <NativeVoicePanel source={source} signedIn channel="general" viewer={1} people={people} voiceAllowed channels={channels} onUnauthorized={() => undefined} onOpen={() => undefined} />
+  </>);
+  const chat = screen.getByRole('textbox', { name: 'Chat message' });
+  chat.focus();
+  fireEvent.click(screen.getByRole('button', { name: 'Talk key' }));
+  expect(document.activeElement).toBe(chat);
+  const picker = await screen.findByRole('combobox', { name: 'Or pick one' });
+  expect(document.activeElement).toBe(chat);
+
+  if (platform === 'linux') fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Set talk key' }));
+  expect(document.activeElement).toBe(chat);
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+  expect(document.activeElement).toBe(chat);
+
+  if (platform === 'linux') {
+    fireEvent.change(picker, { target: { value: 'F12' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
+    expect(document.activeElement).toBe(chat);
+    await screen.findByRole('combobox', { name: 'Or pick one' });
+    expect(document.activeElement).toBe(chat);
+  } else {
+    // Ending voice also cancels a pending Windows capture.
+    activate(screen.getByRole('button', { name: 'Set talk key' }));
+    chat.focus();
+  }
+  fake.set({ ...idle, generation: 2 });
+  expect(document.activeElement).toBe(chat);
+
+  saveTalkBinding.mockResolvedValueOnce({ ok: false, error: 'failed' });
+  fireEvent.change(screen.getByRole('combobox', { name: 'Or pick one' }), { target: { value: 'F12' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  expect(document.activeElement).toBe(chat);
+  expect(await screen.findByText(/Nothing was saved/)).toBeTruthy();
+  expect(document.activeElement).toBe(chat);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+  expect(screen.queryByRole('region', { name: 'Talk key' })).toBeNull();
+  expect(document.activeElement).toBe(chat);
+});
+
+describe.each(['talk', 'mute'] as const)('%s key setup focus (#2220)', (binding) => {
+  function open(fromOptions = true, platform: 'linux' | 'win32' = 'linux') {
+    const fake = new Fake(running());
+    const { source, saveTalkBinding } = keySetupSource(fake, platform);
+    render(<NativeVoicePanel source={source} signedIn channel="general" viewer={1} people={people} voiceAllowed channels={channels} onUnauthorized={() => undefined} onOpen={() => undefined} />);
+    const toggle = screen.getByRole('button', { name: 'Voice options' });
+    if (fromOptions) activate(toggle);
+    activate(screen.getByRole('button', { name: fromOptions ? `Set up ${binding} key` : 'Talk key' }));
+    const setup = screen.getByRole('region', { name: fromOptions && binding === 'mute' ? 'Mute key' : 'Talk key' });
+    return { toggle, setup, saveTalkBinding, fake };
+  }
+
+  it('focuses the first control on keyboard open', async () => {
+    const { setup } = open();
+    expect(document.activeElement).toBe(within(setup).getByRole('button', { name: 'Close' }));
+    await within(setup).findByRole('combobox');
+    expect(setup.contains(document.activeElement)).toBe(true);
+  });
+
+  it('restores the toggle after saving', async () => {
+    const { setup, toggle, saveTalkBinding } = open();
+    let resolve!: (result: VoiceTalkBindingResult) => void;
+    saveTalkBinding.mockReturnValueOnce(new Promise((done) => { resolve = done; }));
+    const picker = await within(setup).findByRole('combobox');
+    fireEvent.change(picker, { target: { value: 'F13' } });
+    const save = within(setup).getByRole<HTMLButtonElement>('button', { name: 'Save' });
+    activate(save);
+    expect(save.disabled).toBe(false);
+    expect(document.activeElement).toBe(save);
+    expect(within(setup).getByText('Saving…').getAttribute('role')).toBe('status');
+    resolve({ ok: true });
+    await waitFor(() => { expect(document.activeElement).toBe(toggle); });
+    expect(saveTalkBinding).toHaveBeenCalledTimes(1);
+    expect(setup.isConnected).toBe(false);
+    expect(screen.getByText(/Saved: .*F13/)).toBeTruthy();
+  });
+
+  it.each(['linux', 'win32'] as const)('preserves chat focus when a pending %s save succeeds', async (platform) => {
+    const { saveTalkBinding } = open(true, platform);
+    render(<input aria-label="Chat message" />);
+    let resolve!: (result: VoiceTalkBindingResult) => void;
+    saveTalkBinding.mockReturnValueOnce(new Promise((done) => { resolve = done; }));
+    const picker = await screen.findByRole('combobox', { name: 'Or pick one' });
+    const setup = screen.getByRole('region', { name: binding === 'talk' ? 'Talk key' : 'Mute key' });
+    fireEvent.change(picker, { target: { value: 'F12' } });
+    activate(within(setup).getByRole('button', { name: 'Save' }));
+    expect(within(setup).getByText('Saving…')).toBeTruthy();
+
+    const chat = screen.getByRole('textbox', { name: 'Chat message' });
+    chat.focus();
+    fireEvent.change(chat, { target: { value: 'hello' } });
+    resolve({ ok: true });
+    expect(await screen.findByText(/Saved: .*F12/)).toBeTruthy();
+    expect(setup.isConnected).toBe(false);
+    expect(document.activeElement).toBe(chat);
+  });
+
+  it.each(['linux', 'win32'] as const)('keeps %s setup focused and open until a rejected save settles', async (platform) => {
+    const { saveTalkBinding, fake } = open(true, platform);
+    let reject!: (reason: Error) => void;
+    saveTalkBinding.mockReturnValueOnce(new Promise((_done, fail) => { reject = fail; }));
+    const picker = await screen.findByRole<HTMLSelectElement>('combobox', { name: 'Or pick one' });
+    fireEvent.change(picker, { target: { value: 'F12' } });
+    const setup = screen.getByRole('region', { name: binding === 'talk' ? 'Talk key' : 'Mute key' });
+    const save = within(setup).getByRole<HTMLButtonElement>('button', { name: 'Save' });
+    const close = within(setup).getByRole('button', { name: 'Close' });
+    activate(save);
+    expect(document.activeElement).toBe(save);
+    expect(save.disabled).toBe(false);
+    expect(save.getAttribute('aria-disabled')).toBe('true');
+    activate(save);
+    expect(saveTalkBinding).toHaveBeenCalledOnce();
+    expect(close.getAttribute('aria-disabled')).toBe('true');
+    const saving = within(setup).getByText('Saving…');
+    expect(close.getAttribute('aria-describedby')).toBe(saving.id);
+    activate(close);
+    expect(setup.isConnected).toBe(true);
+    expect(document.activeElement).toBe(close);
+    fireEvent.keyDown(close, { key: 'Escape', code: 'Escape' });
+    expect(setup.isConnected).toBe(true);
+    expect(document.activeElement).toBe(close);
+
+    if (platform === 'win32') fake.set({ ...idle, generation: 2 });
+    reject(new Error('write rejected'));
+    const error = await within(setup).findByText(/Nothing was saved|The key was not saved/);
+    expect(error.getAttribute('role')).toBe('status');
+    expect(document.activeElement).toBe(save);
+    expect(picker.value).toBe('F12');
+    expect(save.getAttribute('aria-disabled')).not.toBe('true');
+    expect(close.getAttribute('aria-disabled')).not.toBe('true');
+    if (binding === 'talk') fireEvent.keyDown(save, { key: 'Escape', code: 'Escape' });
+    else activate(close);
+    expect(setup.isConnected).toBe(false);
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Voice options' }));
+  });
+
+  it('focuses setup again when the same binding is opened', async () => {
+    const { setup, toggle } = open();
+    const picker = await within(setup).findByRole<HTMLSelectElement>('combobox');
+    fireEvent.change(picker, { target: { value: 'F13' } });
+    activate(toggle);
+    activate(screen.getByRole('button', { name: `Set up ${binding} key` }));
+    expect(document.activeElement).toBe(within(setup).getByRole('button', { name: `Set ${binding} key` }));
+    expect(picker.value).toBe('F13');
+  });
+
+  it.each(['Close after Tab', 'Escape'])('restores the toggle after %s', async (action) => {
+    const { setup, toggle, saveTalkBinding } = open();
+    const close = within(setup).getByRole('button', { name: 'Close' });
+    await within(setup).findByRole('combobox');
+    close.focus();
+    if (action === 'Escape') fireEvent.keyDown(close, { key: 'Escape' });
+    else {
+      fireEvent.keyDown(close, { key: 'Tab', code: 'Tab' });
+      activate(close);
+    }
+    expect(document.activeElement).toBe(toggle);
+    expect(setup.isConnected).toBe(false);
+    expect(saveTalkBinding).not.toHaveBeenCalled();
+  });
+
+  it.each(['Enter', 'Space'] as const)('%s activates focused Close during capture without binding a key', async (key) => {
+    const { setup, toggle, saveTalkBinding } = open();
+    const picker = await within(setup).findByRole<HTMLSelectElement>('combobox');
+    expect(within(setup).getByRole('button', { name: 'Cancel' })).toBeTruthy();
+    const close = within(setup).getByRole('button', { name: 'Close' });
+    activate(close, key);
+    expect(setup.isConnected).toBe(false);
+    expect(document.activeElement).toBe(toggle);
+    expect(picker.value).toBe('');
+    expect(saveTalkBinding).not.toHaveBeenCalled();
+  });
+
+  it('ignores Escape in chat and preserves its focus when setup closes', async () => {
+    const { setup } = open();
+    render(<input aria-label="Chat message" />);
+    await within(setup).findByText(/Press the key/);
+    const chat = screen.getByRole('textbox', { name: 'Chat message' });
+    chat.focus();
+    expect(fireEvent.keyDown(chat, { key: 'Escape', code: 'Escape' })).toBe(true);
+    expect(setup.isConnected).toBe(true);
+    fireEvent.click(within(setup).getByRole('button', { name: 'Close' }));
+    expect(setup.isConnected).toBe(false);
+    expect(document.activeElement).toBe(chat);
+  });
+
+  if (binding === 'talk') {
+    it('restores the Talk key shortcut when it reappears', () => {
+      const { setup } = open(false);
+      activate(within(setup).getByRole('button', { name: 'Close' }));
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Talk key' }));
+    });
+  }
+});
+
+it.each(['linux', 'win32'] as const)('keeps a successful %s save when the voice panel unmounts', async (platform) => {
+  const fake = new Fake(running());
+  const { source, saveTalkBinding } = keySetupSource(fake, platform);
+  let resolve!: (result: VoiceTalkBindingResult) => void;
+  const pending = new Promise<VoiceTalkBindingResult>((done) => { resolve = done; });
+  saveTalkBinding.mockReturnValueOnce(pending);
+  function Dock({ open }: { readonly open: boolean }) {
+    const [binding, setBinding] = useState('Left Ctrl');
+    return <>
+      <button type="button">Chat</button>
+      {open && <NativeVoicePanel source={source} binding={binding} onBound={setBinding} signedIn channel="general" viewer={1} people={people} voiceAllowed channels={channels} onUnauthorized={() => undefined} onOpen={() => undefined} />}
+    </>;
+  }
+  const ui = render(<Dock open />);
+  activate(screen.getByRole('button', { name: 'Talk key' }));
+  fireEvent.change(await screen.findByRole('combobox'), { target: { value: 'F12' } });
+  activate(screen.getByRole('button', { name: 'Save' }));
+  const chat = screen.getByRole('button', { name: 'Chat' });
+  chat.focus();
+  ui.rerender(<Dock open={false} />);
+  await act(async () => {
+    resolve({ ok: true });
+    await pending;
+  });
+  expect(document.activeElement).toBe(chat);
+  fake.set({ ...running(), generation: 2 });
+  ui.rerender(<Dock open />);
+  expect(screen.getByText('mic on · hold F12 to talk')).toBeTruthy();
+});
+
 it('keeps the Talk key label in open mode when the helper loses the key', async () => {
   const lost = { ptt: 'lost', pttProblem: 'read_failed' } as const;
   const f = new Fake(running({ ...lost, talkMode: 'open' }));
@@ -1012,12 +1319,17 @@ it('opens the shared Windows capture from Voice options to save a mute key', asy
   const onBound = vi.fn();
   render(<NativeVoicePanel source={source} onBound={onBound} signedIn channel="general" viewer={1} people={people} voiceAllowed channels={channels} onUnauthorized={() => undefined} onOpen={() => undefined} />);
   fireEvent.click(screen.getByRole('button', { name: 'Voice options' }));
-  fireEvent.click(screen.getByRole('button', { name: 'Set up mute key' }));
-  fireEvent.click(await screen.findByRole('button', { name: 'Set mute key' }));
+  const opener = screen.getByRole('button', { name: 'Set up mute key' });
+  opener.focus();
+  fireEvent.click(opener, { detail: 1 });
+  const capture = await screen.findByRole('button', { name: 'Set mute key' });
+  expect(document.activeElement).toBe(capture);
+  fireEvent.click(capture);
   fireEvent.mouseDown(window, { button: 4 });
   fireEvent.click(screen.getByRole('button', { name: 'Save' }));
   await waitFor(() => {
     expect(saveTalkBinding).toHaveBeenCalledWith({ windowsCode: 'Mouse5', generation: f.nv.snapshot().generation, binding: 'mute' });
   });
+  expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Voice options' }));
   expect(onBound).not.toHaveBeenCalled();
 });
