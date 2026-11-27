@@ -1,4 +1,4 @@
-import type { Page } from '@playwright/test';
+import type { Locator, Page } from '@playwright/test';
 import { createCredentialResponseV1, createPrincipalResponse, type CreateCredentialRequestV1, type CreatePrincipalRequest } from '../src/schema/credential';
 import { postMessageResponseV2 } from '../src/schema/message';
 import { listNetsResponseV1 } from '../src/schema/net';
@@ -10,14 +10,15 @@ let next = 0;
 const unique = (label: string) => `r842-${label}-${Date.now().toString(36)}-${String(++next)}`;
 
 
-// Controls are named by author and time, never by id (issue #1040), so a
-// message's Reply is found inside its item.
-const replyName = /^Reply to .+'s message, \d\d:\d\d$/;
 const threadName = /^Thread around .+'s message, \d\d:\d\d$/;
-const replyTo = (page: Page, root: number) => page.getByRole('log', { name: 'Messages' }).locator(`[data-message-id="${String(root)}"]`).getByRole('button', { name: replyName });
+const row = (page: Page, root: number) => page.getByRole('log', { name: 'Messages' }).locator(`[data-message-id="${String(root)}"]`).first();
+const more = (message: Locator) => message.getByRole('button', { name: /^More actions for / });
+const replyAction = (message: Locator) => message.getByRole('menuitem', { name: 'Reply', exact: true });
 
 async function openThread(page: Page, root: number) {
-  await replyTo(page, root).click();
+  const message = row(page, root);
+  await more(message).click();
+  await replyAction(message).click();
   return page.getByRole('region', { name: threadName });
 }
 
@@ -26,13 +27,29 @@ test('desktop reply and history use the same one-level thread', async ({ meet, w
   await signIn(page, world, world.tokens.browser, 'browser-test');
   const root = await post(world, world.tokens.browser, 'general', unique('root'));
   const body = unique('desktop reply');
-  let thread = await openThread(page, root.id);
+  const message = row(page, root.id);
+  const bodyText = message.locator('.body');
+  await bodyText.click({ button: 'right' });
+  const menu = message.getByRole('menu');
+  await expect(replyAction(message)).toBeVisible();
+  await expect(menu.getByRole('menuitem', { name: 'Add reaction', exact: true })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(menu).toHaveCount(0);
+  await expect(more(message)).toBeFocused();
+  await bodyText.click({ button: 'right' });
+  await replyAction(message).click();
+
+  let thread = page.getByRole('region', { name: threadName });
   const composer = thread.getByRole('textbox', { name: /^Reply to (?!.*'s message, )/ });
   await composer.fill(body);
   await composer.press('Enter');
   await expect(thread.getByText(body, { exact: true })).toBeVisible();
   await expect(thread.getByText('Replying to #general; the audience cannot be changed.')).toBeVisible();
-  await expect(thread.getByRole('button', { name: replyName })).toHaveCount(0);
+  const replyRow = thread.getByRole('listitem').filter({ hasText: body });
+  await replyRow.locator('.body').click({ button: 'right' });
+  await expect(replyRow.getByRole('menu')).toBeVisible();
+  await expect(page.getByRole('menu')).toHaveCount(1);
+  await expect(replyAction(replyRow)).toHaveCount(0);
 
   await page.reload();
   thread = await openThread(page, root.id);
@@ -49,14 +66,21 @@ for (const [size, options] of phones) {
     const { page } = await meet(options);
     await signIn(page, world, world.tokens.browser, 'browser-test');
     const root = await post(world, world.tokens.browser, 'general', unique(`root ${size}`));
-    const thread = await openThread(page, root.id);
+    const message = row(page, root.id);
+    const bodyText = message.locator('.body');
+    await bodyText.dispatchEvent('touchstart', { touches: [{ identifier: 0, clientX: 10, clientY: 10 }] });
+    await expect(replyAction(message)).toBeVisible();
+    await expect(message.getByRole('menuitem', { name: 'Add reaction', exact: true })).toBeVisible();
+    await bodyText.dispatchEvent('touchend', { touches: [] });
+    await replyAction(message).tap();
+    const thread = page.getByRole('region', { name: threadName });
     const body = unique(`touch ${size}`);
     await thread.getByRole('textbox', { name: /^Reply to (?!.*'s message, )/ }).fill(body);
-    await thread.getByRole('button', { name: 'Send reply' }).click();
+    await thread.getByRole('button', { name: 'Send reply' }).tap();
     await expect(thread.getByText(body, { exact: true })).toBeVisible();
     await expectFits(page, `reply ${size}`);
-    await thread.getByRole('button', { name: 'Close thread' }).click();
-    await expect(replyTo(page, root.id)).toBeFocused();
+    await thread.getByRole('button', { name: 'Close thread' }).tap();
+    await expect(more(message)).toBeFocused();
   });
 }
 
@@ -120,9 +144,12 @@ test('a reply from a phone shows its root and the root counts it on the desktop'
   await expect(thread.getByText(body, { exact: true })).toBeVisible();
 
   const log = desktop.page.locator('.log');
-  await expect(log.locator(`[data-message-id="${String(root.id)}"]`).getByRole('button', { name: '1 reply' })).toBeVisible();
-  const row = log.locator('.message', { hasText: body });
-  await expect(row.getByText(new RegExp(`^Replying to .+: ${rootBody}$`))).toBeVisible();
+  const count = log.locator(`[data-message-id="${String(root.id)}"]`).getByRole('button', { name: '1 reply' });
+  await expect(count).toBeVisible();
+  const replyRow = log.locator('.message', { hasText: body });
+  await expect(replyRow.getByText(new RegExp(`^Replying to .+: ${rootBody}$`))).toBeVisible();
+  await count.click();
+  await expect(desktop.page.getByRole('region', { name: threadName }).getByText(body, { exact: true })).toBeVisible();
 });
 
 for (const [size, options] of phoneSizes.filter(([size]) => size === '390×844' || size === '320×640')) {
@@ -130,11 +157,15 @@ for (const [size, options] of phoneSizes.filter(([size]) => size === '390×844' 
     const { page } = await meet(options);
     await signIn(page, world, world.tokens.browser, 'browser-test');
     const root = await post(world, world.tokens.browser, 'general', unique(`fit ${size}`));
-    const replyButton = replyTo(page, root.id);
-    const target = await replyButton.boundingBox();
-    expect(target?.width ?? 0).toBeGreaterThanOrEqual(44);
-    expect(target?.height ?? 0).toBeGreaterThanOrEqual(44);
-    const thread = await openThread(page, root.id);
+    const message = row(page, root.id);
+    await more(message).tap();
+    for (const control of [more(message), replyAction(message)]) {
+      const target = await control.boundingBox();
+      expect(target?.width ?? 0).toBeGreaterThanOrEqual(44);
+      expect(target?.height ?? 0).toBeGreaterThanOrEqual(44);
+    }
+    await replyAction(message).tap();
+    const thread = page.getByRole('region', { name: threadName });
     const box = await thread.boundingBox();
     for (const control of [thread.getByRole('textbox', { name: /^Reply to (?!.*'s message, )/ }), thread.getByRole('button', { name: 'Send reply' })]) {
       const rect = await control.boundingBox();

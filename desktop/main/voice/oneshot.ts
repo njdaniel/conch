@@ -25,14 +25,14 @@
 //   - a run past ONE_SHOT_TIMEOUT_MS is SIGKILLed and reaped;
 //   - one run at a time: a second is refused 'busy', and cancel() (the
 //     profile-switch media hook) kills the one running and waits for it.
-import type { MainLog } from '../diagnostics.ts';
+import { GeometricSampler, type MainLog } from '../diagnostics.ts';
 import { isWindowsBinding } from '../../../web/src/platform/desktop/windows-keys.ts';
 import { VOICE_DEVICES_MAX_BYTES, voiceControlTalkMode } from '../../../web/src/schema/generated.ts';
 import type { NativeVoiceDevicesResult, VoiceBindingKey, VoiceDeviceKey, VoiceOneShotError, VoiceSaveResult } from '../../../web/src/platform/desktop/bridge.ts';
 import { parseVoiceDevices } from './devices.ts';
 import { BY_ID_DIR, fitForARule } from './keydevices.ts';
 import { validDeviceName } from './protocol.ts';
-import { defaultOneShotSpawn, findHelper, HelperError, oneShotEnv, oneShotSpawnOptions, type FindDeps, type OneShotChild, type OneShotSpawnFn } from './spawn.ts';
+import { defaultOneShotSpawn, findHelper, HelperError, oneShotEnv, oneShotSpawnOptions, type FindDeps, type HelperRefusal, type OneShotChild, type OneShotSpawnFn } from './spawn.ts';
 
 // A run that has not ended by itself in this long is killed.
 export const ONE_SHOT_TIMEOUT_MS = 10_000;
@@ -133,6 +133,7 @@ export function lastLine(tail: string): string {
 }
 
 export class OneShot {
+  readonly #helperFailures = new GeometricSampler<`${OneShotOperation} ${HelperRefusal}`>();
   #active: Active | null = null;
 
   constructor(private readonly deps: OneShotDeps) {}
@@ -216,7 +217,9 @@ export class OneShot {
       executable = await findHelper(this.deps.resources, this.deps.find);
     } catch (err) {
       if (err instanceof HelperError) {
-        this.deps.log(`voice: ${what}: ${err.reason}`, { ring: true });
+        if (this.#helperFailures.sample(`${what} ${err.reason}`)) {
+          this.deps.log(`voice: ${what}: ${err.reason}`, { ring: true });
+        }
         this.deps.log(`voice: ${what}: ${err.message}`);
         return { ok: false, error: err.reason };
       }

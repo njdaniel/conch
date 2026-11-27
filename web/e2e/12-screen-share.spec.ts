@@ -505,7 +505,7 @@ test.describe('screen share with LiveKit', () => {
       await voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' }).click();
       await expect(voiceRegion(a.page)).toContainText('You stopped sharing.');
       await expect(shareView(b.page)).toHaveCount(0, { timeout: 15_000 });
-      await expect(voiceRegion(b.page)).toContainText('alice stopped sharing.');
+      await expect(b.page.locator('.stage').getByRole('status').filter({ hasText: 'alice stopped sharing.' })).toBeVisible();
       await expect(voiceRegion(b.page).getByRole('button', { name: 'Watch' })).toHaveCount(0);
       await expect(voiceRegion(a.page)).not.toContainText('You stopped sharing.', { timeout: 8000 });
       await expect.poll(async () => (await shareRows()).slice(before).map((r) => r.action), { timeout: 15_000 }).toEqual(['voice_share_started', 'voice_share_stopped']);
@@ -630,7 +630,7 @@ test.describe('screen share with LiveKit', () => {
       await expect(button).toBeEnabled();
 
       await watching(a, 'bob');
-      const note = alice.getByRole('status').filter({ hasText: 'bob stopped sharing.' });
+      const note = a.page.locator('.stage').getByRole('status').filter({ hasText: 'bob stopped sharing.' });
       const stoppedAt = Date.now();
       await voiceRegion(b.page).getByRole('button', { name: 'Stop sharing' }).click();
       await expect(note).toBeVisible({ timeout: 3000 });
@@ -828,9 +828,11 @@ test.describe('screen share with LiveKit', () => {
       await expect(b.page.getByRole('region', { name: 'Members list' })).toBeFocused();
       await b.page.keyboard.press('Escape');
       await expectFits(b.page, 'watching at phone width');
-      // Voice options, left open, are the Voice view's: under Chat the strip
-      // is one row (issue #1028), and the composer is on the screen while
-      // watching, without scrolling to it.
+      // The resize to the phone's Chat view hides Voice options first (the
+      // strip is one row there, issue #1028); the Members click after it then
+      // clears the open state as an outside press (issue #2189). Either way the
+      // options button is the Voice view's, and the composer is on the screen
+      // while watching, without scrolling to it.
       await expect(voiceRegion(b.page).getByRole('button', { name: 'Voice options' })).toBeHidden();
       await expectComposerShown(b.page, 'watching at 390×844');
       await b.page.setViewportSize({ width: 360, height: 740 });

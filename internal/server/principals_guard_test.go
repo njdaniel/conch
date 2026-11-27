@@ -81,6 +81,10 @@ var principalReads = []principalRead{
 	// cond), so a pair member reads one bit about a peer they may no longer
 	// know, as the design intends (#2096 review).
 	{"store/dm_policy.go", "dmPeerFormerTx", 1, readGated},
+	// dmFillPeerTx reads the name of a visible conversation's non-former
+	// peer. Pair membership gates the read. Empty conversations also require
+	// knownPrincipalsSQL, while a message preserves the name under Decision 11.
+	{"store/dm_visibility.go", "dmFillPeerTx", 1, readGated},
 	{"store/dm_policy.go", "dmPrincipalAllowedTx", 1, readOwnOrInternal},
 	{"store/dm_policy.go", "Store.SetDMAllowed", 2, readOperatorOrMaker},
 	// #1832: a block's target, only when the owner may know it by
@@ -227,6 +231,7 @@ var predicateNames = map[string][]string{
 	"openDMTx":                          {"knownPrincipalsSQL", "listedPrincipalSQL"},
 	"dmMayKnowTx":                       {"knownPrincipalsSQL"},
 	"dmPeerFormerTx":                    {"knownPrincipalsSQL"},
+	"dmFillPeerTx":                      {"knownPrincipalsSQL"},
 }
 
 var selectsPrincipals = regexp.MustCompile(`(?i)\b(from|join)\s+principals\b`)

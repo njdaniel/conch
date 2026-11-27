@@ -158,13 +158,6 @@ func writePrivateCallResult(w http.ResponseWriter, r *http.Request, out store.Pr
 	}
 }
 
-// writeDMRefusal answers with the one fixed body of a DM refusal code
-// (schema.DMRefusalError), never built from the input.
-func writeDMRefusal(w http.ResponseWriter, status int, code string) {
-	body, _ := schema.DMRefusalError(code)
-	writeError(w, status, body.Code, body.Message)
-}
-
 func writePrivateCallCommand(w http.ResponseWriter, out store.PrivateCallResult) {
 	switch out.Code {
 	case schema.ErrorCodeRateLimited:

@@ -68,6 +68,7 @@ export const PROFILE_FUNCTIONS = [
   'profileRemove',
   'profileSwitch',
   'storageRetry',
+  'profileKeep',
   'profilesRecover',
 ] as const satisfies readonly (keyof ConchDesktopBridge)[];
 

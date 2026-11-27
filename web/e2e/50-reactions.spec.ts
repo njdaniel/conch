@@ -1,5 +1,5 @@
-// #766: these checks use actual REST responses and event sockets. No mocked
-// reaction state; the shared server is not restarted while other specs use it.
+// #766: use actual REST responses and event sockets for reaction state.
+// The older-server case substitutes the missing endpoint's 404 response.
 import type { Locator, Page } from '@playwright/test';
 import { createChannelResponseV1 } from '../src/schema/channel';
 import { createCredentialResponseV1, createPrincipalResponse, type CreatePrincipalRequest } from '../src/schema/credential';
@@ -14,24 +14,25 @@ let serial = 0;
 const unique = (label: string) => `r766-${label}-${Date.now().toString(36)}-${String(++serial)}`;
 const row = (page: Page, id: number) => page.getByRole('log', { name: 'Messages' }).locator(`[data-message-id="${String(id)}"]`).first();
 const chip = (item: Locator, count: number) => item.getByRole('button', { name: `thumbs up: ${String(count)} reaction${count === 1 ? '' : 's'}`, exact: true });
-async function pick(page: Page, item: Locator, touch = false) {
-  const add = item.getByRole('button', { name: /^Add reaction to / });
+const more = (item: Locator) => item.getByRole('button', { name: /^More actions for / });
+const addReaction = (item: Locator) => item.getByRole('menuitem', { name: 'Add reaction', exact: true });
+async function pick(page: Page, item: Locator) {
+  const opener = more(item);
+  await opener.press('Enter');
+  const add = addReaction(item);
   await expect(add).toBeEnabled();
-  if (touch) await add.tap();
-  else {
-    // Enter the message's F15 stop, then its reaction controls without adding
-    // a Tab stop before the existing More actions / Reply controls.
-    await item.focus();
-    await page.keyboard.press('ArrowRight');
-    await expect(add).toBeFocused();
-    await page.keyboard.press('Enter');
-  }
+  await add.press('Enter');
   const picker = page.getByRole('dialog', { name: 'Emoji', exact: true });
-  await expect(picker.getByRole('searchbox')).toBeFocused();
-  await picker.getByRole('searchbox').fill('thumbs up');
-  if (touch) await picker.getByRole('button', { name: 'thumbs up', exact: true }).tap();
-  else await picker.getByRole('searchbox').press('Enter');
-  await expect(add).toBeFocused();
+  const search = picker.getByRole('searchbox');
+  await expect(search).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(picker).toHaveCount(0);
+  await expect(opener).toBeFocused();
+  await page.keyboard.press('Enter');
+  await add.press('Enter');
+  await search.fill('thumbs up');
+  await search.press('Enter');
+  await expect(opener).toBeFocused();
 }
 const path = (channel: string, id: number, emoji?: string) => `/v2/channels/${encodeURIComponent(channel)}/messages/${String(id)}/reactions${emoji === undefined ? '' : `/${encodeURIComponent(emoji)}`}`;
 
@@ -63,9 +64,8 @@ test('two clients converge on add/remove/count/list/reload/reconnect without mov
   await pick(first.page, a);
   await expect(chip(a, 1)).toHaveAttribute('aria-pressed', 'true');
   await expect(chip(b, 1)).toHaveAttribute('aria-pressed', 'false');
-  // Add occupies the existing action row; a chip and its Who button fit in
-  // one separate row on the phone, without the Add button forcing a wrap.
-  await expect(b.locator('.reactions .reaction-add')).toHaveCount(0);
+  // The chip and its Who button fit in one row on the phone.
+  await expect(b.getByRole('button', { name: /^Add reaction/ })).toHaveCount(0);
   const bar = await b.locator('.reactions').boundingBox();
   const pair = await b.locator('.reaction-pair').boundingBox();
   if (bar === null || pair === null) throw new Error('missing reaction row');
@@ -75,7 +75,8 @@ test('two clients converge on add/remove/count/list/reload/reconnect without mov
   await chip(b, 1).tap();
   await expect(chip(a, 2)).toBeVisible(); await expect(chip(b, 2)).toHaveAttribute('aria-pressed', 'true');
   expect(await readState(world, author.token)).toEqual(before);
-  // The active message's reaction order is Add, chip, Who reacted.
+  // The row's reaction controls start with the chip, then Who reacted.
+  await a.focus();
   await first.page.keyboard.press('ArrowRight');
   await expect(chip(a, 2)).toBeFocused();
   await first.page.keyboard.press('ArrowRight');
@@ -105,8 +106,6 @@ test('two clients converge on add/remove/count/list/reload/reconnect without mov
   await expect(chip(a, 1)).toHaveAttribute('aria-pressed', 'true');
   await a.focus();
   await first.page.keyboard.press('ArrowRight');
-  await expect(a.getByRole('button', { name: /^Add reaction to / })).toBeFocused();
-  await first.page.keyboard.press('ArrowRight');
   await expect(chip(a, 1)).toBeFocused();
   // Hold a failed removal so focus is checked during the optimistic update
   // as well as after rollback. The server's reaction state stays unchanged.
@@ -119,22 +118,26 @@ test('two clients converge on add/remove/count/list/reload/reconnect without mov
   }, { times: 1 });
   await first.page.keyboard.press('Enter');
   await expect(a.getByRole('button', { name: /thumbs up:/ })).toHaveCount(0);
-  const add = a.getByRole('button', { name: /^Add reaction to / });
-  await expect(add).toBeFocused();
+  await expect(a).toBeFocused();
+  await more(a).press('Enter');
+  await expect(addReaction(a)).toBeDisabled();
+  await first.page.keyboard.press('Escape');
+  await expect(more(a)).toBeFocused();
+  await a.focus();
   failRemoval();
   await expect(a.getByText('Reaction could not be saved. Try again.')).toBeVisible();
   await expect(chip(a, 1)).toBeEnabled();
-  await expect(add).toBeFocused();
+  await expect(a).toBeFocused();
   await first.page.keyboard.press('ArrowRight');
   await expect(chip(a, 1)).toBeFocused();
   await first.page.keyboard.press('Enter');
   await expect(a.getByRole('button', { name: /thumbs up:/ })).toHaveCount(0);
   await expect(b.getByRole('button', { name: /thumbs up:/ })).toHaveCount(0);
-  await expect(add).toBeFocused();
-  await first.page.keyboard.press('Escape');
   await expect(a).toBeFocused();
   await second.page.reload();
-  await expect(b.getByRole('button', { name: /^Add reaction to / })).toBeEnabled();
+  await more(b).tap();
+  await expect(addReaction(b)).toBeEnabled();
+  await second.page.keyboard.press('Escape');
   await expect(b.getByRole('button', { name: /thumbs up:/ })).toHaveCount(0);
   await expectFits(second.page, 'reaction controls on a phone');
 });
@@ -146,18 +149,15 @@ for (const width of [320, 360, 390, 1440]) {
     await signIn(page, world, author.token, author.principal.name);
     const message = await post(world, author.token, 'general', unique('compact'));
     const item = row(page, message.id);
-    const add = item.getByRole('button', { name: /^Add reaction to / });
-    await expect(add).toBeEnabled();
+    await expect(more(item)).toBeAttached();
+    await expect(item.getByRole('button', { name: /^Add reaction/ })).toHaveCount(0);
     await expect(item.locator('.reactions')).toHaveCount(0);
     const sizes = await item.evaluate((element) => {
-      // Compare with the same message's original layout, before reactions:
-      // retain Reply in its original grid cell and remove only the new UI.
+      // Keep the same message and actions menu while measuring the space
+      // occupied by its empty reaction controls.
       const original = element.cloneNode(true);
       if (!(original instanceof HTMLElement)) throw new Error('missing original message');
-      const controls = original.querySelector('.reaction-controls');
-      const actions = controls?.querySelector('.message-reaction-actions');
-      if (controls === null || actions === null || actions === undefined) throw new Error('missing actions');
-      controls.replaceWith(...Array.from(actions.children).filter((child) => !child.classList.contains('reaction-add')));
+      original.querySelector('.reaction-controls')?.remove();
       element.after(original);
       try {
         return { current: element.getBoundingClientRect().height, original: original.getBoundingClientRect().height };
@@ -177,6 +177,27 @@ async function human(world: World, secrets: string[], channel: string) {
   expect((await call(world, world.tokens.operator, 'PUT', `/v1/channels/${encodeURIComponent(channel)}/members/${String(principal.id)}`)).status).toBe(204);
   return { principal, token };
 }
+
+test('the message menu omits Add reaction on an older server and closes when the message is removed', async ({ meet, world, secrets }) => {
+  const author = await human(world, secrets, 'general');
+  const message = await post(world, author.token, 'general', unique('older-server'));
+  const { page } = await meet();
+  const isReactionsBatch = (url: URL) => url.pathname === '/v2/channels/general/reactions' && url.searchParams.has('messages');
+  await page.route(isReactionsBatch, (route) => route.fulfill({ status: 404, body: 'Not found' }));
+  const unsupported = page.waitForResponse((response) => isReactionsBatch(new URL(response.url())));
+  await signIn(page, world, author.token, author.principal.name);
+  await unsupported;
+  const item = row(page, message.id);
+  await item.locator('.body').click({ button: 'right' });
+  await expect(item.getByRole('menuitem', { name: 'Reply', exact: true })).toBeVisible();
+  await expect(addReaction(item)).toHaveCount(0);
+
+  const removed = await call(world, world.tokens.operator, 'DELETE', `/v2/channels/general/messages/${String(message.id)}`);
+  expect(removed.status).toBe(204);
+  await expect(item).toContainText('This message was removed by a moderator.');
+  await expect(item.getByRole('menu')).toHaveCount(0);
+  await expect(more(item)).toHaveCount(0);
+});
 
 test('server-authorized private, net, whisper and disabled guest boundaries', async ({ meet, world, secrets }) => {
   const privateAuthor = await human(world, secrets, 'test-private');
@@ -246,5 +267,5 @@ test('reactor pages are bounded, moderator removals require confirmation, and re
   await expect(chip(item, 1)).toBeVisible();
   expect((await call(world, world.tokens.operator, 'DELETE', `/v1/channels/${encodeURIComponent(channel)}/members/${String(reader.principal.id)}`)).status).toBe(204);
   await expect(page.getByRole('dialog', { name: 'Who reacted with thumbs up' })).toHaveCount(0);
-  await expect(item.getByRole('button', { name: /^Add reaction to / })).toHaveCount(0);
+  await expect(more(item)).toHaveCount(0);
 });

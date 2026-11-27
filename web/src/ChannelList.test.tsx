@@ -30,6 +30,20 @@ afterEach(() => {
 
 const list = (selected: string | null) => <ChannelList channels={channels} selected={selected} unread={new Map()} onOpen={() => undefined} />;
 
+it('keeps single-click browsing and rejects synthetic double-click joins', () => {
+  const onOpen = vi.fn();
+  const onJoinVoice = vi.fn();
+  render(<ChannelList channels={channels} selected="general" unread={new Map()} onOpen={onOpen} onJoinVoice={onJoinVoice} />);
+  const club = screen.getByRole('button', { name: 'book-club' });
+  fireEvent.click(club);
+  expect(onOpen).toHaveBeenCalledExactlyOnceWith('book-club');
+  expect(onJoinVoice).not.toHaveBeenCalled();
+
+  fireEvent.pointerDown(club, { pointerType: 'mouse' });
+  fireEvent.doubleClick(club);
+  expect(onJoinVoice).not.toHaveBeenCalled();
+});
+
 describe('the open channel', () => {
   it('is scrolled into view, the least distance, whenever it changes', () => {
     const view = render(list('general'));

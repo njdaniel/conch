@@ -6,18 +6,21 @@
 // (adaptive stream), so a phone gets a smaller layer than a full-screen
 // desktop, and a closed view gets none (voice-multi-share.md §8). It asks for
 // no device.
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type MouseEvent, type PointerEvent } from 'react';
 import { Glyph } from '../Icons';
 import { platform } from '../platform';
 import { fullscreenVideo } from './fullscreen';
 import { usePictureInPicture } from './pictureInPicture';
-import type { VoiceClient, VoiceState } from './connection';
+import type { ShareSurface, VoiceClient, VoiceState } from './connection';
 import { askedText, nextShortfall, noShortfall, shareReadout, type ShortfallState } from './sdk';
 import type { SettledQuality, ShareDirection, ShareSample } from './share';
 
 // What the watch view needs of the client: the desktop's strip (issue #1582)
 // gives it the companion's, which is a narrower thing than the call view's.
 export type ShareViewClient = Pick<VoiceClient, 'attachStream' | 'readShareStats' | 'watchStream'>;
+
+// How long the controls over the picture stay after the last pointer move.
+export const controlsIdleMs = 3000;
 
 const cpuWarning = 'Your computer is too busy to send smoothly. Close heavy programs or choose a lower share resolution.';
 
@@ -180,6 +183,95 @@ export function ShareView({
   // The browser would not start the sound without a tap (phones' autoplay
   // rules): the view offers one.
   const [blocked, setBlocked] = useState(false);
+  // The controls drawn over the picture (single share, open call view: CSS
+  // says where) fade after controlsIdleMs without a pointer on the share, and
+  // return on a pointer move or a tap. Keyboard focus inside them keeps them
+  // (CSS :focus-visible; a control pressed by a pointer keeps focus but not
+  // the row).
+  const [idle, setIdle] = useState(false);
+  // The press that brings a faded row back is a pure wake: it presses no
+  // control, enlarges nothing and focuses nothing. Its click is swallowed
+  // whatever it lands on (on touch the row would otherwise be pressable before
+  // that tap's click is aimed), and the row takes no press while it fades in
+  // (CSS .waking), so a quick second tap is not a control's either.
+  const [waking, setWaking] = useState(false);
+  const idleTimer = useRef<number | null>(null);
+  // Whether the row is faded as far as the last event knows: set at once,
+  // where the state above waits for a render, so a press right after the
+  // pointer moved onto the share (which woke it) is not taken for a waking one.
+  const idleNow = useRef(false);
+  const wake = useCallback(() => {
+    idleNow.current = false;
+    setIdle(false);
+    if (idleTimer.current !== null) window.clearTimeout(idleTimer.current);
+    idleTimer.current = window.setTimeout(() => { idleNow.current = true; setIdle(true); }, controlsIdleMs);
+  }, []);
+  const swallow = useRef(false);
+  const pointerDown = useRef(false);
+  const controls = useRef<HTMLDivElement>(null);
+  const stillWaking = useRef(false);
+  const wakingTimer = useRef<number | null>(null);
+  const swallowTimer = useRef<number | null>(null);
+  const afterMs = (timer: { current: number | null }, ms: number, then: () => void) => {
+    if (timer.current !== null) window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(then, ms);
+  };
+  const pressDown = (e: PointerEvent) => {
+    // The pop-out is not in the row and never fades: its press is its own.
+    const own = e.target instanceof Element && e.target.closest('.share-pip') !== null;
+    // Only where the row really is faded: the row fades in the single-share
+    // overlay alone (CSS says where), so what the page computes for it, not
+    // the idle timer, decides; elsewhere the first press is the control's.
+    const row = controls.current;
+    const inert = row !== null && getComputedStyle(row).pointerEvents === 'none';
+    if (!own && ((faded && idleNow.current && inert) || stillWaking.current)) {
+      swallow.current = true;
+      stillWaking.current = true;
+      pointerDown.current = true;
+      setWaking(true);
+      afterMs(wakingTimer, 300, () => { stillWaking.current = false; setWaking(false); });
+      // Backstop: a press whose click never comes is forgotten, but not while
+      // the pointer is still down (a long hold is still one press).
+      afterMs(swallowTimer, 1000, () => { if (!pointerDown.current) swallow.current = false; });
+    }
+    wake();
+  };
+  // The click of a waking press is swallowed here, before any control, the
+  // focus button or the picture sees it.
+  const swallowClick = (e: MouseEvent) => {
+    if (!swallow.current) return;
+    swallow.current = false;
+    e.stopPropagation();
+    e.preventDefault();
+  };
+  // A press released anywhere, outside the share too, ends its wait for a click.
+  useEffect(() => {
+    const released = () => {
+      pointerDown.current = false;
+      if (swallow.current) afterMs(swallowTimer, 300, () => { swallow.current = false; });
+    };
+    // A cancelled press (a drag, a lost pointer) is followed by no click.
+    const cancelled = () => {
+      pointerDown.current = false;
+      swallow.current = false;
+    };
+    window.addEventListener('pointerup', released);
+    window.addEventListener('pointercancel', cancelled);
+    window.addEventListener('blur', cancelled);
+    return () => {
+      window.removeEventListener('pointerup', released);
+      window.removeEventListener('pointercancel', cancelled);
+      window.removeEventListener('blur', cancelled);
+    };
+  }, []);
+  useEffect(() => {
+    wake();
+    return () => {
+      if (idleTimer.current !== null) window.clearTimeout(idleTimer.current);
+      if (wakingTimer.current !== null) window.clearTimeout(wakingTimer.current);
+      if (swallowTimer.current !== null) window.clearTimeout(swallowTimer.current);
+    };
+  }, [wake]);
 
   useEffect(() => {
     const v = video.current;
@@ -206,6 +298,9 @@ export function ShareView({
 
   const tracks = arrived ?? { video: false, audio: false };
   const hasSound = tracks.audio;
+  // The controls stay shown while the share is not playing: waiting for the
+  // picture or the stream, or for the tap that starts the sound.
+  const faded = idle && tracks.video && !reconnecting && !(blocked && hasSound);
   useEffect(() => {
     const a = sound.current;
     if (!hasSound || a === null) return;
@@ -242,7 +337,7 @@ export function ShareView({
   ) : null;
 
   return (
-    <section aria-label="Shared screen" className="share-view">
+    <section aria-label="Shared screen" className={`share-view${faded ? ' idle' : ''}${waking ? ' waking' : ''}`} onPointerMove={wake} onPointerDown={pressDown} onClickCapture={swallowClick}>
       <p className="share-title">
         <Glyph name="screen" />
         {name} · {reconnecting ? 'Reconnecting' : 'LIVE'}{quality === null || quality === undefined ? null : <> · {quality}</>}{audio ? ' · with sound' : ''}
@@ -257,11 +352,14 @@ export function ShareView({
             #1028). The compact row scrolls rather than wraps, and the
             thumbnail is too small to carry it, so there it is in the row. */}
         {compact ? null : popOut}
+        {/* The tap that starts the sound is the picture's, centred on it; the
+            compact row keeps it among its controls. */}
+        {!compact && blocked && hasSound ? <button type="button" className="primary share-tap" onClick={tapToPlay}>Tap to play sound</button> : null}
       </div>
       <audio ref={sound} autoPlay aria-label={`${name}'s stream audio`} />
-      <div className="share-controls">
+      <div ref={controls} className="share-controls">
         <button type="button" aria-pressed={muted} onClick={() => { setMuted(!muted); }}>
-          <Glyph name="speaker" />
+          <Glyph name={muted ? 'speakerOff' : 'speaker'} />
           <span className="label">{muted ? 'Unmute share' : 'Mute share'}</span>
         </button>
         {compact ? null : (
@@ -281,12 +379,107 @@ export function ShareView({
           </>
         )}
         {compact ? popOut : null}
-        <button type="button" onClick={() => { client.watchStream(principal, false); }}>Stop watching</button>
+        <button type="button" className="stop" onClick={() => { client.watchStream(principal, false); }}>
+          <Glyph name="close" />
+          <span className="label">Stop watching</span>
+        </button>
         {onToggleLayout === undefined ? null : <button type="button" className="call-layout" aria-pressed={compact} onClick={onToggleLayout}>{compact ? 'Expand' : 'Compact'}</button>}
-        {blocked && hasSound ? <button type="button" className="primary" onClick={tapToPlay}>Tap to play sound</button> : null}
+        {compact && blocked && hasSound ? <button type="button" className="primary" onClick={tapToPlay}>Tap to play sound</button> : null}
       </div>
       {pip.failed ? <p role="status" className="hint">Picture-in-picture could not open. Try again when the picture is playing.</p> : null}
       {state.deafened && hasSound ? <p className="hint">Deafened: the share&apos;s sound is off too.</p> : null}
+    </section>
+  );
+}
+
+// Whether the sharer hides the preview of their own screen (#2197): kept for
+// this page session, in memory, not stored. One sharer tile exists at a time,
+// but it moves between the grid, the strip and the stage, which draw it again,
+// so the choice is the module's and not the tile's.
+let previewHidden = false;
+const previewListeners = new Set<() => void>();
+const setPreviewHidden = (hidden: boolean): void => {
+  previewHidden = hidden;
+  for (const listener of previewListeners) listener();
+};
+// Whether the preview is hidden now: it is the choice of the sharer's tile in
+// every layout, so it is read from the page session's one place.
+export function useSharePreviewHidden(): boolean {
+  return useSyncExternalStore(
+    (listener) => {
+      previewListeners.add(listener);
+      return () => { previewListeners.delete(listener); };
+    },
+    () => previewHidden,
+  );
+}
+// For tests: the page session starts again.
+export function resetSharePreview(): void {
+  setPreviewHidden(false);
+}
+
+// What the sharer's tile needs of the client.
+export type SelfShareClient = Pick<VoiceClient, 'attachShareSelf' | 'stopShare' | 'shareSurface'>;
+
+// What the capture is of, in the sharer's title: the thumbnail is too small to
+// tell two similar windows apart, so the title says the kind of surface. Left
+// out when the browser does not say.
+export function surfaceWords(surface: ShareSurface | null): string | null {
+  switch (surface) {
+    case 'monitor': return 'your entire screen';
+    case 'window': return 'a window';
+    case 'browser': return 'a tab';
+    default: return null;
+  }
+}
+
+// SelfShareView is the sharer's own tile (#2197): a small live preview of the
+// outgoing screen beside the title and the controls, so they can see what they
+// are sharing. The picture is the raw local capture, muted (the sharing sound
+// is never played back) and with no subscription or upload of its own; the
+// client follows it through the capture's stopping or replacing, so no frame is
+// left after Stop sharing. The title names the kind of surface shared. Hide
+// preview collapses the tile to the title and Stop sharing. None of a watched
+// share's controls (mute, volume, full screen, pop out) applies to one's own
+// share, so none wakes or fades. The tile is the container its toggle is sized
+// by: icon alone when it is narrow (CSS).
+export function SelfShareView({ client, quality, compact = false }: {
+  readonly client: SelfShareClient;
+  // In the compact strip the toggle is an icon (its name is the same, its
+  // title the words); a narrow tile does the same by its own width (CSS), so
+  // that the row does not wrap.
+  readonly compact?: boolean;
+  // The declared quality, as in the watched title.
+  readonly quality?: string | null;
+}) {
+  const hidden = useSharePreviewHidden();
+  const video = useRef<HTMLVideoElement>(null);
+  useEffect(() => {
+    if (hidden) return;
+    client.attachShareSelf(video.current);
+    return () => { client.attachShareSelf(null); };
+  }, [client, hidden]);
+  const label = hidden ? 'Show preview' : 'Hide preview';
+  const surface = surfaceWords(client.shareSurface());
+  const words = `You · LIVE${surface === null ? '' : ` · ${surface}`}${quality === null || quality === undefined ? '' : ` · ${quality}`}`;
+  return (
+    <section aria-label="Your stream" className={`share-view own${hidden ? '' : ' self'}`}>
+      <p className="share-title">
+        <Glyph name="screen" />
+        <span className="share-words" title={words}>{words}</span>
+      </p>
+      {hidden ? null : (
+        <div className="share-frame">
+          <video ref={video} aria-label="Preview of your screen" playsInline autoPlay muted />
+        </div>
+      )}
+      <div className="share-controls">
+        <button type="button" onClick={() => { client.stopShare(); }}>Stop sharing</button>
+        <button type="button" className={`preview-toggle${compact ? ' icon' : ''}`} aria-label={`${label} of your screen`} title={label} onClick={() => { setPreviewHidden(!hidden); }}>
+          <Glyph name={hidden ? 'eye' : 'eyeOff'} />
+          <span className="words">{label}</span>
+        </button>
+      </div>
     </section>
   );
 }

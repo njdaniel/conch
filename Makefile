@@ -53,6 +53,7 @@ invisible-check:
 	./scripts/ci-docs-only-test.sh
 	./scripts/mobile-rows-check-test.sh
 	./scripts/mobile-rows-check.sh
+	python3 ./scripts/linux-mic-capture-status-test.py
 
 # The Rust voice client under voice/ (ADR-006): fmt, clippy, tests, the
 # dependency gate and cargo-deny, with the pinned toolchain. Fetch that once
@@ -82,6 +83,7 @@ web-node:
 
 web-check: web-node
 	./scripts/web-gates-test.sh
+	./scripts/pwa-manifest-check-test.sh
 	./scripts/web-depgate.sh
 	./scripts/web-licences.sh
 	cd web && npm ci --no-audit
@@ -131,6 +133,7 @@ desktop-check: desktop-node
 	./scripts/desktop-electron-test.sh
 	./scripts/desktop-lint-test.sh
 	./scripts/desktop-voice-helper-test.sh
+	./scripts/test-desktop-launch-linux-dev.sh
 	./scripts/desktop-version-test.sh
 	./scripts/desktop-release-guard-test.sh
 	./scripts/desktop-deb-test.sh
@@ -224,6 +227,7 @@ p3-reset:
 # Not part of `build`: conchd and conch need no Node.
 web-build: web-node
 	cd web && npm ci --no-audit && npm run build
+	node scripts/pwa-manifest-check.mjs
 
 # Copies the build into internal/web/dist, which a conchd built with
 # -tags conchweb embeds. internal/web/dist is git-ignored. Not part of `build`.

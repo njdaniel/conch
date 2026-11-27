@@ -87,6 +87,12 @@ function openEditor(id: number): HTMLTextAreaElement {
   return box(id) as HTMLTextAreaElement;
 }
 
+function openReply(id: number) {
+  const row = within1(id);
+  fireEvent.click(row.getByRole('button', { name: /^More actions for / }));
+  fireEvent.click(row.getByRole('menuitem', { name: 'Reply' }));
+}
+
 // Copy actions remain even when Edit is unavailable (#1833).
 function expectNoEdit(id: number) {
   const button = more(id);
@@ -150,7 +156,7 @@ describe('the actions menu', () => {
     const menu = screen.getByRole('menu', { name: moreName });
     expect(document.activeElement).toBe(within(menu).getByRole('menuitem', { name: 'Edit' }));
     fireEvent.keyDown(menu, { key: 'ArrowDown' });
-    expect(document.activeElement).toBe(within(menu).getByRole('menuitem', { name: 'Copy link' }));
+    expect(document.activeElement).toBe(within(menu).getByRole('menuitem', { name: 'Reply' }));
     fireEvent.keyDown(menu, { key: 'Escape' });
     expect(screen.queryByRole('menu')).toBeNull();
     expect(document.activeElement).toBe(button);
@@ -710,7 +716,7 @@ describe('Up from the composer', () => {
     vi.spyOn(api, 'loadThread').mockResolvedValueOnce({ ok: true, value: { messages: [root, reply], next_after: 2 } })
       .mockResolvedValue({ ok: false, failure: 'invalid', code: 'thread_not_found' });
     render(conversation([root, msg(3)]));
-    fireEvent.click(screen.getByRole('button', { name: /^Reply to bea/ }));
+    openReply(root.id);
     const thread = screen.getByRole('region', { name: /^Thread around/ });
     await within(thread).findByText('text 2');
     fireEvent.keyDown(within(thread).getByRole('textbox', { name: 'Reply to bea' }), { key: 'ArrowUp' });
@@ -733,7 +739,7 @@ describe('Up from the composer', () => {
     const reply = msg(2, { thread_root_id: 1 });
     vi.spyOn(api, 'loadThread').mockResolvedValue({ ok: true, value: { messages: [root, reply] } });
     render(conversation([root, reply]));
-    fireEvent.click(screen.getByRole('button', { name: /^Reply to bea/ }));
+    openReply(root.id);
     const thread = screen.getByRole('region', { name: /^Thread around/ });
     await within(thread).findByText('text 2');
     const replyBox = within(thread).getByRole('textbox', { name: 'Reply to bea' });
@@ -760,7 +766,7 @@ describe('Up from the composer', () => {
     render(conversation([root, msg(3)]));
     const editor = openEditor(3);
     fireEvent.change(editor, { target: { value: 'unsaved channel text' } });
-    fireEvent.click(screen.getByRole('button', { name: /^Reply to bea/ }));
+    openReply(root.id);
     const thread = screen.getByRole('region', { name: /^Thread around/ });
     await within(thread).findByText('text 2');
     const replyBox = within(thread).getByRole('textbox', { name: 'Reply to bea' });
@@ -783,7 +789,7 @@ describe('Up from the composer', () => {
     vi.spyOn(api, 'loadThread').mockResolvedValue({ ok: true, value: { messages: [root, reply] } });
     vi.spyOn(api, 'editMessage').mockResolvedValue({ ok: false, failure: 'refused', code });
     render(conversation([root]));
-    fireEvent.click(screen.getByRole('button', { name: /^Reply to bea/ }));
+    openReply(root.id);
     const thread = screen.getByRole('region', { name: /^Thread around/ });
     await within(thread).findByText('text 2');
     fireEvent.keyDown(within(thread).getByRole('textbox', { name: 'Reply to bea' }), { key: 'ArrowUp' });
@@ -800,7 +806,7 @@ describe('Up from the composer', () => {
     const onEdited = vi.fn();
     vi.spyOn(api, 'editMessage').mockResolvedValue({ ok: true, message: { ...reply, body: 'fixed', edited_at: new Date().toISOString() } });
     render(conversation([root, msg(3)], { onEdited }));
-    fireEvent.click(screen.getByRole('button', { name: /^Reply to bea/ }));
+    openReply(root.id);
     const thread = screen.getByRole('region', { name: /^Thread around/ });
     await within(thread).findByText('text 2');
     const replyBox = within(thread).getByRole('textbox', { name: 'Reply to bea' });

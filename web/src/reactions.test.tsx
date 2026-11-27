@@ -1,16 +1,41 @@
+import { useRef, useState } from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from './api';
-import { ReactionBar, ReactionScope } from './Reactions';
+import { ActionsMenu } from './MessageMenu';
+import { ReactionBar, ReactionScope, useReactionPicker } from './Reactions';
 import { reactionSummarySchema, type ReactionSummaryV1 } from './schema/reaction';
 vi.mock('./api', () => ({ readReactions: vi.fn(), listReactors: vi.fn(), writeReaction: vi.fn(), moderateReaction: vi.fn(), watchReactions: vi.fn(), whoAmI: vi.fn(), listMembers: vi.fn(), channelNotFound: 'channel_not_found' }));
 let receive: (event: api.ReactionEvent) => void;
 const sum = (count = 1, me = true, at = '2026-11-06T10:00:00Z'): ReactionSummaryV1 => ({ schema: reactionSummarySchema, channel_id: 2, message_id: 4, as_of: at, reactions: count > 0 ? [{ emoji: '👍', count, me }] : [] });
 const people = new Map([[7, { name: 'Ada', kind: 'human' as const }]]);
 const unauthorized = vi.fn();
-const view = (channel = 'general', ids = [4]) => <ReactionScope key={channel} channel={channel} channelId={2} ids={ids} onUnauthorized={unauthorized}><ReactionBar id={4} channel={channel} label="Ada's message" people={people} onUnauthorized={unauthorized} /></ReactionScope>;
+function MessageReactions({ channel }: { readonly channel: string }) {
+  const button = useRef<HTMLButtonElement>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const { addReaction, picker } = useReactionPicker(4, true, button);
+  const items = [
+    { key: 'copy', label: 'Copy link', onSelect: () => undefined },
+    ...(addReaction === undefined ? [] : [addReaction]),
+  ];
+  return (
+    <li data-message-id="4" tabIndex={0}>
+      <ActionsMenu label="More actions for Ada's message" items={items} open={menuOpen} onOpenChange={setMenuOpen} button={button} />
+      <ReactionBar id={4} channel={channel} label="Ada's message" people={people} onUnauthorized={unauthorized} picker={picker} />
+    </li>
+  );
+}
+const view = (channel = 'general', ids = [4]) => <ReactionScope key={channel} channel={channel} channelId={2} ids={ids} onUnauthorized={unauthorized}><MessageReactions channel={channel} /></ReactionScope>;
 const chip = () => screen.getByRole('button', { name: /thumbs up: \d+ reaction/ });
-const add = () => screen.getByRole('button', { name: "Add reaction to Ada's message" });
+const more = () => screen.getByRole('button', { name: "More actions for Ada's message" });
+const add = () => screen.getByRole('menuitem', { name: 'Add reaction' });
+function openActions() {
+  if (more().getAttribute('aria-expanded') !== 'true') fireEvent.click(more());
+}
+async function readyToAdd() {
+  openActions();
+  await waitFor(() => { expect(add().getAttribute('aria-disabled')).toBeNull(); });
+}
 beforeEach(() => {
   vi.resetAllMocks();
   vi.mocked(api.watchReactions).mockImplementation((_channel, _id, listener) => { receive = listener; return vi.fn(); });
@@ -25,18 +50,16 @@ describe('reaction controls', () => {
   it.each(['success', 'rollback'] as const)('moves focus before optimistic last-chip removal and keeps it after %s', async (result) => {
     let finish!: (result: api.ApiResult<ReactionSummaryV1>) => void;
     vi.mocked(api.writeReaction).mockReturnValue(new Promise((resolve) => { finish = resolve; }));
-    render(<li data-message-id="4" tabIndex={0}>{view()}</li>);
+    render(view());
     const button = await screen.findByRole('button', { name: 'thumbs up: 1 reaction' });
     button.focus();
     // jsdom does not synthesize a button click from Enter; exercise its activation.
     fireEvent.click(button);
     expect(screen.queryByRole('button', { name: /thumbs up:/ })).toBeNull();
-    expect(document.activeElement).toBe(add());
+    expect(document.activeElement).toBe(screen.getByRole('listitem'));
     expect(document.querySelector('.reactions')).toBeNull();
     await act(async () => { finish(result === 'success' ? { ok: true, value: sum(0) } : { ok: false, failure: 'network' }); await Promise.resolve(); });
     expect(screen.queryByRole('button', { name: /thumbs up:/ }) !== null).toBe(result === 'rollback');
-    expect(document.activeElement).toBe(add());
-    fireEvent.keyDown(add(), { key: 'Escape' });
     expect(document.activeElement).toBe(screen.getByRole('listitem'));
   });
   it.each(['chip', 'list'] as const)('moves focus before authoritative removal of the focused %s', async (control) => {
@@ -45,21 +68,22 @@ describe('reaction controls', () => {
     (control === 'chip' ? chip() : screen.getByRole('button', { name: 'Who reacted with thumbs up' })).focus();
     act(() => { receive({ kind: 'summary', summary: sum(0, false, '2026-11-06T10:00:01Z') }); });
     expect(screen.queryByRole('button', { name: /thumbs up:/ })).toBeNull();
-    expect(document.activeElement).toBe(add());
+    expect(document.activeElement).toBe(screen.getByRole('listitem'));
   });
   it('falls back to the message when removal also disables Add reaction', async () => {
-    render(<li data-message-id="4" tabIndex={0}>{view()}</li>);
+    render(view());
     (await screen.findByRole('button', { name: 'thumbs up: 1 reaction' })).focus();
     act(() => { receive({ kind: 'closed' }); });
-    expect(add().hasAttribute('disabled')).toBe(true);
     expect(document.activeElement).toBe(screen.getByRole('listitem'));
+    openActions();
+    expect(add().getAttribute('aria-disabled')).toBe('true');
   });
   it('does not move focus when an authoritative removal affects another control', async () => {
     render(view());
     await screen.findByRole('button', { name: 'thumbs up: 1 reaction' });
-    add().focus();
+    more().focus();
     act(() => { receive({ kind: 'summary', summary: sum(0, false, '2026-11-06T10:00:01Z') }); });
-    expect(document.activeElement).toBe(add());
+    expect(document.activeElement).toBe(more());
   });
   it('names the emoji, shows pressed/loading state and serializes duplicate touches', async () => {
     let resolve: (result: api.ApiResult<ReactionSummaryV1>) => void = () => undefined;
@@ -68,18 +92,21 @@ describe('reaction controls', () => {
     await waitFor(() => { expect(chip().getAttribute('aria-pressed')).toBe('true'); });
     fireEvent.touchStart(chip()); fireEvent.touchEnd(chip()); fireEvent.click(chip());
     expect(screen.getByText('Saving reaction…')).toBeTruthy();
+    openActions();
     fireEvent.click(add());
     expect(api.writeReaction).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('dialog')).toBeNull();
     await act(async () => { resolve({ ok: true, value: sum(0) }); await Promise.resolve(); });
     expect(screen.queryByRole('button', { name: /thumbs up:/ })).toBeNull();
   });
   it('opens the shared picker, Escape restores focus, and choosing adds only the viewer', async () => {
     render(view());
-    await waitFor(() => { expect(add().hasAttribute('disabled')).toBe(false); });
-    add().focus(); fireEvent.click(add());
+    await readyToAdd();
+    fireEvent.click(add());
     expect(document.activeElement).toBe(screen.getByRole('searchbox'));
     fireEvent.keyDown(screen.getByRole('searchbox'), { key: 'Escape' });
-    expect(document.activeElement).toBe(add());
+    expect(document.activeElement).toBe(more());
+    openActions();
     fireEvent.click(add());
     fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'red heart' } });
     await screen.findByRole('button', { name: 'red heart' });
@@ -90,19 +117,20 @@ describe('reaction controls', () => {
     let finish!: (result: api.ApiResult<ReactionSummaryV1>) => void;
     vi.mocked(api.writeReaction).mockReturnValue(new Promise((resolve) => { finish = resolve; }));
     render(view());
-    await waitFor(() => { expect(add().hasAttribute('disabled')).toBe(false); });
+    await readyToAdd();
     fireEvent.click(add());
     fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'thumbs up' } });
     await screen.findByRole('button', { name: /^thumbs up$/ });
     fireEvent.keyDown(screen.getByRole('searchbox'), { key: 'Enter' });
-    expect(document.activeElement).toBe(add());
+    expect(document.activeElement).toBe(more());
+    openActions();
     expect(add().getAttribute('aria-disabled')).toBe('true');
-    expect(add().hasAttribute('disabled')).toBe(false);
     fireEvent.click(add());
     expect(screen.queryByRole('dialog')).toBeNull();
+    fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
     await act(async () => { finish({ ok: true, value: sum(2) }); await Promise.resolve(); });
-    expect(document.activeElement).toBe(add());
-    expect(add().getAttribute('aria-disabled')).toBe('false');
+    expect(document.activeElement).toBe(more());
+    await readyToAdd();
   });
   it('replaces optimistic state with a live summary before the write answers', async () => {
     vi.mocked(api.writeReaction).mockReturnValue(new Promise(() => undefined));
@@ -151,17 +179,20 @@ describe('reaction controls', () => {
     act(() => { receive({ kind: 'closed' }); });
     expect(screen.queryByRole('dialog')).toBeNull();
     act(() => { receive({ kind: 'open' }); });
-    await waitFor(() => { expect(add().hasAttribute('disabled')).toBe(false); });
+    await readyToAdd();
     expect(screen.queryByRole('button', { name: /thumbs up:/ })).toBeNull();
   });
   it('hides unsupported server controls and preserves schema refusals as errors', async () => {
     vi.mocked(api.readReactions).mockResolvedValueOnce({ ok: false, failure: 'invalid', code: 'reactions_unsupported' });
     const rendered = render(view());
     await waitFor(() => { expect(screen.queryByRole('group')).toBeNull(); });
+    openActions();
+    expect(screen.queryByRole('menuitem', { name: 'Add reaction' })).toBeNull();
     vi.mocked(api.readReactions).mockResolvedValue({ ok: false, failure: 'invalid', code: 'message_not_found' });
     rendered.rerender(view('other'));
     await screen.findByRole('button', { name: 'Retry reaction' });
-    expect(add()).toBeTruthy();
+    openActions();
+    expect(add().getAttribute('aria-disabled')).toBe('true');
   });
   it('bounds hydration and drops answers after switching channel', async () => {
     let done: (result: api.ApiResult<import('./schema/reaction').ReactionSummariesResponseV1>) => void = () => undefined;
@@ -171,7 +202,7 @@ describe('reaction controls', () => {
     vi.mocked(api.readReactions).mockResolvedValue({ ok: true, value: { summaries: [] } });
     rendered.rerender(view('other'));
     await act(async () => { done({ ok: true, value: { summaries: [sum()] } }); await Promise.resolve(); });
-    await waitFor(() => { expect(add().hasAttribute('disabled')).toBe(false); });
+    await readyToAdd();
     expect(screen.queryByRole('button', { name: /thumbs up:/ })).toBeNull();
   });
 });
@@ -197,7 +228,8 @@ it('does not merge a write response arriving after disconnect', async () => {
   act(() => { receive({ kind: 'closed' }); });
   await act(async () => { finish({ ok: true, value: sum(5) }); await Promise.resolve(); });
   expect(screen.queryByRole('button', { name: /thumbs up:/ })).toBeNull();
-  expect(add().hasAttribute('disabled')).toBe(true);
+  openActions();
+  expect(add().getAttribute('aria-disabled')).toBe('true');
 });
 
 it('keeps rate-limited retries disabled for the server wait', async () => {
@@ -209,8 +241,11 @@ it('keeps rate-limited retries disabled for the server wait', async () => {
     expect(screen.getByText(/Try again after 8 seconds/)).toBeTruthy();
     const retry = screen.getByRole('button', { name: 'Retry reaction' });
     expect(retry.hasAttribute('disabled')).toBe(true);
+    openActions();
+    expect(add().getAttribute('aria-disabled')).toBe('true');
     act(() => { vi.advanceTimersByTime(8000); });
     expect(retry.hasAttribute('disabled')).toBe(false);
+    expect(add().getAttribute('aria-disabled')).toBeNull();
   } finally { vi.useRealTimers(); }
 });
 
@@ -224,7 +259,7 @@ it('hydrates every history page in bounded batches', async () => {
 
 it('confirms frames after an unversioned empty batch before showing counts again', async () => {
   vi.mocked(api.readReactions).mockResolvedValue({ ok: true, value: { summaries: [] } });
-  render(view()); await waitFor(() => { expect(add().hasAttribute('disabled')).toBe(false); });
+  render(view()); await readyToAdd();
   act(() => { receive({ kind: 'summary', summary: sum(3) }); });
   await waitFor(() => { expect(api.readReactions).toHaveBeenCalledTimes(2); });
   expect(screen.queryByRole('button', { name: /thumbs up:/ })).toBeNull();
@@ -238,7 +273,7 @@ it.each([0, 2])('reconciles the newest buffered frame (%i) after a confirming re
   let finish!: (result: Awaited<ReturnType<typeof api.readReactions>>) => void;
   vi.mocked(api.readReactions).mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
   render(view());
-  await waitFor(() => { expect(add().hasAttribute('disabled')).toBe(false); });
+  await readyToAdd();
   act(() => { receive({ kind: 'summary', summary: sum(1) }); });
   await waitFor(() => { expect(api.readReactions).toHaveBeenCalledTimes(2); });
   act(() => {
@@ -255,7 +290,7 @@ it('does not let a superseded read clear the current confirmation', async () => 
   const finishes: ((result: Awaited<ReturnType<typeof api.readReactions>>) => void)[] = [];
   vi.mocked(api.readReactions).mockImplementation(() => new Promise((resolve) => { finishes.push(resolve); }));
   const rendered = render(view());
-  await waitFor(() => { expect(add().hasAttribute('disabled')).toBe(false); });
+  await readyToAdd();
   act(() => { receive({ kind: 'summary', summary: sum(1) }); });
   await waitFor(() => { expect(finishes).toHaveLength(1); });
   rendered.rerender(view('general', [4, 5]));
@@ -282,8 +317,8 @@ it.each([
 
 it('makes reaction controls tabbable outside the main log', async () => {
   render(view());
-  await waitFor(() => { expect(add().hasAttribute('disabled')).toBe(false); });
-  expect(add().tabIndex).toBe(0);
+  await screen.findByRole('button', { name: 'thumbs up: 1 reaction' });
+  expect(more().tabIndex).toBe(0);
   expect(chip().tabIndex).toBe(0);
 });
 
@@ -293,7 +328,7 @@ it('reconfirms a newer buffered frame when the confirming batch omits the messag
   vi.mocked(api.readReactions).mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
   vi.mocked(api.readReactions).mockResolvedValue({ ok: true, value: { summaries: [sum(2, false, '2026-11-06T10:00:03Z')] } });
   render(view());
-  await waitFor(() => { expect(add().hasAttribute('disabled')).toBe(false); });
+  await readyToAdd();
   act(() => { receive({ kind: 'summary', summary: sum(1) }); });
   await waitFor(() => { expect(api.readReactions).toHaveBeenCalledTimes(2); });
   act(() => { receive({ kind: 'summary', summary: sum(2, false, '2026-11-06T10:00:02Z') }); });

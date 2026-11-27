@@ -27,6 +27,8 @@ export const VOICE_CONTROL_MAX_VERSIONS = 8;
 export const VOICE_CONTROL_MAX_HELPER_VERSION_BYTES = 64;
 export const VOICE_CONTROL_MAX_SERVER_BYTES = 1024;
 export const VOICE_CONTROL_MAX_CHANNEL_BYTES = 400;
+export const VOICE_CONTROL_MAX_SHARE_AUDIO_STREAMS = 50;
+export const VOICE_CONTROL_MAX_SHARE_AUDIO_LABEL_BYTES = 24;
 export const VOICE_CONTROL_MAX_RETRY_IN_MS = 600000;
 export const VOICE_CONTROL_V4_MIN_LEVEL_DB = -96;
 export const VOICE_CONTROL_V4_MAX_LOSS_BASIS_POINTS = 10000;
@@ -1457,6 +1459,87 @@ export const voicePresenceV2 = object<VoicePresenceV2>({
   camera_ended: optional(voiceCameraEnded),
 });
 
+// schema.VoiceShareResolutionV3
+export type VoiceShareResolutionV3 = '480p' | '720p' | '1080p' | '1440p' | 'source';
+
+export const voiceShareResolutionV3 = vocab<VoiceShareResolutionV3>({
+  '480p': true,
+  '720p': true,
+  '1080p': true,
+  '1440p': true,
+  source: true,
+});
+
+// schema.VoiceShareQualityV3
+export interface VoiceShareQualityV3 {
+  resolution: VoiceShareResolutionV3;
+  frame_rate: number;
+}
+
+export const voiceShareQualityV3 = object<VoiceShareQualityV3>({
+  resolution: voiceShareResolutionV3,
+  frame_rate: int,
+});
+
+// schema.VoiceParticipantV3
+export interface VoiceParticipantV3 {
+  principal_id: number;
+  can_publish: boolean;
+  transmitting: boolean;
+  joined_at: string;
+  sharing?: boolean;
+  sharing_audio?: boolean;
+  share_started_at?: string;
+  share_quality?: VoiceShareQualityV3;
+  camera?: boolean;
+}
+
+export const voiceParticipantV3 = object<VoiceParticipantV3>({
+  principal_id: int,
+  can_publish: bool,
+  transmitting: bool,
+  joined_at: timestamp,
+  sharing: optional(bool),
+  sharing_audio: optional(bool),
+  share_started_at: optional(timestamp),
+  share_quality: optional(voiceShareQualityV3),
+  camera: optional(bool),
+});
+
+// schema.VoicePresenceRoomV3
+export interface VoicePresenceRoomV3 {
+  audience?: Audience;
+  participants: VoiceParticipantV3[];
+}
+
+export const voicePresenceRoomV3 = object<VoicePresenceRoomV3>({
+  audience: optional(audience),
+  participants: array(voiceParticipantV3),
+});
+
+// schema.VoicePresenceV3
+export const voicePresenceV3Schema = 'conch.voice_presence.v3';
+
+export interface VoicePresenceV3 {
+  schema: typeof voicePresenceV3Schema;
+  channel_id: number;
+  configured: boolean;
+  available: boolean;
+  rooms: VoicePresenceRoomV3[];
+  share_ended?: VoiceShareEnded;
+  camera_ended?: VoiceCameraEnded;
+}
+
+export const voicePresenceV3 = object<VoicePresenceV3>({
+  schema: vocab<typeof voicePresenceV3Schema>({ [voicePresenceV3Schema]: true }),
+  channel_id: int,
+  configured: bool,
+  available: bool,
+  rooms: array(voicePresenceRoomV3),
+  share_ended: optional(voiceShareEnded),
+  camera_ended: optional(voiceCameraEnded),
+});
+
 // schema.VoiceTransmitState
 export type VoiceTransmitState = 'started' | 'stopped';
 
@@ -1589,6 +1672,30 @@ export const voiceShareV2 = object<VoiceShareV2>({
   started_at: timestamp,
   audio: bool,
   quality: voiceShareQuality,
+});
+
+// schema.VoiceShareRequestV2
+export interface VoiceShareRequestV2 {
+  quality?: VoiceShareQualityV3;
+}
+
+export const voiceShareRequestV2 = object<VoiceShareRequestV2>({
+  quality: optional(voiceShareQualityV3),
+});
+
+// schema.VoiceShareV3
+export interface VoiceShareV3 {
+  principal_id: number;
+  started_at: string;
+  audio: boolean;
+  quality: VoiceShareQualityV3;
+}
+
+export const voiceShareV3 = object<VoiceShareV3>({
+  principal_id: int,
+  started_at: timestamp,
+  audio: bool,
+  quality: voiceShareQualityV3,
 });
 
 // schema.VoiceCameraV1
@@ -2438,6 +2545,47 @@ export const voiceControlAckV3 = object<VoiceControlAckV3>({
   error: optional(voiceControlErrorCode),
 });
 
+// schema.VoiceControlShareAudioStreamReason
+export type VoiceControlShareAudioStreamReason =
+  | 'captured'
+  | 'call_playback'
+  | 'conch_client'
+  | 'conch_application'
+  | 'conch_name'
+  | 'unknown_owner'
+  | 'missing_target'
+  | 'awaiting_application'
+  | 'wrong_format'
+  | 'stream_ended'
+  | 'format_not_supported';
+
+export const voiceControlShareAudioStreamReason = vocab<VoiceControlShareAudioStreamReason>({
+  captured: true,
+  call_playback: true,
+  conch_client: true,
+  conch_application: true,
+  conch_name: true,
+  unknown_owner: true,
+  missing_target: true,
+  awaiting_application: true,
+  wrong_format: true,
+  stream_ended: true,
+  format_not_supported: true,
+});
+
+// schema.VoiceControlShareAudioStreamV3
+export interface VoiceControlShareAudioStreamV3 {
+  application: string;
+  media: string;
+  reason: VoiceControlShareAudioStreamReason;
+}
+
+export const voiceControlShareAudioStreamV3 = object<VoiceControlShareAudioStreamV3>({
+  application: str,
+  media: str,
+  reason: voiceControlShareAudioStreamReason,
+});
+
 // schema.VoiceControlShareAudio
 export type VoiceControlShareAudio = 'off' | 'on' | 'unavailable';
 
@@ -2490,6 +2638,7 @@ export interface VoiceControlStateV3 {
   share_audio_muted: boolean;
   share_audio_problem?: VoiceControlShareAudioProblem;
   share_audio_sources: number;
+  share_audio_streams?: VoiceControlShareAudioStreamV3[];
 }
 
 export const voiceControlStateV3 = object<VoiceControlStateV3>({
@@ -2512,6 +2661,7 @@ export const voiceControlStateV3 = object<VoiceControlStateV3>({
   share_audio_muted: bool,
   share_audio_problem: optional(voiceControlShareAudioProblem),
   share_audio_sources: int,
+  share_audio_streams: optional(array(voiceControlShareAudioStreamV3)),
 });
 
 // schema.VoiceControlProtocolErrorV3

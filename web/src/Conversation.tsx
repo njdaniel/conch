@@ -5,7 +5,7 @@ import { ModerationConfirm, useMayModerate, useMayRemoveOwn, useTombstones } fro
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import * as api from './api';
 import { archivedLine } from './archived';
-import { ReactionBar, ReactionScope, useHasReactions } from './Reactions';
+import { ReactionBar, ReactionScope, useReactionPicker } from './Reactions';
 import { Composer } from './Composer';
 import { guestName } from './guestName';
 import { Avatar, PrivateMark } from './Icons';
@@ -29,7 +29,7 @@ import { canLoadOlder, editsKnown, isLater, lastId, oldestId, ordered } from './
 import type { LiveStatus, Person } from './useLiveChannel';
 import { mentions } from './useNotifications';
 import { useAuthorNames } from './useAuthorNames';
-import { timeOf } from './time';
+import { dateOf, dateTimeOf, sameLocalDay, timeOf } from './time';
 import { fromServer } from './schema/validate';
 
 // The time of day, in the reader's own locale and time zone (time.ts).
@@ -93,7 +93,7 @@ const sameRun = 5 * 60 * 1000;
 const authorMarks: readonly IdentityKey[] = ['agent', 'manager', 'operator'];
 
 function Line({
-  time,
+  at,
   author,
   authorId,
   person,
@@ -105,7 +105,7 @@ function Line({
   onCardDisappear,
   children,
 }: {
-  readonly time: string;
+  readonly at: string;
   readonly author: string;
   readonly authorId: number;
   readonly person: Person | undefined;
@@ -124,7 +124,7 @@ function Line({
       <Avatar id={authorId} name={author} />
       <div className="msg-head">
         {badge === null ? null : <span className="audience">{badge} </span>}
-        <time>{time}</time> {interactive ? <ProfileCard id={authorId} person={person} viewer={viewer} name={author} className="author" onDisappear={onCardDisappear} /> : <span className="author">{author}</span>}
+        <time dateTime={at} title={dateTimeOf(at)}>{clock(at)}</time> {interactive ? <ProfileCard id={authorId} person={person} viewer={viewer} name={author} className="author" onDisappear={onCardDisappear} /> : <span className="author">{author}</span>}
         <IdentityMarks kind={person?.kind} role={person?.role} manages={person?.manages} only={authorMarks} textForm />
         <span className="vh">: </span>
       </div>
@@ -194,6 +194,7 @@ function ShownMessage({
   stop = false,
   reactionNavigation = false,
   highlighted = false,
+  onJumped,
 }: {
   readonly message: MessageV2;
   readonly people: ReadonlyMap<number, Person>;
@@ -224,8 +225,12 @@ function ShownMessage({
   readonly stop?: boolean;
   readonly reactionNavigation?: boolean;
   readonly highlighted?: boolean;
+  // Told once the highlight has scrolled this row into view (issue #2158).
+  readonly onJumped?: () => void;
 }) {
   const row = useRef<HTMLLIElement>(null);
+  const jumpedNow = useRef(onJumped);
+  jumpedNow.current = onJumped;
   useLayoutEffect(() => {
     const node = row.current;
     return () => { if (node?.contains(document.activeElement) === true) node.focus(); };
@@ -235,7 +240,8 @@ function ShownMessage({
   const mayRemove = mayModerate || mayRemoveOwn;
   const [removing, setRemoving] = useState(false);
   useEffect(() => { if (message.removed === true || !mayRemove) setRemoving(false); }, [message.removed, mayRemove]);
-  const hasReactions = useHasReactions() && message.removed !== true;
+  const more = useRef<HTMLButtonElement>(null);
+  const { addReaction, picker, hasReactionControls } = useReactionPicker(message.id, message.removed !== true, more);
   const who = messageName(message, people);
   const approval = message.removed === true ? null : approvalOf(message);
   const attachments = message.removed === true ? null : attachmentsOf(message);
@@ -263,6 +269,7 @@ function ShownMessage({
     if (!highlighted) return;
     row.current?.scrollIntoView({ block: 'center', behavior: 'instant' });
     row.current?.focus({ preventScroll: true });
+    jumpedNow.current?.();
   }, [highlighted]);
   function copy(kind: 'link' | 'text') {
     if (message.removed === true) return;
@@ -281,19 +288,30 @@ function ShownMessage({
   }
   const items: readonly MenuItem[] = message.removed === true ? [] : [
     ...(editor === undefined ? actions ?? [] : []),
+    ...(onReply === undefined || message.thread_root_id !== undefined ? [] : [{
+      key: 'reply',
+      label: 'Reply',
+      onSelect: () => {
+        const button = more.current;
+        if (button === null) return;
+        onReply(message.id, button);
+        const composer = row.current?.querySelector<HTMLTextAreaElement>(':scope > .thread-view .reply-composer textarea:enabled');
+        (composer ?? button).focus();
+      },
+    }]),
+    ...(addReaction === undefined ? [] : [addReaction]),
     ...(mayRemove ? [{ key: 'remove-message', label: mayRemoveOwn ? 'Remove' : 'Remove message', onSelect: () => { setRemoving(true); } }] : []),
     { key: 'copy-link', label: 'Copy link', onSelect: () => { copy('link'); } },
     { key: 'copy-text', label: 'Copy text', onSelect: () => { copy('text'); } },
   ];
   const [menuOpen, setMenuOpen] = useState(false);
-  const more = useRef<HTMLButtonElement>(null);
   const openers = useOpeners(items.length > 0, () => {
     setMenuOpen(true);
-  });
+  }, { row: 'li[data-message-id], .thread-view' });
   const named = approval === null && editor === undefined && mentions(message.body, people.get(viewer)?.name ?? '');
   const classes = ['message', ...(highlighted ? ['message-linked'] : []), ...(cont ? ['cont'] : []), ...(named ? ['mentions-you'] : []), ...(items.length > 0 ? ['has-actions'] : []), ...(editor === undefined ? [] : ['editing'])];
   return (
-    <li ref={row} className={classes.join(' ')} data-message-id={message.id} tabIndex={stop ? 0 : -1} aria-description={hasReactions && reactionNavigation ? "Use Right Arrow for reaction controls; Left and Right Arrow move between them, Escape returns to the message." : undefined} {...(context === undefined ? {} : { 'aria-describedby': `reply-context-${String(message.id)}` })} {...openers}>
+    <li ref={row} className={classes.join(' ')} data-message-id={message.id} tabIndex={stop ? 0 : -1} aria-description={hasReactionControls && reactionNavigation ? "Use Right Arrow for reaction controls; Left and Right Arrow move between them, Escape returns to the message." : undefined} {...(context === undefined ? {} : { 'aria-describedby': `reply-context-${String(message.id)}` })} {...openers}>
       {named ? <span className="vh">Mentions you. </span> : null}
       {context === undefined ? null : (
         <p className="reply-context" id={`reply-context-${String(message.id)}`}>
@@ -301,7 +319,7 @@ function ShownMessage({
         </p>
       )}
       <Line
-        time={clock(message.created_at)}
+        at={message.created_at}
         author={authorOf(message, people)}
         authorId={message.author_id}
         person={people.get(message.author_id)}
@@ -334,10 +352,7 @@ function ShownMessage({
       {onOpen === undefined ? null : <button type="button" className="search-open" aria-label={`Open context for ${who}`} onClick={() => {
         onOpen(message.id);
       }}>Open context</button>}
-      <ReactionBar enabled={message.removed !== true} logNavigation={reactionNavigation} id={message.id} channel={channel} label={who} people={people} onUnauthorized={onUnauthorized}>
-        {onReply === undefined || message.removed === true || message.thread_root_id !== undefined ? null : <button type="button" className="message-action reply-action" aria-label={`Reply to ${who}`} onClick={(event) => {
-          onReply(message.id, event.currentTarget);
-        }}>Reply</button>}
+      <ReactionBar enabled={message.removed !== true} logNavigation={reactionNavigation} id={message.id} channel={channel} label={who} people={people} onUnauthorized={onUnauthorized} picker={picker}>
         {onOpenThread === undefined || message.thread_root_id === undefined ? null : <button type="button" className="message-action" aria-label={`Open thread for ${who}`} onClick={(event) => {
           onOpenThread(message.thread_root_id as number, event.currentTarget);
         }}>Open thread</button>}
@@ -377,6 +392,7 @@ function replyContext(root: MessageV2 | undefined, people: ReadonlyMap<number, P
 
 function Pending({
   send,
+  after,
   me,
   nets,
   viewer,
@@ -384,6 +400,7 @@ function Pending({
   onDismiss,
 }: {
   readonly send: PendingSend;
+  readonly after: string | number | undefined;
   readonly me: Person;
   readonly nets: ReadonlyMap<number, string>;
   readonly viewer: number;
@@ -395,40 +412,52 @@ function Pending({
     : send.status === 'failed' ? 'Failed'
     : 'Not confirmed: check the conversation before retrying';
   return (
-    <li className="message pending">
-      <Line
-        time={clock(send.at)}
-        author={me.name}
-        authorId={viewer}
-        person={me}
-        viewer={viewer}
-        badge={send.audience === undefined ? null : audienceLabel(send.audience, viewer, nets)}
-        tag={tag}
-        {...(send.status === 'sending' ? {} : { tone: send.status })}
-      >
-        <Linkified text={send.body} />
-      </Line>
-      {send.status === 'sending' ? null : (
-        <div className="msg-actions">
-          {' '}
-          <button
-            type="button"
-            onClick={() => {
-              onRetry(send.localId);
-            }}
-          >
-            Retry
-          </button>{' '}
-          <button
-            type="button"
-            onClick={() => {
-              onDismiss(send.localId);
-            }}
-          >
-            Dismiss
-          </button>
-        </div>
-      )}
+    <>
+      {sameLocalDay(after, send.at) ? null : <DayDivider at={send.at} />}
+      <li className="message pending">
+        <Line
+          at={new Date(send.at).toISOString()}
+          author={me.name}
+          authorId={viewer}
+          person={me}
+          viewer={viewer}
+          badge={send.audience === undefined ? null : audienceLabel(send.audience, viewer, nets)}
+          tag={tag}
+          {...(send.status === 'sending' ? {} : { tone: send.status })}
+        >
+          <Linkified text={send.body} />
+        </Line>
+        {send.status === 'sending' ? null : (
+          <div className="msg-actions">
+            {' '}
+            <button
+              type="button"
+              onClick={() => {
+                onRetry(send.localId);
+              }}
+            >
+              Retry
+            </button>{' '}
+            <button
+              type="button"
+              onClick={() => {
+                onDismiss(send.localId);
+              }}
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+      </li>
+    </>
+  );
+}
+
+function DayDivider({ at }: { readonly at: string | number }) {
+  const date = dateOf(at);
+  return (
+    <li role="presentation">
+      <div className="message-day" role="separator" aria-label={date}>{date}</div>
     </li>
   );
 }
@@ -450,8 +479,9 @@ function continues(before: MessageV2 | undefined, message: MessageV2): boolean {
   return Date.parse(message.created_at) - Date.parse(before.created_at) < sameRun;
 }
 
-function ThreadView({ highlightedId, rootId, root, chat, channel, live, archived, people: known, nets, viewer, draft, onDraft, onClose, onReplySend, onRetrySend, onDismissSend, onUnauthorized, onEditLast, editorFor, notices }: {
+function ThreadView({ highlightedId, onJumped, rootId, root, chat, channel, live, archived, people: known, nets, viewer, draft, onDraft, onClose, onReplySend, onRetrySend, onDismissSend, onUnauthorized, onEditLast, editorFor, notices }: {
   readonly highlightedId: number | null;
+  readonly onJumped?: () => void;
   readonly notices: ReadonlyMap<number, string>;
   readonly onEditLast: (messages: readonly MessageV2[], composer: HTMLTextAreaElement) => boolean;
   readonly editorFor: (message: MessageV2, onSaved: (saved: MessageV2) => void) => ReactNode;
@@ -551,8 +581,13 @@ function ThreadView({ highlightedId, rootId, root, chat, channel, live, archived
         </div>
       ) : null}
       <ol className="messages" aria-label="Root and replies">
-        {messages.map((message) => <Message highlighted={message.id === highlightedId} key={message.id} message={message} people={people} nets={nets} viewer={viewer} channel={channel} sent={message.id === sentMark} cont={false} onUnauthorized={onUnauthorized} notice={notices.get(message.id) ?? null} editor={editorFor(message, (saved) => { setFetched((previous) => previous.map((held) => held.id === saved.id ? saved : held)); })} />)}
-        {pending.map((send) => <Pending key={`local-${String(send.localId)}`} send={send} me={me} nets={nets} viewer={viewer} onRetry={onRetrySend} onDismiss={onDismissSend} />)}
+        {messages.map((message, i) => (
+          <Fragment key={message.id}>
+            {sameLocalDay(messages[i - 1]?.created_at, message.created_at) ? null : <DayDivider at={message.created_at} />}
+            <Message highlighted={message.id === highlightedId} onJumped={onJumped} message={message} people={people} nets={nets} viewer={viewer} channel={channel} sent={message.id === sentMark} cont={false} onUnauthorized={onUnauthorized} notice={notices.get(message.id) ?? null} editor={editorFor(message, (saved) => { setFetched((previous) => previous.map((held) => held.id === saved.id ? saved : held)); })} />
+          </Fragment>
+        ))}
+        {pending.map((send, i) => <Pending key={`local-${String(send.localId)}`} send={send} after={pending[i - 1]?.at ?? messages.at(-1)?.created_at} me={me} nets={nets} viewer={viewer} onRetry={onRetrySend} onDismiss={onDismissSend} />)}
       </ol>
       {nextAfter === undefined ? null : (
         <button type="button" disabled={status === 'loading'} onClick={() => {
@@ -746,15 +781,30 @@ export function Conversation({
   // changes every message's height) can put that message back.
   const view = useRef<{ readonly id: string; readonly offset: number } | null>(null);
   const shownDensity = useRef(density);
-  // The log's height as the observer below last handled it; null before it
+  // The log's size as the observer below last handled it; null before it
   // has, or without one.
-  const sized = useRef<number | null>(null);
+  const sized = useRef<{ readonly width: number; readonly height: number } | null>(null);
   const [unseen, setUnseen] = useState(false);
   const [openThread, setOpenThread] = useState<number | null>(null);
   useEffect(() => {
     const message = highlightedId === null ? undefined : chat.byId.get(highlightedId);
     if (message?.thread_root_id !== undefined) setOpenThread(message.thread_root_id);
   }, [highlightedId, chat.byId]);
+  // A message link scrolls its row into view (Message's highlight effect, in
+  // the log or in a thread shown inline in it), and says so here. Whether the
+  // reader is still at the newest message is read from where the jump left
+  // the log, as onScroll would: the scroll handler ignores a scroll at a
+  // size the resize observer has not handled yet, so a log resize in the
+  // same frame (the voice dock settling, say) would otherwise act on a stale
+  // "at the bottom" and scroll the linked row out of view (issue #2158). A
+  // link to a message already at the bottom keeps the log following.
+  const settleJump = useCallback(() => {
+    const el = log.current;
+    if (el === null) return;
+    atBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight <= nearBottom;
+    onBottom(atBottom.current);
+    if (atBottom.current) setUnseen(false);
+  }, [onBottom]);
   const opener = useRef<HTMLElement | null>(null);
   const threadReturn = useRef<{ readonly root: number; readonly anchor: number | null; readonly opener: HTMLElement | null } | null>(null);
   const openFrom = useCallback((id: number, from: HTMLElement) => {
@@ -794,7 +844,7 @@ export function Conversation({
     threadReturn.current = null;
     const list = log.current;
     const target = back.opener?.isConnected === true ? back.opener
-      : list?.querySelector<HTMLElement>(`[data-message-id="${String(back.root)}"] .reply-action`)
+      : list?.querySelector<HTMLElement>(`[data-message-id="${String(back.root)}"] > .message-menu > .more-actions`)
         ?? list?.querySelector<HTMLElement>(`[data-message-id="${String(back.root)}"]`)
         ?? list?.querySelector<HTMLElement>(`[data-message-id="${String(back.anchor)}"]`);
     target?.focus();
@@ -1026,6 +1076,7 @@ export function Conversation({
   }, [repliesSettled, channelId, viewer, replyDrafts]);
 
   const shown = ordered(chat);
+  const pending = chat.pending.filter((send) => send.threadRootId === undefined);
   // Expanded threads share this channel timeline's mark; they deliberately
   // have no second divider or independent unread position.
   // The reducer retains the opening head across view remounts and live arrivals.
@@ -1183,17 +1234,20 @@ export function Conversation({
     if (held !== null && row !== null) el.scrollTop += row.getBoundingClientRect().top - el.getBoundingClientRect().top - held.offset;
   }, [unreadId]);
 
-  // Anything that changes the log's own height (the whisper picker, the voice
-  // strip, a share's stage) keeps a reader at the newest message there; one
-  // who has scrolled up is left where they are. Browsers without a
-  // ResizeObserver, and jsdom, keep the behaviour above alone.
+  // Changes to the log's height (the whisper picker, the voice strip, a
+  // share's stage) or width (which can re-wrap messages) keep a reader at the
+  // newest message there. A reader who has scrolled up is left where they
+  // are. Browsers without a ResizeObserver, and jsdom, keep the behaviour
+  // above alone.
   useEffect(() => {
     const el = log.current;
     if (el === null || typeof ResizeObserver !== 'function') return;
     sized.current = null;
     const watch = new ResizeObserver(() => {
-      if (el.clientHeight === sized.current) return;
-      sized.current = el.clientHeight;
+      const { clientWidth: width, clientHeight: height } = el;
+      const size = sized.current;
+      if (size !== null && width === size.width && height === size.height) return;
+      sized.current = { width, height };
       if (atBottom.current) el.scrollTop = el.scrollHeight;
     });
     watch.observe(el);
@@ -1295,13 +1349,16 @@ export function Conversation({
         {...(shown.length === 0 ? { tabIndex: 0 } : {})}
         onScroll={(event) => {
           const el = event.currentTarget;
-          // A scroll at a height the observer has not handled yet is the
-          // browser's, not the reader's: Chrome's scroll anchoring puts back
-          // a position it once clamped when the log grew (the voice strip
-          // getting shorter, say) as soon as the log gets shorter again, which
-          // leaves a reader at the newest message more than nearBottom above
-          // it. Whether they were at the bottom is kept for the observer.
-          if (sized.current === null || el.clientHeight === sized.current) {
+          // Chrome's scroll anchoring can move the log before the observer
+          // handles its new size. When the log shrinks or its messages wrap
+          // onto more lines, that scroll can leave a reader more than
+          // nearBottom above the end. Keep their previous at-bottom state
+          // for the observer.
+          // This assumes the log's box is never animated: during a width or
+          // height transition every scroll would land at an unhandled size
+          // and a reader's own scrolling would be ignored until it ends.
+          const size = sized.current;
+          if (size === null || (el.clientWidth === size.width && el.clientHeight === size.height)) {
             atBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight <= nearBottom;
             onBottom(atBottom.current);
             if (atBottom.current) setUnseen(false);
@@ -1333,8 +1390,11 @@ export function Conversation({
             if (item !== null) setLastFocused(Number(item.dataset.messageId));
           }}
         >
-          {shown.map((message, i) => (
-            <Fragment key={message.id}>
+          {shown.map((message, i) => {
+            const before = shown[i - 1];
+            const startsDay = !sameLocalDay(before?.created_at, message.created_at);
+            return <Fragment key={message.id}>
+              {startsDay ? <DayDivider at={message.created_at} /> : null}
               {message.id === unreadId ? (
                 <li className="new-messages-row" role="presentation">
                   <div ref={divider} className="new-messages" role="separator" aria-label="New messages">New messages</div>
@@ -1342,18 +1402,18 @@ export function Conversation({
               ) : null}
               <Message
                 highlighted={message.id === highlightedId && message.thread_root_id === undefined}
+                onJumped={settleJump}
                 stop={message.id === stop}
                 reactionNavigation
                 replies={replyCounts.get(message.id) ?? 0}
                 {...(message.thread_root_id === undefined ? {} : { context: replyContext(chat.byId.get(message.thread_root_id), people) })}
-                key={message.id}
                 message={message}
                 people={people}
                 nets={nets}
                 viewer={viewer}
                 channel={channel}
                 sent={message.id === sentMark}
-                cont={message.id !== unreadId && continues(shown[i - 1], message)}
+                cont={!startsDay && message.id !== unreadId && continues(before, message)}
                 onUnauthorized={onUnauthorized}
                 onReply={openFrom}
                 onOpenThread={openFrom}
@@ -1363,6 +1423,7 @@ export function Conversation({
                 thread={threadAnchor === null || message.id !== threadAnchor ? null : (
                   <ThreadView
                     highlightedId={highlightedId}
+                    onJumped={settleJump}
                     key={openThread}
                     rootId={openThread as number}
                     root={chat.byId.get(openThread as number)}
@@ -1388,10 +1449,10 @@ export function Conversation({
                   />
                 )}
               />
-            </Fragment>
-          ))}
-          {chat.pending.filter((send) => send.threadRootId === undefined).map((send) => (
-            <Pending key={`local-${String(send.localId)}`} send={send} me={me} nets={nets} viewer={viewer} onRetry={onRetrySend} onDismiss={onDismissSend} />
+            </Fragment>;
+          })}
+          {pending.map((send, i) => (
+            <Pending key={`local-${String(send.localId)}`} send={send} after={pending[i - 1]?.at ?? shown.at(-1)?.created_at} me={me} nets={nets} viewer={viewer} onRetry={onRetrySend} onDismiss={onDismissSend} />
           ))}
         </ol>
       </div>

@@ -12,6 +12,7 @@
 import type { OperationId } from '../operations';
 import type { FeedConnection, SocketTransport } from '../types';
 import type { FeedKind, FeedRequest } from './bridge';
+import { voicePresenceV3Schema } from '../../schema/generated';
 import { bridge } from './access';
 
 const kinds: Partial<Record<OperationId, FeedKind>> = {
@@ -28,9 +29,7 @@ function count(value: string | undefined): number | undefined {
 
 // feedOf is the subscription the client's query names: the feed of the
 // operation, and its channel, session and cursor. The rest of the query is
-// main's to add: the messages feed's heartbeat, and the voice feed's
-// ?schema=conch.voice_presence.v2, which main always asks for, as the client
-// does (api.ts openVoiceSocket; desktop/main/api/feeds.ts feedUrl).
+// main's to add: the messages feed's heartbeat and the legacy voice version.
 export function feedOf(id: OperationId, query: Readonly<Record<string, string>>): FeedRequest | null {
   const kind = kinds[id];
   if (kind === undefined) return null;
@@ -42,6 +41,7 @@ export function feedOf(id: OperationId, query: Readonly<Record<string, string>>)
     ...(channel === undefined ? {} : { channel }),
     ...(session === undefined ? {} : { session }),
     ...(after === undefined ? {} : { after }),
+    ...(kind === 'voice' && query['schema'] === voicePresenceV3Schema ? { schema: voicePresenceV3Schema } : {}),
   };
 }
 

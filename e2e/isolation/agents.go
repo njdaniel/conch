@@ -146,10 +146,24 @@ func coreAgentRows() []row {
 			probe: func(*world, subject) probe { return personSock(false) }},
 		{route: personStream, what: "opens a person stream as an agent with a ticket", want: answer{http.StatusForbidden, "forbidden"}, after: checkAgentPersonStreamDenied(personStream),
 			probe: func(*world, subject) probe { return personSock(true) }},
+		// The DM routes (issue #2019) refuse an agent the same way, first,
+		// with the same audited reason (#2098): an agent has no direct
+		// messages. No id it names is looked up.
+		{route: "POST /v1/dms", what: "opens a conversation as an agent", want: answer{http.StatusForbidden, "forbidden"}, after: checkAgentPersonStreamDenied("POST /v1/dms"),
+			probe: func(w *world, _ subject) probe { return post("/v1/dms", schema.OpenDMRequestV1{PeerID: bobOf(w)}) }},
+		{route: "GET /v1/dms", what: "lists an inbox as an agent", want: answer{http.StatusForbidden, "forbidden"}, after: checkAgentPersonStreamDenied("GET /v1/dms"),
+			probe: func(*world, subject) probe { return get("/v1/dms") }},
+		{route: "GET /v1/dms/{conversation}", what: "reads A's conversation as an agent", pick: aConversation, want: answer{http.StatusForbidden, "forbidden"}, after: checkAgentPersonStreamDenied("GET /v1/dms/{conversation}"),
+			probe: func(_ *world, s subject) probe { return get("/v1/dms/" + id(s.id)) }},
+		{route: "PUT /v1/dms/{conversation}/state", what: "hides A's conversation as an agent", pick: aConversation, want: answer{http.StatusForbidden, "forbidden"}, after: checkAgentPersonStreamDenied("PUT /v1/dms/{conversation}/state"),
+			probe: func(_ *world, s subject) probe {
+				return put("/v1/dms/"+id(s.id)+"/state", schema.SetDMStateRequestV1{State: schema.DMStateHidden})
+			}},
 	}
 }
 
-// checkAgentPersonStreamDenied checks the audited reason for the refusal.
+// checkAgentPersonStreamDenied checks the audited reason for the refusal (the
+// person stream's and the DM routes').
 func checkAgentPersonStreamDenied(route string) func(w *world, a api) error {
 	return func(w *world, _ api) error {
 		events, err := w.auditRows("access_denied")

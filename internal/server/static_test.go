@@ -739,3 +739,31 @@ func TestStaticCSPWithVoice(t *testing.T) {
 		}
 	})
 }
+
+// TestStaticManifestAndIcons pins what an installable client needs (issue
+// #1970): the manifest and an icon are served without auth, with a type the
+// browser accepts, and are revalidated rather than cached as immutable.
+func TestStaticManifestAndIcons(t *testing.T) {
+	const manifest = `{"id":"/app/","icons":[{"src":"pwa-192.png"}]}`
+	const png = "\x89PNG\r\n\x1a\n"
+	ts := webFSServer(t, AuthRequired, fstest.MapFS{
+		"index.html":          {Data: []byte(indexHTML)},
+		"conch-manifest.json": {Data: []byte(manifest)},
+		"pwa-192.png":         {Data: []byte(png)},
+	})
+	for _, c := range []struct{ path, body, typ string }{
+		{"/app/conch-manifest.json", manifest, "json"},
+		{"/app/pwa-192.png", png, "image/png"},
+	} {
+		resp, body := fetch(t, "GET", ts.URL+c.path)
+		if resp.StatusCode != http.StatusOK || body != c.body {
+			t.Fatalf("GET %s = %d %q, want 200 and the file", c.path, resp.StatusCode, body)
+		}
+		if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, c.typ) {
+			t.Errorf("%s Content-Type = %q, want it to contain %q", c.path, ct, c.typ)
+		}
+		if got := resp.Header.Get("Cache-Control"); got != "no-cache" {
+			t.Errorf("%s Cache-Control = %q, want no-cache", c.path, got)
+		}
+	}
+}

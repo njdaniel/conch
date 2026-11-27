@@ -1,19 +1,22 @@
 // The desktop voice strip (issue #1376, D3-5 of #771), driven by a fake native
 // voice and a fake presence socket: no helper, no browser engine, no network.
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, createEvent, fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/react';
+import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../../api';
+import { VoiceStrip } from '../../phone';
 import { setSoundAudience, sounds } from '../../sounds';
-import type { NativeVoiceHelper, NativeVoiceView } from '../../platform/desktop/bridge';
+import type { NativeVoiceHelper, NativeVoiceView, VoiceKeyDevicesResult, VoiceTalkBindingResult } from '../../platform/desktop/bridge';
 import type { NativeVoice, NativeVoiceError, NativeVoiceOutcome } from '../../platform/types';
 import type { ChannelV0 } from '../../schema/channel';
-import type { VoicePresenceV2 } from '../../schema/voice';
-import type { SocketEvents } from '../../state/feed';
+import { voicePresenceV3Schema, type VoicePresence, type VoicePresenceV2, type VoicePresenceV3 } from '../../schema/voice';
+import { firstDelay, type SocketEvents } from '../../state/feed';
 import type { Person } from '../../useLiveChannel';
 import * as sdk from '../sdk';
 import { confirmWithin, duplicateWarning, NativeVoicePanel } from './NativeVoicePanel';
 import { initialVoice, type VoiceState } from '../connection';
 import type { Companion, CompanionClient } from './useCompanion';
+import { usePresence } from './usePresence';
 import { shareDisabledWords, silentShareBefore, statusWords, words } from './words';
 
 const idle: NativeVoiceView = { status: 'idle', generation: 0, channel: null, retryable: false };
@@ -89,7 +92,7 @@ beforeEach(() => {
     sockets.push({ channel, events });
     return Promise.resolve({ ok: true, value: { close: () => undefined } });
   });
-  vi.spyOn(api, 'getVoicePresence').mockResolvedValue({ ok: false, failure: 'unreachable' } as never);
+  vi.spyOn(api, 'getVoicePresence').mockResolvedValue({ ok: false, failure: 'network' });
 });
 afterEach(() => {
   cleanup();
@@ -98,12 +101,23 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-async function frame(p: VoicePresenceV2) {
+async function frame(p: VoicePresence) {
   await waitFor(() => { expect(sockets.length).toBeGreaterThan(0); });
+  sendFrame(p);
+}
+
+function sendFrame(p: VoicePresence) {
   act(() => {
-    const s = sockets[sockets.length - 1];
+    const s = sockets.at(-1);
     s?.events.onOpen();
     s?.events.onFrame(JSON.stringify(p));
+  });
+}
+
+async function closeSocket(code: number, reason?: string) {
+  await act(async () => {
+    sockets.at(-1)?.events.onClose(code, reason);
+    await Promise.resolve();
   });
 }
 
@@ -111,12 +125,231 @@ const channels: ChannelV0[] = [];
 const people: ReadonlyMap<number, Person> = new Map([[2, { name: 'Ada' } as Person]]);
 
 function strip(fake: Fake, channel: string | null = 'general', binding?: string, viewerName?: string) {
-  const ui = (ch: string | null) => (
-    <NativeVoicePanel source={fake.nv} binding={binding} signedIn channel={ch} viewer={1} {...(viewerName === undefined ? {} : { viewerName })} people={people} voiceAllowed channels={channels} onUnauthorized={() => undefined} onOpen={() => undefined} />
+  const ui = (ch: string | null, chat: boolean) => (
+    <VoiceStrip.Provider value={chat ? () => undefined : null}>
+      <NativeVoicePanel source={fake.nv} binding={binding} signedIn channel={ch} viewer={1} {...(viewerName === undefined ? {} : { viewerName })} people={people} voiceAllowed channels={channels} onUnauthorized={() => undefined} onOpen={() => undefined} />
+    </VoiceStrip.Provider>
   );
-  const r = render(ui(channel));
-  return { ...r, show: (ch: string | null) => { r.rerender(ui(ch)); } };
+  const r = render(ui(channel, false));
+  return { ...r, show: (ch: string | null, chat = false) => { r.rerender(ui(ch, chat)); } };
 }
+
+describe('native Voice options disclosure (#2195)', () => {
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  async function open(row = new DOMRect(300, 750, 875, 48), height = 900) {
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(row);
+    vi.spyOn(HTMLElement.prototype, 'offsetParent', 'get').mockReturnValue(document.body);
+    vi.spyOn(document.documentElement, 'clientHeight', 'get').mockReturnValue(height);
+    const fake = new Fake(running({ talkMode: 'push_to_talk' }));
+    const { show } = strip(fake);
+    const toggle = screen.getByRole('button', { name: 'Voice options' });
+    toggle.focus();
+    fireEvent.click(toggle, { detail: 1 });
+    const retry = await screen.findByRole('button', { name: 'Try again' });
+    return { fake, toggle, retry, show };
+  }
+
+  it.each(['Escape', 'Close'])('closes on %s and restores the toggle focus', async (action) => {
+    const { toggle, retry } = await open();
+    retry.focus();
+    if (action === 'Escape') fireEvent.keyDown(retry, { key: 'Escape' });
+    else fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(toggle);
+  });
+
+  it('dismisses on an outside press without preventing text selection', async () => {
+    const { toggle } = await open();
+    render(<p>Selectable chat text</p>);
+    const text = screen.getByText('Selectable chat text');
+    const press = createEvent.mouseDown(text);
+    fireEvent(text, press);
+    expect(press.defaultPrevented).toBe(false);
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('dismisses on a press that focuses an outside input and keeps focus there', async () => {
+    const { toggle, retry } = await open();
+    render(<input aria-label="Message" />);
+    const field = screen.getByRole('textbox', { name: 'Message' });
+    retry.focus();
+    // jsdom needs the default mousedown focus action simulated.
+    if (fireEvent.mouseDown(field)) field.focus();
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(field);
+    fireEvent.mouseUp(field);
+    expect(document.activeElement).toBe(field);
+  });
+
+  it('dismisses on a press on blank space and restores focus on the matching pointer release', async () => {
+    const { toggle, retry } = await open();
+    render(<div data-testid="blank-space" />);
+    const blank = screen.getByTestId('blank-space');
+    retry.focus();
+    // A blank press blurs the focused control without focusing a new one.
+    fireEvent.pointerDown(blank, { pointerId: 1, pointerType: 'mouse', isPrimary: true });
+    act(() => {
+      if (fireEvent.mouseDown(blank)) retry.blur();
+    });
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.pointerUp(blank, { pointerId: 2, pointerType: 'touch' });
+    expect(document.activeElement === document.body).toBe(true);
+    fireEvent.pointerUp(blank, { pointerId: 1, pointerType: 'mouse', isPrimary: true });
+    expect(document.activeElement).toBe(toggle);
+  });
+
+  it('Tabs into the panel, Shift+Tabs back, and Tabs out to Leave voice', async () => {
+    const { toggle } = await open();
+    expect(fireEvent.keyDown(toggle, { key: 'Tab' })).toBe(false);
+    const first = screen.getByRole('button', { name: 'Close' });
+    expect(document.activeElement).toBe(first);
+    fireEvent.keyDown(first, { key: 'Tab', shiftKey: true });
+    expect(document.activeElement).toBe(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+
+    const last = screen.getByRole('radio', { name: 'Push to talk' });
+    last.focus();
+    fireEvent.keyDown(last, { key: 'Tab' });
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Leave voice' }));
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('keeps focus in the open-microphone confirmation inside the panel', async () => {
+    const { fake, toggle } = await open();
+    fireEvent.click(screen.getByRole('radio', { name: 'Open microphone' }));
+    const dialog = screen.getByRole('alertdialog', { name: 'Use the open microphone' });
+    const confirm = within(dialog).getByRole('button', { name: 'Use open microphone' });
+    expect(document.activeElement).toBe(confirm);
+    fake.set(running({ talkMode: 'push_to_talk', muted: true }));
+    expect(document.activeElement).toBe(confirm);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('closes on narrowing and returns focus to the toggle', async () => {
+    vi.stubGlobal('innerWidth', 1215);
+    const { toggle, retry } = await open();
+    retry.focus();
+    vi.stubGlobal('innerWidth', 360);
+    act(() => { window.dispatchEvent(new Event('resize')); });
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(toggle);
+  });
+
+  it('focuses Close in the narrow modal sheet and clears inert on dismissal', async () => {
+    vi.stubGlobal('innerWidth', 360);
+    const { toggle } = await open(new DOMRect(12, 170, 336, 150), 480);
+    const dialog = screen.getByRole('dialog', { name: 'Voice options' });
+    const close = within(dialog).getByRole('button', { name: 'Close' });
+    const bar = toggle.closest('.voice-bar');
+    expect(dialog.getAttribute('aria-modal')).toBe('true');
+    expect(document.activeElement).toBe(close);
+    expect(bar?.hasAttribute('inert')).toBe(true);
+    fireEvent.keyDown(close, { key: 'Escape' });
+    expect(dialog.hasAttribute('hidden')).toBe(true);
+    expect(bar?.hasAttribute('inert')).toBe(false);
+    expect(document.activeElement).toBe(toggle);
+  });
+
+  it('closes when the helper leaves, with idle options still available', async () => {
+    const { fake } = await open();
+    fake.set(idle);
+    const idleToggle = screen.getByRole('button', { name: 'Voice options' });
+    expect(idleToggle.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(idleToggle);
+    expect(await screen.findByRole('button', { name: 'Try again' })).toBeTruthy();
+  });
+
+  it.each(['Chat', 'Channels'])('keeps focus on %s when switching views, and stays closed on return', async (view) => {
+    vi.stubGlobal('innerWidth', 360);
+    const { toggle, show } = await open(new DOMRect(12, 170, 336, 150), 480);
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Close' }));
+    render(<nav className="phone-nav">
+      <button type="button" aria-current="page">Voice</button>
+      <button type="button" onClick={() => { show('general', true); }}><span>{view}</span></button>
+    </nav>);
+    const destination = screen.getByRole('button', { name: view });
+    const label = within(destination).getByText(view);
+    // jsdom needs the browser's default mousedown focus action simulated.
+    if (fireEvent.mouseDown(label)) act(() => { destination.focus(); });
+    fireEvent.click(label, { detail: 1 });
+    expect(document.activeElement).toBe(destination);
+    expect(screen.queryByRole('dialog', { name: 'Voice options' })).toBeNull();
+    show('general');
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    expect(document.activeElement).toBe(destination);
+  });
+});
+
+describe('usePresence', () => {
+  const hook = () => renderHook(() => usePresence({ channel: 'general', joined: null, voiceAllowed: true, onUnauthorized: vi.fn() }));
+
+  it('keeps the 1008 follow-up roster through the retry wait', async () => {
+    vi.useFakeTimers();
+    const read = presence([2, '2026-01-01T00:00:01Z']);
+    vi.mocked(api.getVoicePresence).mockResolvedValueOnce({ ok: true, value: read });
+    const { result } = hook();
+    const initial: VoicePresenceV3 = { ...presence([1, '2026-01-01T00:00:00Z']), schema: voicePresenceV3Schema };
+    sendFrame(initial);
+
+    await closeSocket(1008);
+    expect(api.getVoicePresence).toHaveBeenCalledWith('general');
+    const snapshot = { kind: 'presence', presence: read, socketSchema: voicePresenceV3Schema };
+    expect(result.current).toEqual(snapshot);
+
+    act(() => { vi.advanceTimersByTime(firstDelay - 1); });
+    expect(sockets).toHaveLength(1);
+    expect(result.current).toEqual(snapshot);
+
+    act(() => { vi.advanceTimersByTime(1); });
+    expect(sockets).toHaveLength(2);
+  });
+
+  it('shows unreachable and retries when the 1008 follow-up read gets no answer', async () => {
+    vi.useFakeTimers();
+    const { result } = hook();
+    sendFrame(presence([1, '2026-01-01T00:00:00Z']));
+
+    await closeSocket(1008);
+    expect(api.getVoicePresence).toHaveBeenCalledWith('general');
+    expect(result.current).toEqual({ kind: 'unreachable' });
+    // The feed is not left dead: it tries again after the backoff.
+    act(() => { vi.advanceTimersByTime(firstDelay); });
+    expect(sockets).toHaveLength(2);
+  });
+
+  it.each([
+    { status: 503, refusal: 403, code: 'voice_not_allowed', kind: 'not_allowed' },
+    { status: 500, refusal: 403, code: 'voice_not_allowed', kind: 'not_allowed' },
+    { status: 504, refusal: 404, code: 'channel_not_found', kind: 'gone' },
+    { status: 429, refusal: 404, code: 'channel_not_found', kind: 'gone' },
+  ])('retries after a 1008 read with HTTP $status and stops on a later $refusal', async ({ status, refusal, code, kind }) => {
+    vi.useFakeTimers();
+    const read = vi.mocked(api.getVoicePresence);
+    read.mockResolvedValueOnce({ ok: false, failure: 'invalid', status });
+    const { result } = hook();
+    sendFrame(presence([1, '2026-01-01T00:00:00Z']));
+
+    await closeSocket(1008);
+    expect(read).toHaveBeenCalledWith('general');
+    expect(result.current).toEqual({ kind: 'unreachable' });
+    act(() => { vi.advanceTimersByTime(firstDelay - 1); });
+    expect(sockets).toHaveLength(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(sockets).toHaveLength(2);
+    const roster = presence([2, '2026-01-01T00:00:01Z']);
+    sendFrame(roster);
+    expect(result.current).toEqual({ kind: 'presence', presence: roster, socketSchema: roster.schema });
+
+    read.mockResolvedValueOnce({ ok: false, failure: 'invalid', status: refusal, code });
+    await closeSocket(1008);
+    expect(result.current).toEqual({ kind });
+    act(() => { vi.advanceTimersByTime(120_000); });
+    expect(sockets).toHaveLength(2);
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+});
 
 describe('NativeVoicePanel', () => {
   it('plays remote join, leave and share cues once, with no initial or reconnect backlog', async () => {
@@ -197,8 +430,10 @@ describe('NativeVoicePanel', () => {
     const s = strip(fake);
     await frame(presence([1, '2026-01-01T00:00:00Z']));
     fake.set({ status: 'ended', generation: 1, channel: 'general', retryable: false, problem: 'voice_removed', helper: helper({ phase: 'failed', reason: 'voice_removed', capture: 'off', blocked: ['not_connected'] }) });
-    await frame(presence());
+    vi.mocked(api.getVoicePresence).mockResolvedValueOnce({ ok: true, value: presence([2, '2026-01-01T00:00:01Z']) });
+    await closeSocket(1008, 'voice_removed');
     expect(screen.getByText('voice ended: you were removed from voice')).toBeTruthy();
+    expect(within(screen.getByRole('list')).getByText('Ada')).toBeTruthy();
     expect(screen.getByText(/Not in voice/)).toBeTruthy();
     expect(screen.queryByText(/internal error/)).toBeNull();
     expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
@@ -485,7 +720,7 @@ describe('NativeVoicePanel', () => {
   describe('share and watch (#1582)', () => {
     function companionOf(over: Partial<VoiceState> = {}) {
       const calls: string[] = [];
-      const presences: VoicePresenceV2[] = [];
+      const presences = vi.fn<CompanionClient['presence']>();
       const outs: number[] = [];
       const state: VoiceState = { ...initialVoice, ...over };
       const client: CompanionClient = {
@@ -498,7 +733,7 @@ describe('NativeVoicePanel', () => {
         watchStream: () => undefined,
         focusShare: () => undefined,
         setShareQuality: () => Promise.resolve(),
-        presence: (p) => { presences.push(p); },
+        presence: presences,
         attachStream: () => undefined,
         readShareStats: () => Promise.resolve(null),
         diagnosticsSources: () => [],
@@ -601,16 +836,24 @@ describe('NativeVoicePanel', () => {
       const c = companionOf();
       withCompanion(new Fake(running()), c.companion);
       await frame(sharingPresence());
-      expect(c.presences.length).toBeGreaterThan(0);
+      expect(c.presences).toHaveBeenCalled();
       fireEvent.click(within(screen.getByRole('region', { name: "Ada's stream" })).getByRole('button', { name: 'Watch' }));
       expect(c.calls).toEqual(['watch general 2']);
+    });
+
+    it('passes the v3 socket schema to the companion client', async () => {
+      const c = companionOf();
+      withCompanion(new Fake(running()), c.companion);
+      const p: VoicePresenceV3 = { ...presence([1, '2026-01-01T00:00:00Z']), schema: voicePresenceV3Schema };
+      await frame(p);
+      expect(c.presences).toHaveBeenLastCalledWith(p, voicePresenceV3Schema);
     });
 
     it('draws no tiles and gives no presence out of voice', async () => {
       const c = companionOf();
       withCompanion(new Fake(idle), c.companion);
       await frame(sharingPresence());
-      expect(c.presences).toEqual([]);
+      expect(c.presences).not.toHaveBeenCalled();
       expect(screen.queryByRole('region', { name: "Ada's stream" })).toBeNull();
     });
 
@@ -729,6 +972,312 @@ describe('NativeVoicePanel', () => {
   });
 });
 
+function activate(button: HTMLElement, code: 'Enter' | 'Space' = 'Enter') {
+  button.focus();
+  const key = code === 'Space' ? ' ' : 'Enter';
+  if (!fireEvent.keyDown(button, { key, code })) return;
+  if (code === 'Space' && !fireEvent.keyUp(button, { key, code })) return;
+  // jsdom does not synthesize the click from a button's keyboard activation.
+  fireEvent.click(button, { detail: 0 });
+}
+
+function keySetupSource(fake: Fake, platform: 'linux' | 'win32') {
+  const saveTalkBinding = vi.fn<NonNullable<NativeVoice['saveTalkBinding']>>().mockResolvedValue({ ok: true });
+  const source: NativeVoice = { ...fake.nv,
+    keyDevices: () => Promise.resolve({ ok: true, platform: platform === 'win32' ? platform : undefined, devices: [{ id: 'k1', name: 'Keyboard', kind: 'keyboard', readable: true }], disclosure: [] }),
+    saveTalkBinding,
+  };
+  return { source, saveTalkBinding };
+}
+
+it.each(['linux', 'win32'] as const)('keeps letters in the composer during %s discovery and capture', async (platform) => {
+  const fake = new Fake(running());
+  const { source } = keySetupSource(fake, platform);
+  const devices = await source.keyDevices?.();
+  let resolve!: (result: VoiceKeyDevicesResult) => void;
+  const listing = new Promise<VoiceKeyDevicesResult>((done) => { resolve = done; });
+  const keyDevices = () => listing;
+  render(<>
+    <input aria-label="Chat message" />
+    <NativeVoicePanel source={{ ...source, keyDevices }} signedIn channel="general" viewer={1} people={people} voiceAllowed channels={channels} onUnauthorized={() => undefined} onOpen={() => undefined} />
+  </>);
+  activate(screen.getByRole('button', { name: 'Talk key' }));
+  expect(screen.getByText('Reading what is available…')).toBeTruthy();
+  const chat = screen.getByRole<HTMLInputElement>('textbox', { name: 'Chat message' });
+  const clickChat = () => {
+    if (fireEvent.mouseDown(chat)) chat.focus();
+    fireEvent.mouseUp(chat);
+    fireEvent.click(chat);
+  };
+  const typeLetter = (key: 'a' | 'b') => {
+    const target = document.activeElement ?? document.body;
+    // jsdom does not insert the character after an uncancelled keydown.
+    if (fireEvent.keyDown(target, { key, code: `Key${key.toUpperCase()}` }) && target === chat) {
+      fireEvent.input(chat, { target: { value: chat.value + key } });
+    }
+  };
+  clickChat();
+  if (devices === undefined) throw new Error('missing device listing');
+  await act(async () => {
+    resolve(devices);
+    await listing;
+  });
+  const picker = screen.getByRole<HTMLSelectElement>('combobox', { name: 'Or pick one' });
+  typeLetter('a');
+  expect(document.activeElement).toBe(chat);
+  expect(chat.value).toBe('a');
+  expect(picker.value).toBe('');
+
+  if (platform === 'win32') {
+    activate(screen.getByRole('button', { name: 'Set talk key' }));
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBe(document.activeElement);
+    clickChat();
+  }
+  typeLetter('b');
+  expect(document.activeElement).toBe(chat);
+  expect(chat.value).toBe('ab');
+  expect(fireEvent.mouseDown(chat, { button: 3 })).toBe(true);
+  expect(picker.value).toBe('');
+
+  // Re-entering the setup lets the pending capture take a binding.
+  const capture = platform === 'linux' ? screen.getByText(/Press the key/) : screen.getByRole('button', { name: 'Cancel' });
+  capture.focus();
+  expect(fireEvent.keyDown(chat, { key: 'c', code: 'KeyC' })).toBe(true);
+  expect(fireEvent.keyDown(capture, { key: 'F12', code: 'F12' })).toBe(false);
+  expect(picker.value).toBe('F12');
+});
+
+it.each(['linux', 'win32'] as const)('keeps focus on an outside input across %s setup transitions', async (platform) => {
+  const fake = new Fake(running());
+  const { source, saveTalkBinding } = keySetupSource(fake, platform);
+  render(<>
+    <input aria-label="Chat message" />
+    <NativeVoicePanel source={source} signedIn channel="general" viewer={1} people={people} voiceAllowed channels={channels} onUnauthorized={() => undefined} onOpen={() => undefined} />
+  </>);
+  const chat = screen.getByRole('textbox', { name: 'Chat message' });
+  chat.focus();
+  fireEvent.click(screen.getByRole('button', { name: 'Talk key' }));
+  expect(document.activeElement).toBe(chat);
+  const picker = await screen.findByRole('combobox', { name: 'Or pick one' });
+  expect(document.activeElement).toBe(chat);
+
+  if (platform === 'linux') fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Set talk key' }));
+  expect(document.activeElement).toBe(chat);
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+  expect(document.activeElement).toBe(chat);
+
+  if (platform === 'linux') {
+    fireEvent.change(picker, { target: { value: 'F12' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
+    expect(document.activeElement).toBe(chat);
+    await screen.findByRole('combobox', { name: 'Or pick one' });
+    expect(document.activeElement).toBe(chat);
+  } else {
+    // Ending voice also cancels a pending Windows capture.
+    activate(screen.getByRole('button', { name: 'Set talk key' }));
+    chat.focus();
+  }
+  fake.set({ ...idle, generation: 2 });
+  expect(document.activeElement).toBe(chat);
+
+  saveTalkBinding.mockResolvedValueOnce({ ok: false, error: 'failed' });
+  fireEvent.change(screen.getByRole('combobox', { name: 'Or pick one' }), { target: { value: 'F12' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  expect(document.activeElement).toBe(chat);
+  expect(await screen.findByText(/Nothing was saved/)).toBeTruthy();
+  expect(document.activeElement).toBe(chat);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+  expect(screen.queryByRole('region', { name: 'Talk key' })).toBeNull();
+  expect(document.activeElement).toBe(chat);
+});
+
+describe.each(['talk', 'mute'] as const)('%s key setup focus (#2220)', (binding) => {
+  function open(fromOptions = true, platform: 'linux' | 'win32' = 'linux') {
+    const fake = new Fake(running());
+    const { source, saveTalkBinding } = keySetupSource(fake, platform);
+    render(<NativeVoicePanel source={source} signedIn channel="general" viewer={1} people={people} voiceAllowed channels={channels} onUnauthorized={() => undefined} onOpen={() => undefined} />);
+    const toggle = screen.getByRole('button', { name: 'Voice options' });
+    if (fromOptions) activate(toggle);
+    activate(screen.getByRole('button', { name: fromOptions ? `Set up ${binding} key` : 'Talk key' }));
+    const setup = screen.getByRole('region', { name: fromOptions && binding === 'mute' ? 'Mute key' : 'Talk key' });
+    return { toggle, setup, saveTalkBinding, fake };
+  }
+
+  it('focuses the first control on keyboard open', async () => {
+    const { setup } = open();
+    expect(document.activeElement).toBe(within(setup).getByRole('button', { name: 'Close' }));
+    await within(setup).findByRole('combobox');
+    expect(setup.contains(document.activeElement)).toBe(true);
+  });
+
+  it('restores the toggle after saving', async () => {
+    const { setup, toggle, saveTalkBinding } = open();
+    let resolve!: (result: VoiceTalkBindingResult) => void;
+    saveTalkBinding.mockReturnValueOnce(new Promise((done) => { resolve = done; }));
+    const picker = await within(setup).findByRole('combobox');
+    fireEvent.change(picker, { target: { value: 'F13' } });
+    const save = within(setup).getByRole<HTMLButtonElement>('button', { name: 'Save' });
+    activate(save);
+    expect(save.disabled).toBe(false);
+    expect(document.activeElement).toBe(save);
+    expect(within(setup).getByText('Saving…').getAttribute('role')).toBe('status');
+    resolve({ ok: true });
+    await waitFor(() => { expect(document.activeElement).toBe(toggle); });
+    expect(saveTalkBinding).toHaveBeenCalledTimes(1);
+    expect(setup.isConnected).toBe(false);
+    expect(screen.getByText(/Saved: .*F13/)).toBeTruthy();
+  });
+
+  it.each(['linux', 'win32'] as const)('preserves chat focus when a pending %s save succeeds', async (platform) => {
+    const { saveTalkBinding } = open(true, platform);
+    render(<input aria-label="Chat message" />);
+    let resolve!: (result: VoiceTalkBindingResult) => void;
+    saveTalkBinding.mockReturnValueOnce(new Promise((done) => { resolve = done; }));
+    const picker = await screen.findByRole('combobox', { name: 'Or pick one' });
+    const setup = screen.getByRole('region', { name: binding === 'talk' ? 'Talk key' : 'Mute key' });
+    fireEvent.change(picker, { target: { value: 'F12' } });
+    activate(within(setup).getByRole('button', { name: 'Save' }));
+    expect(within(setup).getByText('Saving…')).toBeTruthy();
+
+    const chat = screen.getByRole('textbox', { name: 'Chat message' });
+    chat.focus();
+    fireEvent.change(chat, { target: { value: 'hello' } });
+    resolve({ ok: true });
+    expect(await screen.findByText(/Saved: .*F12/)).toBeTruthy();
+    expect(setup.isConnected).toBe(false);
+    expect(document.activeElement).toBe(chat);
+  });
+
+  it.each(['linux', 'win32'] as const)('keeps %s setup focused and open until a rejected save settles', async (platform) => {
+    const { saveTalkBinding, fake } = open(true, platform);
+    let reject!: (reason: Error) => void;
+    saveTalkBinding.mockReturnValueOnce(new Promise((_done, fail) => { reject = fail; }));
+    const picker = await screen.findByRole<HTMLSelectElement>('combobox', { name: 'Or pick one' });
+    fireEvent.change(picker, { target: { value: 'F12' } });
+    const setup = screen.getByRole('region', { name: binding === 'talk' ? 'Talk key' : 'Mute key' });
+    const save = within(setup).getByRole<HTMLButtonElement>('button', { name: 'Save' });
+    const close = within(setup).getByRole('button', { name: 'Close' });
+    activate(save);
+    expect(document.activeElement).toBe(save);
+    expect(save.disabled).toBe(false);
+    expect(save.getAttribute('aria-disabled')).toBe('true');
+    activate(save);
+    expect(saveTalkBinding).toHaveBeenCalledOnce();
+    expect(close.getAttribute('aria-disabled')).toBe('true');
+    const saving = within(setup).getByText('Saving…');
+    expect(close.getAttribute('aria-describedby')).toBe(saving.id);
+    activate(close);
+    expect(setup.isConnected).toBe(true);
+    expect(document.activeElement).toBe(close);
+    fireEvent.keyDown(close, { key: 'Escape', code: 'Escape' });
+    expect(setup.isConnected).toBe(true);
+    expect(document.activeElement).toBe(close);
+
+    if (platform === 'win32') fake.set({ ...idle, generation: 2 });
+    reject(new Error('write rejected'));
+    const error = await within(setup).findByText(/Nothing was saved|The key was not saved/);
+    expect(error.getAttribute('role')).toBe('status');
+    expect(document.activeElement).toBe(save);
+    expect(picker.value).toBe('F12');
+    expect(save.getAttribute('aria-disabled')).not.toBe('true');
+    expect(close.getAttribute('aria-disabled')).not.toBe('true');
+    if (binding === 'talk') fireEvent.keyDown(save, { key: 'Escape', code: 'Escape' });
+    else activate(close);
+    expect(setup.isConnected).toBe(false);
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Voice options' }));
+  });
+
+  it('focuses setup again when the same binding is opened', async () => {
+    const { setup, toggle } = open();
+    const picker = await within(setup).findByRole<HTMLSelectElement>('combobox');
+    fireEvent.change(picker, { target: { value: 'F13' } });
+    activate(toggle);
+    activate(screen.getByRole('button', { name: `Set up ${binding} key` }));
+    expect(document.activeElement).toBe(within(setup).getByRole('button', { name: `Set ${binding} key` }));
+    expect(picker.value).toBe('F13');
+  });
+
+  it.each(['Close after Tab', 'Escape'])('restores the toggle after %s', async (action) => {
+    const { setup, toggle, saveTalkBinding } = open();
+    const close = within(setup).getByRole('button', { name: 'Close' });
+    await within(setup).findByRole('combobox');
+    close.focus();
+    if (action === 'Escape') fireEvent.keyDown(close, { key: 'Escape' });
+    else {
+      fireEvent.keyDown(close, { key: 'Tab', code: 'Tab' });
+      activate(close);
+    }
+    expect(document.activeElement).toBe(toggle);
+    expect(setup.isConnected).toBe(false);
+    expect(saveTalkBinding).not.toHaveBeenCalled();
+  });
+
+  it.each(['Enter', 'Space'] as const)('%s activates focused Close during capture without binding a key', async (key) => {
+    const { setup, toggle, saveTalkBinding } = open();
+    const picker = await within(setup).findByRole<HTMLSelectElement>('combobox');
+    expect(within(setup).getByRole('button', { name: 'Cancel' })).toBeTruthy();
+    const close = within(setup).getByRole('button', { name: 'Close' });
+    activate(close, key);
+    expect(setup.isConnected).toBe(false);
+    expect(document.activeElement).toBe(toggle);
+    expect(picker.value).toBe('');
+    expect(saveTalkBinding).not.toHaveBeenCalled();
+  });
+
+  it('ignores Escape in chat and preserves its focus when setup closes', async () => {
+    const { setup } = open();
+    render(<input aria-label="Chat message" />);
+    await within(setup).findByText(/Press the key/);
+    const chat = screen.getByRole('textbox', { name: 'Chat message' });
+    chat.focus();
+    expect(fireEvent.keyDown(chat, { key: 'Escape', code: 'Escape' })).toBe(true);
+    expect(setup.isConnected).toBe(true);
+    fireEvent.click(within(setup).getByRole('button', { name: 'Close' }));
+    expect(setup.isConnected).toBe(false);
+    expect(document.activeElement).toBe(chat);
+  });
+
+  if (binding === 'talk') {
+    it('restores the Talk key shortcut when it reappears', () => {
+      const { setup } = open(false);
+      activate(within(setup).getByRole('button', { name: 'Close' }));
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Talk key' }));
+    });
+  }
+});
+
+it.each(['linux', 'win32'] as const)('keeps a successful %s save when the voice panel unmounts', async (platform) => {
+  const fake = new Fake(running());
+  const { source, saveTalkBinding } = keySetupSource(fake, platform);
+  let resolve!: (result: VoiceTalkBindingResult) => void;
+  const pending = new Promise<VoiceTalkBindingResult>((done) => { resolve = done; });
+  saveTalkBinding.mockReturnValueOnce(pending);
+  function Dock({ open }: { readonly open: boolean }) {
+    const [binding, setBinding] = useState('Left Ctrl');
+    return <>
+      <button type="button">Chat</button>
+      {open && <NativeVoicePanel source={source} binding={binding} onBound={setBinding} signedIn channel="general" viewer={1} people={people} voiceAllowed channels={channels} onUnauthorized={() => undefined} onOpen={() => undefined} />}
+    </>;
+  }
+  const ui = render(<Dock open />);
+  activate(screen.getByRole('button', { name: 'Talk key' }));
+  fireEvent.change(await screen.findByRole('combobox'), { target: { value: 'F12' } });
+  activate(screen.getByRole('button', { name: 'Save' }));
+  const chat = screen.getByRole('button', { name: 'Chat' });
+  chat.focus();
+  ui.rerender(<Dock open={false} />);
+  await act(async () => {
+    resolve({ ok: true });
+    await pending;
+  });
+  expect(document.activeElement).toBe(chat);
+  fake.set({ ...running(), generation: 2 });
+  ui.rerender(<Dock open />);
+  expect(screen.getByText('mic on · hold F12 to talk')).toBeTruthy();
+});
+
 it('keeps the Talk key label in open mode when the helper loses the key', async () => {
   const lost = { ptt: 'lost', pttProblem: 'read_failed' } as const;
   const f = new Fake(running({ ...lost, talkMode: 'open' }));
@@ -770,12 +1319,17 @@ it('opens the shared Windows capture from Voice options to save a mute key', asy
   const onBound = vi.fn();
   render(<NativeVoicePanel source={source} onBound={onBound} signedIn channel="general" viewer={1} people={people} voiceAllowed channels={channels} onUnauthorized={() => undefined} onOpen={() => undefined} />);
   fireEvent.click(screen.getByRole('button', { name: 'Voice options' }));
-  fireEvent.click(screen.getByRole('button', { name: 'Set up mute key' }));
-  fireEvent.click(await screen.findByRole('button', { name: 'Set mute key' }));
+  const opener = screen.getByRole('button', { name: 'Set up mute key' });
+  opener.focus();
+  fireEvent.click(opener, { detail: 1 });
+  const capture = await screen.findByRole('button', { name: 'Set mute key' });
+  expect(document.activeElement).toBe(capture);
+  fireEvent.click(capture);
   fireEvent.mouseDown(window, { button: 4 });
   fireEvent.click(screen.getByRole('button', { name: 'Save' }));
   await waitFor(() => {
     expect(saveTalkBinding).toHaveBeenCalledWith({ windowsCode: 'Mouse5', generation: f.nv.snapshot().generation, binding: 'mute' });
   });
+  expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Voice options' }));
   expect(onBound).not.toHaveBeenCalled();
 });

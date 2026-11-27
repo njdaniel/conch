@@ -1,6 +1,6 @@
 // The voice/share renderer sends a fixed code over the owned document's bridge.
 // Main supplies the severity and message without reading the renderer console.
-import { GeometricSampler, type MainLog } from '../diagnostics.ts';
+import type { GeometricSampler, MainLog } from '../diagnostics.ts';
 import type { VoiceDiagnostic } from '../../../web/src/platform/desktop/bridge.ts';
 
 const lines = {
@@ -17,14 +17,17 @@ export function isVoiceDiagnostic(value: unknown): value is VoiceDiagnostic {
   return typeof value === 'string' && Object.hasOwn(lines, value);
 }
 
-export function voiceDiagnosticLog(log: MainLog, now: () => number): (diagnostic: VoiceDiagnostic) => void {
+export function voiceDiagnosticLog(log: MainLog, now: () => number, samples: GeometricSampler<VoiceDiagnostic>): (diagnostic: VoiceDiagnostic) => void {
   // The IPC registry lives for the whole app, across profile/window changes.
   const last = new Map<VoiceDiagnostic, number>();
-  const samples = new GeometricSampler<VoiceDiagnostic>();
   return (diagnostic) => {
     const at = now();
     const previous = last.get(diagnostic);
-    if (previous !== undefined && at - previous < 10_000) return;
+    if (previous !== undefined && at - previous < 10_000) {
+      // Count validated reports even when the local throttle keeps them silent.
+      samples.sample(diagnostic, false);
+      return;
+    }
     last.set(diagnostic, at);
     // Keep the local throttle and sample each code separately in the export.
     if (samples.sample(diagnostic)) {

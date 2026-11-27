@@ -7,6 +7,7 @@ import { platform } from './platform';
 import { pausedText } from './Composer';
 import { clock } from './Conversation';
 import { maxHeld, pageSize } from './state/messages';
+import { dateOf, dateTimeOf } from './time';
 
 // A test that renders a whole held history, or is otherwise slow: about 6 s
 // locally and three times that on CI runners (#1940).
@@ -186,7 +187,7 @@ async function connect(socket: FakeSocket) {
 
 // The log's own items, by selector: a role walk over every row costs what the
 // rows do, and a loaded machine feels it (issue #1780).
-const lines = () => Array.from(screen.getByLabelText('Messages').querySelectorAll<HTMLElement>('ol.messages > li')).map((li) => {
+const lines = () => Array.from(screen.getByLabelText('Messages').querySelectorAll<HTMLElement>('ol.messages > li.message')).map((li) => {
   const copy = li.cloneNode(true) as HTMLElement;
   // Action buttons are controls, not message text. The author's name is a
   // button too (issue #1544), but stays in the HH:MM name [agent]: text.
@@ -467,6 +468,51 @@ describe('rendering', () => {
     await openChat();
     await screen.findByText('plain words');
     expect(screen.queryByRole('article')).toBeNull();
+  });
+});
+
+describe('dates in the message history', () => {
+  const lastEvening = new Date(2026, 11, 31, 23, 57).toISOString();
+  const beforeMidnight = new Date(2026, 11, 31, 23, 59).toISOString();
+  const midnight = new Date(2027, 0, 1).toISOString();
+
+  it('starts a day and an author group when a live message crosses the local new year', async () => {
+    server.history.general = [
+      message(1, 'first', { created_at: lastEvening }),
+      message(2, 'same day', { created_at: beforeMidnight }),
+    ];
+    const socket = await openChat();
+    await connect(socket);
+    const log = within(screen.getByRole('log'));
+    const first = log.getByText('first').closest('li');
+    const sameDay = log.getByText('same day').closest('li');
+    expect(log.getAllByRole('separator').map((row) => row.textContent)).toEqual([dateOf(lastEvening)]);
+    expect(first?.classList.contains('cont')).toBe(false);
+    expect(sameDay?.classList.contains('cont')).toBe(true);
+    expect(sameDay?.querySelector('time')?.getAttribute('datetime')).toBe(beforeMidnight);
+    sameDay?.focus();
+
+    socket.send(message(3, 'next day', { created_at: midnight }));
+    const newDay = (await log.findByText('next day')).closest('li');
+    expect(log.getAllByRole('separator').map((row) => row.textContent)).toEqual([dateOf(lastEvening), dateOf(midnight)]);
+    expect(newDay?.classList.contains('cont')).toBe(false);
+    expect(newDay?.querySelector('time')).toMatchObject({ dateTime: midnight, title: dateTimeOf(midnight), textContent: clock(midnight) });
+    expect(document.activeElement).toBe(sameDay);
+    if (sameDay === null) throw new Error('no message row');
+    fireEvent.keyDown(sameDay, { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(newDay);
+  });
+
+  it('labels the root day and the reply day in the thread', async () => {
+    server.history.general = [
+      message(1, 'thread root', { created_at: beforeMidnight }),
+      message(2, 'next day reply', { created_at: midnight, thread_root_id: 1 }),
+    ];
+    await openChat();
+    fireEvent.click(await screen.findByRole('button', { name: '1 reply' }));
+    const thread = within(await screen.findByRole('list', { name: 'Root and replies' }));
+    expect(thread.getAllByRole('separator').map((row) => row.textContent)).toEqual([dateOf(beforeMidnight), dateOf(midnight)]);
+    expect(thread.getAllByRole('listitem').map((row) => row.querySelector('.body')?.textContent)).toEqual(['thread root', 'next day reply']);
   });
 });
 
@@ -2020,8 +2066,8 @@ describe('a long channel', () => {
     await openChat();
     await screen.findByText(`m${String(maxHeld + 100)}`);
     // Counted, not read: lines() copies every row to drop its buttons, and a
-    // role query walks every message's Reply button, both slow at maxHeld rows
-    // in jsdom (issue #842 added the buttons).
+    // role query walks every message's controls, both slow at maxHeld rows
+    // in jsdom.
     const rows = () => screen.getByRole('log', { name: 'Messages' }).querySelectorAll('li[data-message-id]').length;
     for (const held of [maxHeld - pageSize, maxHeld]) {
       const older = screen.queryByText('Load older messages', { selector: 'button' });
@@ -2060,13 +2106,15 @@ describe('scrolling', () => {
     Object.defineProperty(el, 'scrollTop', { configurable: true, get: () => state.top, set: (v: number) => (state.top = v) });
   }
 
-  it('keeps the reader in place when older history is drawn above them', async () => {
-    server.history.general = Array.from({ length: 150 }, (_, i) => message(i + 1, `m${String(i + 1)}`));
+  it('keeps the reader in place when older history and its day label are drawn above them', async () => {
+    const older = new Date(2026, 11, 31, 23, 59).toISOString();
+    const newer = new Date(2027, 0, 1).toISOString();
+    server.history.general = Array.from({ length: 150 }, (_, i) => message(i + 1, `m${String(i + 1)}`, { created_at: i < 25 ? older : newer }));
     await openChat();
     await screen.findByText('m150');
     expect(lines()).toHaveLength(100);
     const log = screen.getByRole('log');
-    // The content is as tall as its lines: 10px each, plus 500px of padding.
+    // Model each message and day divider as 10px, plus 500px of padding.
     const geo = { top: 0, client: 300 };
     Object.defineProperty(log, 'scrollHeight', { configurable: true, get: () => 500 + 10 * log.querySelectorAll('li').length });
     Object.defineProperty(log, 'clientHeight', { configurable: true, get: () => geo.client });
@@ -2075,8 +2123,9 @@ describe('scrolling', () => {
     await waitFor(() => {
       expect(lines()).toHaveLength(150);
     });
-    // Fifty lines of 10px were added above: the reader is moved down by that.
-    expect(geo.top).toBe(500);
+    expect(within(log).getAllByRole('separator').map((row) => row.textContent)).toEqual([dateOf(older), dateOf(newer)]);
+    // Fifty messages and one date divider were added above the reader.
+    expect(geo.top).toBe(510);
   });
 
   it('offers Jump to latest instead of moving a reader who has scrolled up', async () => {
@@ -2111,7 +2160,7 @@ describe('scrolling', () => {
   });
 
   // A stand-in ResizeObserver (jsdom has none) that keeps what it watches and
-  // its callback, so a test can say when the log's height has changed.
+  // its callback, so a test can say when the log's size has changed.
   class FakeObserver {
     static all: FakeObserver[] = [];
     watched: Element[] = [];
@@ -2216,6 +2265,44 @@ describe('scrolling', () => {
     expect(geo.top).toBe(100);
     fireEvent.click(jump);
     expect(geo.top).toBe(1000);
+  });
+
+  it('re-pins a reader at the end on width-only changes and leaves a scrolled-up reader in place', async () => {
+    stubObserver();
+    const socket = await openChat();
+    await connect(socket);
+    const log = screen.getByRole('log');
+    const geo = { height: 1000, top: 700, client: 300, width: 320 };
+    geometry(log, geo);
+    Object.defineProperty(log, 'clientWidth', { configurable: true, get: () => geo.width });
+    resized(log);
+    geo.top = 700;
+    fireEvent.scroll(log);
+
+    // The log narrows at the same height. Chrome's scroll anchoring sends a
+    // scroll event after the messages re-wrap and before the observer runs.
+    geo.width = 305;
+    geo.height = 1180;
+    geo.top = 720;
+    fireEvent.scroll(log);
+    resized(log);
+    expect(geo.top).toBe(1180);
+
+    // Widening also re-pins. The mock records the scrollTop assignment before
+    // the browser's normal clamping.
+    geo.width = 320;
+    geo.height = 1000;
+    geo.top = 700;
+    fireEvent.scroll(log);
+    resized(log);
+    expect(geo.top).toBe(1000);
+
+    geo.top = 200;
+    fireEvent.scroll(log);
+    geo.width = 305;
+    geo.height = 1180;
+    resized(log);
+    expect(geo.top).toBe(200);
   });
 
   it('stops watching the log when the conversation goes', async () => {

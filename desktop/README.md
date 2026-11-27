@@ -134,7 +134,17 @@ The web client is built by web's own Vite with `--base /` into `out/ui`; no
 file under `web/` changes and `web/dist` is not touched. `scripts/desktop-web-dist-check.sh` and the
 CI job check that no desktop code is in the browser build.
 
-Run the unpacked app by hand: `desktop/dist/linux-unpacked/conch-desktop`.
+Launch an unpacked Linux development build with a named profile.
+
+```sh
+./scripts/desktop-launch-linux-dev.sh voice-test
+```
+
+The launcher checks the app and helper paths before starting the app. The
+profile lives under `${XDG_CONFIG_HOME:-$HOME/.config}/conch-desktop-dev/`.
+If the launcher reports a writable ancestor, build in a private directory
+you own, or copy a build you trust to one and pass the unpacked app directory
+after the profile name.
 
 ### The `.deb`
 

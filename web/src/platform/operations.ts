@@ -138,10 +138,11 @@ import {
   voiceCompanionResponseV1,
   voiceOccupancyV1,
   voicePresenceV2,
+  voicePresenceV3,
   voiceSessionResponseV1,
-  voiceShareRequestV1,
+  voiceShareRequestV2,
   voiceShareV1,
-  voiceShareV2,
+  voiceShareV3,
   voiceTransmitReportV1,
   whoAmIResponseV1,
   wsTicketV1,
@@ -205,14 +206,19 @@ const check = <T>(validator: Validator<T>): Validator<never> => validator as unk
 // from the renderer.
 const reply = <T>(validator: Validator<T>): Validator<never> => check(fromServer(validator));
 
-// shareReply is the share claim's answer: VoiceShareV2 when the claim sent a
-// quality, else VoiceShareV1 (web/src/api.ts claimVoiceShare). V2 is tried
+// shareReply accepts the share claim versions that carry a quality, or
+// VoiceShareV1 when the claim sent none. The version with a quality is tried
 // first, because a validator strips the keys it does not declare from a value
 // it passes, so V1 would pass a V2 answer and drop its quality (issue #1638).
 // Without it the desktop main forwards no body, and every desktop share fails.
 const shareReply: Validator<never> = check((value: unknown, path?: string) => {
-  const asV2 = fromServer(voiceShareV2)(value, path);
-  return asV2.length === 0 ? asV2 : fromServer(voiceShareV1)(value, path);
+  const withQuality = fromServer(voiceShareV3)(value, path);
+  return withQuality.length === 0 ? withQuality : fromServer(voiceShareV1)(value, path);
+});
+
+const presenceReply: Validator<never> = check((value: unknown, path?: string) => {
+  const asV3 = fromServer(voicePresenceV3)(value, path);
+  return asV3.length === 0 ? asV3 : fromServer(voicePresenceV2)(value, path);
 });
 
 export const operations = {
@@ -433,10 +439,10 @@ export const operations = {
   // Voice. The session grant holds the join token of the person's own voice:
   // the desktop renderer never holds it (D1-2), so it cannot ask for one.
   voiceSession: op('POST', '/v1/channels/{channel}/voice/session', 'bearer', { response: reply(voiceSessionResponseV1), renderer: false, credentials: ['rooms'] }),
-  voicePresence: op('GET', '/v1/channels/{channel}/voice', 'bearer', { response: reply(voicePresenceV2) }),
+  voicePresence: op('GET', '/v1/channels/{channel}/voice', 'bearer', { response: presenceReply }),
   voiceTransmit: op('POST', '/v1/channels/{channel}/voice/transmit', 'bearer', { request: check(voiceTransmitReportV1) }),
   voiceOccupancy: op('GET', '/v1/voice/occupancy', 'bearer', { response: reply(voiceOccupancyV1) }),
-  claimShare: op('POST', '/v1/channels/{channel}/voice/share', 'bearer', { request: check(voiceShareRequestV1), response: shareReply }),
+  claimShare: op('POST', '/v1/channels/{channel}/voice/share', 'bearer', { request: check(voiceShareRequestV2), response: shareReply }),
   stopShare: op('DELETE', '/v1/channels/{channel}/voice/share', 'bearer'),
   // The viewer (issue #936, voice-control-plane.md §13): the second
   // participant, p<id>.view, that lets a tab watch beside the voice of

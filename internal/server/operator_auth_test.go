@@ -654,6 +654,8 @@ var reauthDecisions = map[string]reauthDecision{
 	"PUT /v1/push/registrations/{id}":                                                      {reauthNone, "a person replaces the target of their own sign-in's registration (issue #1714): no grant"},
 	"DELETE /v1/push/registrations/{id}":                                                   {reauthNone, "a person ends their own sign-in's registration (issue #1714): no grant"},
 	"POST /v1/channels/{channel}/leave":                                                    {reauthNone, "a member ends their own membership"},
+	"POST /v1/dms":                                                                         {reauthNone, "a person opens or resumes a conversation with someone (issue #2019): no grant, and a person's own DMs refuse an operator-made credential outright (selfMadeCredentialRoutes), so there is no proof to ask for"},
+	"PUT /v1/dms/{conversation}/state":                                                     {reauthNone, "a person archives, hides or reopens their own view of a conversation (issue #2019): no grant, and nothing the peer can see"},
 	"POST /v1/approvals":                                                                   {reauthNone, "an approval request (approval-path, unchanged)"},
 	"POST /v1/approvals/{id}/decisions":                                                    {reauthNone, "a decision (approval-path, unchanged)"},
 }

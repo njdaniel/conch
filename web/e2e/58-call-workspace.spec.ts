@@ -5,7 +5,7 @@
 // the pinned LiveKit of voice-world.ts; these are not real-device tests.
 import type { Browser, BrowserContextOptions, Locator, Page } from '@playwright/test';
 import { secretLines, withoutJoinTokenInSocketRefusals, type BrowserLogEntry } from './console-lines';
-import { channelButton, expect, openChannel, showView, test } from './fixtures';
+import { channelButton, drawDesktopStrip, expect, openChannel, showView, test } from './fixtures';
 import { enter, inbound as inboundStats, joinVoice, leave, type Someone } from './people';
 import { dockerAvailable, startVoiceWorld, type Member, type VoiceWorld } from './voice-world';
 
@@ -146,8 +146,8 @@ test.describe('the persistent call workspace', () => {
     expect(put.status, put.text).toBe(200);
   }
 
-  const person = (browser: Browser, member: Member, options?: BrowserContextOptions): Promise<Person> =>
-    enter(browser, vw, member, options === undefined ? {} : { context: options });
+  const person = (browser: Browser, member: Member, options?: BrowserContextOptions, before?: (page: Page) => Promise<void>): Promise<Person> =>
+    enter(browser, vw, member, { ...(options === undefined ? {} : { context: options }), ...(before === undefined ? {} : { before }) });
 
   const join = (p: Person): Promise<void> => joinVoice(p, 'Join voice');
 
@@ -184,6 +184,1060 @@ test.describe('the persistent call workspace', () => {
     expect(p.watch.policy, 'Permissions-Policy reports').toEqual([]);
     expect(p.watch.failed, 'requests to conchd that failed').toEqual([]);
   }
+
+  // The share's own <audio> refuses to play until window.__blockShareSound is
+  // cleared, as a phone's autoplay rule does: ShareView then offers "Tap to
+  // play sound".
+  const blockShareSound = async (page: Page): Promise<void> => {
+    await page.addInitScript(() => {
+      const w = window as unknown as { __blockShareSound?: boolean };
+      w.__blockShareSound = true;
+      // The original method is called back with the element it was called on.
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const play = HTMLMediaElement.prototype.play;
+      HTMLMediaElement.prototype.play = function (this: HTMLMediaElement) {
+        if (w.__blockShareSound === true && this instanceof HTMLAudioElement && (this.getAttribute('aria-label') ?? '').endsWith('stream audio')) {
+          return Promise.reject(new DOMException('blocked for the test', 'NotAllowedError'));
+        }
+        return play.call(this);
+      };
+    });
+  };
+  // A pointer over the share shows its controls (they fade after a pause).
+  const wake = async (page: Page): Promise<void> => {
+    const box = await shareView(page).locator('.share-frame').boundingBox();
+    if (box === null) throw new Error('no share frame');
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 3);
+  };
+  const controlsOpacity = (page: Page): Promise<string> => shareView(page).locator('.share-controls').evaluate((el) => getComputedStyle(el).opacity);
+
+  // Read the layout, not pixels. The stage keeps the size it always had. In
+  // the open call view the share's controls are icon buttons on the picture's
+  // bottom edge, like a video player's, so the frame takes what the view
+  // leaves under the title (6rem at the least) and the video is contained in
+  // it. In the closed phone Chat stage the controls stay in a row below.
+  const checkShare = async (page: Page, where: string, opts: { log?: boolean; open?: boolean } = {}) => {
+    const open = opts.open ?? true;
+    const g = await shareView(page).evaluate((share) => {
+      const stage = share.closest('.stage');
+      const frame = share.querySelector('.share-frame');
+      const video = frame?.querySelector('video');
+      const controls = share.querySelector('.share-controls');
+      const title = share.querySelector('.share-title');
+      if (stage === null || frame === null || video == null || controls === null || title === null) throw new Error('no share layout boxes');
+      const view = share.closest('.call-view') ?? stage;
+      const rect = (element: Element) => element.getBoundingClientRect().toJSON() as DOMRectInit;
+      const within = (element: Element, outer: Element) => {
+        const box = element.getBoundingClientRect();
+        const bounds = outer.getBoundingClientRect();
+        return box.width > 0 && box.height > 0 && box.left >= bounds.left - 1 && box.right <= bounds.right + 1 &&
+          box.top >= bounds.top - 1 && box.bottom <= bounds.bottom + 1;
+      };
+      const style = getComputedStyle(view);
+      const content = view.getBoundingClientRect().bottom - parseFloat(style.paddingBottom) - parseFloat(style.borderBottomWidth);
+      const box = controls.getBoundingClientRect();
+      // One line: every drawn control starts at the same height.
+      const tops = [...controls.querySelectorAll('button, input')].map((e) => e.getBoundingClientRect()).filter((r) => r.width > 0).map((r) => Math.round(r.top));
+      return {
+        stage: rect(stage), view: rect(view), frame: rect(frame), video: rect(video), controls: rect(controls),
+        floor: 6 * parseFloat(getComputedStyle(document.documentElement).fontSize),
+        fit: getComputedStyle(video).objectFit,
+        scrolls: view.scrollHeight > view.clientHeight + 1,
+        videoInStage: within(video, stage) && within(video, view),
+        controlsInFrame: within(controls, frame),
+        controlsInStage: within(controls, stage) && within(controls, view),
+        controlsInWindow: box.left >= -1 && box.top >= -1 && box.right <= window.innerWidth + 1 && box.bottom <= window.innerHeight + 1,
+        oneLine: tops.length > 0 && Math.max(...tops) - Math.min(...tops) <= 2,
+        visibleLabels: [...controls.querySelectorAll('.label')].filter((e) => e.getBoundingClientRect().width > 2).length,
+        // Under the frame: what the view's content leaves unused.
+        slack: content - frame.getBoundingClientRect().bottom,
+        // What the view has under the title (the call head is above it, so is
+        // not taken off again).
+        room: content - title.getBoundingClientRect().bottom,
+        log: document.querySelector('[role="log"]')?.getBoundingClientRect().height ?? 0,
+      };
+    });
+    const details = JSON.stringify(g);
+    expect.soft(g.fit, where).toBe('contain');
+    expect.soft(g.video, `${where}: the video fills its frame\n${details}`).toEqual(g.frame);
+    expect.soft(g.frame.height, `${where}: the frame keeps its floor\n${details}`).toBeGreaterThanOrEqual(g.floor - 1);
+    expect.soft(g.videoInStage, `${where}: the video is inside the stage\n${details}`).toBe(true);
+    expect.soft(g.controlsInWindow, `${where}: the controls are inside the window\n${details}`).toBe(true);
+    if (open) {
+      expect.soft(g.scrolls, `${where}: the call view needs no scrolling\n${details}`).toBe(false);
+      expect.soft(g.controlsInFrame, `${where}: the controls are inside the frame\n${details}`).toBe(true);
+      expect.soft(g.oneLine, `${where}: the controls are one line\n${details}`).toBe(true);
+      expect.soft(g.controls.height, `${where}: the controls cover at most 64 px\n${details}`).toBeLessThanOrEqual(64);
+      expect.soft(g.visibleLabels, `${where}: the controls are icons, their names read out\n${details}`).toBe(0);
+      // At its floor the frame may use the view's bottom padding (8 px);
+      // above it, it takes exactly what the view leaves.
+      const atFloor = (g.frame.height ?? 0) <= g.floor + 1;
+      expect.soft(g.slack <= 3 && g.slack >= (atFloor ? -9 : -3), `${where}: the frame fills the stage below the title\n${details}`).toBe(true);
+    } else {
+      expect.soft(g.controlsInStage, `${where}: the controls are inside the stage\n${details}`).toBe(true);
+    }
+    if (opts.log === true) expect.soft(g.log, `${where}: the message log keeps its 6rem floor\n${details}`).toBeGreaterThanOrEqual(95);
+    return g;
+  };
+  // Each control, the pop-out and the focus button take a real pointer: a
+  // trial click checks the point it would press is its own, not covered.
+  const clickable = async (page: Page) => {
+    await wake(page);
+    const view = shareView(page);
+    for (const control of [
+      view.getByRole('button', { name: /^(Mute|Unmute) share$/ }),
+      view.getByRole('slider', { name: 'Share volume' }),
+      view.getByRole('button', { name: 'Full screen' }),
+      view.getByRole('button', { name: 'Stop watching' }),
+      view.getByRole('button', { name: 'Pop out' }),
+    ]) {
+      await expect(control).toBeVisible();
+      await control.click({ trial: true, timeout: 5000 });
+    }
+    await view.getByRole('button', { name: /^Focus .*screen$/ }).click({ trial: true, position: { x: 8, y: 8 }, timeout: 5000 });
+  };
+
+  test('P2187 a watched share fills its stage, with its controls over the picture', async ({ browser }) => {
+    const people: Person[] = [];
+    try {
+      const a = await person(browser, vw.alice);
+      people.push(a);
+      const b = await person(browser, vw.bob, { viewport: { width: 1215, height: 900 } });
+      people.push(b);
+      const c = await person(browser, vw.carol, { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 });
+      people.push(c);
+      await drawDesktopStrip(b.page);
+      await join(a);
+      await join(b);
+      await join(c);
+      await share(a);
+
+      await watching(b);
+      const strip = await checkShare(b.page, '1215×900 under the desktop strip', { log: true });
+      // The picture takes at least 85% of what the stage has under the title.
+      expect.soft(strip.frame.height, `the picture under the strip, of ${String(strip.room)} px\n${JSON.stringify(strip)}`).toBeGreaterThanOrEqual(0.85 * strip.room);
+      await clickable(b.page);
+      await b.page.evaluate(() => { document.querySelector('.desktop-bar')?.remove(); });
+      for (const [width, height] of [[1440, 900], [1920, 1080], [800, 700], [768, 700], [720, 700]] as const) {
+        await b.page.setViewportSize({ width, height });
+        await checkShare(b.page, `${String(width)}×${String(height)} browser`, { log: true });
+        if (width < 1000) await clickable(b.page);
+      }
+
+      await watching(c);
+      // The open view's picture has its focus button; the closed Chat stage's
+      // has none (the empty box drawn over the video on main).
+      await expect.soft(shareView(c.page).locator('.call-enlarge')).toHaveCount(1);
+      for (const [width, height] of [[390, 844], [360, 740], [360, 640]] as const) {
+        await c.page.setViewportSize({ width, height });
+        await checkShare(c.page, `${String(width)}×${String(height)} Voice`);
+        await clickable(c.page);
+      }
+      await c.page.setViewportSize({ width: 390, height: 844 });
+      await showView(c.page, 'Chat');
+      await expect(c.page.locator('.call-stage')).toHaveCount(1);
+      await checkShare(c.page, '390×844 Chat', { open: false });
+      await expect.soft(shareView(c.page).locator('.call-enlarge')).toHaveCount(0);
+    } finally {
+      for (const p of people) await leave(p);
+    }
+  });
+
+  test('P2187 the controls fade after a pause and return on a move, a tap or focus', async ({ browser }) => {
+    test.setTimeout(120_000);
+    const people: Person[] = [];
+    try {
+      const a = await person(browser, vw.alice);
+      people.push(a);
+      const b = await person(browser, vw.bob, { viewport: { width: 1440, height: 900 } });
+      people.push(b);
+      const c = await person(browser, vw.carol, { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 });
+      people.push(c);
+      await join(a);
+      await join(b);
+      await join(c);
+      await share(a);
+      await watching(b);
+      await watching(c);
+
+      // Desktop: shown at first, hidden after about 3 s (opacity 0, still in
+      // the tab order), back on a pointer move.
+      await wake(b.page);
+      await expect.poll(() => controlsOpacity(b.page)).toBe('1');
+      await expect.poll(() => controlsOpacity(b.page), { timeout: 10_000 }).toBe('0');
+      await expect(shareView(b.page).getByRole('button', { name: 'Full screen' })).toHaveCount(1);
+      await wake(b.page);
+      await b.page.mouse.move(300, 400);
+      await wake(b.page);
+      await expect.poll(() => controlsOpacity(b.page)).toBe('1');
+      // Tab into them: the row is shown and stays while focus is in it.
+      await expect.poll(() => controlsOpacity(b.page), { timeout: 10_000 }).toBe('0');
+      await b.page.mouse.move(2, 2);
+      await shareView(b.page).getByRole('button', { name: /^Focus .*screen$/ }).focus();
+      for (let i = 0; i < 6; i++) {
+        await b.page.keyboard.press('Tab');
+        if (await shareView(b.page).locator('.share-controls :focus').count() > 0) break;
+      }
+      await expect(shareView(b.page).locator('.share-controls :focus')).toHaveCount(1);
+      await expect.poll(() => controlsOpacity(b.page)).toBe('1');
+      await b.page.waitForTimeout(4500);
+      expect(await controlsOpacity(b.page), 'still shown after 4.5 s with focus inside').toBe('1');
+      await b.page.keyboard.press('Shift+Tab');
+      await b.page.keyboard.press('Shift+Tab');
+      await b.page.keyboard.press('Shift+Tab');
+      await expect.poll(() => controlsOpacity(b.page), { timeout: 10_000 }).toBe('0');
+
+      // Phone: a tap on the picture shows them.
+      await expect.poll(() => controlsOpacity(c.page), { timeout: 10_000 }).toBe('0');
+      const frame = await shareView(c.page).locator('.share-frame').boundingBox();
+      if (frame === null) throw new Error('no share frame');
+      await c.page.touchscreen.tap(frame.x + frame.width / 2, frame.y + frame.height / 4);
+      await expect.poll(() => controlsOpacity(c.page)).toBe('1');
+    } finally {
+      for (const p of people) await leave(p);
+    }
+  });
+
+  // The hit target at the centre of each control: the control (or something in
+  // it), not the picture's focus button over the whole frame.
+  const hitTargets = (page: Page) => shareView(page).evaluate((share) => {
+    const out: { name: string; own: boolean; enlarge: boolean; row: boolean }[] = [];
+    for (const el of share.querySelectorAll<HTMLElement>('.share-controls button, .share-controls input, .share-frame .share-pip')) {
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) continue;
+      const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      out.push({
+        name: el.getAttribute('aria-label') ?? el.className,
+        own: hit !== null && el.contains(hit),
+        enlarge: hit?.closest('.call-enlarge') != null,
+        row: el.closest('.share-controls') !== null,
+      });
+    }
+    return out;
+  });
+
+  test('P2187 every control on the picture is its own hit target when shown, and the picture\'s when faded', async ({ browser }) => {
+    test.setTimeout(120_000);
+    const people: Person[] = [];
+    try {
+      const a = await person(browser, vw.alice);
+      people.push(a);
+      const b = await person(browser, vw.bob, { viewport: { width: 1440, height: 900 } });
+      people.push(b);
+      const c = await person(browser, vw.carol, { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 });
+      people.push(c);
+      await join(a);
+      await join(b);
+      await join(c);
+      await share(a);
+      await watching(b);
+      await watching(c);
+
+      for (const [p, sizes] of [[b, [[1440, 900], [800, 700]]], [c, [[390, 844], [360, 640]]]] as const) {
+        for (const [width, height] of sizes) {
+          await p.page.setViewportSize({ width, height });
+          const where = `${String(width)}×${String(height)}`;
+          await wake(p.page);
+          await expect.poll(() => controlsOpacity(p.page), { timeout: 10_000 }).toBe('1');
+          const shown = await hitTargets(p.page);
+          expect(shown.length, `${where}: the controls are there`).toBeGreaterThanOrEqual(3);
+          expect(shown.filter((t) => !t.own), `${where}: shown, each control is what a press at its centre reaches`).toEqual([]);
+          // Faded, nothing invisible in the row takes a press: it is the
+          // picture's, which a tap there also wakes the controls with (the
+          // pop-out is not in the row and stays).
+          await expect.poll(() => controlsOpacity(p.page), { timeout: 10_000 }).toBe('0');
+          const faded = await hitTargets(p.page);
+          expect(faded.filter((t) => t.row && (t.own || !t.enlarge)), `${where}: faded, a press at a control reaches the picture`).toEqual([]);
+        }
+      }
+    } finally {
+      for (const p of people) await leave(p);
+    }
+  });
+
+  const faded = (page: Page) => expect.poll(() => controlsOpacity(page), { timeout: 10_000 });
+
+  test('P2187 on touch a tap on a faded control only brings the row back; a second tap presses it', async ({ browser }) => {
+    test.setTimeout(240_000);
+    const people: Person[] = [];
+    try {
+      const a = await person(browser, vw.alice);
+      people.push(a);
+      const phone = await person(browser, vw.carol, { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 });
+      people.push(phone);
+      const tablet = await person(browser, vw.bob, { viewport: { width: 1024, height: 768 }, hasTouch: true });
+      people.push(tablet);
+      await join(a);
+      await join(phone);
+      await join(tablet);
+      await share(a);
+      await watching(phone);
+      await watching(tablet);
+
+      for (const p of [phone, tablet]) {
+        const { page } = p;
+        const view = shareView(page);
+        const where = page.viewportSize()?.width === 390 ? '390×844' : '1024×768';
+        const centre = async (control: Locator): Promise<[number, number]> => {
+          const box = await control.boundingBox();
+          if (box === null) throw new Error('control not drawn');
+          return [box.x + box.width / 2, box.y + box.height / 2];
+        };
+        const mute = view.getByRole('button', { name: /^(Mute|Unmute) share$/ });
+        const slider = view.getByRole('slider', { name: 'Share volume' });
+        const full = view.getByRole('button', { name: 'Full screen' });
+        const stop = view.getByRole('button', { name: 'Stop watching' });
+        // The state each control would change.
+        const state = (): Promise<string> => page.evaluate(() => {
+          const v = document.querySelector('section[aria-label="Shared screen"]');
+          const m = v?.querySelector('.share-controls button[aria-pressed]')?.getAttribute('aria-pressed') ?? '';
+          const r = v?.querySelector<HTMLInputElement>('.share-controls input[type="range"]')?.value ?? '';
+          return `${m}|${r}|${String(document.fullscreenElement !== null)}|${String(v !== null)}`;
+        });
+        for (const [name, control] of [['Mute', mute], ['volume', slider], ['Full screen', full], ['Stop watching', stop]] as const) {
+          await faded(page).toBe('0');
+          const before = await state();
+          const [x, y] = await centre(control);
+          await page.touchscreen.tap(x, y);
+          await page.waitForTimeout(700);
+          expect(await state(), `${where}: the first tap on the faded ${name} presses nothing`).toBe(before);
+          await expect.poll(() => controlsOpacity(page), { message: `${where}: and brings the row back` }).toBe('1');
+          await page.touchscreen.tap(x, y);
+          await page.waitForTimeout(700);
+          if (name === 'Stop watching') await expect(view, `${where}: the second tap stops watching`).toHaveCount(0);
+          else if (name === 'Full screen') {
+            // Headless may refuse the request; the tap must still reach the button.
+            await page.evaluate(() => { void document.exitFullscreen().catch(() => undefined); });
+          } else expect(await state(), `${where}: the second tap presses ${name}`).not.toBe(before);
+          await page.waitForTimeout(300);
+        }
+      }
+    } finally {
+      for (const p of people) await leave(p);
+    }
+  });
+
+  test('P2187 the press that wakes a faded row is a pure wake, on touch and with a mouse', async ({ browser }) => {
+    test.setTimeout(180_000);
+    const people: Person[] = [];
+    try {
+      const a = await person(browser, vw.alice);
+      people.push(a);
+      const touch = await person(browser, vw.bob, { viewport: { width: 1024, height: 768 }, hasTouch: true });
+      people.push(touch);
+      const mouse = await person(browser, vw.carol, { viewport: { width: 1440, height: 900 } });
+      people.push(mouse);
+      await join(a);
+      await join(touch);
+      await join(mouse);
+      await share(a);
+      await watching(touch);
+      await watching(mouse);
+      const back = (page: Page) => page.getByRole('button', { name: 'Back to grid' });
+      const centreOf = async (control: Locator): Promise<[number, number]> => {
+        const box = await control.boundingBox();
+        if (box === null) throw new Error('control not drawn');
+        return [box.x + box.width / 2, box.y + box.height / 2];
+      };
+
+      // Touch: a tap on the picture while faded wakes the row and does no more;
+      // a quick second tap on a faded Stop watching does not stop watching.
+      const tp = touch.page;
+      await faded(tp).toBe('0');
+      const frame = await shareView(tp).locator('.share-frame').boundingBox();
+      if (frame === null) throw new Error('no frame');
+      await tp.touchscreen.tap(frame.x + 40, frame.y + 40);
+      await tp.waitForTimeout(600);
+      await expect.poll(() => controlsOpacity(tp)).toBe('1');
+      await expect(back(tp), 'a wake tap on the picture enlarges nothing').toHaveCount(0);
+      await faded(tp).toBe('0');
+      const [sx, sy] = await centreOf(shareView(tp).getByRole('button', { name: 'Stop watching' }));
+      await tp.touchscreen.tap(sx, sy);
+      await tp.waitForTimeout(80);
+      await tp.touchscreen.tap(sx, sy);
+      await tp.waitForTimeout(600);
+      await expect(shareView(tp), 'a quick double tap on the faded Stop watching does not stop').toHaveCount(1);
+      await expect(back(tp)).toHaveCount(0);
+
+      // A touch held 1.6 s on the faded Stop watching is one press that wakes
+      // and does no more, however long it is held.
+      await faded(tp).toBe('0');
+      const [hx, hy] = await centreOf(shareView(tp).getByRole('button', { name: 'Stop watching' }));
+      const cdp = await tp.context().newCDPSession(tp);
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: hx, y: hy }] });
+      await tp.waitForTimeout(1600);
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+      await tp.waitForTimeout(600);
+      await expect(shareView(tp), 'a long hold on the faded Stop watching stops nothing').toHaveCount(1);
+
+      // Mouse resting on a faded control: its first press only wakes the row.
+      const mp = mouse.page;
+      const mute = shareView(mp).getByRole('button', { name: /^(Mute|Unmute) share$/ });
+      await wake(mp);
+      await expect.poll(() => controlsOpacity(mp)).toBe('1');
+      const [mx, my] = await centreOf(mute);
+      await mp.mouse.move(mx, my);
+      await faded(mp).toBe('0');
+      await mp.mouse.down();
+      await mp.mouse.up();
+      await mp.waitForTimeout(500);
+      await expect.poll(() => controlsOpacity(mp)).toBe('1');
+      await expect(mute, 'the first press on a faded control presses nothing').toHaveAttribute('aria-pressed', 'false');
+      await expect(back(mp)).toHaveCount(0);
+      await mp.waitForTimeout(400);
+      await mute.click();
+      await expect(mute, 'the next press is the control\'s').toHaveAttribute('aria-pressed', 'true');
+
+      // A press released outside the share does not leave the next click swallowed.
+      await mp.mouse.move(mx, my);
+      await faded(mp).toBe('0');
+      await mp.mouse.down();
+      await mp.mouse.move(2, 2);
+      await mp.mouse.up();
+      await mp.waitForTimeout(700);
+      await mute.click();
+      await expect(mute, 'a press released outside leaves nothing swallowed').toHaveAttribute('aria-pressed', 'false');
+
+    } finally {
+      for (const p of people) await leave(p);
+    }
+  });
+
+  // Where the row does not fade (the overlay is the single share in an open
+  // call view over 560 px tall), the first press on a control is the control's
+  // however long the share has been left alone.
+  test('P2187 outside the overlay the first press after a pause presses the control', async ({ browser }) => {
+    test.setTimeout(240_000);
+    const people: Person[] = [];
+    try {
+      const a = await person(browser, vw.alice);
+      people.push(a);
+      const phone = await person(browser, vw.carol, { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 });
+      people.push(phone);
+      const desk = await person(browser, vw.bob, { viewport: { width: 1000, height: 540 } });
+      people.push(desk);
+      await join(a);
+      await join(phone);
+      await join(desk);
+      await share(a);
+      await watching(phone);
+      await watching(desk);
+      const mute = (page: Page) => shareView(page).getByRole('button', { name: /^(Mute|Unmute) share$/ });
+      const centreOf = async (control: Locator): Promise<[number, number]> => {
+        await control.scrollIntoViewIfNeeded();
+        const box = await control.boundingBox();
+        if (box === null) throw new Error('control not drawn');
+        return [box.x + box.width / 2, box.y + box.height / 2];
+      };
+
+      // Phone Chat stage: untouched for 4 s, one tap mutes.
+      await showView(phone.page, 'Chat');
+      await phone.page.waitForTimeout(4000);
+      const [px, py] = await centreOf(mute(phone.page));
+      await phone.page.touchscreen.tap(px, py);
+      await expect(mute(phone.page), 'phone Chat: one tap after a pause mutes').toHaveAttribute('aria-pressed', 'true');
+
+      // A short desktop window: the pointer resting on Mute, a second press unmutes.
+      const dp = desk.page;
+      const [dx, dy] = await centreOf(mute(dp));
+      await dp.mouse.click(dx, dy);
+      await expect(mute(dp)).toHaveAttribute('aria-pressed', 'true');
+      await dp.waitForTimeout(4000);
+      await dp.mouse.down();
+      await dp.mouse.up();
+      await expect(mute(dp), '1000×540: the press after a pause unmutes').toHaveAttribute('aria-pressed', 'false');
+    } finally {
+      for (const p of people) await leave(p);
+    }
+  });
+
+  test('P2187 in a grid of two one click on a picture focuses it, after a pause too', async ({ browser }) => {
+    test.setTimeout(240_000);
+    const people: Person[] = [];
+    try {
+      const a = await person(browser, vw.alice);
+      people.push(a);
+      const b = await person(browser, vw.bob, { viewport: { width: 1440, height: 900 } });
+      people.push(b);
+      const c = await person(browser, vw.carol);
+      people.push(c);
+      await join(a);
+      await join(b);
+      await join(c);
+      await share(a);
+      await share(c);
+      await tile(b.page, 'alice').getByRole('button', { name: 'Watch' }).click({ timeout: 30_000 });
+      await tile(b.page, 'carol').getByRole('button', { name: 'Watch' }).click({ timeout: 30_000 });
+      await expect(b.page.locator('.call-enlarge')).toHaveCount(2, { timeout: 30_000 });
+      await b.page.waitForTimeout(1500);
+      const box = await b.page.locator('.call-enlarge').first().boundingBox();
+      if (box === null) throw new Error('no picture');
+      await b.page.mouse.move(box.x + 8, box.y + 8);
+      await b.page.waitForTimeout(4500);
+      await b.page.mouse.down();
+      await b.page.mouse.up();
+      await expect(b.page.locator('ul.call-grid.focus'), 'the click after a pause focuses the picture').toHaveCount(1);
+    } finally {
+      for (const p of people) await leave(p);
+    }
+  });
+
+  test('P2187 after a pointer press on a control the row still fades; keyboard focus holds it', async ({ browser }) => {
+    test.setTimeout(120_000);
+    const people: Person[] = [];
+    try {
+      const a = await person(browser, vw.alice);
+      people.push(a);
+      const b = await person(browser, vw.bob, { viewport: { width: 1440, height: 900 } });
+      people.push(b);
+      await join(a);
+      await join(b);
+      await share(a);
+      await watching(b);
+      const view = shareView(b.page);
+      await wake(b.page);
+      await expect.poll(() => controlsOpacity(b.page)).toBe('1');
+      for (const control of [view.getByRole('button', { name: /^(Mute|Unmute) share$/ }), view.getByRole('slider', { name: 'Share volume' })]) {
+        await wake(b.page);
+        await control.click();
+        await b.page.mouse.move(2, 2);
+        await b.page.waitForTimeout(500);
+        // The control still has focus, from the press, and the row fades anyway.
+        await expect(control).toBeFocused();
+        await faded(b.page).toBe('0');
+        await wake(b.page);
+      }
+    } finally {
+      for (const p of people) await leave(p);
+    }
+  });
+
+  // Where "Tap to play sound" is, with the audio refused: wholly inside its
+  // picture (a frame under 44 px tall gives it a smaller pill) and what a press
+  // at its centre reaches.
+  const tapGeometry = async (page: Page, where: string): Promise<void> => {
+    await page.waitForTimeout(300);
+    const taps = page.getByRole('button', { name: 'Tap to play sound' });
+    await expect(taps.first(), where).toBeVisible({ timeout: 15_000 });
+    for (let i = 0; i < await taps.count(); i += 1) {
+      const tap = taps.nth(i);
+      await tap.scrollIntoViewIfNeeded();
+      const g = await tap.evaluate((el) => {
+        const frame = el.closest('.share-frame');
+        if (frame === null) throw new Error('the tap is not on a picture');
+        const r = el.getBoundingClientRect();
+        const f = frame.getBoundingClientRect();
+        const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        return {
+          inFrame: r.left >= f.left - 1 && r.right <= f.right + 1 && r.top >= f.top - 1 && r.bottom <= f.bottom + 1,
+          own: hit !== null && el.contains(hit),
+          tall: r.height >= 44 - 1 || f.height < 44 + 4,
+          size: [Math.round(r.width), Math.round(r.height), Math.round(f.width), Math.round(f.height)],
+        };
+      });
+      const details = `${where}: ${JSON.stringify(g)}`;
+      expect.soft(g.inFrame, `the tap is inside its picture, ${details}`).toBe(true);
+      expect.soft(g.own, `a press at the tap's centre reaches it, ${details}`).toBe(true);
+      expect.soft(g.tall, `the tap is a full target where the picture has room, ${details}`).toBe(true);
+    }
+  };
+  // A real press starts the sound: the page lets its audio play, and the tap goes.
+  const pressTap = async (page: Page, where: string, touch: boolean): Promise<void> => {
+    await page.evaluate(() => { (window as unknown as { __blockShareSound?: boolean }).__blockShareSound = false; });
+    const tap = page.getByRole('button', { name: 'Tap to play sound' }).first();
+    await tap.scrollIntoViewIfNeeded();
+    const box = await tap.boundingBox();
+    if (box === null) throw new Error('no tap');
+    const count = await page.getByRole('button', { name: 'Tap to play sound' }).count();
+    if (touch) await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
+    else await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await expect(page.getByRole('button', { name: 'Tap to play sound' }), `${where}: a press starts the sound`).toHaveCount(count - 1);
+  };
+  const reblock = async (page: Page, name: string): Promise<void> => {
+    await page.evaluate(() => { (window as unknown as { __blockShareSound?: boolean }).__blockShareSound = true; });
+    await page.evaluate(() => { document.querySelector<HTMLElement>('.share-controls .stop')?.click(); });
+    await tile(page, name).getByRole('button', { name: 'Watch' }).click({ timeout: 30_000 });
+  };
+
+  test('P2187 the tap to play sound is whole, on the picture and pressable in every layout, on a desktop', async ({ browser }) => {
+    test.setTimeout(300_000);
+    const people: Person[] = [];
+    try {
+      const a = await person(browser, vw.alice);
+      people.push(a);
+      const b = await person(browser, vw.bob, { viewport: { width: 1440, height: 900 } }, blockShareSound);
+      people.push(b);
+      const c = await person(browser, vw.carol);
+      people.push(c);
+      await join(a);
+      await join(b);
+      await join(c);
+      await share(a);
+      await watching(b);
+      const page = b.page;
+      for (const [w, h] of [[1440, 900], [1000, 540], [1280, 560]] as const) {
+        await page.setViewportSize({ width: w, height: h });
+        await tapGeometry(page, `single share ${String(w)}×${String(h)}`);
+      }
+      await pressTap(page, 'single share 1280×560', false);
+
+      // A second stream: a grid of two, each with its own tap.
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await share(c);
+      await expect(page.locator('.call-share')).toHaveCount(2, { timeout: 30_000 });
+      await reblock(page, 'alice');
+      await tile(page, 'carol').getByRole('button', { name: 'Watch' }).click({ timeout: 30_000 });
+      for (const [w, h] of [[1440, 900], [1024, 768], [1920, 1080]] as const) {
+        await page.setViewportSize({ width: w, height: h });
+        await tapGeometry(page, `grid of two ${String(w)}×${String(h)}`);
+      }
+
+      // Focused: the enlarged picture and the strip.
+      await page.setViewportSize({ width: 1440, height: 900 });
+      // Its corner: the middle of the picture is the tap's.
+      await page.locator('.call-enlarge').first().click({ position: { x: 8, y: 8 } });
+      await expect(page.locator('ul.call-grid.focus')).toHaveCount(1);
+      await tapGeometry(page, 'focused with a strip 1440×900');
+      await pressTap(page, 'focused with a strip 1440×900', false);
+    } finally {
+      for (const p of people) await leave(p);
+    }
+  });
+
+  test('P2187 the tap to play sound is whole, on the picture and pressable in every layout, on a phone', async ({ browser }) => {
+    test.setTimeout(240_000);
+    const people: Person[] = [];
+    try {
+      const a = await person(browser, vw.alice);
+      people.push(a);
+      const c = await person(browser, vw.carol, { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 }, blockShareSound);
+      people.push(c);
+      await join(a);
+      await join(c);
+      await share(a);
+      await watching(c);
+      const page = c.page;
+      for (const [w, h] of [[390, 844], [360, 640]] as const) {
+        await page.setViewportSize({ width: w, height: h });
+        await tapGeometry(page, `phone Voice ${String(w)}×${String(h)}`);
+      }
+      const stopWidth = () => shareView(page).locator('.share-controls .stop .label').evaluate((el) => el.getBoundingClientRect().width);
+      // Icons only on the picture; the words back where the row is below it.
+      expect(await stopWidth(), 'phone Voice: Stop watching is an icon, its name read out').toBeLessThanOrEqual(2);
+      await page.setViewportSize({ width: 390, height: 844 });
+      await showView(page, 'Chat');
+      expect(await stopWidth(), 'phone Chat: Stop watching says so').toBeGreaterThan(40);
+      // The words take the room the icon would: Stop watching is as wide as
+      // main's (119.6 px; with its icon 146 px, which wrapped the row onto a
+      // second line and took the picture's height: 105.5 px to 53.5 at 360×640),
+      // and the row stays one line. The picture's own height depends on what
+      // else the Chat view holds, so it is not compared here.
+      for (const [w, h] of [[360, 740], [360, 640]] as const) {
+        await page.setViewportSize({ width: w, height: h });
+        const row = await shareView(page).evaluate((share) => {
+          const tops = [...share.querySelectorAll('.share-controls button, .share-controls input')].map((e) => e.getBoundingClientRect()).filter((r) => r.width > 0).map((r) => Math.round(r.top + r.height / 2));
+          const stop = share.querySelector('.stop');
+          const icon = stop?.querySelector('svg');
+          return { spread: Math.max(...tops) - Math.min(...tops), stop: Math.round(stop?.getBoundingClientRect().width ?? 0), icon: icon != null && getComputedStyle(icon).display !== 'none' };
+        });
+        expect(row.spread, `phone Chat ${String(w)}×${String(h)}: the controls are one line ${JSON.stringify(row)}`).toBeLessThanOrEqual(2);
+        expect(row.stop, `phone Chat ${String(w)}×${String(h)}: Stop watching is words alone in width (main's 119.6 px, 126 on wider fonts; with the icon 26 px more) ${JSON.stringify(row)}`).toBeLessThanOrEqual(135);
+        expect(row.icon, `phone Chat ${String(w)}×${String(h)}: Stop watching is words alone`).toBe(false);
+      }
+      for (const [w, h] of [[390, 844], [360, 740], [360, 640]] as const) {
+        await page.setViewportSize({ width: w, height: h });
+        await tapGeometry(page, `phone Chat ${String(w)}×${String(h)}`);
+      }
+      // Held sideways: wide enough for the desktop layout, 390 px tall.
+      await page.setViewportSize({ width: 844, height: 390 });
+      await tapGeometry(page, 'phone held sideways 844×390');
+      await page.setViewportSize({ width: 360, height: 740 });
+      await pressTap(page, 'phone Chat 360×740', true);
+    } finally {
+      for (const p of people) await leave(p);
+    }
+  });
+
+  test('P2187 the tap to play sound is the picture\'s, the row stays one line and the waiting hint is not covered', async ({ browser }) => {
+    test.setTimeout(120_000);
+    const people: Person[] = [];
+    try {
+      const a = await person(browser, vw.alice);
+      people.push(a);
+      const b = await person(browser, vw.bob, { viewport: { width: 1440, height: 900 } }, blockShareSound);
+      people.push(b);
+      const c = await person(browser, vw.carol, { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 }, blockShareSound);
+      people.push(c);
+      await join(a);
+      await join(b);
+      await join(c);
+      await share(a);
+      await watching(b);
+      await watching(c);
+
+      for (const [p, sizes] of [[b, [[1440, 900], [800, 700]]], [c, [[390, 844], [360, 640]]]] as const) {
+        for (const [width, height] of sizes) {
+          await p.page.setViewportSize({ width, height });
+          const where = `${String(width)}×${String(height)} with the sound waiting for a tap`;
+          const tap = shareView(p.page).getByRole('button', { name: 'Tap to play sound' });
+          await expect(tap, where).toBeVisible({ timeout: 15_000 });
+          await tap.click({ trial: true });
+          const g = await checkShare(p.page, where);
+          expect.soft(g.oneLine, `${where}: the row is still one line`).toBe(true);
+          // The tap is on the picture and not in the control row.
+          const inRow = await shareView(p.page).locator('.share-controls').getByRole('button', { name: 'Tap to play sound' }).count();
+          expect.soft(inRow, `${where}: the tap is not among the controls`).toBe(0);
+          // While it waits the controls stay shown, however long the pause.
+          await p.page.mouse.move(2, 2);
+          await p.page.waitForTimeout(4500);
+          expect.soft(await controlsOpacity(p.page), `${where}: the controls stay shown`).toBe('1');
+        }
+      }
+
+      // The waiting hint ("Waiting for the picture", "Waiting for the stream
+      // to come back") is drawn when the picture is not playing, a state
+      // LiveKit does not hold still: so the page's own hint is drawn here as
+      // ShareView draws it (same element and class), and must clear the row.
+      for (const [p, sizes] of [[b, [[1440, 900], [720, 700]]], [c, [[390, 844], [360, 640]]]] as const) {
+        for (const [width, height] of sizes) {
+          await p.page.setViewportSize({ width, height });
+          const where = `${String(width)}×${String(height)} waiting hint`;
+          const g = await shareView(p.page).evaluate((share) => {
+            const frame = share.querySelector('.share-frame');
+            const controls = share.querySelector('.share-controls');
+            if (frame === null || controls === null) throw new Error('no frame');
+            const hint = document.createElement('p');
+            hint.className = 'hint';
+            hint.textContent = 'Waiting for the stream to come back';
+            frame.append(hint);
+            const h = hint.getBoundingClientRect();
+            const c = controls.getBoundingClientRect();
+            const f = frame.getBoundingClientRect();
+            hint.remove();
+            return { hintBottom: h.bottom, controlsTop: c.top, inFrame: h.top >= f.top - 1 && h.bottom <= f.bottom + 1 };
+          });
+          const details = JSON.stringify(g);
+          expect.soft(g.inFrame, `${where}: the hint is inside the frame\n${details}`).toBe(true);
+          expect.soft(g.hintBottom, `${where}: the hint is above the controls\n${details}`).toBeLessThanOrEqual(g.controlsTop + 1);
+        }
+      }
+    } finally {
+      for (const p of people) await leave(p);
+    }
+  });
+
+  // The sharer's own stage (#2197): a live preview of the outgoing screen in
+  // the watched share's frame, which Hide preview collapses to the title and
+  // Stop sharing. The preview is the local capture the picker gave: the
+  // instrument keeps it, and the video must play that very track.
+  const keepCapture = async (page: Page): Promise<void> => { await page.addInitScript(() => {
+    const w = window as unknown as { __capture: MediaStream | null };
+    w.__capture = null;
+    const devices = navigator.mediaDevices;
+    const display = devices.getDisplayMedia.bind(devices);
+    devices.getDisplayMedia = async (options?: DisplayMediaStreamOptions) => {
+      const stream = await display(options);
+      w.__capture = stream;
+      return stream;
+    };
+  }); };
+  const ownStage = (page: Page) => page.getByRole('region', { name: 'Your stream' });
+  const preview = (page: Page) => ownStage(page).locator('video');
+  // The preview plays the local capture's picture, not a copy or another track.
+  const expectPlaysCapture = async (page: Page, where: string): Promise<void> => {
+    await expect.poll(() => preview(page).evaluate((video: HTMLVideoElement) => {
+      const w = window as unknown as { __capture: MediaStream | null };
+      const mine = w.__capture?.getVideoTracks()[0];
+      const shown = video.srcObject instanceof MediaStream ? video.srcObject.getVideoTracks()[0] : undefined;
+      return {
+        sameTrack: mine !== undefined && shown !== undefined && mine.id === shown.id,
+        playing: video.readyState >= 2 && !video.paused && video.videoWidth > 0,
+        muted: video.muted,
+        sound: video.srcObject instanceof MediaStream ? video.srcObject.getAudioTracks().length : -1,
+      };
+    }), { message: `${where}: the preview plays the local capture`, timeout: 30_000 }).toEqual({ sameTrack: true, playing: true, muted: true, sound: 0 });
+  };
+  const measureOwn = (page: Page) => ownStage(page).evaluate((own) => {
+      const stage = own.closest('.stage');
+      const view = own.closest('.call-view, .call-stage') ?? stage;
+      const tile = own.closest('li') ?? own;
+      const video = own.querySelector('video');
+      const frame = own.querySelector('.share-frame');
+      const controls = own.querySelector('.share-controls');
+      if (stage === null || view === null || controls === null) throw new Error('no stage layout boxes');
+      const inside = (element: Element, outer: Element) => {
+        const box = element.getBoundingClientRect();
+        const bounds = outer.getBoundingClientRect();
+        return box.width > 0 && box.height > 0 && box.left >= bounds.left - 1 && box.right <= bounds.right + 1 &&
+          box.top >= bounds.top - 1 && box.bottom <= bounds.bottom + 1;
+      };
+      const onScreen = (element: Element) => {
+        const box = element.getBoundingClientRect();
+        return box.width > 0 && box.height > 0 && box.left >= -1 && box.top >= -1 && box.right <= window.innerWidth + 1 && box.bottom <= window.innerHeight + 1 && inside(element, view);
+      };
+      const buttons = [...controls.querySelectorAll('button')];
+      const scroller = document.scrollingElement;
+      return {
+        tile: [Math.round(tile.getBoundingClientRect().width), Math.round(tile.getBoundingClientRect().height)],
+        controlsSize: [Math.round(controls.getBoundingClientRect().width), Math.round(controls.getBoundingClientRect().height)],
+        hasVideo: video !== null,
+        hasFrame: frame !== null,
+        fit: video === null ? '' : getComputedStyle(video).objectFit,
+        videoInTile: video !== null && inside(video, tile) && inside(video, view),
+        videoHeight: video?.getBoundingClientRect().height ?? 0,
+        controlsInTile: inside(controls, tile),
+        buttons: buttons.map((b) => b.textContent.trim() || b.getAttribute('aria-label')),
+        buttonsOnScreen: buttons.length === 2 && buttons.every(onScreen),
+        scrolls: view.scrollHeight > view.clientHeight + 1,
+        viewExcess: view.scrollHeight - view.clientHeight,
+        pageScrolls: scroller === null ? false : scroller.scrollHeight > scroller.clientHeight + 1,
+        overflow: scroller === null ? 0 : scroller.scrollHeight - scroller.clientHeight,
+      };
+  });
+  // The geometry of the sharer's tile (#2197): the preview is a thumbnail that
+  // stays inside its tile, the page and the call view never scroll where
+  // main's do not, and Stop sharing and the toggle are fully on screen.
+  const checkOwn = async (page: Page, where: string, expectVideo: boolean) => {
+    // The tile without its preview is what main drew: the preview may add no
+    // scrolling to it (a layout that scrolls without it, such as a grid of many
+    // tiles in a short window, is not the preview's doing).
+    let base = { overflow: 0, scrolls: false, viewExcess: 0, tileHeight: 0, controlsHeight: 0 };
+    if (expectVideo) {
+      await ownStage(page).getByRole('button', { name: 'Hide preview of your screen' }).click();
+      const hiddenTile = await measureOwn(page);
+      base = { overflow: hiddenTile.overflow, scrolls: hiddenTile.scrolls, viewExcess: hiddenTile.viewExcess, tileHeight: hiddenTile.tile[1] ?? 0, controlsHeight: hiddenTile.controlsSize[1] ?? 0 };
+      // The tile without its preview is main's: one row of buttons, never wrapped.
+      expect.soft(base.controlsHeight, `the buttons do not wrap without the preview: ${where}\n${JSON.stringify(hiddenTile)}`).toBeLessThanOrEqual(54);
+      await ownStage(page).getByRole('button', { name: 'Show preview of your screen' }).click();
+      await expect(preview(page)).toHaveCount(1);
+    }
+    const g = await measureOwn(page);
+    const details = `${where}\n${JSON.stringify(g)}`;
+    expect.soft(g.hasVideo, `the preview is ${expectVideo ? 'drawn' : 'gone'}: ${details}`).toBe(expectVideo);
+    expect.soft(g.hasFrame, `the frame is ${expectVideo ? 'drawn' : 'gone'}: ${details}`).toBe(expectVideo);
+    if (expectVideo) {
+      expect.soft(g.fit, details).toBe('contain');
+      expect.soft(g.videoInTile, `the preview is inside its tile: ${details}`).toBe(true);
+      expect.soft(g.videoHeight, `the preview has a picture's height: ${details}`).toBeGreaterThanOrEqual(40);
+    }
+    expect.soft(g.controlsInTile, `the controls are inside the tile: ${details}`).toBe(true);
+    if (base.overflow === 0) expect.soft(g.buttonsOnScreen, `Stop sharing and the toggle are fully shown: ${details}`).toBe(true);
+    // Never scrolling where the tile without its preview does not.
+    expect.soft(g.overflow, `the page scrolls no more than without the preview (${String(base.overflow)}): ${details}`).toBeLessThanOrEqual(base.overflow);
+    // The call view scrolls no more than it does without the preview, and the
+    // tile is no taller than that one.
+    expect.soft(g.viewExcess, `the call view scrolls no more than without the preview (${String(base.viewExcess)}): ${details}`).toBeLessThanOrEqual(Math.max(base.viewExcess, 1));
+    if (expectVideo) expect.soft(g.tile[1], `the tile is no taller than without the preview (${String(base.tileHeight)}): ${details}`).toBeLessThanOrEqual(base.tileHeight + 1);
+    return g;
+  };
+  const desktopSizes = [[1440, 900], [1366, 768], [1280, 720]] as const;
+
+  test('P2197 the sharer sees a live preview of the outgoing screen, inside the stage, which can be hidden and shown', async ({ browser }) => {
+    test.setTimeout(180_000);
+    const people: Person[] = [];
+    try {
+      const a = await person(browser, vw.alice, { viewport: { width: 1440, height: 900 } }, keepCapture);
+      people.push(a);
+      await join(a);
+      await share(a);
+      await expectPlaysCapture(a.page, '1440×900');
+      await checkOwn(a.page, '1440×900', true);
+      // No sound of the share is played back to the sharer.
+      await expect(a.page.locator('audio[aria-label$="stream audio"]')).toHaveCount(0);
+
+      // Under the desktop strip, 1215×900.
+      await a.page.setViewportSize({ width: 1215, height: 900 });
+      await drawDesktopStrip(a.page);
+      await checkOwn(a.page, '1215×900 under the desktop strip', true);
+      await a.page.evaluate(() => { document.querySelector('.desktop-bar')?.remove(); });
+
+      // 390×844 is a phone's, below.
+      // Hide preview takes the video away, and Show preview brings it back, on
+      // the same capture.
+      const own = ownStage(a.page);
+      // The title says what is shared, from the real capture's displaySurface
+      // (#2197): Chromium's fake device reports one of the three kinds.
+      await expect(own.locator('.share-title')).toContainText(/You · LIVE · (your entire screen|a window|a tab)/);
+      await own.getByRole('button', { name: 'Hide preview of your screen' }).click();
+      await expect(preview(a.page)).toHaveCount(0);
+      await expect(own.getByRole('button', { name: 'Show preview of your screen' })).toHaveText('Show preview');
+      await expect(own.getByRole('button', { name: 'Stop sharing' })).toBeVisible();
+      await checkOwn(a.page, 'hidden at 1440×900', false);
+      await own.getByRole('button', { name: 'Show preview of your screen' }).click();
+      await expect(preview(a.page)).toHaveCount(1);
+      await expectPlaysCapture(a.page, 'shown again');
+      await checkOwn(a.page, 'shown again at 1440×900', true);
+
+      // The choice is the session's: hidden, it stays hidden when the stage is
+      // drawn again (a second share later).
+      await own.getByRole('button', { name: 'Hide preview of your screen' }).click();
+      await own.getByRole('button', { name: 'Stop sharing' }).click();
+      await expect(own).toHaveCount(0, { timeout: 30_000 });
+      await share(a);
+      await expect(preview(a.page)).toHaveCount(0);
+      await own.getByRole('button', { name: 'Show preview of your screen' }).click();
+      await expectPlaysCapture(a.page, 'second share');
+
+      // Stop sharing leaves no preview, and no frozen last frame, behind.
+      await own.getByRole('button', { name: 'Stop sharing' }).click();
+      await expect(own).toHaveCount(0, { timeout: 30_000 });
+      await expect(a.page.locator('video[aria-label="Preview of your screen"]')).toHaveCount(0);
+      await expectClean(a);
+    } finally {
+      for (const p of people) await leave(p);
+    }
+  });
+
+  test('P2197 the sharer\'s preview fits every desktop size, alone, with a camera and beside another share', async ({ browser }) => {
+    test.setTimeout(240_000);
+    const people: Person[] = [];
+    try {
+      const a = await person(browser, vw.alice, { viewport: { width: 1440, height: 900 } }, keepCapture);
+      people.push(a);
+      await join(a);
+      await share(a);
+      await expectPlaysCapture(a.page, 'alone');
+      for (const [w, h] of desktopSizes) {
+        await a.page.setViewportSize({ width: w, height: h });
+        await checkOwn(a.page, `alone ${String(w)}×${String(h)}`, true);
+      }
+      // The compact strip: the same tile, one row of buttons, no taller with
+      // the preview than without.
+      await a.page.getByRole('button', { name: 'Compact', exact: true }).click();
+      await expect(a.page.locator('.call-view.compact')).toHaveCount(1);
+      await checkOwn(a.page, 'alone, compact', true);
+      await a.page.getByRole('button', { name: 'Expand', exact: true }).click();
+      await expect(a.page.locator('.call-view.compact')).toHaveCount(0);
+
+      await a.page.setViewportSize({ width: 1215, height: 900 });
+      await drawDesktopStrip(a.page);
+      await checkOwn(a.page, 'alone 1215×900 under the desktop strip', true);
+      await a.page.evaluate(() => { document.querySelector('.desktop-bar')?.remove(); });
+
+      await camera(a, true);
+      for (const [w, h] of desktopSizes) {
+        await a.page.setViewportSize({ width: w, height: h });
+        await checkOwn(a.page, `with a camera ${String(w)}×${String(h)}`, true);
+      }
+      await camera(a, false);
+
+      const b = await person(browser, vw.bob, { viewport: { width: 1440, height: 900 } });
+      people.push(b);
+      await join(b);
+      await share(b);
+      await expect(tile(a.page, 'bob')).toBeVisible({ timeout: 30_000 });
+      for (const [w, h] of desktopSizes) {
+        await a.page.setViewportSize({ width: w, height: h });
+        await checkOwn(a.page, `beside another share ${String(w)}×${String(h)}`, true);
+      }
+      // Under the desktop strip, beside another share: the tile is narrow, and
+      // its row stays one line, no taller than without the preview.
+      await a.page.setViewportSize({ width: 1215, height: 900 });
+      await drawDesktopStrip(a.page);
+      await checkOwn(a.page, 'beside another share 1215×900 under the desktop strip', true);
+    } finally {
+      for (const p of people) await leave(p);
+    }
+  });
+
+  test('P2197 the sharer\'s preview fits a phone alone and beside another share, and the page does not scroll', async ({ browser }) => {
+    test.setTimeout(240_000);
+    const people: Person[] = [];
+    try {
+      const c = await person(browser, vw.carol, { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 }, keepCapture);
+      people.push(c);
+      await join(c);
+      await share(c);
+      await expectPlaysCapture(c.page, 'phone');
+      for (const [w, h] of [[390, 844], [360, 640]] as const) {
+        await c.page.setViewportSize({ width: w, height: h });
+        await checkOwn(c.page, `phone alone ${String(w)}×${String(h)}`, true);
+      }
+      const b = await person(browser, vw.bob, { viewport: { width: 1440, height: 900 } });
+      people.push(b);
+      await join(b);
+      await share(b);
+      await expect(tile(c.page, 'bob')).toBeVisible({ timeout: 30_000 });
+      for (const [w, h] of [[390, 844], [360, 640]] as const) {
+        await c.page.setViewportSize({ width: w, height: h });
+        await checkOwn(c.page, `phone beside another share ${String(w)}×${String(h)}`, true);
+      }
+    } finally {
+      for (const p of people) await leave(p);
+    }
+  });
+
+  // The preview plays the raw capture, never through the SDK's attach(): that
+  // registers livekit-client's visibility handler, which on a phone restarts a
+  // disabled, muted or ended track with getUserMedia({ video }), putting the
+  // camera into the share while the page says it shares the screen.
+  test('P2197 the preview never lets a phone\'s visibility change swap the camera into the share', async ({ browser }) => {
+    test.setTimeout(120_000);
+    const people: Person[] = [];
+    try {
+      const iphone = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
+      const count = async (page: Page): Promise<void> => {
+        await page.addInitScript(() => {
+          const w = window as unknown as { __videoAsks: number };
+          w.__videoAsks = 0;
+          const devices = navigator.mediaDevices;
+          const user = devices.getUserMedia.bind(devices);
+          devices.getUserMedia = (constraints?: MediaStreamConstraints) => {
+            if (constraints?.video !== undefined && constraints.video !== false) w.__videoAsks++;
+            return user(constraints);
+          };
+        });
+        await keepCapture(page);
+      };
+      const c = await person(browser, vw.carol, { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, userAgent: iphone }, count);
+      people.push(c);
+      await join(c);
+      await share(c);
+      await expectPlaysCapture(c.page, 'iPhone');
+      const asks = (): Promise<number> => c.page.evaluate(() => (window as unknown as { __videoAsks: number }).__videoAsks);
+      expect(await asks()).toBe(0);
+      // The page goes to the background and returns while the capture is
+      // disabled, as a phone's lock can leave it.
+      await c.page.evaluate(async () => {
+        const w = window as unknown as { __capture: MediaStream | null };
+        let state: DocumentVisibilityState = 'visible';
+        Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => state });
+        const track = w.__capture?.getVideoTracks()[0];
+        if (track === undefined) throw new Error('no capture');
+        track.enabled = false;
+        state = 'hidden';
+        document.dispatchEvent(new Event('visibilitychange'));
+        await new Promise((resolve) => setTimeout(resolve, 6000));
+        state = 'visible';
+        document.dispatchEvent(new Event('visibilitychange'));
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        track.enabled = true;
+      });
+      expect(await asks(), 'no camera was asked for').toBe(0);
+      await expectPlaysCapture(c.page, 'iPhone after the page came back');
+    } finally {
+      for (const p of people) await leave(p);
+    }
+  });
+
+  test('P2197 the sharer\'s preview fits a phone, in Voice', async ({ browser }) => {
+    test.setTimeout(120_000);
+    const people: Person[] = [];
+    try {
+      const c = await person(browser, vw.carol, { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 }, keepCapture);
+      people.push(c);
+      await join(c);
+      await share(c);
+      await expectPlaysCapture(c.page, 'phone');
+      await checkOwn(c.page, '390×844 phone', true);
+      await ownStage(c.page).getByRole('button', { name: 'Hide preview of your screen' }).click();
+      await checkOwn(c.page, '390×844 phone, hidden', false);
+      await ownStage(c.page).getByRole('button', { name: 'Stop sharing' }).click();
+      await expect(ownStage(c.page)).toHaveCount(0, { timeout: 30_000 });
+    } finally {
+      for (const p of people) await leave(p);
+    }
+  });
 
   test('all six call workspace scenarios', async ({ browser }) => {
     test.setTimeout(180_000);
@@ -292,8 +1346,10 @@ test.describe('the persistent call workspace', () => {
       await expect(phoneStage.locator('.call-head')).toBeVisible();
       await expect(phoneStage.locator('.call-context')).toContainText('#voice-room');
       await expect(phoneStage.locator('.call-context')).toContainText('Sharing: alice');
-      await expect(phoneStage.locator('.voice-sub')).toContainText('Microphone in use');
-      await expect(phoneStage.locator('.voice-sub')).toContainText('Push to talk.');
+      // The tooltip keeps the microphone; the chip is gone (issue #2198).
+      await expect(phoneStage.locator('.voice-sub')).toHaveAttribute('title', /Microphone in use/);
+      await expect(phoneStage.locator('.voice-sub')).not.toContainText('Microphone in use');
+      await expect(phoneStage.locator('.voice-sub')).toContainText('Push to talk: not sending');
       // The header's text is on screen, not only in the DOM: every piece of
       // the context and status rows lies inside the 390 px viewport.
       const offscreen = await phoneStage.locator('.call-context > *, .voice-sub > *').evaluateAll((parts) => parts
@@ -346,7 +1402,8 @@ test.describe('the persistent call workspace', () => {
       await voice(a.page).getByRole('button', { name: 'Stop sharing' }).click();
       await expect(shareView(b.page)).toHaveCount(1, { timeout: 20_000 });
       await expect(call(b.page)).toHaveClass(/compact/);
-      await expect(voice(b.page).getByText('alice stopped sharing.', { exact: true })).toBeVisible();
+      // Where the stage was, not in the strip (issue #2198, UI-stream-5).
+      await expect(b.page.locator('.stage').getByRole('status').filter({ hasText: 'alice stopped sharing.' })).toBeVisible();
       await voice(c.page).getByRole('button', { name: 'Stop sharing' }).click();
       await expect(shareView(b.page)).toHaveCount(0, { timeout: 20_000 });
       await expect(call(b.page)).toHaveCount(0);

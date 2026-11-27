@@ -46,14 +46,14 @@ import { ModerationConfirm, useMayModerate, useMayModerateIn } from '../Moderati
 // §7.1, #1509): the people's tiles join them only with the person's choice to
 // view, and a focused stream is the main picture with every other tile in the
 // strip (design §7.4).
-import { useCallback, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent as KeyEvent, type RefObject } from 'react';
+import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as KeyEvent, type MouseEvent as PressEvent, type ReactNode, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { readHideNonVideo, writeHideNonVideo } from '../api';
 import { archivedLine } from '../archived';
 import { Avatar, Glyph } from '../Icons';
 import { IdentityMarks } from '../Identity';
 import type { ChannelV0 } from '../schema/channel';
-import { MicTestShown, onPhoneCamera, usePhone, VoiceLive, VoiceStrip } from '../phone';
+import { MicTestShown, onPhoneCamera, useCoarsePointer, usePhone, VoiceLive, VoiceSheet, VoiceStrip } from '../phone';
 import { StageHost } from '../stage';
 import { MicTest } from './MicTest';
 import { cameraNote, cameraOffForYou, cameraOn, listenOnlyCamera, watchOnlyCamera } from './camera';
@@ -65,12 +65,12 @@ import { clampTail, maxTail, releasePage, releaseStep } from './gate';
 import { keyLabel, talkKeyForMouseButton } from './keys';
 import { occupants, qualityLabel, sharers, type Occupant } from './presence';
 import { endedNote, ownPageNote, resumedNote, resumingNote, sharedNote, shortShareNote, soundNote, type ShareFrameRate, type ShareResolution } from './share';
-import { ShareQualityMenu, autoNote, cautionFor, estimateWords, resolutionWords, shareFrameRates, shareResolutions } from './ShareQualityMenu';
-import { ShareCaptureWarning, ShareReadout, ShareView } from './ShareView';
+import { ShareQualityMenu, autoNote, cautionFor, estimateWords, resolutionWords, shareFrameRates, shareResolutionChoices } from './ShareQualityMenu';
+import { SelfShareView, ShareCaptureWarning, ShareReadout, ShareView } from './ShareView';
 import { nobody, type InVoice } from './useOccupancy';
 import { VoiceDiagnostics } from './VoiceDiagnostics';
 import type { VoiceControl } from './useVoice';
-import { VoiceStatus } from './VoiceStatus';
+import { microphoneCaptured, VoiceStatus } from './VoiceStatus';
 
 // The keys that hold Hold to talk down while it has focus.
 function holdKey(e: KeyEvent): boolean {
@@ -134,6 +134,21 @@ function Tag({ text }: { readonly text: string }) {
   );
 }
 
+// Dot is a chip's sending or speaking mark: a dot on the corner of its avatar
+// (the avatar's own box, so it stays there however the chip wraps), out of the
+// chip's flow, so the chip is the same size with it and without it. It used to
+// be a pill after the name, and a pill wider than the room left wrapped the
+// chip onto a second line and moved every control below it, Hold to talk under
+// a held finger among them (issue #2211). The dot is for the eye; Said is the
+// word read out, after the name as before.
+function Dot({ text }: { readonly text: 'sending' | 'speaking' }) {
+  return <span className={`state ${text}`} aria-hidden="true" />;
+}
+
+function Said({ text }: { readonly text: 'sending' | 'speaking' | undefined }) {
+  return text === undefined ? null : <span className="vh said"> ({text})</span>;
+}
+
 export function VoicePanel({
   voice,
   viewer,
@@ -169,7 +184,6 @@ export function VoicePanel({
 }) {
   const { state, snapshot, client } = voice;
   const stage = useContext(StageHost);
-  const [options, setOptions] = useState(false);
   const [hideNonVideo, setHideNonVideo] = useState(readHideNonVideo);
   const [focusShow, setFocusShow] = useState(false);
   const showVideoButton = useRef<HTMLButtonElement>(null);
@@ -180,7 +194,13 @@ export function VoicePanel({
   // takes focus there once they are shown (issue #600).
   const about = useRef<HTMLElement>(null);
   const [toAbout, setToAbout] = useState(false);
+  // Whether the talk key and sharing notes are open (About talking and sharing).
+  const [help, setHelp] = useState(false);
+  // A touch screen has no talk key to explain (F18).
+  const coarse = useCoarsePointer();
   const inVoice = state.phase !== 'idle' && state.phase !== 'stopped';
+  // About talking and sharing starts closed on every join: leaving closes it.
+  if (!inVoice && help) setHelp(false);
   // The open microphone has no level meter to hear with, while a connection
   // holds the microphone (as VoiceStatus's captured): said in the notes, and
   // in the phone's strip, where the notes are hidden.
@@ -262,6 +282,23 @@ export function VoicePanel({
       window.removeEventListener('mousedown', onMouse);
     };
   }, [voice]);
+
+  const { options, setOptions, covered, button: optionButton, panel, onClose, onShrink, sheet, onSheet } = useOptionsDisclosure({
+    hidden: strip || !inVoice,
+    capturing: voice.capturing,
+    toAbout,
+  });
+
+  // The talk key capture ends with the panel it was started in, by whatever
+  // route the panel closes (outside press, its button, the phone's strip, or
+  // leaving voice): otherwise the next key anywhere would set the talk key.
+  const shown = options && !strip && inVoice;
+  const capturing = voice.capturing;
+  const wasShown = useRef(shown);
+  useEffect(() => {
+    if (wasShown.current && !shown && capturing) voice.capture(false);
+    wasShown.current = shown;
+  }, [shown, capturing, voice]);
 
   useEffect(() => {
     if (!toAbout || !options) return;
@@ -416,7 +453,8 @@ export function VoicePanel({
   const speaking = state.speaking;
   // Only on a live snapshot that says voice is up: not while loading, while
   // the server cannot be reached, or after the socket was closed for good.
-  const canJoin = voice.secure && presence !== null && presence.available;
+  const viewedChannel = channels.find((channel) => channel.name === viewed);
+  const canJoin = voice.secure && presence !== null && presence.available && (viewedChannel === undefined || presence.channel_id === viewedChannel.id);
   const silenced = state.muted || state.deafened;
   // One tile per live stream, beside the camera tiles. An unwatched tile only
   // offers Watch; a watched one owns its player, volume and focus control. The
@@ -435,12 +473,7 @@ export function VoicePanel({
       watched,
       startedAt: stream.startedAt,
       render: (focus, compact, onToggleLayout) => {
-        if (me) return (
-          <section aria-label="Your stream" className="share-view">
-            <p className="share-title"><Glyph name="screen" />You · LIVE{quality === null ? null : <> · {quality}</>}</p>
-            <div className="share-controls"><button type="button" onClick={() => { client.stopShare(); }}>Stop sharing</button></div>
-          </section>
-        );
+        if (me) return <SelfShareView client={client} quality={quality} compact={compact} />;
         if (!watched) return (
           <section aria-label={`${name}'s stream`} className="share-view">
             <p className="share-title"><Glyph name="screen" />{name} · LIVE{quality === null ? null : <> · {quality}</>}</p>
@@ -513,6 +546,15 @@ export function VoicePanel({
       keepSaid={focusShow}
     />
   );
+  // "<name> stopped sharing." is shown where the stage was, for stoppedFor
+  // (issue #2198, UI-stream-5), not as small text after the help line.
+  const stoppedNotice = stopped === null || !inVoice ? null : <p role="status" className="stage-notice">{stopped.name} stopped sharing.</p>;
+  // One fragment either way, so the call view keeps its place (and its
+  // state) when the notice comes and goes.
+  // Where there is no stage content (a phone under Chat once its last share
+  // ends), the notice alone would make the stage non-empty and the share
+  // layout would clip the conversation's header: it is the strip's then.
+  const onStage = staged === null ? null : <>{stoppedNotice}{staged}</>;
   // How many cameras are on in the room: everyone else's claims, and the
   // person's own while their track is published.
   const cameraCount = roster.filter((o) => o.principal !== viewer && o.camera).length + (state.cameraTrack === 'published' ? 1 : 0);
@@ -543,8 +585,15 @@ export function VoicePanel({
   // cap can refuse a new claim now (voice-multi-share.md §5.1, #1509). Before a
   // share the strip keeps one line, with full notes in Voice options (#600).
   const { features } = voice;
-  const shareLine = !state.listenOnly && features.canShare && state.share.kind === 'idle';
+  // A viewer is listen only from the first frame. Use the join's viewer flag
+  // for the row's status and help before the grant confirms it (#2210).
+  const listenOnly = state.viewer || state.listenOnly;
+  const shareLine = !listenOnly && features.canShare && state.share.kind === 'idle';
   const sharable = shareLine;
+  // What About talking and sharing would show: the talk-key line, the sharing
+  // line. With neither there is nothing to disclose, and no button.
+  const talkLine = state.mode === 'ptt' && !listenOnly && !state.watchOnly && !coarse;
+  const hasHelp = talkLine || shareLine;
   // Everyone else in the room joined, whose volumes Voice options sets.
   const others = roster.filter((o) => o.principal !== viewer).map((o) => ({ principal: o.principal, name: nameOf(people, o.principal, viewer) }));
   const more = () => {
@@ -563,10 +612,10 @@ export function VoicePanel({
           so a roster that grows, or a longer status, moves the strip's top and
           leaves the controls where they were. The phone's strip is the one
           row, of four controls (issue #1028). */}
-      <div className="voice-bar">
+      <div className="voice-bar" inert={covered}>
         {inVoice ? <BlockedVoiceMute voice={voice} others={others} /> : null}
         {strip ? null : (
-          <Roster channel={rosterChannel ?? undefined} mayModerate={mayModerateRoster} roster={roster} people={people} viewer={viewer} viewerName={viewerName} elsewhere={elsewhere} speaking={speaking} volumes={inVoice ? state.volumes : noVolumes} />
+          <Roster channel={rosterChannel ?? undefined} mayModerate={mayModerateRoster} reserve={inVoice} roster={roster} people={people} viewer={viewer} viewerName={viewerName} elsewhere={elsewhere} speaking={speaking} volumes={inVoice ? state.volumes : noVolumes} />
         )}
         {awayLine}
         <div className="voice-row">
@@ -578,11 +627,8 @@ export function VoicePanel({
                 {phaseLabel[state.phase]}
                 {where}
               </p>
-              {inVoice ? (
-                <VoiceStatus state={state} />
-              ) : (
-                <p className="voice-sub">Microphone off</p>
-              )}
+              {/* Not in voice, "Microphone off" is the hint below, said once. */}
+              {inVoice ? <VoiceStatus state={listenOnly === state.listenOnly ? state : { ...state, listenOnly }} /> : null}
             </div>
           )}
 
@@ -621,7 +667,15 @@ export function VoicePanel({
                     <span className="label">Show video ({cameraCount})</span>
                   </button>
                 ) : null}
-                <button type="button" className="quiet" aria-expanded={options} aria-controls="voice-options" onClick={() => { setOptions(!options); }}>
+                {/* The talk key and sharing notes are behind this disclosure,
+                    not always shown (issue #2198, UI-talk-6). Nothing is
+                    remembered: it starts closed. */}
+                {hasHelp ? (
+                  <button type="button" className="quiet voice-help-button" aria-expanded={help} aria-controls="voice-notes" aria-label="About talking and sharing" onClick={() => { setHelp(!help); }}>
+                    <span aria-hidden="true">i</span>
+                  </button>
+                ) : null}
+                <button type="button" className="quiet" {...optionButton}>
                   <Glyph name="options" />
                   <span className="label">Voice options</span>
                 </button>
@@ -629,7 +683,7 @@ export function VoicePanel({
               </>
             ) : (
               <>
-                <button ref={joinButton} type="button" className="primary" onClick={voice.join} disabled={!canJoin}>
+                <button ref={joinButton} type="button" className="primary" onClick={() => { voice.join(); }} disabled={!canJoin}>
                   <Glyph name="headphones" />
                   {/* One flex item, so the words and the channel read as one line of text (F17). */}
                   <span className="btn-text">Join voice {dest}</span>
@@ -649,7 +703,7 @@ export function VoicePanel({
         {strip && noPlayback ? <HearButton voice={voice} /> : null}
       </div>
 
-      <div className="voice-notes" hidden={strip}>
+      <div id="voice-notes" className="voice-notes" hidden={strip} inert={covered}>
         {state.why === null ? null : <p role="status" className="hint">{state.why}</p>}
         {state.reportNote === 'rate_limited' ? <p role="status" className="hint">Too many talk reports; slow down</p> : null}
         {state.reportNote === 'retrying' ? <p role="status" className="hint">Reporting your talking is slow; retrying</p> : null}
@@ -679,15 +733,12 @@ export function VoicePanel({
                 {state.deafened ? 'Hold to talk sends nothing while you are deafened. Undeafen to talk.' : 'Hold to talk sends nothing while you are muted. Unmute to talk.'}
               </p>
             ) : null}
-            {state.mode === 'ptt' && !state.listenOnly && !state.watchOnly ? (
-              <p className="hint talk-key-note voice-supplemental">Talk key: {keyLabel(voice.talkKey)}. It works only while this tab has focus, and not while you are typing.</p>
+            {/* Only the notes of a disclosure are behind it; what is
+                happening (a share, why one ended) is not. */}
+            {help && talkLine ? (
+              <p className="hint talk-key-note">{talkKeyNote(voice.talkKey)}</p>
             ) : null}
-            <ShareNotes voice={voice} onMore={more} othersShare={streams.length > 0} />
-            {stopped === null ? null : (
-              <p role="status" className="hint">
-                {stopped.name} stopped sharing.
-              </p>
-            )}
+            <ShareNotes voice={voice} onMore={more} othersShare={streams.length > 0} showLine={help && shareLine} />
           </>
         ) : (
           <>
@@ -729,8 +780,13 @@ export function VoicePanel({
         ) : null}
       </div>
 
-      {inVoice ? <Options voice={voice} open={options && !strip} sharable={sharable} about={about} others={others} cameraAllowed={cameraAllowed} /> : null}
-      {staged === null ? null : stage === null ? staged : createPortal(staged, stage)}
+      {inVoice ? (
+        <Options panel={panel} onClose={onClose} onShrink={onShrink} sheet={sheet} onSheet={onSheet} open={options && !strip}>
+          <BrowserOptions voice={voice} open={options && !strip} sharable={sharable} about={about} others={others} cameraAllowed={cameraAllowed} />
+        </Options>
+      ) : null}
+      {staged === null ? stoppedNotice : null}
+      {onStage === null ? null : stage === null ? onStage : createPortal(onStage, stage)}
     </section>
   );
 }
@@ -781,10 +837,29 @@ function StripState({
   );
 }
 
+// talkKeyNote is the talk key and when it works: the notes' line, and the
+// description of Hold to talk.
+function talkKeyNote(key: string): string {
+  return `Talk key: ${keyLabel(key)}. It works only while this tab has focus, and not while you are typing.`;
+}
+
+// What Hold to talk says where the session cannot send.
+const listenOnlyTalkNote = 'Hold to talk is off: this session is listen only.';
+const viewerTalkNote = 'Hold to talk is off: you are watching beside your voice on another device.';
+const watchOnlyTalkNote = 'Hold to talk is off: you are in Watch only. Use microphone to talk.';
+
 // TalkControl is Hold to talk, or, with the open microphone, its level: the
 // one way to talk, in the strip and in the Voice view alike.
 function TalkControl({ voice, silenced }: { readonly voice: VoiceControl; readonly silenced: boolean }) {
   const { state, client } = voice;
+  // Without a microphone nothing can be sent: the key is not advertised, and
+  // the description says why. The reason muted is only referenced while it is
+  // drawn (the notes' #voice-talk-why), so no description points at nothing.
+  const coarse = useCoarsePointer();
+  const cannot = state.listenOnly ? listenOnlyTalkNote : state.viewer ? viewerTalkNote : state.watchOnly ? watchOnlyTalkNote : null;
+  const why = silenced && cannot === null;
+  // On a touch screen no keyboard key is named (F18); only a reason is said.
+  const description = cannot ?? (coarse ? null : talkKeyNote(voice.talkKey));
   if (state.mode !== 'ptt') {
     return (
       <span className="open-mic">
@@ -797,36 +872,42 @@ function TalkControl({ voice, silenced }: { readonly voice: VoiceControl; readon
     );
   }
   return (
-    <button
-      type="button"
-      className="talk"
-      aria-pressed={state.talking}
-      disabled={state.listenOnly || state.watchOnly}
-      // Muted or deafened it stays pressable (a press reaches the gate, which
-      // is shut and sends nothing), but it looks off and says why in the note
-      // below (UX-07).
-      aria-disabled={silenced ? true : undefined}
-      aria-describedby={silenced ? 'voice-talk-why' : undefined}
-      onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); client.press(); }}
-      onPointerUp={() => { client.release(); }}
-      onPointerCancel={() => { client.release(); }}
-      // The keyboard holds it as a pointer does (issue #590): a held key
-      // repeats, and only its first press counts. Focus moving away lets go,
-      // as a lost pointer does.
-      onKeyDown={(e) => {
-        if (!holdKey(e) || e.repeat) return;
-        e.preventDefault();
-        client.press();
-      }}
-      onKeyUp={(e) => {
-        if (holdKey(e)) client.release();
-      }}
-      onBlur={() => { client.release(); }}
-      onContextMenu={(e) => { e.preventDefault(); }}
-    >
-      <Glyph name="mic" />
-      Hold to talk
-    </button>
+    <>
+      <button
+        type="button"
+        className="talk"
+        aria-pressed={state.talking}
+        disabled={state.listenOnly || state.watchOnly}
+        // Muted or deafened it stays pressable (a press reaches the gate, which
+        // is shut and sends nothing), but it looks off and says why in the note
+        // below (UX-07).
+        aria-disabled={silenced ? true : undefined}
+        title={cannot ?? (coarse ? undefined : `Talk key: ${keyLabel(voice.talkKey)}`)}
+        aria-describedby={[why ? 'voice-talk-why' : '', description === null ? '' : 'voice-talk-key'].filter((id) => id !== '').join(' ') || undefined}
+        onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); client.press(); }}
+        onPointerUp={() => { client.release(); }}
+        onPointerCancel={() => { client.release(); }}
+        // The keyboard holds it as a pointer does (issue #590): a held key
+        // repeats, and only its first press counts. Focus moving away lets go,
+        // as a lost pointer does.
+        onKeyDown={(e) => {
+          if (!holdKey(e) || e.repeat) return;
+          e.preventDefault();
+          client.press();
+        }}
+        onKeyUp={(e) => {
+          if (holdKey(e)) client.release();
+        }}
+        onBlur={() => { client.release(); }}
+        onContextMenu={(e) => { e.preventDefault(); }}
+      >
+        <Glyph name="mic" />
+        Hold to talk
+      </button>
+    {/* The talk key is in the button's description as well as its title,
+        whether or not the notes behind About talking and sharing are open. */}
+    {description === null ? null : <span id="voice-talk-key" hidden>{description}</span>}
+    </>
   );
 }
 
@@ -925,12 +1006,17 @@ function shownOnPhone(roster: readonly Occupant[], viewer: number): ReadonlySet<
 // Roster is who is in voice, with how many as its heading, which also names
 // the list. At 700 px and wider every chip shows, wrapping onto more lines;
 // on a phone three show, the viewer's own among them, and "+N more" shows
-// the rest.
-export function Roster({ channel, mayModerate: standing, roster, people, viewer, viewerName = '', elsewhere, speaking, volumes }: {
+// the rest. While this page is in voice (reserve) and presence does not yet
+// list it, the roster holds the page's own chip, invisible, in the slot the
+// real one takes (the roster is in principal order): the real chip arrives with
+// the next presence snapshot a moment after the join, and where the roster is
+// above the controls a row that wrapped differently would push them (issue #2202).
+export function Roster({ channel, mayModerate: standing, reserve = false, roster, people, viewer, viewerName = '', elsewhere, speaking, volumes }: {
   // The channel the roster belongs to, and whether the viewer may moderate it
   // (when not said, the standing in the channel on screen).
   readonly channel?: string;
   readonly mayModerate?: boolean;
+  readonly reserve?: boolean;
   readonly roster: readonly Occupant[];
   readonly people: ReadonlyMap<number, Person>;
   readonly viewer: number;
@@ -950,28 +1036,63 @@ export function Roster({ channel, mayModerate: standing, roster, people, viewer,
   const more = roster.length - phoneChips;
   const capped = more > 0 && !all;
   const kept = shownOnPhone(roster, viewer);
-  if (roster.length === 0 && kick === null) return null;
+  // The page's own chip, before presence lists it (issue #2202): the real
+  // chip's markup, name and moderation button included, unseen, inert and
+  // hidden from assistive technology, in the slot where the real one will
+  // sort (by principal, as the roster is), so the row wraps now and not a
+  // moment after the join.
+  const unlisted = reserve && !roster.some((o) => o.principal === viewer);
+  const ownName = nameOf(people, viewer, viewer, false, viewerName);
+  const placeholder = (
+    <li key="held" className="me reserved" aria-hidden="true" inert>
+      <span className="face"><Avatar id={viewer} name={ownName} /></span>
+      <span className="who">{nameOf(people, viewer, viewer, elsewhere, viewerName)}</span>
+      <IdentityMarks kind={people.get(viewer)?.kind} only={['agent']} />
+      {!mayModerate || channel === undefined ? null : <button type="button" tabIndex={-1} aria-label={`Remove ${ownName} from voice`}>Remove from voice</button>}
+    </li>
+  );
+  const slot = roster.findIndex((o) => o.principal > viewer);
+  const heldAt = slot < 0 ? roster.length : slot;
+  if (roster.length === 0 && kick === null) {
+    return unlisted ? (
+      <div className="voice-who reserved" aria-hidden="true" inert>
+        <span className="voice-count">1 in voice</span>
+        <ul className="voice-roster">{placeholder}</ul>
+      </div>
+    ) : null;
+  }
   return (
     <div className="voice-who">
       <h2 id="voice-count" className="voice-count">
         {roster.length} in voice
       </h2>
       <ul id="voice-roster" aria-labelledby="voice-count" className={capped ? 'voice-roster capped' : 'voice-roster'}>
-        {roster.map((o) => (
+        {roster.flatMap((o, i) => {
+          const mark = speaking.has(o.principal) ? 'speaking' : o.transmitting ? 'sending' : undefined;
+          return [
+          unlisted && i === heldAt ? placeholder : null,
+          (
           <li key={o.principal} className={[speaking.has(o.principal) ? 'speaking' : '', kept.has(o.principal) ? '' : 'beyond', o.principal === viewer ? 'me' : ''].filter((c) => c !== '').join(' ') || undefined}>
-            <Avatar id={o.principal} name={people.get(o.principal)?.name ?? nameOf(people, o.principal, viewer, false, viewerName)} />
+            <span className="face">
+              <Avatar id={o.principal} name={people.get(o.principal)?.name ?? nameOf(people, o.principal, viewer, false, viewerName)} />
+              {/* One badge for sending audio (issue #2198, UI-talk-4): "speaking"
+                  when the level says so, else "sending"; the level is the
+                  avatar's ring. */}
+              {mark === undefined ? null : <Dot text={mark} />}
+            </span>
             <span className="who">{nameOf(people, o.principal, viewer, elsewhere, viewerName)}</span>
             <IdentityMarks kind={people.get(o.principal)?.kind} only={['agent']} />
             {!mayModerate || channel === undefined ? null : <button type="button" aria-label={`Remove ${nameOf(people, o.principal, viewer, false, viewerName)} from voice`} onClick={(event) => { kickOpener.current = event.currentTarget; setKick({ id: o.principal, name: nameOf(people, o.principal, viewer, false, viewerName) }); }}>Remove from voice</button>}
-            {o.transmitting ? <Tag text="transmitting" /> : null}
-            {speaking.has(o.principal) ? <Tag text="speaking" /> : null}
+            <Said text={mark} />
             {o.sharing ? <Tag text="sharing" /> : null}
             {/* Others' claims; the person's own camera is said from their
                 own track, in the strip (S5). */}
             {o.camera && o.principal !== viewer ? <Tag text="camera" /> : null}
             {o.principal === viewer ? null : <VolumeTag volume={volumes.get(o.principal)} />}
           </li>
-        ))}
+          ),
+        ];})}
+        {unlisted && heldAt === roster.length ? placeholder : null}
       </ul>
       {kick === null || channel === undefined || !mayModerate ? null : <ModerationConfirm key={kick.id} op="kickVoice" channel={channel} id={kick.id} name={kick.name} onClose={() => { setKick(null); kickOpener.current?.focus(); }} />}
       {more > 0 ? (
@@ -1353,8 +1474,420 @@ function CameraOptions({ voice, open, cameraAllowed }: { readonly voice: VoiceCo
   );
 }
 
-// Voice options: the less used choices, out of the strip.
-function Options({ voice, open, sharable, about, others, cameraAllowed }: {
+// Whether el is inside a dialog or aria-modal element that is not the panel
+// and not shut away: another modal has the focus (the switcher, Settings).
+function inOtherModal(el: Element | null, panel: Element | null): boolean {
+  const modal = el === null ? null : el.closest('[role="dialog"], [role="alertdialog"], [aria-modal="true"]');
+  return modal !== null && modal !== panel && modal.closest('[hidden], [inert]') === null;
+}
+
+const tabbable = 'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])';
+// A press on a control or its label can activate it even if the browser
+// leaves focus on the body. Count programmatically focusable elements too.
+const pressControl = 'a[href], area[href], button, input, select, textarea, label, summary, iframe, audio[controls], video[controls], [tabindex], [contenteditable=""], [contenteditable="true"], [contenteditable="plaintext-only"]';
+
+function isDrawn(control: HTMLElement): boolean {
+  return (control.offsetParent !== null || control.getClientRects().length > 0) && getComputedStyle(control).visibility === 'visible';
+}
+
+// The controls of the panel that Tab reaches, in order: enabled and drawn.
+function panelTabbables(panel: HTMLElement): HTMLElement[] {
+  const visible = Array.from(panel.querySelectorAll<HTMLElement>(tabbable)).filter(isDrawn);
+  // A radio group is one Tab stop. If none is checked, use the focused
+  // radio when already in the group, or the first one when entering it.
+  return visible.filter((control) => {
+    if (!(control instanceof HTMLInputElement) || control.type !== 'radio' || control.name === '') return true;
+    const group = visible.filter((c): c is HTMLInputElement =>
+      c instanceof HTMLInputElement && c.type === 'radio' && c.name === control.name && c.form === control.form);
+    return control === (group.find((radio) => radio.checked) ?? group.find((radio) => radio === document.activeElement) ?? group[0]);
+  });
+}
+
+// After a nested confirmation closes, the preferred radio can be disabled
+// while its command runs. Keep focus in the disclosure in either case.
+export function focusOptionsControl(panel: HTMLElement, radio: HTMLInputElement | null): void {
+  const target = radio !== null && !radio.matches(':disabled') && isDrawn(radio) ? radio : panelTabbables(panel)[0] ?? panel;
+  target.focus();
+}
+
+// The next control after the button in its own row (Leave voice, say), as Tab
+// would reach it, or null.
+function tabbablesAfter(button: HTMLElement): HTMLElement | null {
+  const row = button.parentElement;
+  if (row === null) return null;
+  const all = Array.from(row.querySelectorAll<HTMLElement>(tabbable));
+  const next = all[all.indexOf(button) + 1];
+  return next ?? null;
+}
+
+// The browser and helper-backed panels share the disclosure and sheet rules.
+export function useOptionsDisclosure({ hidden, capturing = false, toAbout = false, native = false }: {
+  readonly hidden: boolean;
+  readonly capturing?: boolean;
+  readonly toAbout?: boolean;
+  readonly native?: boolean;
+}) {
+  const [options, setOptions] = useState(false);
+  // The Voice options button: Escape returns focus to it, and a press on it is
+  // its own toggle, not an outside press (issue #2189).
+  const optionsButton = useRef<HTMLButtonElement>(null);
+  const optionsPanel = useRef<HTMLDivElement>(null);
+  // The toggle can be inert while a sheet is open. Close and Escape restore
+  // focus after the panel closes. An outside press waits for its release.
+  const focusBack = useRef(false);
+  // The release listeners outlive the open panel's dismissal listeners.
+  const outsidePress = useRef<AbortController | null>(null);
+  useLayoutEffect(() => () => { outsidePress.current?.abort(); }, []);
+  useLayoutEffect(() => {
+    if (options || hidden) outsidePress.current?.abort();
+  }, [options, hidden]);
+  const closeOptions = useCallback(() => {
+    focusBack.current = true;
+    setOptions(false);
+  }, []);
+  // A layout change may hide the anchor or call for a modal sheet (issue
+  // #2189). Close the disclosure so a sheet only opens by a press. Return
+  // focus to the toggle if it was in the panel and the toggle is available.
+  const shrinkOptions = useCallback(() => {
+    // The button may be inert or covered at that moment (a modal over it): then
+    // focus stays where it is.
+    const button = optionsButton.current;
+    focusBack.current = optionsPanel.current?.contains(document.activeElement) === true && button !== null && button.closest('[inert]') === null;
+    setOptions(false);
+  }, []);
+  // Whether the open panel is a bottom sheet (set by Options from its place).
+  const [sheet, setSheet] = useState(false);
+  // What the lobby says of the sheet (VoiceSheet), read here for the press
+  // below and for the sheet's own handling after it.
+  const { report, blocked, behind } = useContext(VoiceSheet);
+  // Escape and an outside press close Voice options. Escape while the talk
+  // key is being chosen only cancels that, as Change talk key says.
+  useEffect(() => {
+    if (!options || hidden) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.defaultPrevented || capturing) return;
+      // Settings or re-authentication is over the panel (behind): Escape is
+      // theirs, even when focus has fallen to the body and their own handler
+      // is not on its path.
+      if (behind) return;
+      closeOptions();
+    };
+    // Focus reaching the share quality menu's button closes the panel, so the
+    // menu, which paints over it, is not drawn on top of an open panel.
+    //
+    // The anchored panel is a popover, not a modal: focus moving to anything
+    // else than the panel or its own button closes it, where focus went (it is
+    // not moved), so no control is left focused under it, covered. Only focus
+    // gained counts (focusin): the window losing focus, a native picker or the
+    // talk key capture moves none. Not while something is over the panel
+    // (behind), and not as a sheet, which is modal and has the rest inert.
+    const onFocus = (e: FocusEvent) => {
+      const at = e.target;
+      if (!(at instanceof Element)) return;
+      if (at.closest('.share-chooser') !== null) setOptions(false);
+      // Focus going into another modal (the quick switcher, whose field takes
+      // it before the lobby has said it is over the panel) is not leaving it:
+      // the panel stays open beneath, and Escape from that modal returns.
+      else if (!sheet && !behind && !capturing && optionsPanel.current?.contains(at) !== true && optionsButton.current?.contains(at) !== true && !inOtherModal(at, optionsPanel.current)) setOptions(false);
+    };
+    // Keep the pointer identity for the compatibility mousedown. Dismissing
+    // there also keeps the usual click on touch browsers.
+    let pointerDown: PointerEvent | null = null;
+    const onPointerDown = (e: PointerEvent) => { pointerDown = e; };
+    const onPress = (e: MouseEvent) => {
+      const { target: at, button } = e;
+      const pointerId = pointerDown?.target === at && pointerDown.button === button ? pointerDown.pointerId : undefined;
+      pointerDown = null;
+      if (!(at instanceof Node)) return;
+      if (optionsPanel.current?.contains(at) === true || optionsButton.current?.contains(at) === true) return;
+      // Settings or re-authentication is over the panel (behind): a press on
+      // them, their Close and their backdrop among them, is theirs, and the
+      // panel stays open beneath, to take focus back when they go.
+      if (behind) return;
+      // Controls get their usual focus and click. On other space, wait for
+      // release before recovering focus so a held press can turn into a
+      // text selection. The lobby handles focus on view changes.
+      const element = at instanceof Element ? at : at.parentElement;
+      if (element?.closest(pressControl) == null) {
+        outsidePress.current?.abort();
+        const pending = new AbortController();
+        outsidePress.current = pending;
+        const matchesPointer = (event: MouseEvent) => pointerId === undefined || !('pointerId' in event) || event.pointerId === pointerId;
+        const stranded = (el: EventTarget | null) => el === null || el === document.body || (el instanceof Node && optionsPanel.current?.contains(el) === true);
+        const onRelease = (event: MouseEvent) => {
+          if (event.button !== button || !matchesPointer(event) || (event.type === 'click' && event.detail === 0)) return;
+          pending.abort();
+          if (!stranded(document.activeElement) || window.getSelection()?.isCollapsed === false) return;
+          const toggle = optionsButton.current;
+          if (toggle !== null && toggle.closest('[hidden], [inert]') === null) toggle.focus();
+        };
+        const listen = { signal: pending.signal };
+        document.addEventListener('pointerup', onRelease, listen);
+        document.addEventListener('mouseup', onRelease, listen);
+        document.addEventListener('click', onRelease, listen);
+        document.addEventListener('pointercancel', (event) => {
+          if (matchesPointer(event)) pending.abort();
+        }, listen);
+        // A later press of this button means the original release was missed.
+        document.addEventListener('mousedown', (event) => {
+          if (event.button === button) pending.abort();
+        }, { ...listen, capture: true });
+        document.addEventListener('focusin', (event) => {
+          if (!stranded(event.target)) pending.abort();
+        }, listen);
+      }
+      setOptions(false);
+    };
+    document.addEventListener('keydown', onKey);
+    document.addEventListener('pointerdown', onPointerDown, true);
+    document.addEventListener('mousedown', onPress);
+    document.addEventListener('focusin', onFocus);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('pointerdown', onPointerDown, true);
+      document.removeEventListener('mousedown', onPress);
+      document.removeEventListener('focusin', onFocus);
+    };
+  }, [options, hidden, capturing, closeOptions, behind, sheet]);
+
+  useEffect(() => {
+    if (options) return;
+    if (!hidden && focusBack.current) optionsButton.current?.focus();
+    focusBack.current = false;
+  }, [options, hidden]);
+
+  // The sheet is modal (role dialog, aria-modal). The voice section makes
+  // its controls and notes inert, and the lobby does the same for the rest
+  // of the page through VoiceSheet. The phone's navigation stays available
+  // as a way out. A sheet opens with focus on Close, unless More about
+  // sharing takes it to the notes. In the anchored disclosure the dock
+  // stays in the tab order. Re-authentication closes either placement.
+  const covered = options && !hidden && sheet && !blocked;
+  useEffect(() => {
+    if (!covered) return;
+    report(true);
+    return () => { report(false); };
+  }, [covered, report]);
+  useEffect(() => {
+    if (blocked && options) setOptions(false);
+  }, [blocked, options]);
+  // Close whenever the panel goes out of sight, such as switching to Chat
+  // or leaving voice. Returning to the section starts with it closed. The
+  // lobby recovers focus on view switches, and Leave voice has its own
+  // handoff when it goes away.
+  useEffect(() => {
+    if (options && hidden) setOptions(false);
+  }, [options, hidden]);
+  // A foreign dialog can take focus before the lobby reports behind.
+  const inForeignModal = () => inOtherModal(document.activeElement, optionsPanel.current);
+  useEffect(() => {
+    if (!covered || toAbout || behind || inForeignModal()) return;
+    if (optionsPanel.current?.contains(document.activeElement) === true) return;
+    optionsPanel.current?.querySelector<HTMLElement>('.voice-options-close')?.focus();
+    // Behind: Settings was opened over the sheet and has closed again, and the
+    // focus the sheet lost to the dock's inert is given back to it.
+  }, [covered, toAbout, behind]);
+  // The sheet turning into the panel above the strip (a resize, a scroll)
+  // hides the browser panel's Close: focus held there moves to the first control.
+  const wasCovered = useRef(false);
+  useEffect(() => {
+    if (!native && wasCovered.current && !covered && options && !inForeignModal()) {
+      const at = document.activeElement;
+      if (at === null || at === document.body || at.classList.contains('voice-options-close')) {
+        // The first control that is enabled and drawn, else the panel itself
+        // (Watch only has few of them).
+        const controls = optionsPanel.current?.querySelectorAll<HTMLElement>('select:not(:disabled), input:not(:disabled), button:not(:disabled):not(.voice-options-close)') ?? [];
+        const first = Array.from(controls).find((c) => c.offsetParent !== null);
+        (first ?? optionsPanel.current)?.focus();
+      }
+    }
+    wasCovered.current = covered;
+  }, [covered, options, native]);
+
+  // Opened with the keyboard, the anchored panel takes focus at its first
+  // control. The bar containing its toggle can be inert while a sheet is
+  // open, so the panel is farther down the DOM. A sheet takes focus at its
+  // Close, and More about sharing at the notes. A pointer leaves focus on
+  // the anchored panel's toggle.
+  const byKeyboard = useRef(false);
+  useEffect(() => {
+    if (!options) {
+      byKeyboard.current = false;
+      return;
+    }
+    if (!byKeyboard.current || toAbout) return;
+    byKeyboard.current = false;
+    const panel = optionsPanel.current;
+    if (panel === null || panel.classList.contains('sheet')) return;
+    panelTabbables(panel)[0]?.focus();
+  }, [options, toAbout]);
+  // Tab order of a disclosure, kept inside the anchored panel: Shift+Tab from
+  // its first control goes back to the button (the panel stays open), and Tab
+  // from its last goes on to what follows the button, which closes it.
+  useEffect(() => {
+    const panel = optionsPanel.current;
+    if (!options || sheet || panel === null) return;
+    const onTab = (e: KeyboardEvent) => {
+      // While the talk key is being chosen the capture has every key, Tab
+      // and Shift+Tab among them, and focus stays put.
+      if (e.key !== 'Tab' || e.defaultPrevented || capturing) return;
+      const list = panelTabbables(panel);
+      const at = document.activeElement;
+      if (e.shiftKey && at === list[0]) {
+        e.preventDefault();
+        optionsButton.current?.focus();
+      } else if (!e.shiftKey && at === list[list.length - 1]) {
+        const after = optionsButton.current === null ? null : tabbablesAfter(optionsButton.current);
+        if (after === null) {
+          // Join can be disabled in the desktop dock. Let Tab proceed
+          // through the page and dismiss the panel even in that case.
+          if (native) setOptions(false);
+          return;
+        }
+        e.preventDefault();
+        after.focus();
+      }
+    };
+    panel.addEventListener('keydown', onTab);
+    return () => {
+      panel.removeEventListener('keydown', onTab);
+    };
+  }, [options, sheet, capturing, native]);
+
+  const button = {
+    ref: optionsButton,
+    'aria-expanded': options,
+    'aria-controls': 'voice-options',
+    onKeyDown: (e: KeyEvent<HTMLButtonElement>) => {
+      // Tab from the button enters the open anchored panel, which follows
+      // the dock controls in the DOM.
+      const panel = optionsPanel.current;
+      if (e.key !== 'Tab' || e.shiftKey || !options || sheet || panel === null || capturing) return;
+      const first = panelTabbables(panel)[0];
+      if (first === undefined) return;
+      e.preventDefault();
+      first.focus();
+    },
+    onClick: (e: PressEvent<HTMLButtonElement>) => {
+      // Enter and Space click with no pointer (detail 0): put focus inside
+      // the disclosure. A pointer press leaves it on the button.
+      if (!options) byKeyboard.current = e.detail === 0;
+      setOptions(!options);
+    },
+  };
+  return { options, setOptions, covered, button, panel: optionsPanel, onClose: closeOptions, onShrink: shrinkOptions, sheet, onSheet: setSheet };
+}
+
+// Voice options: the less used choices, out of the strip. A panel over the
+// page above the voice section, not a row in it (issue #2189): opening it moves
+// nothing under it. It is fixed, so the dock's own scroll does not clip it;
+// its place is the section's, set on it from the section's box, or a bottom
+// sheet over the window where there is too little room above the section.
+export function Options({ panel, onClose, onShrink, sheet, onSheet, open, anchor, children }: {
+  readonly panel: RefObject<HTMLDivElement | null>;
+  // Closes the panel and returns focus to its button.
+  readonly onClose: () => void;
+  // Closes the panel for the window having changed under it: it was anchored
+  // and would now be a sheet.
+  readonly onShrink: () => void;
+  // Whether the panel is drawn as a bottom sheet, which is a modal dialog.
+  readonly sheet: boolean;
+  // Says whether the panel is drawn as a bottom sheet.
+  readonly onSheet: (sheet: boolean) => void;
+  readonly open: boolean;
+  // The desktop toggle, in the row the panel must keep clear.
+  readonly anchor?: RefObject<HTMLButtonElement | null>;
+  readonly children: ReactNode;
+}) {
+  // The panel's left, width and bottom (and so its tallest) follow the voice
+  // section's box while open: CSSOM custom properties, which the page's CSP
+  // allows where a style attribute would not.
+  useLayoutEffect(() => {
+    const el = panel.current;
+    const section = el?.parentElement;
+    if (!open || !el || !section) return;
+    const controls = anchor?.current?.parentElement ?? undefined;
+    // Whether the panel was anchored when last placed: null until it is first.
+    let anchored: boolean | null = null;
+    let phone = false;
+    const place = () => {
+      const r = section.getBoundingClientRect();
+      const view = document.documentElement.clientHeight;
+      const nav = document.querySelector('.phone-nav')?.getBoundingClientRect();
+      const navTop = nav === undefined ? view : Math.min(view, nav.top);
+      // The desktop panel follows the toggle's whole controls row. On a
+      // short Voice view, it can open below the row if there is more room
+      // there. Both placements keep the controls clear even when the
+      // helper's device list grows. Reserve the nav's space in either case.
+      const row = controls?.getBoundingClientRect();
+      const top = row === undefined ? r.top : Math.min(row.top, navTop);
+      const below = row === undefined ? 0 : navTop - Math.max(0, row.bottom);
+      const opensBelow = row !== undefined && top < view * 0.4 && below > top;
+      const room = opensBelow ? below : top;
+      // Same breakpoint as the phone layout in phone.ts.
+      const narrow = window.innerWidth < 700;
+      // Where the section's top leaves less than 40% of the window above it
+      // (or is itself above the window, as a scrolled dock can leave it), the
+      // browser panel is a bottom sheet. On desktop, the sheet shares the
+      // anchored bounds and is modal only on a narrow Voice view with little
+      // room on either side of the controls.
+      const sheet = room < view * 0.4 && (row === undefined || narrow);
+      const rowOutOfView = row !== undefined && view > 0 && (row.bottom <= 0 || row.top >= navTop);
+      // Close on entering the narrow layout, losing the anchor, or when
+      // the open disclosure would turn into a modal.
+      if (rowOutOfView || (anchored !== null && row !== undefined && narrow && !phone) || (anchored === true && sheet)) {
+        onShrink();
+        return;
+      }
+      anchored = !sheet;
+      phone = narrow;
+      el.classList.toggle('sheet', sheet);
+      onSheet(sheet);
+      // The sheet rests on the phone's navigation, which stays in reach.
+      el.style.setProperty('--vo-sheet-bottom', `${String(Math.max(0, view - navTop))}px`);
+      el.style.setProperty('--vo-left', `${String(Math.max(0, r.left))}px`);
+      el.style.setProperty('--vo-width', `${String(r.width)}px`);
+      el.style.setProperty('--vo-bottom', `${String(Math.max(0, view - top))}px`);
+      if (row !== undefined) {
+        el.classList.toggle('below', opensBelow);
+        el.style.setProperty('--vo-top', `${String(Math.max(0, row.bottom))}px`);
+        el.style.setProperty('--vo-room', `${String(Math.max(0, room))}px`);
+      }
+    };
+    place();
+    window.addEventListener('resize', place);
+    window.addEventListener('scroll', place, true);
+    const watch = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(place);
+    watch?.observe(section);
+    if (controls !== undefined) watch?.observe(controls);
+    return () => {
+      window.removeEventListener('resize', place);
+      window.removeEventListener('scroll', place, true);
+      watch?.disconnect();
+    };
+  }, [open, panel, onSheet, onShrink, anchor]);
+  // Make a closing native launcher inert before key setup checks focus.
+  return (
+    <div
+      ref={panel}
+      id="voice-options"
+      className={anchor === undefined ? 'voice-options popover' : 'voice-options popover native'}
+      hidden={!open}
+      inert={anchor !== undefined && !open}
+      tabIndex={-1}
+      role={sheet ? 'dialog' : undefined}
+      aria-modal={sheet ? true : undefined}
+      aria-label={sheet ? 'Voice options' : undefined}
+    >
+      {/* The browser shows Close on its sheet, and the desktop in either
+          placement. */}
+      <button type="button" className="voice-options-close" onClick={onClose}>Close</button>
+      {children}
+    </div>
+  );
+}
+
+function BrowserOptions({ voice, open, sharable, about, others, cameraAllowed }: {
   readonly voice: VoiceControl;
   readonly open: boolean;
   readonly cameraAllowed: boolean;
@@ -1367,7 +1900,9 @@ function Options({ voice, open, sharable, about, others, cameraAllowed }: {
 }) {
   const { state, client, features } = voice;
   return (
-    <div id="voice-options" className="voice-options" hidden={!open}>
+    <>
+      {/* Where the strip no longer says it (issue #2198, UI-talk-3). */}
+      {microphoneCaptured(state) ? <p className="hint">This page is using your microphone.</p> : null}
       <MicrophoneChoice voice={voice} />
       <CameraOptions voice={voice} open={open} cameraAllowed={cameraAllowed} />
       <SpeakersChoice voice={voice} />
@@ -1454,7 +1989,7 @@ function Options({ voice, open, sharable, about, others, cameraAllowed }: {
                 void client.setShareQuality({ ...state.shareQuality, resolution });
               }}
             >
-              {shareResolutions.map((resolution) => (
+              {shareResolutionChoices(state.shareQualityV3).map((resolution) => (
                 <option key={resolution} value={resolution}>{resolutionWords[resolution]}</option>
               ))}
             </select>
@@ -1483,7 +2018,7 @@ function Options({ voice, open, sharable, about, others, cameraAllowed }: {
           <p className="hint">{ownPageNote}</p>
         </section>
       ) : null}
-    </div>
+    </>
   );
 }
 
@@ -1501,7 +2036,7 @@ function ShareButton({ voice }: { readonly voice: VoiceControl }) {
         <Glyph name="screen" />
         <span className="label">Share screen</span>
       </button>
-      <ShareQualityMenu quality={state.shareQuality} onChoose={(next) => { void client.setShareQuality(next); }} />
+      <ShareQualityMenu quality={state.shareQuality} v3={state.shareQualityV3} onChoose={(next) => { void client.setShareQuality(next); }} />
     </span>
   );
   return (
@@ -1534,13 +2069,14 @@ function StoppedNote({ text, othersShare }: { readonly text: string; readonly ot
 // suppress that line or the picker (voice-multi-share.md §7.1, #1509).
 // A claim refused at the six-stream cap says so here; the old busy refusal and
 // its who-shares line are gone (voice-multi-share.md §4, §5.1; issue #591, F14).
-function ShareNotes({ voice, onMore, othersShare }: { readonly voice: VoiceControl; readonly onMore: () => void; readonly othersShare: boolean }) {
+function ShareNotes({ voice, onMore, othersShare, showLine = true }: { readonly voice: VoiceControl; readonly onMore: () => void; readonly othersShare: boolean; readonly showLine?: boolean }) {
   const { state, features, client } = voice;
   const share = state.share;
   if (state.listenOnly) return null;
   const inCall = state.phase !== 'idle' && state.phase !== 'stopped';
-  const line = (
-    <p className="hint share-line voice-supplemental">
+  // The one-line sharing note is behind About talking and sharing.
+  const line = !showLine ? null : (
+    <p className="hint share-line">
       {shortShareNote(features)}{' '}
       <button type="button" className="more" aria-controls="voice-options" onClick={onMore}>More about sharing</button>
     </p>

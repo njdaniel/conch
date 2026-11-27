@@ -14,4 +14,7 @@ describe('uploadRefusalLine', () => {
   it('keeps the server line for other refusals', () => {
     expect(uploadRefusalLine('a.txt', 'uploads_disabled', 'file uploads are disabled on this server')).toBe('file uploads are disabled on this server');
   });
+  it('says the desktop limit for a 413 the desktop itself answered', () => {
+    expect(uploadRefusalLine('big.bin', 'desktop_unavailable', 'The desktop app accepts files up to 20 MiB.')).toBe('The desktop app accepts files up to 20 MiB.');
+  });
 });

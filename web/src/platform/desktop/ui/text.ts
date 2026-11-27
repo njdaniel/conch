@@ -62,6 +62,8 @@ export function storageLine(storage: StorageStatus, platform: string): string {
           return 'This computer has no secret store available, so sign-ins are kept only until the app closes. You will sign in again next time.';
         case 'insecure-backend':
           return 'The system’s secret store here protects nothing (it uses a built-in password), so sign-ins are kept only until the app closes. You will sign in again next time.';
+        case 'no-keyring':
+          return 'No system keyring is unlocked, so sign-ins are kept only until the app closes and you will sign in again each time Conch starts. Unlock or set up your keyring, then Retry.';
         case 'unknown-backend':
           return 'The app cannot tell that this computer’s secret store is a safe one, so sign-ins are kept only until the app closes. You will sign in again next time.';
         case 'unsafe-root':
@@ -70,10 +72,58 @@ export function storageLine(storage: StorageStatus, platform: string): string {
   }
 }
 
-export const noticeLines: Readonly<Record<ProfileNotice, string>> = {
+// The desktop sign-in form's "Keep me signed in on this computer" choice
+// (issue #2077): its label, the status beside it for each storage state, the
+// operator rule and the help link.
+export const keepText = {
+  label: 'Keep me signed in on this computer',
+  operator: 'Operator sign-ins are never kept: they last for this window, and the server ends them after 12 hours or an hour idle.',
+  help: 'How staying signed in works',
+  checking: 'Checking whether this computer can keep your sign-in…',
+  retry: 'Check again',
+};
+
+// keepLine is the status beside the choice, and says what will happen, never
+// something else: with the choice off, the sign-in lasts until the app
+// closes; with it on, where a kept sign-in goes, or why none can be kept here.
+// Where the keyring may still answer before the sign-in (it has not answered
+// yet, or none is unlocked yet), main will keep the sign-in if it does, and
+// the line says that too.
+export function keepLine(storage: StorageStatus, platform: string, keep: boolean): string {
+  const each = 'you’ll be asked to sign in each time Conch starts';
+  if (!keep) return 'This sign-in will last only until Conch closes, and you’ll be asked to sign in next time.';
+  const unless = 'If it answers before you sign in, your sign-in will be kept in it; uncheck this to keep it only until Conch closes.';
+  switch (storage.kind) {
+    case 'protected':
+      if (platform === 'win32') return 'Your sign-in will be kept on this computer, sealed by Windows for your account.';
+      if (platform === 'darwin') return 'Your sign-in will be kept in your macOS keychain.';
+      return 'Your sign-in will be kept in the system keyring.';
+    case 'unavailable':
+      return `The system keyring has not answered yet. Unlock it, then choose ${keepText.retry}. ${unless}`;
+    case 'session-only':
+      switch (storage.reason) {
+        case 'no-keyring':
+          return `No system keyring is unlocked, so ${each}. If you unlock one before you sign in, your sign-in will be kept in it; uncheck this to keep it only until Conch closes.`;
+        case 'insecure-backend':
+          return `This desktop gives Conch no keyring that protects anything, so ${each}.`;
+        case 'unavailable':
+          return platform === 'win32' ? `Windows credential protection is unavailable, so ${each}.` : `This computer has no secret store, so ${each}.`;
+        case 'unknown-backend':
+          return `Conch can’t tell that this computer’s keyring is a safe one, so ${each}.`;
+        case 'unsafe-root':
+          return `Conch’s data folder is not private to you, so nothing is saved and ${each}.`;
+      }
+  }
+}
+
+// The fixed notices. legacy-not-ended names its server, so it is made by
+// noticeLine below.
+export const noticeLines: Readonly<Record<Exclude<ProfileNotice, 'legacy-not-ended'>, string>> = {
   'operator-window-only':
     'Operator sign-ins aren’t remembered on this computer. They’re kept for this window only, and the server ends them after 12 hours or an hour idle. Use a member account for everyday use.',
   'sign-in-again': 'The saved sign-in for this server could not be used. Sign in again.',
+  'sign-in-ended': 'Your saved sign-in for this server has ended: it was signed out elsewhere, revoked or expired. Sign in again.',
+  'not-kept': 'The system keyring did not take this sign-in, so it lasts only until the app closes.',
   'could-not-verify':
     'The saved sign-in for this server could not be checked because the server did not answer, so it was not used. Switch to the server again when it can be reached.',
   'account-mismatch':
@@ -82,6 +132,16 @@ export const noticeLines: Readonly<Record<ProfileNotice, string>> = {
   'revocation-unsent': 'Signed out on this computer. The server could not be reached, so the app cannot prove the sign-in was ended there; it was forgotten here.',
   'teardown-slow': 'Something that was using the old sign-in did not stop in time. It was left behind, and the new server was started without it.',
 };
+
+// The legacy sweep could not confirm that the server ended a sign-in saved
+// by an older Conch (issue #2217). server is the active profile's host.
+export const legacyNotEnded = (server: string): string =>
+  `A sign-in saved by an older Conch for ${server} may still be active. Sign in to that server with the same account and open Settings → Your sign-ins. If you recognize the old entry by its label and the date next to “since”, choose End this sign-in. You can also choose Sign out everywhere in Settings or ask an operator to revoke the old sign-in.`;
+
+// noticeLine is what a notice says, for the active profile's server.
+export function noticeLine(notice: ProfileNotice, server: string | null): string {
+  return notice === 'legacy-not-ended' ? legacyNotEnded(server ?? 'this server') : noticeLines[notice];
+}
 
 // What the app says of the server's release (issue #946). X is the server's
 // version as /healthz named it, or "unknown"; Y is this app's own.
@@ -194,6 +254,7 @@ const whyLines: Readonly<Record<IntegrationWhy, string>> = {
   'portal-unasked': 'Conch has not checked yet whether this desktop can share a screen.',
   'secret-store-missing': 'This computer has no password keyring, so sign-ins are kept only until the app closes and you will sign in again next time.',
   'insecure-backend': 'The password keyring here protects nothing, so sign-ins are kept only until the app closes and you will sign in again next time.',
+  'no-keyring': 'No password keyring is unlocked here, so sign-ins are kept only until the app closes and you will sign in again next time.',
   'unknown-backend': 'Conch can’t tell that the password keyring here is a safe one, so sign-ins are kept only until the app closes.',
   'unsafe-root': 'The folder where Conch keeps its files is not private to you, so nothing is saved and sign-ins are kept only until the app closes.',
   'secret-store-silent': 'The password keyring did not answer, so Conch can’t tell yet whether sign-ins will be kept.',

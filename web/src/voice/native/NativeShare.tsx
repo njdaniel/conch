@@ -13,14 +13,15 @@
 // which takes the client as a prop.
 import { useContext, useRef, type ReactNode } from 'react';
 import { DesktopOS } from '../../platform/os';
+import type { VoiceControlShareAudioStreamReason } from '../../schema/generated';
 import { Glyph } from '../../Icons';
 import type { Person } from '../../useLiveChannel';
-import { companionDefaultQuality, companionQualities, shareQualityRefusedNote } from '../connection';
-import { cautionFor, estimateWords } from '../ShareQualityMenu';
+import { companionDefaultQuality, companionQualityChoices, companionQuality, shareQualityRefusedNote } from '../connection';
+import { cautionFor, estimateWords, resolutionWords, shareResolutionChoices } from '../ShareQualityMenu';
 import { qualityLabel, sharers, type Sharer } from '../presence';
-import type { VoicePresenceV2 } from '../../schema/voice';
+import type { VoicePresence } from '../../schema/voice';
 import { ShareCaptureWarning, ShareReadout, ShareView } from '../ShareView';
-import { provisionalQuality, qualityLaterNote, type ShareQuality } from '../share';
+import { provisionalQuality, qualityLaterNote } from '../share';
 import { nameOf } from '../VoicePanel';
 import type { Companion } from './useCompanion';
 import type { ShareSoundUi } from './useShareSound';
@@ -30,7 +31,6 @@ import {
   shareDisabledWords,
   shareElsewhereWords,
   shareNote,
-  shareQualityWords,
   shareSoundMuteLabel,
   shareSoundWords,
   shareWithSoundLabel,
@@ -56,8 +56,8 @@ const cautionId = 'native-share-caution';
 const soundWhyId = 'native-share-sound-why';
 
 // ShareSoundToggle is the standing choice for the share's sound, shown before
-// the picker and during a share (issue #1854): "Share with sound", on by
-// default; unchecked is "share without sound", one click. It always shows
+// the picker and during a share when main offers sound (issue #1854).
+// Unchecked is "share without sound", one click. It always shows
 // main's choice, the one the next share acts on: a box that read otherwise
 // would let the person believe a share is silent that is not. With no route
 // (the helper has none, or the server cannot record the consent) it is
@@ -109,6 +109,35 @@ export function ShareSoundMute({ sound }: { readonly sound: ShareSoundUi }) {
   );
 }
 
+const streamReasons: Record<VoiceControlShareAudioStreamReason, string> = {
+  captured: 'Captured · Eligible playback',
+  call_playback: 'Excluded · Call playback',
+  conch_client: 'Excluded · Conch process',
+  conch_application: 'Excluded · Conch application process',
+  conch_name: 'Excluded · Conch application name',
+  unknown_owner: 'Excluded · Stream owner is unknown',
+  missing_target: 'Excluded · Stream target is unavailable',
+  awaiting_application: 'Excluded · Waiting for application metadata',
+  wrong_format: 'Excluded · Unsupported audio format',
+  stream_ended: 'Excluded · Stream ended',
+  format_not_supported: 'Excluded · Audio format not supported',
+};
+
+function ShareSoundStreams({ sound }: { readonly sound: ShareSoundUi }) {
+  const streams = sound.audio?.streams;
+  if (!sound.live || sound.audio?.state !== 'on' || sound.view.choice === 'none' || !streams?.length) return null;
+  return (
+    <details className="share-stream-diagnostics">
+      <summary>What’s being shared</summary>
+      <ul>
+        {streams.map(({ application, media, reason }, index) => (
+          <li key={index}>{`${application || 'Unknown application'} · ${media || 'Unnamed stream'} · ${streamReasons[reason]}`}</li>
+        ))}
+      </ul>
+    </details>
+  );
+}
+
 // ShareButton is Share, or Stop sharing while a share is starting, live or
 // resuming. It is disabled with its reason, which the notes say.
 export function ShareButton({ companion, joined, reason }: { readonly companion: Companion; readonly joined: string | null; readonly reason: string | null }) {
@@ -145,10 +174,6 @@ export function ShareButton({ companion, joined, reason }: { readonly companion:
   );
 }
 
-function qualityKey(q: ShareQuality): string {
-  return `${q.resolution}${String(q.frameRate)}`;
-}
-
 // ShareNotes is what the share control says: why it is off, what sound the
 // share will carry (none, from the Linux app, said before the picker opens
 // and in short while sharing), the indicator naming the channel, the
@@ -180,7 +205,16 @@ export function ShareNotes({
   const soundReason = sound?.view.unavailable;
   const soundNote = sound?.note ?? null;
   const note = share.kind === 'idle' ? shareNote(share, state.companionRefusal, state.phase === 'stopped' ? state.why : null, state.companionShareUnavailable) : null;
-  const quality = companionQualities.find((q) => qualityKey(q) === qualityKey(state.shareQuality)) ?? companionDefaultQuality;
+  const quality = companionQuality(state.shareQuality, state.shareQualityV3);
+  const choices = companionQualityChoices(state.shareQualityV3);
+  const resolutions = shareResolutionChoices(state.shareQualityV3).filter((resolution) => resolution !== 'auto');
+  const rates = choices.filter((q) => q.resolution === quality.resolution);
+  const chooseResolution = (resolution: string) => {
+    const rates = choices.filter((q) => q.resolution === resolution);
+    const next = rates.find((q) => q.frameRate === quality.frameRate)
+      ?? rates.find((q) => q.frameRate === companionDefaultQuality.frameRate);
+    if (next !== undefined) void client.setShareQuality(next);
+  };
   const caution = cautionFor(quality);
   // The picker is open before a share and while one is sharing: never while
   // it is claiming, picking, publishing (the capture and its sender are not
@@ -216,6 +250,7 @@ export function ShareNotes({
       {share.kind === 'sharing' ? <ShareCaptureWarning stalled={state.shareCaptureStalled} client={client} /> : null}
       {!windows && !offered && live ? <p className="hint">{silentShareWhile}</p> : null}
       {showToggle ? <ShareSoundToggle sound={sound} /> : null}
+      {showToggle && live ? <ShareSoundStreams sound={sound} /> : null}
       {sound !== undefined && soundReason !== undefined && (share.kind === 'idle' ? reason === null : live || starting) ? (
         <p id={soundWhyId} role="status" className="hint">
           {shareSoundWords[soundReason]}
@@ -230,23 +265,37 @@ export function ShareNotes({
         </p>
       )}
       {pickerOpen ? (
-        <label className="share-quality">
-          <span className="label">Share quality</span>
-          <select
-            aria-describedby={caution === null ? undefined : cautionId}
-            value={qualityKey(quality)}
-            onChange={(e) => {
-              const next = companionQualities.find((q) => qualityKey(q) === e.target.value);
-              if (next !== undefined) void client.setShareQuality(next);
-            }}
-          >
-            {companionQualities.map((q) => (
-              <option key={qualityKey(q)} value={qualityKey(q)}>
-                {shareQualityWords(q)} · {estimateWords(q)}
-              </option>
-            ))}
-          </select>
-        </label>
+        <>
+          <label className="share-quality">
+            <span className="label">Resolution</span>
+            <select
+              aria-describedby={caution === null ? undefined : cautionId}
+              value={quality.resolution}
+              onChange={(e) => { chooseResolution(e.target.value); }}
+            >
+              {resolutions.map((resolution) => (
+                <option key={resolution} value={resolution}>
+                  {resolutionWords[resolution]} · {estimateWords({ resolution, frameRate: quality.frameRate })}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="share-quality">
+            <span className="label">Frame rate</span>
+            <select
+              aria-describedby={caution === null ? undefined : cautionId}
+              value={quality.frameRate}
+              onChange={(e) => {
+                const next = rates.find((q) => q.frameRate === Number(e.target.value));
+                if (next !== undefined) void client.setShareQuality(next);
+              }}
+            >
+              {rates.map(({ frameRate }) => (
+                <option key={frameRate} value={frameRate}>{String(frameRate)} fps</option>
+              ))}
+            </select>
+          </label>
+        </>
       ) : null}
       {pickerOpen && caution !== null ? <p id={cautionId} className="hint" role="note">{caution}</p> : null}
       {liveWhy === null ? null : <p role="status" className="hint">{liveWhy}</p>}
@@ -268,7 +317,7 @@ export function NativeStreams({
   live,
 }: {
   readonly companion: Companion;
-  readonly presence: VoicePresenceV2 | null;
+  readonly presence: VoicePresence | null;
   readonly viewer: number;
   readonly people: ReadonlyMap<number, Person>;
   // The channel voice is joined in, and whether the helper is connected.

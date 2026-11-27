@@ -26,7 +26,7 @@ import {
 } from '../../main/api/feeds.ts';
 import { agentConstructor, connector, createNodeConnect } from '../../main/api/socket.ts';
 import { Session } from '../../main/api/session.ts';
-import { diagnosticSamplesFor, diagnosticsLogger, LogRing, type MainLog } from '../../main/diagnostics.ts';
+import { diagnosticsLogger, GeometricSampler, LogRing, type FeedDiagnosticKey, type MainLog } from '../../main/diagnostics.ts';
 import { makePki, type Pki } from './support.ts';
 import type { FeedEvent } from '../../shared/bridge-names.ts';
 
@@ -39,6 +39,7 @@ const HEARTBEAT = fixture('heartbeat-v1');
 // document is not one of its frames.
 const PRESENCE = fixture('voice-presence-v2');
 const PRESENCE_V1 = fixture('voice-presence-v1');
+const PRESENCE_V3 = fixture('voice-presence-v3');
 const OCCUPANCY = fixture('voice-occupancy-v1');
 const ROSTER = fixture('session-roster-v1');
 
@@ -71,7 +72,7 @@ interface Rig {
   readonly timers: { run: () => void; ms: number; cleared: boolean }[];
 }
 
-function rig(limits: { maxQueuedFrames?: number; maxQueuedBytes?: number } = {}, log?: MainLog): Rig {
+function rig(limits: { maxQueuedFrames?: number; maxQueuedBytes?: number } = {}, log?: MainLog, samples = new GeometricSampler<FeedDiagnosticKey>()): Rig {
   const session = new Session();
   session.setOrigin('http://127.0.0.1:8080');
   session.adopt(TOKEN);
@@ -123,6 +124,7 @@ function rig(limits: { maxQueuedFrames?: number; maxQueuedBytes?: number } = {},
       events.push([document, event]);
     },
     log: log ?? ((line) => logs.push(line)),
+    samples,
     setTimer: (run, ms) => {
       const timer = { run, ms, cleared: false };
       timers.push(timer);
@@ -166,6 +168,7 @@ it.each([167, 1_001])('keeps export history through %i feed churn cycles', async
     }),
     deliver: () => undefined,
     log: diagnosticsLogger(ring, (line) => local.push(line)),
+    samples: new GeometricSampler(),
     setTimer: () => ({}),
     clearTimer: () => undefined,
   });
@@ -183,8 +186,10 @@ it.each([167, 1_001])('keeps export history through %i feed churn cycles', async
 it('samples each feed kind independently and keeps counts across activations', () => {
   const ring = new LogRing();
   const log = diagnosticsLogger(ring, () => undefined);
-  const first = rig({}, log);
-  const second = rig({}, log);
+  const samples = new GeometricSampler<FeedDiagnosticKey>();
+  const wrapped: MainLog = (line, options) => { log(line, options); };
+  const first = rig({}, log, samples);
+  const second = rig({}, wrapped, samples);
   for (const [r, id, request] of [
     [first, 1, messages], [first, 2, messages],
     [second, 1, occupancy], [second, 2, messages], [second, 3, messages],
@@ -199,7 +204,7 @@ it('samples each feed kind independently and keeps counts across activations', (
     `conch-desktop: feed ${kind} socket closed; 0 open, 0 closing`,
   ];
   expect(ring.lines()).toEqual([...events('messages'), ...events('messages'), ...events('occupancy'), ...events('messages')]);
-  expect(diagnosticSamplesFor(log)?.feeds.counts()).toEqual([
+  expect(samples.counts()).toEqual([
     ['messages opening', 4], ['messages unsubscribed', 4], ['messages socket closed', 4],
     ['occupancy opening', 1], ['occupancy unsubscribed', 1], ['occupancy socket closed', 1],
   ]);
@@ -217,6 +222,9 @@ describe('what the renderer may ask for', () => {
     [{ kind: 'events', channel: 'general', session: -2 }, null],
     [{ kind: 'voice' }, null],
     [{ kind: 'voice', channel: 7 }, null],
+    [{ kind: 'voice', channel: 'general', schema: 'conch.voice_presence.v3' }, { kind: 'voice', channel: 'general', schema: 'conch.voice_presence.v3' }],
+    [{ kind: 'voice', channel: 'general', schema: 'conch.voice_presence.v4' }, null],
+    [{ kind: 'occupancy', schema: 'conch.voice_presence.v3' }, null],
     [{ kind: 'voice', channel: 'a\u0000b' }, null],
     [{ kind: 'occupancy', ticket: 'x' }, null],
     [{ kind: 'occupancy', url: 'wss://evil.example/' }, null],
@@ -231,9 +239,8 @@ describe('what the renderer may ask for', () => {
   it('is turned into the feed’s fixed route on the selected origin, with a query main builds', () => {
     expect(feedUrl('http://127.0.0.1:8080', messages)).toBe('ws://127.0.0.1:8080/v2/ws?channel=general&after=4&heartbeat=1');
     expect(feedUrl('https://chat.example', { kind: 'events', channel: 'a b&c=d', session: 9 })).toBe('wss://chat.example/v1/events/ws?channel=a+b%26c%3Dd&session=9');
-    // The voice feed always asks for v2 presence, which is what the web
-    // client reads.
     expect(feedUrl('https://chat.example', { kind: 'voice', channel: 'general' })).toBe('wss://chat.example/v1/voice/ws?channel=general&schema=conch.voice_presence.v2');
+    expect(feedUrl('https://chat.example', { kind: 'voice', channel: 'general', schema: 'conch.voice_presence.v3' })).toBe('wss://chat.example/v1/voice/ws?channel=general&schema=conch.voice_presence.v3');
     expect(feedUrl('https://chat.example', occupancy)).toBe('wss://chat.example/v1/voice/occupancy/ws');
   });
 });
@@ -291,6 +298,22 @@ describe('the voice feed', () => {
 });
 
 describe('frames', () => {
+  it('delivers v3 presence only to a subscription that requested it', () => {
+    const r = rig();
+    expect(r.feeds.subscribe(1, 1, { kind: 'voice', channel: 'general', schema: 'conch.voice_presence.v3' })).toBe(true);
+    const socket = r.sockets[0];
+    expect(new URL(socket?.url ?? '').searchParams.get('schema')).toBe('conch.voice_presence.v3');
+    socket?.on.open();
+    socket?.on.frame(PRESENCE);
+    expect(r.feeds.invalid).toBe(1);
+    socket?.on.frame(PRESENCE_V3);
+    expect(r.events).toEqual([
+      [1, { id: 1, type: 'open' }],
+      [1, { id: 1, type: 'frames', frames: [PRESENCE_V3] }],
+    ]);
+    expect(validFrame('voice', PRESENCE_V3)).toBe(false);
+  });
+
   it.each<[FeedRequest['kind'], string, boolean]>([
     ['messages', MESSAGE, true],
     ['messages', HEARTBEAT, true],
@@ -356,7 +379,8 @@ describe('frames', () => {
     const log = diagnosticsLogger(ring, (line) => local.push(line));
     const history = 'voice: helper 1 lost: ack-timeout';
     ring.record(history);
-    const r = rig({}, log);
+    const counts = new GeometricSampler<FeedDiagnosticKey>();
+    const r = rig({}, log, counts);
     expect(r.feeds.subscribe(1, 1, messages)).toBe(true);
     expect(r.feeds.subscribe(1, 2, occupancy)).toBe(true);
     const [busy, quiet] = r.sockets;
@@ -373,7 +397,7 @@ describe('frames', () => {
     ]);
     expect(local).toContain(dropped('messages', 100));
     expect(local.filter((line) => line.includes('dropped'))).toHaveLength(samples + Math.floor(frames / 100) + 1);
-    expect(diagnosticSamplesFor(log)?.feeds.counts()).toEqual([
+    expect(counts.counts()).toEqual([
       ['messages opening', 1], ['occupancy opening', 1],
       ['messages invalid frame', frames], ['occupancy invalid frame', 1],
     ]);
@@ -759,6 +783,7 @@ describe('Node’s WebSocket, as main opens it', () => {
       connect: createNodeConnect(() => undefined),
       deliver: () => undefined,
       log: (line) => logs.push(line),
+      samples: new GeometricSampler(),
       // The deadline, shortened for the test.
       setTimer: (run, ms) => {
         expect(ms).toBe(CLOSE_DEADLINE_MS);

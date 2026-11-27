@@ -7,12 +7,10 @@
 //! helper captures and publishes on its owner's command: [`VoiceControlSetShareAudioV3`]
 //! asks for it or stops it, [`VoiceControlSetShareAudioMuteV3`] mutes the published track,
 //! and the state says what came of it ([`VoiceControlShareAudio`],
-//! [`VoiceControlShareAudioProblem`], and a count of the applications being mixed).
+//! [`VoiceControlShareAudioProblem`], a stream count and optional stream diagnostics).
 //!
-//! What v1 and v2 leave out, v3 leaves out too: no secret, no free text from the helper
-//! (the application name the owner sends is never repeated, and the state names no
-//! application), and no command that opens the gate: the share's sound is not the
-//! microphone, and `transmitting` does not depend on any of it.
+//! The share's sound is independent of the microphone and transmit gate. Stream
+//! diagnostics contain bounded display labels from the audio graph and a fixed decision.
 //!
 //! A share-audio command the helper cannot carry out is refused into the state, not by
 //! the reader: a scope this platform cannot capture is a valid command, and its answer is
@@ -56,6 +54,12 @@ pub const VOICE_CONTROL_MAX_APPLICATION_NAME_BYTES: usize = 128;
 
 /// The largest `share_audio_sources` a state may carry.
 pub const VOICE_CONTROL_MAX_SHARE_AUDIO_SOURCES: i64 = 1024;
+
+/// The most streams the share-audio diagnostics may report.
+pub const VOICE_CONTROL_MAX_SHARE_AUDIO_STREAMS: usize = 50;
+
+/// The most UTF-8 bytes in a diagnostic display label.
+pub const VOICE_CONTROL_MAX_SHARE_AUDIO_LABEL_BYTES: usize = 24;
 
 vocabulary!(
     /// What a v3 command asks for: v2's seven kinds, with v2's meaning, and the two of the
@@ -424,9 +428,57 @@ impl VoiceControlAckV3 {
     }
 }
 
+vocabulary!(
+    /// Why a playback stream is captured or excluded from the share's sound.
+    VoiceControlShareAudioStreamReason, "not a share-audio stream reason", {
+    Captured = "captured",
+    CallPlayback = "call_playback",
+    ConchClient = "conch_client",
+    ConchApplication = "conch_application",
+    ConchName = "conch_name",
+    UnknownOwner = "unknown_owner",
+    MissingTarget = "missing_target",
+    AwaitingApplication = "awaiting_application",
+    WrongFormat = "wrong_format",
+    StreamEnded = "stream_ended",
+    FormatNotSupported = "format_not_supported",
+});
+
+/// One stream decision, with local display labels that are omitted from debug output.
+#[derive(Clone, PartialEq, Eq, Serialize)]
+pub struct VoiceControlShareAudioStreamV3 {
+    /// Application display label. Empty when unavailable or unsuitable for display.
+    pub application: String,
+    /// Media display label. Empty when unavailable or unsuitable for display.
+    pub media: String,
+    /// Why the stream is captured or excluded.
+    pub reason: VoiceControlShareAudioStreamReason,
+}
+
+wire_object!(VoiceControlShareAudioStreamV3, "a share-audio stream decision", unknown = refused, {
+    application: required,
+    media: required,
+    reason: required,
+});
+
+impl fmt::Debug for VoiceControlShareAudioStreamV3 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VoiceControlShareAudioStreamV3")
+            .field("reason", &self.reason)
+            .finish_non_exhaustive()
+    }
+}
+
+fn valid_stream_label(label: &str) -> bool {
+    label.len() <= VOICE_CONTROL_MAX_SHARE_AUDIO_LABEL_BYTES
+        && !label.chars().any(|c| {
+            c.is_control()
+                || matches!(c, '/' | '\\' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        })
+}
+
 /// A whole-state snapshot (helper to owner): every field of [`VoiceControlStateV2`],
-/// unchanged and by the same rules, and four about the sound of the owner's screen share.
-/// It names no device, no application and no stream.
+/// unchanged and by the same rules, plus the status of the owner's screen share audio.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct VoiceControlStateV3 {
     /// Always [`VOICE_CONTROL_SCHEMA_V3`].
@@ -475,8 +527,11 @@ pub struct VoiceControlStateV3 {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub share_audio_problem: Option<VoiceControlShareAudioProblem>,
     /// How many applications' streams are being mixed into the share's sound now: 0 to
-    /// [`VOICE_CONTROL_MAX_SHARE_AUDIO_SOURCES`]. A count and nothing else.
+    /// [`VOICE_CONTROL_MAX_SHARE_AUDIO_SOURCES`].
     pub share_audio_sources: i64,
+    /// Optional, possibly partial diagnostics for active capture. An empty list is omitted.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub share_audio_streams: Vec<VoiceControlShareAudioStreamV3>,
 }
 
 wire_object!(VoiceControlStateV3, "a voice control state", unknown = ignored, {
@@ -499,6 +554,7 @@ wire_object!(VoiceControlStateV3, "a voice control state", unknown = ignored, {
     share_audio_muted: required,
     share_audio_problem: maybe,
     share_audio_sources: required,
+    share_audio_streams: recoverable,
 });
 
 impl VoiceControlStateV3 {
@@ -769,7 +825,10 @@ pub fn parse_event_v3(line: &[u8]) -> Result<VoiceControlEventV3, VoiceControlRe
             (VoiceControlEventV3::Ack(ack), checked)
         }
         VoiceControlEventKind::State => {
-            let state: VoiceControlStateV3 = typed(text, None)?;
+            let mut state: VoiceControlStateV3 = typed(text, None)?;
+            if !state.valid_streams() {
+                state.share_audio_streams.clear();
+            }
             let checked = state.check();
             (VoiceControlEventV3::State(state), checked)
         }
@@ -986,9 +1045,17 @@ impl VoiceControlAckV3 {
 }
 
 impl VoiceControlStateV3 {
-    /// `VoiceControlStateV3.Validate`, in its order: v2's rules, every one and unchanged
-    /// (they are v2's own check, run on the snapshot's v2 fields), and then the rules of
-    /// the four fields v3 adds.
+    fn valid_streams(&self) -> bool {
+        let streams = &self.share_audio_streams;
+        streams.is_empty()
+            || (self.share_audio == VoiceControlShareAudio::On
+                && streams.len() <= VOICE_CONTROL_MAX_SHARE_AUDIO_STREAMS
+                && streams.iter().all(|stream| {
+                    valid_stream_label(&stream.application) && valid_stream_label(&stream.media)
+                }))
+    }
+
+    /// `VoiceControlStateV3.Validate`: v2's rules, then the rules for share audio.
     fn check(&self) -> Result<(), String> {
         use VoiceControlPhase as Phase;
         use VoiceControlShareAudio as Audio;
@@ -1047,6 +1114,9 @@ impl VoiceControlStateV3 {
             return Err(
                 "voice control state share_audio_sources must be 0 unless share_audio is on".into(),
             );
+        }
+        if !self.valid_streams() {
+            return Err("voice control state has invalid share_audio_streams".into());
         }
         Ok(())
     }
@@ -1145,7 +1215,7 @@ mod tests {
         "command-set-share-audio-mute-off.json",
     ];
 
-    const EVENTS: [&str; 21] = [
+    const EVENTS: [&str; 22] = [
         "event-ack.json",
         "event-ack-refused.json",
         "event-protocol-error.json",
@@ -1159,6 +1229,7 @@ mod tests {
         "event-state-failed.json",
         // The share's sound.
         "event-state-share-audio-on.json",
+        "event-state-share-audio-streams.json",
         "event-state-share-audio-muted.json",
         "event-state-share-audio-no-sources.json",
         "event-state-share-audio-transmitting.json",
@@ -1469,7 +1540,7 @@ mod tests {
     }
 
     /// The vocabularies are the Go constants' words, in the Go order, and so are the
-    /// schema name and the two bounds.
+    /// schema name and the bounds.
     #[test]
     fn the_vocabularies_the_name_and_the_bounds_are_the_schemas() {
         let read = |file: &str| std::fs::read_to_string(schema_dir().join(file)).unwrap();
@@ -1497,6 +1568,19 @@ mod tests {
         assert_eq!(
             words_of(&v3, "VoiceControlShareAudio"),
             ours(VoiceControlShareAudio::ALL, VoiceControlShareAudio::as_str)
+        );
+        assert!(v3.contains(&format!(
+            "\tVoiceControlMaxShareAudioStreams = {VOICE_CONTROL_MAX_SHARE_AUDIO_STREAMS}"
+        )));
+        assert!(v3.contains(&format!(
+            "\tVoiceControlMaxShareAudioLabelBytes = {VOICE_CONTROL_MAX_SHARE_AUDIO_LABEL_BYTES}"
+        )));
+        assert_eq!(
+            words_of(&v3, "VoiceControlShareAudioStreamReason"),
+            ours(
+                VoiceControlShareAudioStreamReason::ALL,
+                VoiceControlShareAudioStreamReason::as_str
+            )
         );
         assert_eq!(
             words_of(&v3, "VoiceControlShareAudioProblem"),
@@ -1612,7 +1696,7 @@ mod tests {
     }
 
     /// The writer refuses what the reader refuses: a v3 state that does not hold together,
-    /// by a rule of the four fields or by one of v2's, is never written.
+    /// by a share-audio rule or by one of v2's, is never written.
     #[test]
     fn a_state_that_does_not_hold_together_is_not_written() {
         use VoiceControlBlock as Block;

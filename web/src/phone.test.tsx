@@ -8,9 +8,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { headingId } from './Conversation';
 import { InvitePanel } from './InvitePanel';
 import { Lobby } from './Lobby';
+import { LeaveDrawer } from './pageModal';
 import { MicTestShown, ShowChat, useAppHeight, VoiceLive, VoiceStrip } from './phone';
 import type { ChannelV0 } from './schema/channel';
 import type { ChannelsState } from './state/channels';
+import { Options, useOptionsDisclosure } from './voice/VoicePanel';
 
 const events: string[] = [];
 
@@ -107,7 +109,9 @@ function lobby({
   joined = () => undefined,
   firstRun,
   newChannel,
-}: { channels?: ChannelsState; live?: boolean; onOpen?: (name: string) => void; joined?: () => void; firstRun?: ReactNode; newChannel?: ReactNode } = {}) {
+  panel = <p>Nobody</p>,
+  voice = <Voice live={live} joined={joined} />,
+}: { panel?: ReactNode; channels?: ChannelsState; live?: boolean; onOpen?: (name: string) => void; joined?: () => void; firstRun?: ReactNode; newChannel?: ReactNode; voice?: ReactNode } = {}) {
   const page = (voice: ReactNode, shown: ChannelsState = channels) => (
     <Lobby
       origin="http://127.0.0.1:8080"
@@ -119,7 +123,7 @@ function lobby({
       conversation={firstRun === undefined ? <Conversation /> : null}
       firstRun={firstRun}
       newChannel={newChannel}
-      panel={<p>Nobody</p>}
+      panel={panel}
       voice={voice}
       invites={null}
       onOpen={onOpen}
@@ -129,7 +133,7 @@ function lobby({
       signOutProblem={null}
     />
   );
-  const view = render(page(<Voice live={live} joined={joined} />));
+  const view = render(page(voice));
   return {
     ...view,
     setLive: (next: boolean) => {
@@ -218,6 +222,23 @@ describe('opening a channel from the channels column (issue #991)', () => {
     expect(document.activeElement?.id).toBe(headingId);
   });
 
+  // Issue #2196: an action in the Members drawer that shows something in the
+  // centre takes a phone to Chat, where the centre is drawn.
+  it.each(['Voice', 'Channels'])('takes a phone from %s to Chat when the Members drawer shows something in the centre', (from) => {
+    windowOf(true);
+    function Action() {
+      const leave = useContext(LeaveDrawer);
+      return <button type="button" onClick={leave}>Open run</button>;
+    }
+    lobby({ panel: <Action /> });
+    fireEvent.click(tab(from));
+    fireEvent.click(screen.getByRole('button', { name: 'Members' }));
+    expect(tab(from).getAttribute('aria-current')).toBe('page');
+    fireEvent.click(screen.getByRole('button', { name: 'Open run' }));
+    expect(screen.queryByRole('region', { name: 'Members list' })).toBeNull();
+    expect(tab('Chat').getAttribute('aria-current')).toBe('page');
+  });
+
   it('does nothing where the conversation is already beside the list', () => {
     windowOf(false);
     lobby({ newChannel: <Opener /> });
@@ -250,6 +271,71 @@ describe('the first-run panel (issue #1032)', () => {
 });
 
 describe('switching views', () => {
+  function VoiceOptions() {
+    const strip = useContext(VoiceStrip) !== null;
+    const { options, button, panel, onClose, onShrink, sheet, onSheet } = useOptionsDisclosure({ hidden: strip });
+    return (
+      <section aria-label="Voice">
+        {!strip && <button type="button" {...button}>Voice options</button>}
+        <Options panel={panel} onClose={onClose} onShrink={onShrink} sheet={sheet} onSheet={onSheet} open={options && !strip}>
+          <p>Voice preferences</p>
+        </Options>
+      </section>
+    );
+  }
+
+  function openVoiceSheet(options: Parameters<typeof lobby>[0] = {}) {
+    windowOf(true);
+    const height = vi.spyOn(document.documentElement, 'clientHeight', 'get').mockReturnValue(520);
+    try {
+      lobby({ ...options, voice: <VoiceOptions /> });
+      fireEvent.click(tab('Voice'));
+      fireEvent.click(screen.getByRole('button', { name: 'Voice options' }));
+      const sheet = screen.getByRole('dialog', { name: 'Voice options' });
+      const close = within(sheet).getByRole('button', { name: 'Close' });
+      expect(document.activeElement).toBe(close);
+      return { sheet, close };
+    } finally {
+      height.mockRestore();
+    }
+  }
+
+  it.each(['Chat', 'Channels'])('focuses %s when Safari clicks it from an open Voice options sheet', (view) => {
+    const { sheet, close } = openVoiceSheet();
+    const destination = tab(view);
+    const label = within(destination).getByText(view);
+    // Safari blurs the previous control without focusing the clicked button.
+    act(() => {
+      if (fireEvent.mouseDown(label)) close.blur();
+    });
+    expect(document.activeElement).toBe(document.body);
+    fireEvent.click(label, { detail: 1 });
+    expect(destination.getAttribute('aria-current')).toBe('page');
+    expect(sheet.hasAttribute('hidden')).toBe(true);
+    expect(document.activeElement).toBe(destination);
+  });
+
+  it('leaves focus on a navigation control that stays visible when the sheet closes', () => {
+    const { sheet } = openVoiceSheet();
+    const voice = tab('Voice');
+    voice.focus();
+    fireEvent.click(tab('Chat'), { detail: 1 });
+    expect(sheet.hasAttribute('hidden')).toBe(true);
+    expect(document.activeElement).toBe(voice);
+  });
+
+  it('focuses main when a switch from the sheet has no navigation button or Chat heading', () => {
+    function OpenChat() {
+      const showChat = useContext(ShowChat);
+      return <button type="button" onClick={showChat}>Show chat</button>;
+    }
+    const { sheet } = openVoiceSheet({ firstRun: <p>Welcome</p>, newChannel: <OpenChat /> });
+    // A programmatic activation never gives the button focus.
+    act(() => { screen.getByText('Show chat').click(); });
+    expect(sheet.hasAttribute('hidden')).toBe(true);
+    expect(document.activeElement).toBe(screen.getByRole('main'));
+  });
+
   it('mounts the conversation and the voice section once and never again, through every view and a rotation', () => {
     const phone = windowOf(true);
     lobby();

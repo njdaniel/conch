@@ -4,14 +4,16 @@
 // releases (blur, hidden, pagehide).
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import * as api from '../api';
+import { isArchived } from '../archived';
 import { soundAudience, sounds, voiceSounds } from '../sounds';
 import { pageHiddenOnPhone } from '../phone';
 import { platform } from '../platform';
 import type { ChannelV0 } from '../schema/channel';
 import type { SocketCloseReason } from '../schema/generated';
-import type { VoicePresenceV2 } from '../schema/voice';
+import type { VoicePresence } from '../schema/voice';
 import { Feed, type FeedStatus } from '../state/feed';
 import type { Camera } from './camera';
+import { useChannelJoin } from './channelJoin';
 import { openAudio, VoiceClient, type Microphone, type ModeStore, type Output, type ProcessingStore, type VoiceState } from './connection';
 import { defaultTail, snapTail } from './gate';
 import { companionEnv } from './native/companionEnv';
@@ -259,8 +261,8 @@ function modeChoice(): ModeStore {
 }
 
 // What is known about the channel's voice, as the strip says it. loading is
-// before the first frame; presence is a frame on an open socket; unreachable
-// is the socket lost and not back, so the server cannot be reached;
+// before the first frame; presence is a frame or a read after the socket closes;
+// unreachable is the socket lost and not back, so the server cannot be reached;
 // not_allowed is a person whose access has no voice; gone is any other close
 // the server meant (the channel lost, which the page says elsewhere).
 export type Snapshot =
@@ -268,7 +270,7 @@ export type Snapshot =
   | { readonly kind: 'unreachable' }
   | { readonly kind: 'not_allowed' }
   | { readonly kind: 'gone' }
-  | { readonly kind: 'presence'; readonly presence: VoicePresenceV2 };
+  | { readonly kind: 'presence'; readonly presence: VoicePresence };
 
 // How every voice route refuses a person whose invite did not grant voice
 // (schema.ErrorCodeVoiceNotAllowed).
@@ -301,7 +303,7 @@ export interface VoiceControl {
   // Sets the release delay, and keeps it for the tab.
   readonly setReleaseDelay: (ms: number) => void;
   readonly capture: (on: boolean) => void;
-  readonly join: () => void;
+  readonly join: (audio?: AudioContext | null) => void;
   // Joins to watch, without the microphone.
   // beside: the person's own voice is in another client, so watch as the
   // viewer (issue #936).
@@ -355,6 +357,7 @@ export function useVoice({
       // The desktop's default is its own (Q-D4-3 on #1578), so there a choice
       // is passed only if one was made.
       shareQuality: platform.nativeVoice?.companion === undefined ? api.readShareQuality() : (api.keptShareQuality() ?? undefined),
+      keepShareQuality: api.writeShareQuality,
       outputSelection: canChooseOutput(),
       output: readOutput(),
       gate: { tail: readRelease() },
@@ -363,16 +366,16 @@ export function useVoice({
   }
   const client = clientRef.current;
   const state = useSyncExternalStore(client.subscribe, client.snapshot);
-  const keptShareQuality = useRef(state.shareQuality);
   const [talkKey, setKey] = useState(readKey);
   const [capturing, setCapturing] = useState(false);
   const [snapshot, setSnapshot] = useState<Snapshot>({ kind: 'loading' });
   const [features] = useState(browserFeatures);
   // The presence feed of the shown channel, what it last reported and the
   // presence it last gave, for the effects beside the one that owns it.
+  // A cached read carries the last socket schema for a later join.
   const feedRef = useRef<Feed | null>(null);
   const feedStatus = useRef<FeedStatus | null>(null);
-  const latest = useRef<VoicePresenceV2 | null>(null);
+  const latest = useRef<{ readonly presence: VoicePresence; readonly socketSchema: VoicePresence['schema'] | null } | null>(null);
   const joinedRef = useRef<string | null>(null);
   // Whether the feed is lost and not back: the server out of reach.
   const lost = useRef(false);
@@ -414,14 +417,6 @@ export function useVoice({
   useEffect(() => {
     writeCamera(state.cameraChoice);
   }, [state.cameraChoice]);
-
-  // The share quality is a local preference, not something sent to the room.
-  // Merely opening the page writes no default; only a new choice is stored.
-  useEffect(() => {
-    if (keptShareQuality.current === state.shareQuality) return;
-    keptShareQuality.current = state.shareQuality;
-    api.writeShareQuality(state.shareQuality);
-  }, [state.shareQuality]);
 
   // Every client of the page, for leaveVoice.
   useEffect(() => {
@@ -484,15 +479,17 @@ export function useVoice({
     let live = true;
     lost.current = false;
     setSnapshot({ kind: 'loading' });
-    const show = (presence: VoicePresenceV2) => {
+    let socketSchema: VoicePresence['schema'] | null = null;
+    const show = (presence: VoicePresence, frameSchema: VoicePresence['schema'] | null) => {
       const audience = soundAudience;
       if (joinedRef.current !== null && audience?.allows(presence.channel_id)) {
-        voiceSounds(lost.current ? null : latest.current, presence, audience.me, (sound) => { sounds.play(sound); });
+        voiceSounds(lost.current ? null : (latest.current?.presence ?? null), presence, audience.me, (sound) => { sounds.play(sound); });
       }
-      latest.current = presence;
+      socketSchema = frameSchema ?? socketSchema;
+      latest.current = { presence, socketSchema };
       lost.current = false;
       setSnapshot({ kind: 'presence', presence });
-      if (joinedRef.current !== null) client.presence(presence);
+      if (joinedRef.current !== null) client.presence(presence, frameSchema);
     };
     const set = (kind: 'not_allowed' | 'gone') => {
       latest.current = null;
@@ -532,7 +529,7 @@ export function useVoice({
       onFrame: (data) => {
         const presence = parsePresence(data);
         if (presence === null || !live) return;
-        show(presence);
+        show(presence, presence.schema);
       },
       onStatus: (status: FeedStatus) => {
         if (!live) return;
@@ -545,9 +542,9 @@ export function useVoice({
         else if (status === 'denied') settle();
       },
     });
-    // A 1008 close says only that the server meant it. One read says why:
-    // voice withdrawn, the channel lost, or neither (it answers), when the
-    // feed goes back through its backoff rather than retrying at once.
+    // A 1008 close says only that the server meant it. One read can tell us
+    // whether voice was withdrawn or the channel was lost. A roster or a
+    // transient failure sends the feed back through its backoff.
     const settle = () => {
       // Told it by the close itself: the channel is gone, and asking would
       // only be answered 404.
@@ -562,9 +559,12 @@ export function useVoice({
       void api.getVoicePresence(named()).then((result) => {
         if (!live) return;
         if (result.ok) {
-          show(result.value);
+          // retryLater reports waiting synchronously. Show the read after it
+          // so the roster stays visible during the backoff.
           feed.retryLater();
+          show(result.value, null);
         } else if (result.failure === 'unauthorized') onUnauthorized();
+        else if (result.failure === 'network' || result.status === 429 || (result.status ?? 0) >= 500) feed.retryLater();
         else set(result.code === voiceNotAllowed ? 'not_allowed' : 'gone');
       });
     };
@@ -580,15 +580,19 @@ export function useVoice({
   }, [shownKey, voiceAllowed, onUnauthorized, client]);
 
   // While in voice the client reads presence too, for the screen share. On
-  // joining it is given what the socket last said: the socket is not opened
-  // again, and says nothing more until something changes. Leaving while the
-  // socket is lost leaves a strip that says so, not the roster kept in voice.
+  // joining it is given the latest roster and the last socket schema: the
+  // socket is not opened again, and says nothing more until something changes.
+  // Leaving while the socket is lost leaves a strip that says so, not the
+  // roster kept in voice.
   useEffect(() => {
     joinedRef.current = joined;
     if (joined === null && lost.current) {
       latest.current = null;
       setSnapshot({ kind: 'unreachable' });
-    } else if (joined !== null && latest.current !== null) client.presence(latest.current);
+    } else if (joined !== null && latest.current !== null) {
+      const { presence, socketSchema } = latest.current;
+      client.presence(presence, socketSchema);
+    }
   }, [joined, client]);
 
   // Back in reach (the status line says Connected): a feed waiting out its
@@ -688,14 +692,19 @@ export function useVoice({
     if (client.snapshot().phase !== 'idle' && client.snapshot().phase !== 'stopped') return;
     joinedAt.current = channelsNow.current.find((c) => c.name === name)?.id ?? null;
   }, [client]);
-  const join = useCallback(() => {
+  const join = useCallback((audio?: AudioContext | null) => {
     if (channel === null) return;
-    // The meter's audio context is made first, in the click, with nothing
-    // before or between (issue #1794): iOS only runs one made in a gesture.
-    const audio = openAudio();
+    // The meter's audio context is made in the click (issue #1794). A
+    // shortcut waiting for presence supplies the context it already opened.
+    const meterAudio = audio === undefined ? openAudio() : audio;
     note(channel);
-    client.join(channel, { audio });
+    client.join(channel, { audio: meterAudio });
   }, [channel, client, note]);
+  const joinShortcut = useCallback((_presence: VoicePresence, audio: AudioContext | null) => {
+    join(audio);
+  }, [join]);
+  const viewed = channels.find((candidate) => candidate.name === channel);
+  useChannelJoin(viewed, signedIn && voiceAllowed && reachable && window.isSecureContext && joined === null && !isArchived(viewed), snapshot, joinShortcut, openAudio);
   const watchOnly = useCallback((beside = false) => {
     if (channel === null) return;
     note(channel);

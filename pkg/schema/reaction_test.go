@@ -255,6 +255,9 @@ func TestReactionConstants(t *testing.T) {
 		"VOICE_CONTROL_PIPE_NONCE_ENV":           VoiceControlPipeNonceEnv,
 		"VOICE_CONTROL_PIPE_NONCE_BYTES":         VoiceControlPipeNonceBytes,
 		"VOICE_CONTROL_PIPE_NONCE_CHARS":         VoiceControlPipeNonceChars,
+		// Optional share-audio diagnostics (issue #2083).
+		"VOICE_CONTROL_MAX_SHARE_AUDIO_LABEL_BYTES": VoiceControlMaxShareAudioLabelBytes,
+		"VOICE_CONTROL_MAX_SHARE_AUDIO_STREAMS":     VoiceControlMaxShareAudioStreams,
 		// A spoiler attachment (issue #1500).
 		"SPOILER_FILE_PREFIX": SpoilerFilePrefix,
 		"MAX_FILE_NAME_BYTES": MaxFileNameBytes,

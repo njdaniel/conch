@@ -79,7 +79,7 @@
 // stops it and the share with it, in words.
 import type { CameraClaimResult, ShareClaimResult, TransmitAnswer, VoiceSessionResult, VoiceViewerResult } from '../api';
 import type { CompanionEndReason, CompanionGrantError, CompanionGrantResult, CompanionPageEnd, CompanionShareUnavailable } from '../platform/desktop/bridge';
-import type { VoicePresenceV2, VoiceTransmitState } from '../schema/voice';
+import { voicePresenceV3Schema, type VoicePresence, type VoiceTransmitState } from '../schema/voice';
 import type { Clock } from '../state/feed';
 import { CameraClient, cameraOff, cameraOn, findCamera, type Camera, type CameraLoss, type CameraProfile, type CameraRoom, type CameraState } from './camera';
 import { afterDisconnect, afterRefusal, afterViewerRefusal, cameraAfter, retryDelay, type DisconnectCause, type Next } from './disconnect';
@@ -87,7 +87,7 @@ import { clampTail, defaultTail, TransmitGate, type GateMode, type GateOptions }
 import type { DiagnosticsSource } from './stats';
 import { cameraHolders, occupants, personOf, principalOf, sharers } from './presence';
 import { ReportQueue, type ReportEvent } from './reports';
-import { autoFrameRate, defaultShareQuality, idleShare, qualityLaterNote, resumeLimit, ScreenShare, type ScreenEnd, type SettledQuality, type ShareDirection, type ShareQuality, type ShareRoom, type ShareSample, type ShareState } from './share';
+import { autoFrameRate, defaultShareQuality, extendedResolution, idleShare, qualityLaterNote, resumeLimit, ScreenShare, type ScreenEnd, type SettledQuality, type ShareDirection, type ShareQuality, type ShareRoom, type ShareSample, type ShareState } from './share';
 import { record } from '../diagnostics';
 
 // The names a browser gives the failures of a microphone it was asked for
@@ -198,8 +198,9 @@ export interface RoomEvents {
   readonly onReconnecting: () => void;
   readonly onReconnected: () => void;
   readonly onDisconnected: (cause: DisconnectCause) => void;
-  // Principal ids of the active speakers, by the identity p<id>.
-  readonly onSpeakers: (principals: readonly number[]) => void;
+  // Principal ids of the remote active speakers, by the identity p<id>, and
+  // whether the room's own local participant is among the speakers.
+  readonly onSpeakers: (principals: readonly number[], local: boolean) => void;
   // This page's published share is gone (share.ts).
   readonly onScreenEnded: (cause: ScreenEnd) => void;
   // The held screen capture has been muted for 3 s, or has recovered.
@@ -247,6 +248,9 @@ export interface ShareSink {
   readonly video: HTMLVideoElement;
   readonly audio: HTMLAudioElement;
 }
+
+// What a capture is of, as the browser reports it (displaySurface).
+export type ShareSurface = 'monitor' | 'window' | 'browser';
 
 // What the client needs of one LiveKit room connection.
 export interface Room extends ShareRoom, CameraRoom {
@@ -327,6 +331,13 @@ export interface Room extends ShareRoom, CameraRoom {
   cameras: () => Promise<readonly Camera[] | null>;
   switchCamera: (choice: string) => Promise<void>;
   attachSelf: (el: HTMLVideoElement | null) => void;
+  // Plays this page's own screen picture, muted, into the sharer's preview
+  // (#2197), or into none: it follows the capture, and is empty once the
+  // share is stopped.
+  attachShareSelf: (el: HTMLVideoElement | null) => void;
+  // What the capture is of (a whole screen, a window, a tab), as the browser
+  // says, or null: named in the sharer's title.
+  shareSurface: () => ShareSurface | null;
   // Receiving cameras: whether the call view is open (the person's choice),
   // whether the video is shown here now (setShown: false in the phone layout
   // outside the Voice view, where no camera is received), who holds a camera
@@ -380,6 +391,7 @@ export interface VoiceState {
   readonly shareCaptureStalled: boolean;
   // The capture and top-layer caps chosen by the sharer, kept locally.
   readonly shareQuality: ShareQuality;
+  readonly shareQualityV3: boolean;
   // Which shares this page watches by publisher, which one is focused (the
   // stage's, its layer left to adaptive stream), and which of each watched
   // share's tracks have arrived (#1509). focusedShare is always one of
@@ -490,6 +502,8 @@ export interface VoiceEnv {
   readonly mode?: ModeStore;
   // The share quality chosen earlier in this browser; default is 1080p30.
   readonly shareQuality?: ShareQuality;
+  // Keep a user choice even when an older server temporarily limits the UI.
+  readonly keepShareQuality?: (quality: ShareQuality) => void;
   // Whether the speakers may be chosen, and the output chosen earlier in
   // this tab, if any (issue #660).
   readonly outputSelection?: boolean;
@@ -543,7 +557,8 @@ export const reportWait = 1000;
 
 // What the desktop offers for a share (Q-D4-3 on #1578, lifted by Nick on
 // 2026-11-11, #1772): 720p30, the default, 1080p30, 1080p60 and Source at 30
-// and 60 fps. #1584 still measures the real numbers and may hide a choice
+// and 60 fps. Each resolution also offers 15 fps (#2128). #1584 still measures
+// the real numbers and may hide a choice
 // again; the sharer's Sending line (the browser's ShareReadout, fed from the
 // companion's own publication stats) says what is actually sent. Any other
 // choice is taken as the default, Auto (issue #1659) among them: the desktop
@@ -554,14 +569,31 @@ export const companionDefaultQuality: ShareQuality = { resolution: '720p', frame
 // What a live capture that cannot take a quality change says (setShareQuality).
 export const shareQualityRefusedNote = 'The share quality could not be changed on this capture.';
 export const companionQualities: readonly ShareQuality[] = [
+  { resolution: '720p', frameRate: 15 },
   companionDefaultQuality,
+  { resolution: '1080p', frameRate: 15 },
   { resolution: '1080p', frameRate: 30 },
   { resolution: '1080p', frameRate: 60 },
+  { resolution: 'source', frameRate: 15 },
   { resolution: 'source', frameRate: 30 },
   { resolution: 'source', frameRate: 60 },
 ];
-export function companionQuality(quality: ShareQuality): ShareQuality {
-  return companionQualities.find((q) => q.resolution === quality.resolution && q.frameRate === quality.frameRate) ?? companionDefaultQuality;
+const extendedCompanionQualities: readonly ShareQuality[] = [
+  { resolution: '480p', frameRate: 15 },
+  { resolution: '480p', frameRate: 30 },
+  { resolution: '480p', frameRate: 60 },
+  ...companionQualities,
+  { resolution: '1440p', frameRate: 15 },
+  { resolution: '1440p', frameRate: 30 },
+  { resolution: '1440p', frameRate: 60 },
+];
+
+export function companionQualityChoices(v3: boolean): readonly ShareQuality[] {
+  return v3 ? extendedCompanionQualities : companionQualities;
+}
+
+export function companionQuality(quality: ShareQuality, v3 = false): ShareQuality {
+  return companionQualityChoices(v3).find((q) => q.resolution === quality.resolution && q.frameRate === quality.frameRate) ?? companionDefaultQuality;
 }
 
 // Why no grant was given, in words (CompanionGrantError). The one table: the
@@ -682,6 +714,7 @@ export const initialVoice: VoiceState = {
   share: idleShare,
   shareCaptureStalled: false,
   shareQuality: defaultShareQuality,
+  shareQualityV3: false,
   watched: new Set(),
   focusedShare: null,
   streamTracks: new Map(),
@@ -729,6 +762,7 @@ export class VoiceClient {
   private readonly gate: TransmitGate;
   private readonly reports: ReportQueue;
   private state: VoiceState = initialVoice;
+  private preferredShareQuality: ShareQuality;
   private restartingShare = false;
   private listeners = new Set<() => void>();
   private room: Room | null = null;
@@ -748,6 +782,14 @@ export class VoiceClient {
   private readonly camera: CameraClient;
   // This person, from the identity of the last session.
   private me: number | null = null;
+  // The remote speakers last reported, whether the room's local participant
+  // was last reported speaking, and whether this person is transmitting. The
+  // local level is LiveKit's own and rises with the track muted, so it only
+  // counts while transmitting; it is remembered so that an update that comes
+  // just before the unmute lands is not lost.
+  private remoteSpeaking: ReadonlySet<number> = new Set();
+  private localSpeaking = false;
+  private transmittingNow = false;
   // Watches and their players are keyed by publisher. awaiting holds one
   // resume timer per watched publisher whose stream went with its renewed
   // room: that watch ends if the publisher's stream is not back by then
@@ -769,6 +811,7 @@ export class VoiceClient {
   private cameraClaims: ReadonlySet<number> = new Set();
   private readonly cameraViews = new Map<number, HTMLVideoElement>();
   private selfView: HTMLVideoElement | null = null;
+  private shareSelfView: HTMLVideoElement | null = null;
   // Numbers the camera's operations (on, off, a switch, and every new
   // capture or stop, however it came): a switch's outcome counts only while
   // nothing newer has happened to the camera.
@@ -826,10 +869,11 @@ export class VoiceClient {
     this.now = now;
     this.processing = env.processing ?? memoryStore();
     this.modes = env.mode ?? null;
+    this.preferredShareQuality = env.shareQuality ?? (env.companion === undefined ? defaultShareQuality : companionDefaultQuality);
     this.state = {
       ...initialVoice,
       mode: this.modes?.get() ?? initialVoice.mode,
-      shareQuality: env.companion === undefined ? (env.shareQuality ?? defaultShareQuality) : companionQuality(env.shareQuality ?? companionDefaultQuality),
+      shareQuality: this.availableShareQuality(this.preferredShareQuality, false),
       ...this.chosen(env.microphone ?? null),
       outputSelection: env.outputSelection === true,
       output: env.output ?? null,
@@ -843,7 +887,12 @@ export class VoiceClient {
     this.share = new ScreenShare(
       { claim: env.claimShare, release: env.stopShare },
       (share) => {
-        this.set({ share, ...(share.kind === 'idle' || share.kind === 'stopping' || share.kind === 'resuming' ? { shareCaptureStalled: false } : {}) });
+        // A socket version change during the last share applies to the next one.
+        this.set({
+          share,
+          ...(share.kind === 'idle' ? { shareQuality: this.availableShareQuality(this.preferredShareQuality, this.state.shareQualityV3) } : {}),
+          ...(share.kind === 'idle' || share.kind === 'stopping' || share.kind === 'resuming' ? { shareCaptureStalled: false } : {}),
+        });
         this.settleCompanion();
       },
       env.clock,
@@ -943,7 +992,7 @@ export class VoiceClient {
       companion,
       companionRefusal: null,
       companionShareUnavailable: null,
-      ...(companion ? { shareQuality: companionQuality(this.state.shareQuality) } : {}),
+      ...(companion ? { shareQuality: companionQuality(this.state.shareQuality, this.state.shareQualityV3) } : {}),
       watched: new Set(),
       focusedShare: null,
       streamTracks: new Map(),
@@ -1304,6 +1353,17 @@ export class VoiceClient {
     });
   }
 
+  private availableShareQuality(asked: ShareQuality, v3: boolean): ShareQuality {
+    // An older server's quality vocabulary is shared by both platforms.
+    // An older server has no 480p or 1440p: fall back to the nearest it has
+    // at the chosen rate (480p to 720p, so the lightest stays the lightest),
+    // and then, on the desktop, to its own choices (companionQualities: no
+    // 720p60, Q-D4-3 on #1578), so 480p60 there is the desktop's 720p30.
+    if (!v3 && extendedResolution(asked.resolution)) asked = { resolution: asked.resolution === '480p' ? '720p' : '1080p', frameRate: asked.frameRate };
+    if (this.env.companion !== undefined) return companionQuality(asked, v3);
+    return asked.resolution === 'auto' ? { resolution: 'auto', frameRate: autoFrameRate } : asked;
+  }
+
   // A quality choice applies to the next picker, and to a live capture and
   // its sender without ending the publication; once the capture has it, conchd
   // is told, for the others' label (share.ts changeQuality). The local choice
@@ -1314,10 +1374,13 @@ export class VoiceClient {
     // choice, not this one); the note comes back only if this one fails too.
     if (this.state.why === shareQualityRefusedNote || this.state.why === qualityLaterNote) this.set({ why: null });
     // The desktop offers companionQualities only (Q-D4-3 on #1578, widened by
-    // #1772); a choice outside them, Auto included, is its 720p30 default.
+    // #1772), with the saved rate carried over for a server fallback. Other
+    // choices outside them, Auto included, use its 720p30 default.
     // The browser's Auto is always 30 fps (Q10 on #1614), whatever rate was
     // left on the choice.
-    const quality = this.env.companion !== undefined ? companionQuality(asked) : asked.resolution === 'auto' ? { resolution: 'auto' as const, frameRate: autoFrameRate } : asked;
+    const quality = this.availableShareQuality(asked, this.state.shareQualityV3);
+    this.preferredShareQuality = quality;
+    this.env.keepShareQuality?.(quality);
     this.set({ shareQuality: quality });
     try {
       await this.room?.setShareQuality(quality);
@@ -1487,6 +1550,19 @@ export class VoiceClient {
     this.room?.attachSelf(el);
   }
 
+  // shareSurface says what this page's screen capture is of, for the sharer's
+  // title (#2197), or null when there is none or the browser does not say.
+  shareSurface(): ShareSurface | null {
+    return this.room?.shareSurface() ?? null;
+  }
+
+  // attachShareSelf plays the sharer's own screen into the preview, on this
+  // connection and every one after it (#2197).
+  attachShareSelf(el: HTMLVideoElement | null): void {
+    this.shareSelfView = el;
+    this.room?.attachShareSelf(el);
+  }
+
   // refreshCameras reads the cameras the browser lists again: after the
   // camera test was allowed, the browser names them.
   refreshCameras(): void {
@@ -1566,13 +1642,28 @@ export class VoiceClient {
     this.room?.attachStream(principal, sink);
   }
 
-  // presence is each v2 document the voice socket sends: every live sharer,
+  // presence reconciles each document from the voice socket or the read
+  // after a 1008 close: every live sharer,
   // whether this person still holds their own share, and, in this person's own
   // document alone, why the server ended their last share (#1509).
-  presence(p: VoicePresenceV2): void {
+  // The read uses v2 even on a v3 server. Pass the socket schema for a frame
+  // or when replaying the last socket version, and null to reconcile only.
+  presence(p: VoicePresence, socketSchema: VoicePresence['schema'] | null): void {
     const streams = sharers(p);
     const mine = streams.some((s) => s.principal === this.me);
     this.share.presence(mine ? 'me' : streams.length === 0 ? 'none' : 'other', p.share_ended);
+
+    // Keep the claimed quality during a share and record the negotiated
+    // version for the next one.
+    const v3 = socketSchema === voicePresenceV3Schema;
+    if (socketSchema !== null && v3 !== this.state.shareQualityV3) {
+      const share = this.state.share.kind;
+      const active = share !== 'idle' && share !== 'stopping';
+      this.set({
+        shareQualityV3: v3,
+        ...(active ? {} : { shareQuality: this.availableShareQuality(this.preferredShareQuality, v3) }),
+      });
+    }
     // Why this person's camera claim ended, if it did; and who else holds
     // one, whose cameras alone are received.
     this.camera.presence(p.camera_ended);
@@ -1717,6 +1808,7 @@ export class VoiceClient {
     // Nobody's camera is received out of voice; the next join reads presence.
     this.cameraClaims = new Set();
     this.switching = false;
+    this.forgetSpeakers();
     this.set({
       phase: 'idle',
       channel: null,
@@ -1768,7 +1860,8 @@ export class VoiceClient {
   }
 
   setMuted(muted: boolean): void {
-    this.set({ muted });
+    if (muted) this.localSpeaking = false;
+    this.set(muted ? { muted, speaking: this.speakingNow() } : { muted });
     this.applyBlock();
   }
 
@@ -1788,7 +1881,8 @@ export class VoiceClient {
 
   setDeafened(deafened: boolean): void {
     this.room?.setDeafened(deafened);
-    this.set({ deafened });
+    if (deafened) this.localSpeaking = false;
+    this.set(deafened ? { deafened, speaking: this.speakingNow() } : { deafened });
     this.applyBlock();
   }
 
@@ -1892,7 +1986,31 @@ export class VoiceClient {
     }
     // Transmitting begins once the track is unmuted (opened), and ends here,
     // with the mute.
-    this.set(open ? { talking: true } : { talking: false, transmitting: false });
+    // Your own chip goes with it: a stale speaker set must not outlive it.
+    if (!open) {
+      this.localSpeaking = false;
+      this.transmittingNow = false;
+    }
+    this.set(open ? { talking: true } : { talking: false, transmitting: false, speaking: this.speakingNow() });
+  }
+
+  // forgetSpeakers drops what the last room said about who was speaking: a
+  // room left, dropped, reconnecting or replaced must not lend its speakers
+  // to the next press.
+  private forgetSpeakers(): void {
+    this.remoteSpeaking = new Set();
+    this.localSpeaking = false;
+    this.transmittingNow = false;
+  }
+
+  // speakingNow is who is speaking: the remote speakers, and this person only
+  // while sending and the room reports their own local participant speaking.
+  // Not by principal: another client of the same person (a viewer, a
+  // companion) is a remote participant and counts as speaking.
+  private speakingNow(): ReadonlySet<number> {
+    const speaking = new Set(this.remoteSpeaking);
+    if (this.me !== null && this.localSpeaking && this.transmittingNow) speaking.add(this.me);
+    return speaking;
   }
 
   // opened unmutes the track at once and queues the `started` report to go
@@ -1915,7 +2033,10 @@ export class VoiceClient {
     await this.within(
       room.setSending(true).then(() => {
         this.trace('track unmuted');
-        if (talk === this.talk && edge === this.edge && room === this.room) this.set({ transmitting: true });
+        if (talk === this.talk && edge === this.edge && room === this.room) {
+          this.transmittingNow = true;
+          this.set({ transmitting: true, speaking: this.speakingNow() });
+        }
       }),
       reportWait,
     );
@@ -2008,6 +2129,7 @@ export class VoiceClient {
     this.switching = false;
     // The meter and the playback are the next room's to say: a note or a
     // button about this one's would stay up through the retry.
+    this.forgetSpeakers();
     this.set({ speaking: new Set(), level: 0, talking: false, transmitting: false, meter: true, playback: true, streamTracks: new Map(), cameraTracks: noCameraTracks, ...nothingInUse, ...this.cameraNow() });
     if (room !== null) void room.close().catch(() => undefined);
     if (companion && !fromMain) void this.endCompanion(end);
@@ -2101,6 +2223,8 @@ export class VoiceClient {
     this.me = this.state.companion ? personOf(session.value.identity) : principalOf(session.value.identity.replace(/\.view$/, ''));
     const room = this.env.newRoom();
     this.room = room;
+    // A room that failed after reporting speakers must not lend them to this one.
+    this.forgetSpeakers();
     if (this.state.companion) room.setCompanion?.(true);
     // A companion's connection refused by the CSP is said as such to main
     // (issue #1992), from the connect until it is made or has failed.
@@ -2108,7 +2232,9 @@ export class VoiceClient {
     const events: RoomEvents = {
       onReconnecting: () => {
         if (mine !== this.attempt) return;
-        this.set({ phase: 'reconnecting' });
+        // Nobody is heard while reconnecting; the resumed room reports afresh.
+        this.forgetSpeakers();
+        this.set({ phase: 'reconnecting', speaking: new Set() });
         this.applyBlock();
         // A signal-only resume that escalates to a full restart reports
         // Reconnecting again: the limit runs from the first of them.
@@ -2138,9 +2264,13 @@ export class VoiceClient {
         }
         this.drop(afterDisconnect(cause), cameraAfter(cause), cause === 'room_deleted', false, { kind: 'disconnected', detail: refused ?? cause });
       },
-      onSpeakers: (ids) => {
+      onSpeakers: (ids, local) => {
         if (mine !== this.attempt) return;
-        this.set({ speaking: new Set(ids) });
+        // LiveKit reports the local participant from its own microphone
+        // level, muted track or not: you are speaking only while sending.
+        this.remoteSpeaking = new Set(ids);
+        this.localSpeaking = local;
+        this.set({ speaking: this.speakingNow() });
       },
       onScreenStalled: (stalled) => {
         if (mine !== this.attempt) return;
@@ -2217,6 +2347,7 @@ export class VoiceClient {
     room.setViewing(this.state.viewing);
     room.setShown(this.videoShown);
     room.attachSelf(this.selfView);
+    room.attachShareSelf(this.shareSelfView);
     for (const [principal, el] of this.cameraViews) room.attachCamera(principal, el);
     // So is each person's volume, so that nobody is heard at full volume
     // first.
@@ -2263,6 +2394,9 @@ export class VoiceClient {
       this.clearReconnectTimer();
       void room.close().catch(() => undefined);
       this.room = null;
+      // Whoever the failed room said was speaking is not heard now.
+      this.forgetSpeakers();
+      this.set({ speaking: new Set() });
       // A microphone that cannot be had stops: the next attempt is the
       // person's own Join voice or Watch only. Anything else is retried. The
       // device chosen not being there is said as such, and the choice is let

@@ -13,7 +13,7 @@ import type { JoinAccountRequestV1, JoinGuestRequestV1 } from '../../schema/gues
 import type { CreateInviteRequestV2, RedeemInviteGuestRequestV1, RedeemInviteRequestV2 } from '../../schema/invite';
 import type { CreateCredentialRequestV1 } from '../../schema/credential';
 import type { CreateDeviceLinkRequestV1, CreateSignInLinkRequestV1, RedeemSignInLinkRequestV1 } from '../../schema/signin';
-import { DESKTOP_UNAVAILABLE } from '../../appLimit';
+import { DESKTOP_UNAVAILABLE, DESKTOP_UPLOAD_MAX_BYTES } from '../../appLimit';
 import { operations, type Call, type OperationId } from '../operations';
 import type { HttpTransport } from '../types';
 import type { BridgeReply, BridgeRequest, ConchDesktopBridge, NoAnswerReason, ReplaceCredentialRequest, SignInOutcome } from './bridge';
@@ -275,6 +275,13 @@ export const http: HttpTransport = {
     const channel = call.params?.['channel'];
     const filename = filenameOf(call);
     if (call.op !== 'uploadFile' || typeof channel !== 'string' || filename === null) return noAnswer('unsupported');
+    signal.throwIfAborted();
+    if (bytes.size > DESKTOP_UPLOAD_MAX_BYTES) {
+      return jsonResponse(413, {
+        code: DESKTOP_UNAVAILABLE,
+        message: `The desktop app accepts files up to ${String(DESKTOP_UPLOAD_MAX_BYTES / (1024 * 1024))} MiB.`,
+      });
+    }
     const data = await withSignal(toBase64(bytes), signal);
     return fromReply(await withSignal(b.uploadFile({ channel, filename, mediaType, data }), signal));
   },

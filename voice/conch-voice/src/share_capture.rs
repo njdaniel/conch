@@ -6,7 +6,7 @@
 //! capture of one of them by its serial), the Conch process tree ([`ReadTree`]), and the
 //! application name of the owner's command. Output: one [`StereoFrame`] every 10 ms on a
 //! bounded channel, for the track's audio source, and a [`Report`] whenever what is being
-//! captured changes: how many streams, or why none can be. Owns: an [`Engine`]'s thread,
+//! captured changes, with bounded stream decisions or a failure reason. Owns: an [`Engine`]'s thread,
 //! every capture it opened, and their closing.
 //!
 //! What it keeps:
@@ -29,29 +29,35 @@
 //! - **Never in the microphone's way.** The engine is a thread of its own. It hands each mix
 //!   to a bounded queue ([`FRAME_QUEUE`]) and drops a frame, counted, when the queue is full;
 //!   a capture whose ring has more than [`BACKLOG_FRAMES`] waiting has the oldest dropped,
-//!   counted. Its steady loop allocates nothing (the frames are fixed arrays, the mixer is
-//!   [`StereoMixer`]), takes no lock and logs nothing; it logs a change, by count and
-//!   reason, and never a name, a serial or a pid. The PipeWire callbacks are `dmn-audio`'s.
+//!   counted. Mixing uses fixed arrays and [`StereoMixer`] without allocating or taking
+//!   locks. Reporting can inspect the audio system's error when a capture fails. Logs carry
+//!   counts and reasons without names, serials or pids. The PipeWire callbacks are `dmn-audio`'s.
 //! - **Closing is bounded and complete.** Captures are closed as a group, each on a short
 //!   thread of its own, within [`STOP_BUDGET`] (inside `VoiceControlCaptureStopMS`), not one
 //!   after another. A capture whose close is late is still closed by its thread, counted
 //!   ([`ShareCounters::late_stops`]), and never left open: [`ShareCounters::open`] goes back
 //!   to zero only when every capture has closed. An engine that is dropped stops.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc as std_mpsc};
 use std::time::{Duration, Instant};
 
-use conch_voice_api::VOICE_CONTROL_MAX_SHARE_AUDIO_SOURCES;
+pub use conch_voice_api::VoiceControlShareAudioStreamV3 as StreamDecision;
+use conch_voice_api::{
+    VOICE_CONTROL_MAX_SHARE_AUDIO_LABEL_BYTES, VOICE_CONTROL_MAX_SHARE_AUDIO_SOURCES,
+    VOICE_CONTROL_MAX_SHARE_AUDIO_STREAMS, VoiceControlShareAudioStreamReason as StreamReason,
+};
 use conch_voice_audio::{
     FRAME_LEN, FRAME_MS, SAMPLE_RATE, STEREO_SILENCE, StereoFrame, StereoMixer,
 };
 use tokio::sync::mpsc;
 
-use crate::share_eligibility::{NoTree, ProcessTree, StreamFacts, eligible};
+use crate::share_eligibility::{
+    Deferral, Exclusion, NoTree, ProcessTree, Rule, StreamFacts, Verdict, judge,
+};
 
 /// PipeWire's graph (Linux only).
 #[cfg(target_os = "linux")]
@@ -169,10 +175,23 @@ pub enum Health {
     Waiting,
     /// Delivering 48 kHz stereo.
     Streaming,
-    /// It settled at another rate or channel count: it is not mixed or counted.
+    /// It reports delivery at another rate or channel count.
     WrongFormat,
+    /// The audio system rejected the negotiated format.
+    FormatNotSupported,
     /// The stream it captured is gone, or the capture failed.
     Ended,
+}
+
+impl Health {
+    fn reason(self) -> StreamReason {
+        match self {
+            Self::Streaming | Self::Waiting => StreamReason::Captured,
+            Self::WrongFormat => StreamReason::WrongFormat,
+            Self::FormatNotSupported => StreamReason::FormatNotSupported,
+            Self::Ended => StreamReason::StreamEnded,
+        }
+    }
 }
 
 /// What one take from a capture gave.
@@ -188,7 +207,8 @@ pub struct Taken {
 pub trait Capture: Send {
     /// How it is doing.
     fn health(&self) -> Health;
-    /// Writes the next whole frame into `frame`, if one is waiting.
+    /// Writes the next whole frame into `frame` if the capture is streaming in the share's
+    /// format and a frame is waiting.
     fn take(&mut self, frame: &mut StereoFrame) -> Taken;
     /// Closes it. May wait for the audio system; called on a thread of its own.
     fn stop(self: Box<Self>);
@@ -233,7 +253,7 @@ impl fmt::Debug for ShareSource {
 /// What the engine says of what it captures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Report {
-    /// This many streams are being captured and mixed (0: nothing is playing).
+    /// This many captures are waiting or streaming in the share's format.
     Sources(usize),
     /// The audio system cannot be reached, or a capture could not be opened: nothing is
     /// captured, and the mix is silence.
@@ -245,12 +265,57 @@ pub enum Report {
 }
 
 /// A report, with the engine it came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reported {
     /// The engine's number.
     pub generation: u64,
     /// What it said.
     pub report: Report,
+    /// The local view of the streams, while the capture route is running.
+    pub streams: Option<Arc<[StreamDecision]>>,
+}
+
+fn display_label(label: Option<&str>) -> String {
+    let label = label.unwrap_or_default();
+    if label.contains(['/', '\\']) {
+        return String::new();
+    }
+    let mut bytes = 0;
+    label
+        .trim()
+        .chars()
+        .filter(|c| {
+            !c.is_control() && !matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        })
+        .take_while(|c| {
+            bytes += c.len_utf8() + usize::from(*c == '"');
+            bytes <= VOICE_CONTROL_MAX_SHARE_AUDIO_LABEL_BYTES
+        })
+        .collect()
+}
+
+struct Candidate {
+    application: String,
+    media: String,
+    verdict: Verdict,
+}
+
+impl Candidate {
+    fn reason(&self, capture_reasons: &[(u64, StreamReason)]) -> StreamReason {
+        match self.verdict {
+            Verdict::Excluded(Exclusion::OwnPlayback) => StreamReason::CallPlayback,
+            Verdict::Excluded(Exclusion::ClientInTree) => StreamReason::ConchClient,
+            Verdict::Excluded(Exclusion::ApplicationInTree) => StreamReason::ConchApplication,
+            Verdict::Excluded(Exclusion::ApplicationName) => StreamReason::ConchName,
+            Verdict::Deferred(Deferral::NoClientPid) => StreamReason::UnknownOwner,
+            Verdict::Deferred(Deferral::NoSerial) => StreamReason::MissingTarget,
+            Verdict::Eligible(serial) => capture_reasons
+                .binary_search_by_key(&serial, |&(serial, _)| serial)
+                .map_or(StreamReason::AwaitingApplication, |index| {
+                    capture_reasons[index].1
+                }),
+        }
+    }
 }
 
 /// What the captures have done, for the log and the tests. Counts only.
@@ -305,6 +370,8 @@ impl Engine {
             lost: false,
             seen: None,
             captures: BTreeMap::new(),
+            capture_reasons: Vec::new(),
+            candidates: Vec::new(),
             pending: BTreeMap::new(),
             held_since: None,
             problem: None,
@@ -435,6 +502,9 @@ struct Worker {
     /// The registry's generation last evaluated.
     seen: Option<u64>,
     captures: BTreeMap<u64, Box<dyn Capture>>,
+    /// A reusable snapshot in capture serial order, shared by the count and the list.
+    capture_reasons: Vec<(u64, StreamReason)>,
+    candidates: Vec<Candidate>,
     /// Eligible streams whose application pid is not known yet, with when each was first
     /// seen so: captured once [`APP_PID_GRACE`] has passed without one (`reconcile`).
     pending: BTreeMap<u64, Instant>,
@@ -443,7 +513,7 @@ struct Worker {
     /// Why nothing is captured, while that is so.
     problem: Option<Report>,
     /// The report last sent.
-    sent: Option<Report>,
+    sent: Option<Reported>,
     generation: u64,
     frames: mpsc::Sender<StereoFrame>,
     reports: mpsc::UnboundedSender<Reported>,
@@ -507,6 +577,7 @@ impl Worker {
         let _ = self.reports.send(Reported {
             generation: self.generation,
             report: Report::Closed,
+            streams: None,
         });
     }
 
@@ -546,19 +617,35 @@ impl Worker {
 
     /// Opens a capture of every eligible stream not yet captured and closes every other.
     fn reconcile(&mut self, streams: &[StreamFacts], stop: &AtomicBool) {
-        let tree = (self.tree)();
-        let wanted = match eligible(
-            streams,
-            tree.as_ref().map_err(|no| *no),
-            self.own_pid,
-            &self.name,
-        ) {
-            Ok(wanted) => wanted,
+        let (tree, own_pid) = match (self.tree)()
+            .and_then(|tree| Ok((tree, self.own_pid.ok_or(NoTree::OwnPidUnknown)?)))
+        {
+            Ok(facts) => facts,
             Err(no) => {
                 self.fail(Report::NoProcessTree, no.reason());
                 return;
             }
         };
+        let rule = Rule {
+            own_pid,
+            tree: &tree,
+            application_name: &self.name,
+        };
+        let mut wanted = BTreeSet::new();
+        self.candidates.clear();
+        for stream in streams {
+            let verdict = judge(stream, rule);
+            if let Verdict::Eligible(serial) = verdict {
+                wanted.insert(serial);
+            }
+            if self.candidates.len() < VOICE_CONTROL_MAX_SHARE_AUDIO_STREAMS {
+                self.candidates.push(Candidate {
+                    application: display_label(stream.application_name.as_deref()),
+                    media: display_label(stream.media_name.as_deref()),
+                    verdict,
+                });
+            }
+        }
         if wanted.len() > MAX_CAPTURES {
             log::warn!(
                 "share audio: {} streams may be captured, more than {MAX_CAPTURES}",
@@ -570,7 +657,7 @@ impl Worker {
         let gone: Vec<u64> = self
             .captures
             .keys()
-            .filter(|serial| wanted.binary_search(serial).is_err())
+            .filter(|serial| !wanted.contains(serial))
             .copied()
             .collect();
         let closing: Vec<Box<dyn Capture>> = gone
@@ -628,6 +715,7 @@ impl Worker {
         }
         self.problem = Some(problem);
         self.pending.clear();
+        self.candidates.clear();
         self.close_all();
     }
 
@@ -639,10 +727,6 @@ impl Worker {
     /// One tick: a frame of each capture that has one, mixed, and handed on.
     fn mix_one(&mut self) {
         for capture in self.captures.values_mut() {
-            match capture.health() {
-                Health::Streaming | Health::Waiting => {}
-                Health::WrongFormat | Health::Ended => continue,
-            }
             let taken = capture.take(&mut self.scratch);
             if taken.dropped > 0 {
                 self.counters
@@ -660,18 +744,6 @@ impl Worker {
         }
     }
 
-    /// What is being captured now.
-    fn now(&self) -> Report {
-        self.problem.unwrap_or_else(|| {
-            Report::Sources(
-                self.captures
-                    .values()
-                    .filter(|capture| capture.health() != Health::WrongFormat)
-                    .count(),
-            )
-        })
-    }
-
     /// Says what is being captured, if that changed.
     fn report(&mut self) {
         // While a stream waits for its application pid the count is not final: it is said
@@ -683,14 +755,55 @@ impl Worker {
         } else if self.held_since.get_or_insert_with(Instant::now).elapsed() < MAX_COUNT_HOLD {
             return;
         }
-        let now = self.now();
-        if self.sent != Some(now) {
-            self.sent = Some(now);
-            let _ = self.reports.send(Reported {
-                generation: self.generation,
-                report: now,
-            });
+        self.capture_reasons.clear();
+        self.capture_reasons.extend(
+            self.captures
+                .iter()
+                .map(|(&serial, capture)| (serial, capture.health().reason())),
+        );
+        let report = self.problem.unwrap_or_else(|| {
+            Report::Sources(
+                self.capture_reasons
+                    .iter()
+                    .filter(|(_, reason)| *reason == StreamReason::Captured)
+                    .count(),
+            )
+        });
+        let decisions = self.candidates.iter().map(|s| {
+            (
+                s.application.as_str(),
+                s.media.as_str(),
+                s.reason(&self.capture_reasons),
+            )
+        });
+        if let Some(sent) = &self.sent
+            && sent.report == report
+            && decisions
+                .clone()
+                .eq(sent.streams.iter().flat_map(|streams| {
+                    streams
+                        .iter()
+                        .map(|s| (s.application.as_str(), s.media.as_str(), s.reason))
+                }))
+        {
+            return;
         }
+        let streams = matches!(report, Report::Sources(_)).then(|| {
+            decisions
+                .map(|(application, media, reason)| StreamDecision {
+                    application: application.to_owned(),
+                    media: media.to_owned(),
+                    reason,
+                })
+                .collect()
+        });
+        let reported = Reported {
+            generation: self.generation,
+            report,
+            streams,
+        };
+        self.sent = Some(reported.clone());
+        let _ = self.reports.send(reported);
     }
 }
 
@@ -778,6 +891,7 @@ impl SyntheticGraph {
                 sec_pid: Some(own_pid),
                 application_process_id: Some(own_pid),
                 application_name: Some("conch-voice".to_owned()),
+                media_name: None,
             },
             SYNTHETIC_OWN_TONE_HZ,
         )];
@@ -790,6 +904,7 @@ impl SyntheticGraph {
                     sec_pid: Some(pid),
                     application_process_id: Some(pid),
                     application_name: Some(format!("synthetic-{at}")),
+                    media_name: None,
                 },
                 *hz,
             ));
@@ -873,7 +988,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::share_eligibility::ProcessTree;
+    use crate::share_eligibility::{ProcessTree, eligible};
 
     const OWN: u32 = 4100;
     const PARENT: u32 = 4000;
@@ -936,6 +1051,7 @@ mod tests {
         refuse: Vec<u64>,
         opened: Vec<CaptureSpec>,
         graphs: u32,
+        capture_health: Option<Health>,
     }
 
     impl Scripted {
@@ -967,8 +1083,25 @@ mod tests {
             if state.refuse.contains(&spec.serial) {
                 return Err(OpenFailed);
             }
+            if let Some(health) = state.capture_health {
+                return Ok(Box::new(SilentCapture(health)));
+            }
             Ok(Box::new(ToneCapture::new(300.0 + spec.serial as f32, 0.1)))
         }
+    }
+
+    struct SilentCapture(Health);
+
+    impl Capture for SilentCapture {
+        fn health(&self) -> Health {
+            self.0
+        }
+
+        fn take(&mut self, _frame: &mut StereoFrame) -> Taken {
+            Taken::default()
+        }
+
+        fn stop(self: Box<Self>) {}
     }
 
     fn other(serial: u64) -> StreamFacts {
@@ -977,6 +1110,7 @@ mod tests {
             sec_pid: Some(9000 + serial as u32),
             application_process_id: None,
             application_name: Some(format!("app-{serial}")),
+            media_name: None,
         }
     }
 
@@ -992,6 +1126,10 @@ mod tests {
     fn running(streams: Vec<StreamFacts>) -> Running {
         let graph = Scripted::default();
         graph.set(streams);
+        running_with_graph(graph)
+    }
+
+    fn running_with_graph(graph: Scripted) -> Running {
         let tree_ok = Arc::new(AtomicBool::new(true));
         let opened = graph.clone();
         let readable = Arc::clone(&tree_ok);
@@ -1035,13 +1173,13 @@ mod tests {
         }
     }
 
-    fn next_report(reports: &mut mpsc::UnboundedReceiver<Reported>) -> Report {
+    fn next_reported(reports: &mut mpsc::UnboundedReceiver<Reported>) -> Reported {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             match reports.try_recv() {
                 Ok(reported) => {
                     assert_eq!(reported.generation, 7);
-                    return reported.report;
+                    return reported;
                 }
                 Err(_) => {
                     assert!(Instant::now() < deadline, "no report");
@@ -1049,6 +1187,10 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn next_report(reports: &mut mpsc::UnboundedReceiver<Reported>) -> Report {
+        next_reported(reports).report
     }
 
     fn until_report(reports: &mut mpsc::UnboundedReceiver<Reported>, want: Report) {
@@ -1059,6 +1201,58 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_rejected_format_has_its_own_reason_and_is_not_counted() {
+        use dmn_audio::{CaptureState, StreamError};
+
+        let cases = [
+            (
+                StreamError::Format("need F32LE".into()),
+                StreamReason::FormatNotSupported,
+            ),
+            (
+                StreamError::RateMismatch {
+                    requested: SAMPLE_RATE,
+                    negotiated: 44_100,
+                },
+                StreamReason::FormatNotSupported,
+            ),
+            (
+                StreamError::ChannelMismatch {
+                    requested: SHARE_CHANNELS,
+                    negotiated: 1,
+                },
+                StreamReason::FormatNotSupported,
+            ),
+            (
+                StreamError::Stream("stream broke".into()),
+                StreamReason::StreamEnded,
+            ),
+        ];
+        for (error, reason) in cases {
+            let graph = Scripted::default();
+            graph.set(vec![StreamFacts {
+                application_process_id: Some(9002),
+                ..other(2)
+            }]);
+            graph.0.lock().unwrap().capture_health = Some(linux::health(
+                CaptureState::Error,
+                None,
+                (SAMPLE_RATE, SHARE_CHANNELS),
+                || Err(error),
+            ));
+            let mut run = running_with_graph(graph);
+            let reported = next_reported(&mut run.reports);
+            assert_eq!(reported.report, Report::Sources(0), "{reason:?}");
+            let streams = reported.streams.unwrap();
+            assert_eq!(streams.len(), 1);
+            assert_eq!(streams[0].reason, reason);
+            run.engine.stop();
+            until_report(&mut run.reports, Report::Closed);
+        }
+    }
+
     #[test]
     fn streams_are_captured_as_they_come_and_go_and_never_the_helpers_own() {
         let own = StreamFacts {
@@ -1066,6 +1260,7 @@ mod tests {
             sec_pid: Some(OWN),
             application_process_id: Some(OWN),
             application_name: Some("conch-voice".into()),
+            media_name: None,
         };
         let mut run = running(vec![own.clone(), other(2), other(3)]);
         until_report(&mut run.reports, Report::Sources(2));

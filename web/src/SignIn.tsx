@@ -11,10 +11,11 @@
 // page then shows the code's step and nothing of the server, and the step
 // ends at the challenge's five minutes. An operator's first setup, from a
 // token made on the host, is its own page (Setup.tsx), reached from here.
-import { useEffect, useRef, useState, type SyntheticEvent } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type SyntheticEvent } from 'react';
 import * as api from './api';
 import { CreateAccount, type AccountProblem } from './CreateAccount';
 import { accountRefusal, heldLine, refusalLine } from './Invite';
+import { platform } from './platform';
 import type { JoinInfoV1 } from './schema/guest';
 import type { WhoAmIResponseV1 } from './schema/principal';
 import { ServerVersion } from './ServerVersion';
@@ -24,6 +25,7 @@ import { timeWithSeconds } from './time';
 
 // Said when a join went through but this browser would not keep its sign-in.
 const keepLine = 'You joined, but this browser will not let the page keep your sign-in. Allow this site to keep data, then try again.';
+const passwordFormWaitMs = 15_000;
 
 type Info = { readonly state: 'loading' } | { readonly state: 'ready'; readonly info: JoinInfoV1 } | { readonly state: 'unknown' };
 
@@ -79,6 +81,7 @@ export function SignIn({
   const field = useRef<HTMLInputElement>(null);
   const nameField = useRef<HTMLInputElement>(null);
   const passwordField = useRef<HTMLInputElement>(null);
+  const passwordSubmitted = useRef(false);
   const [info, setInfo] = useState<Info>({ state: 'loading' });
   const [way, setWay] = useState<'account' | null>(null);
   const [busy, setBusy] = useState(false);
@@ -103,12 +106,36 @@ export function SignIn({
 
   // After a refusal focus goes back where the next try is typed, so it needs
   // no mouse: the credential field for a refused credential, the password
-  // for a refused password.
-  useEffect(() => {
+  // for a refused password. A layout effect, so that it lands in the same
+  // commit as the refusal's words, never after them (#2077).
+  useLayoutEffect(() => {
     if (notice === 'rejected' || notice === 'held') field.current?.focus();
     else if (line !== undefined) passwordField.current?.focus();
     else if (notice !== null) (nameField.current ?? field.current)?.focus();
   }, [notice, line]);
+
+  // The submitted password leaves the form once the answer is known, in the
+  // same commit that shows a refusal (a layout effect: nobody, a test
+  // included, can see the refusal with the password still in the field,
+  // #2077), or after a bounded wait when the answer does not come.
+  useLayoutEffect(() => {
+    if (!passwordSubmitted.current) return;
+    const input = passwordField.current;
+    if (!checking) {
+      passwordSubmitted.current = false;
+      // Success removes the form. Clear the field when a refusal leaves it open.
+      if (input !== null) input.value = '';
+      return;
+    }
+    if (input === null || platform.name === 'desktop') return;
+    // A stalled request must not leave the submitted password in the form.
+    const timer = window.setTimeout(() => {
+      input.value = '';
+    }, passwordFormWaitMs);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [checking]);
 
   function submit(event: SyntheticEvent) {
     event.preventDefault();
@@ -137,14 +164,17 @@ export function SignIn({
     event.preventDefault();
     const name = nameField.current?.value ?? '';
     const password = passwordField.current;
-    if (password === null || checking) return;
+    if (password === null || checking || passwordSubmitted.current) return;
     const typed = password.value;
-    // The password is emptied at once, as the credential is.
-    password.value = '';
     if (name === '' || typed === '') {
+      password.value = '';
       (name === '' ? nameField.current : password)?.focus();
       return;
     }
+    // The browser's password manager can observe the filled form submission.
+    // Electron uses the desktop's protected session storage instead.
+    if (platform.name === 'desktop') password.value = '';
+    passwordSubmitted.current = true;
     onPassword(name, typed);
   }
 
@@ -246,10 +276,11 @@ export function SignIn({
       {insecure || !passwordLogin ? null : (
         <section aria-labelledby="password-heading">
           <h2 id="password-heading">Sign in</h2>
-          <form onSubmit={signIn}>
+          <form id="password-sign-in" method="post" onSubmit={signIn}>
             <label htmlFor="signin-name">Name</label>
             <input
               id="signin-name"
+              name="username"
               ref={nameField}
               type="text"
               autoComplete="username"
@@ -258,10 +289,17 @@ export function SignIn({
               spellCheck={false}
             />
             <label htmlFor="signin-password">Password</label>
-            <input id="signin-password" ref={passwordField} type="password" autoComplete="current-password" />
+            <input id="signin-password" name="password" ref={passwordField} type="password" autoComplete="current-password" />
+            {/* The desktop shell's keep choice and storage status (#2077); the browser has none. */}
+            {platform.SignInKeep === undefined ? null : <platform.SignInKeep />}
             <button type="submit" aria-busy={checking}>
               {checking ? 'Checking…' : 'Sign in'}
             </button>
+            <p className="hint">
+              {platform.name === 'desktop'
+                ? 'You can paste a saved password from your password manager.'
+                : 'Your browser’s password manager can save and fill this sign-in.'}
+            </p>
             <p className="hint">
               Forgot your password? There is no reset here: ask an operator for a link to choose a new one. Without a
               password yet, ask an operator for a sign-in link.

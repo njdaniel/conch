@@ -34,7 +34,9 @@ describe('the share quality kept in local preferences', () => {
 
 describe('the chosen capture and encodings', () => {
   it.each([
+    { quality: { resolution: '480p', frameRate: 15 }, width: 854, height: 480, hint: 'detail' },
     { quality: { resolution: '720p', frameRate: 15 }, width: 1280, height: 720, hint: 'detail' },
+    { quality: { resolution: '1440p', frameRate: 30 }, width: 2560, height: 1440, hint: 'motion' },
     { quality: { resolution: '1080p', frameRate: 30 }, width: 1920, height: 1080, hint: 'motion' },
     { quality: { resolution: 'source', frameRate: 60 }, width: 3840, height: 2160, hint: 'motion' },
   ] as const)('caps $quality.resolution at $quality.frameRate fps and uses $hint', ({ quality, width, height, hint }) => {
@@ -42,12 +44,22 @@ describe('the chosen capture and encodings', () => {
   });
 
   const bottom = { width: 1280, height: 720, maxBitrate: 2_000_000, maxFramerate: 30 };
+  const middle = { width: 1920, height: 1080, maxBitrate: 4_000_000, maxFramerate: 30 };
   it.each([
+    { quality: { resolution: '480p', frameRate: 15 }, top: { width: 853, height: 480, maxBitrate: 2_000_000, maxFramerate: 15 }, lower: [] },
     { quality: { resolution: '720p', frameRate: 15 }, top: { width: 1280, height: 720, maxBitrate: 6_000_000, maxFramerate: 15 }, lower: [] },
     { quality: { resolution: '1080p', frameRate: 30 }, top: { width: 1920, height: 1080, maxBitrate: 6_000_000, maxFramerate: 30 }, lower: [bottom] },
-    { quality: { resolution: 'source', frameRate: 60 }, top: { width: 3840, height: 2160, maxBitrate: 18_000_000, maxFramerate: 60 }, lower: [bottom, { width: 1920, height: 1080, maxBitrate: 4_000_000, maxFramerate: 30 }] },
+    { quality: { resolution: '1440p', frameRate: 60 }, top: { width: 2560, height: 1440, maxBitrate: 10_000_000, maxFramerate: 60 }, lower: [bottom, middle] },
+    { quality: { resolution: 'source', frameRate: 60 }, top: { width: 3840, height: 2160, maxBitrate: 18_000_000, maxFramerate: 60 }, lower: [bottom, middle] },
   ] as const)('sets the top and bottom layers for $quality.resolution at $quality.frameRate fps', ({ quality, top, lower }) => {
     expect(shareEncodings({ width: 3840, height: 2160, frameRate: 60 }, quality)).toEqual({ top, lower });
+  });
+
+  it('fits a 4:3 capture into the 480p cap and keeps the 480p bitrate', () => {
+    expect(shareEncodings({ width: 1600, height: 1200 }, { resolution: '480p', frameRate: 30 })).toEqual({
+      top: { width: 640, height: 480, maxBitrate: 2_000_000, maxFramerate: 30 },
+      lower: [],
+    });
   });
 
   it('does not upscale a smaller capture and never sends a lower layer faster than the top', () => {
@@ -106,9 +118,11 @@ describe('Auto share quality', () => {
 describe('the estimate beside a choice', () => {
   it.each([
     { resolution: 'auto', frameRate: 30, mbps: 8 },
+    { resolution: '480p', frameRate: 30, mbps: 2 },
     { resolution: '720p', frameRate: 30, mbps: 6 },
     { resolution: '1080p', frameRate: 30, mbps: 8 },
     { resolution: '1080p', frameRate: 60, mbps: 8 },
+    { resolution: '1440p', frameRate: 60, mbps: 16 },
     { resolution: 'source', frameRate: 30, mbps: 24 },
     { resolution: 'source', frameRate: 60, mbps: 24 },
   ] as const)('$resolution at $frameRate fps is about $mbps Mbps', ({ resolution, frameRate, mbps }) => {

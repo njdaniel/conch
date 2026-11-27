@@ -1,0 +1,15 @@
+{
+  "id": "/app/",
+  "name": "Conch",
+  "short_name": "Conch",
+  "start_url": "/app/",
+  "scope": "/app/",
+  "display": "standalone",
+  "theme_color": "#111416",
+  "background_color": "#111416",
+  "icons": [
+    { "src": "pwa-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "pwa-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "pwa-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

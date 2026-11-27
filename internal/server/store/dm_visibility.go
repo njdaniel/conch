@@ -144,6 +144,9 @@ type DMConversation struct {
 	// with no name: the peer is no longer an active identity and the viewer
 	// may no longer know it (dmPeerFormerTx). An enabled peer is never former.
 	PeerFormer bool
+	// PeerName is the peer's current display name; empty when PeerFormer.
+	// Filled by the reads below, never by an open's side effects.
+	PeerName string
 	// CreatedAt is when the conversation first became visible to the peer:
 	// the time of its first message. It is zero until there is one; an open
 	// never sets it, so it tells nothing about who opened first.
@@ -223,10 +226,37 @@ func dmConversationTx(ctx context.Context, q execer, viewer, convID int64) (DMCo
 	if c.Unread, err = dmUnreadTx(ctx, q, convID, viewer, c.LastReadID); err != nil {
 		return DMConversation{}, err
 	}
-	if c.PeerFormer, err = dmPeerFormerTx(ctx, q, viewer, c.PeerID); err != nil {
+	if err = dmFillPeerTx(ctx, q, viewer, &c); err != nil {
 		return DMConversation{}, err
 	}
 	return c, nil
+}
+
+// dmFillPeerTx sets c.PeerFormer and, for a peer who is not former, c.PeerName.
+// The name goes through the directory's rule (knownPrincipalsSQL) like every
+// name shown to a member, with one exception that is not a leak: once a
+// message exists, the peer keeps their name even on a hide-members server that
+// no longer shows them to the viewer (ADR-017 Decision 11, as dmPeerFormerTx).
+// An empty conversation needed the peer to be known when it was opened; if
+// they no longer are, it shows no name rather than one the viewer may not see.
+func dmFillPeerTx(ctx context.Context, q execer, viewer int64, c *DMConversation) (err error) {
+	if c.PeerFormer, err = dmPeerFormerTx(ctx, q, viewer, c.PeerID); err != nil || c.PeerFormer {
+		return err
+	}
+	seeAll, err := permittedTx(ctx, q, viewer, schema.PermSeeMemberDirectory)
+	if err != nil {
+		return err
+	}
+	cond, args, _ := knownPrincipalsSQL(viewer, seeAll)
+	switch err := q.QueryRowContext(ctx,
+		`SELECT p.name FROM principals p WHERE p.id = ? AND (? OR (`+cond+`))`, // #nosec G202 -- every fragment is a constant
+		append([]any{c.PeerID, c.Revision > 0}, args...)...).Scan(&c.PeerName); {
+	case errors.Is(err, sql.ErrNoRows):
+		c.PeerName = ""
+	case err != nil:
+		return fmt.Errorf("store: read the peer name of conversation %d: %w", c.ID, err)
+	}
+	return nil
 }
 
 // DMConversationFor returns conversation convID as viewer sees it, or
@@ -309,7 +339,7 @@ func (s *Store) ListDMConversations(ctx context.Context, viewer int64, state sch
 			if out[i].Unread, err = dmUnreadTx(ctx, tx, out[i].ID, viewer, out[i].LastReadID); err != nil {
 				return err
 			}
-			if out[i].PeerFormer, err = dmPeerFormerTx(ctx, tx, viewer, out[i].PeerID); err != nil {
+			if err = dmFillPeerTx(ctx, tx, viewer, &out[i]); err != nil {
 				return err
 			}
 		}

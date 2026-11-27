@@ -121,7 +121,7 @@ func TestOpenDMRunsTheSameStatementsInEveryProbeClass(t *testing.T) {
 					var count int
 					err := f.s.withImmediateTx(ctx, func(tx execer) error {
 						c := &countingExecer{execer: tx}
-						_, err := openDMTx(ctx, c, f.alice.ID, probe.id, f.tick())
+						_, err := openDMTx(ctx, c, f.alice.ID, probe.id, f.tick(), nil)
 						count = c.n
 						return err
 					})

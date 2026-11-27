@@ -187,18 +187,23 @@ import {
   voiceCompanionResponseV1,
   voiceOccupancyV1,
   voicePresenceV2,
+  voicePresenceV2Schema,
+  voicePresenceV3,
+  voicePresenceV3Schema,
   voiceSessionResponseV1,
   voiceShareV1,
   voiceShareV2,
+  voiceShareV3,
   type VoiceCameraV1,
   type VoiceCompanionRequestV1,
   type VoiceCompanionResponseV1,
   type VoiceOccupancyV1,
   type VoicePresenceV2,
   type VoiceSessionResponseV1,
-  type VoiceShareRequestV1,
+  type VoiceShareRequestV2,
   type VoiceShareV1,
   type VoiceShareV2,
+  type VoiceShareV3,
   type VoiceTransmitReportV1,
   type VoiceTransmitState,
 } from './schema/voice';
@@ -2866,7 +2871,8 @@ export function keptShareQuality(): ShareQuality | null {
     const raw: unknown = JSON.parse(platform.credentials.readPreference(shareQualityKey) ?? 'null');
     if (typeof raw !== 'object' || raw === null) return null;
     const kept = raw as { resolution?: unknown; frameRate?: unknown };
-    const resolution = kept.resolution === 'auto' || kept.resolution === '720p' || kept.resolution === '1080p' || kept.resolution === 'source' ? kept.resolution : null;
+    const resolution = kept.resolution === 'auto' || kept.resolution === '480p' || kept.resolution === '720p'
+      || kept.resolution === '1080p' || kept.resolution === '1440p' || kept.resolution === 'source' ? kept.resolution : null;
     const frameRate = kept.frameRate === 15 || kept.frameRate === 30 || kept.frameRate === 60 ? kept.frameRate : null;
     // Auto is always 30 fps, whatever rate was stored with it.
     return resolution === null || frameRate === null ? null : { resolution, frameRate: resolution === 'auto' ? 30 : frameRate };
@@ -2960,27 +2966,39 @@ const diagnosticOf: Record<SocketName, DiagnosticSocket> = { messages: 'messages
 const retries: Record<SocketName, number> = { messages: 0, events: 0, voice: 0, occupancy: 0, person: 0 };
 const lost: Record<SocketName, boolean> = { messages: false, events: false, voice: false, occupancy: false, person: false };
 
-// connect asks for a ticket with the credential and opens the socket that
-// `query` names, with the ticket added. The ticket is single use, so a
+type SocketQuery = Readonly<Record<string, string>>;
+
+// connect waits for any credential replacement, resolves the query (probing
+// first if needed), asks for a ticket with the credential and opens the socket
+// that the query names, with the ticket added. The ticket is single use, so a
 // reconnect calls this again. A platform that opens its sockets with the
 // credential it holds (the desktop shell's main) is asked for none. The
 // diagnostic ring is told of each open, each close with its code and each try
 // after a loss, by kind, never by address: the address holds the channel and
 // the ticket.
-async function connect(name: SocketName, id: OperationId, query: Readonly<Record<string, string>>, events: SocketEvents): Promise<ApiResult<FeedSocket>> {
+async function connect(name: SocketName, id: OperationId, query: SocketQuery | (() => Promise<ApiResult<SocketQuery>>), events: SocketEvents): Promise<ApiResult<FeedSocket>> {
   const kind = diagnosticOf[name];
   if (lost[name]) record({ kind: 'reconnect', socket: kind, attempt: ++retries[name] });
-  // Lost until it opens: a ticket refused or a socket that never opens is
-  // followed by another try.
+  // Lost until it opens: a failed probe, a ticket refused or a socket that
+  // never opens is followed by another try.
   lost[name] = true;
   await holdSockets();
+  let address: SocketQuery;
+  if (typeof query === 'function') {
+    const resolved = await query();
+    if (!resolved.ok) return resolved;
+    // A credential replacement may have started while the probe was out.
+    await holdSockets();
+    address = resolved.value;
+  } else {
+    address = query;
+  }
   // The credential this socket is opened with, which a replacement may end.
   const opened = current();
-  let address = query;
   if (platform.sockets.ticket) {
     const ticket = await requestTicket();
     if (!ticket.ok) return ticket;
-    address = { ...query, ticket: ticket.value.ticket };
+    address = { ...address, ticket: ticket.value.ticket };
   }
   let socket: FeedConnection;
   try {
@@ -3259,9 +3277,11 @@ export async function removeVoiceViewer(channel: string): Promise<ApiResult<null
 
 // getVoicePresence reads who is in a channel's voice, once. The page keeps
 // presence on its socket, joined or not, and reads this only to learn why
-// the server closed that socket (1008).
+// the server closed that socket (1008). Both older and newer servers serve
+// v2 for this read, and a live share keeps its negotiated quality. The HTTP
+// status lets the caller distinguish a transient failure from a refusal.
 export function getVoicePresence(channel: string): Promise<ApiResult<VoicePresenceV2>> {
-  return authed(call('voicePresence', { channel }, queryOf({ schema: 'conch.voice_presence.v2' })), voicePresenceV2);
+  return authed(call('voicePresence', { channel }, queryOf({ schema: voicePresenceV2Schema })), voicePresenceV2, true);
 }
 
 // How a transmit report was answered. no_session is "go back to conchd" (409
@@ -3286,11 +3306,28 @@ export async function reportVoiceTransmit(channel: string, state: VoiceTransmitS
   return 'no_session';
 }
 
-// openVoiceSocket opens the v2 presence stream of a channel's voice with a
-// ticket: the roster, who is transmitting, camera claims and every live share
-// (voice-multi-share.md §2, #1509).
+// Probe on HTTP first so an older server never receives a WebSocket upgrade
+// with a version it cannot serve. Only a validated v3 reply enables v3.
+//
+// v2 is chosen only on the one answer that says "this server is older": an
+// alpha.21 server refuses a schema value it does not know with 400
+// invalid_request (writeVoicePresenceSchemaInvalid), before it checks
+// anything else. A network error, a 5xx, a 429 or a malformed v3 body says
+// nothing about the server's version, and picking v2 on one would pin a
+// healthy v3 server's socket to v2 (no 480p or 1440p) until some other
+// reconnect. Those are handed back as the probe's own failure instead: the
+// Feed that calls this goes through its 1 s .. 30 s backoff and calls again,
+// which probes again, so a transient failure costs one wait and never a
+// downgrade, and it cannot hammer. A 401 comes back as 'unauthorized', which
+// authed has already signed out for and the Feed reports as such.
 export function openVoiceSocket(channel: string, events: SocketEvents): Promise<ApiResult<FeedSocket>> {
-  return connect('voice', 'voiceSocket', { channel, schema: 'conch.voice_presence.v2' }, events);
+  return connect('voice', 'voiceSocket', async () => {
+    const probe = await authed(call('voicePresence', { channel }, queryOf({ schema: voicePresenceV3Schema })), voicePresenceV3, true);
+    if (probe.ok) return { ok: true, value: { channel, schema: voicePresenceV3Schema } };
+    const legacy = probe.failure === 'invalid' && probe.status === 400 && probe.code === 'invalid_request';
+    if (!legacy) return probe;
+    return { ok: true, value: { channel, schema: voicePresenceV2Schema } };
+  }, events);
 }
 
 // Voice occupancy (issue #596): how many are in each channel's voice, for
@@ -3356,7 +3393,7 @@ export async function fileReport(id: number, issue: string): Promise<InviteResul
 // rate_limited a holder's quality change past its bound (#1546), with the
 // seconds its Retry-After asks for.
 export type ShareClaimResult =
-  | { readonly ok: true; readonly value: VoiceShareV1 | VoiceShareV2 }
+  | { readonly ok: true; readonly value: VoiceShareV1 | VoiceShareV2 | VoiceShareV3 }
   | { readonly ok: false; readonly failure: ApiFailure; readonly status?: number; readonly code?: string; readonly retryAfter?: number };
 
 // claimVoiceShare claims the caller's own share, or claims it again after a
@@ -3366,8 +3403,10 @@ export type ShareClaimResult =
 // concrete resolution: Auto (issue #1659) is a local choice, and the type says
 // so.
 export async function claimVoiceShare(channel: string, quality?: SettledQuality): Promise<ShareClaimResult> {
-  const request: VoiceShareRequestV1 | undefined = quality === undefined ? undefined : { quality: { resolution: quality.resolution, frame_rate: quality.frameRate } };
-  const reply = await authedPost(call('claimShare', { channel }), request);
+  const v3 = quality?.resolution === '480p' || quality?.resolution === '1440p';
+  const request: VoiceShareRequestV2 | undefined = quality === undefined ? undefined : { quality: { resolution: quality.resolution, frame_rate: quality.frameRate } };
+  const query = v3 ? queryOf({ schema: voicePresenceV3Schema }) : undefined;
+  const reply = await authedPost(call('claimShare', { channel }, query), request);
   if (reply.kind === 'none') return { ok: false, failure: 'network' };
   if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
   const res = reply.res;
@@ -3384,7 +3423,8 @@ export async function claimVoiceShare(channel: string, quality?: SettledQuality)
   }
   try {
     const parsed: unknown = await res.json();
-    if (quality !== undefined && fromServer(voiceShareV2)(parsed).length === 0) return { ok: true, value: parsed as VoiceShareV2 };
+    if (v3 && fromServer(voiceShareV3)(parsed).length === 0) return { ok: true, value: parsed as VoiceShareV3 };
+    if (!v3 && quality !== undefined && fromServer(voiceShareV2)(parsed).length === 0) return { ok: true, value: parsed as VoiceShareV2 };
     if (quality === undefined && fromServer(voiceShareV1)(parsed).length === 0) return { ok: true, value: parsed as VoiceShareV1 };
   } catch {
     // Fall through.

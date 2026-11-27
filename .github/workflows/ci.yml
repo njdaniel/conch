@@ -94,7 +94,11 @@ jobs:
             awk -v header="  $1-spike:" '/^  [^ ]/ { job = ($0 == header) } job && NF'
           }
           for spike in ios android; do
-            paths=$(git diff --name-only --no-renames "$base" HEAD -- "spikes/mobile/$spike/")
+            spike_paths=("spikes/mobile/$spike/")
+            if [ "$spike" = android ]; then
+              spike_paths+=(scripts/mobile-android-toolchain-test.sh)
+            fi
+            paths=$(git diff --name-only --no-renames "$base" HEAD -- "${spike_paths[@]}")
             previous=
             if git cat-file -e "$base:$workflow" 2>/dev/null; then
               previous=$(git show "$base:$workflow" | spike_job "$spike")
@@ -1036,6 +1040,7 @@ jobs:
         run: |
           ./scripts/mobile-rows-check-test.sh
           ./scripts/mobile-rows-check.sh
+          python3 ./scripts/linux-mic-capture-status-test.py
 
       # The issue-claim helper's lifecycle (#831): real local Git remotes,
       # mocked GitHub and model calls, no network.
@@ -1174,17 +1179,41 @@ jobs:
           cache: npm
           cache-dependency-path: spikes/mobile/android/package-lock.json
 
-      # Cache the JDK, SDK and Android CLI bootstrap state. The Gradle home
-      # (GRADLE_USER_HOME, also under CONCH_CACHE) would cost more of the
-      # repository's cache budget than it saves.
-      - name: Android toolchain cache
+      - name: test Android toolchain
+        run: ../../../scripts/mobile-android-toolchain-test.sh
+
+      # Restore only the pinned prerequisites before asking the rolling CLI
+      # for its version. A fresh CLI home makes the launcher fetch today's CLI.
+      - name: Android bootstrap cache
         uses: actions/cache@v4
         with:
           path: |
             ${{ env.CONCH_CACHE }}/jdk-*
-            ${{ env.CONCH_CACHE }}/android-sdk
-            ${{ env.CONCH_CACHE }}/android-user-home
-          key: android-spike-toolchain-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('spikes/mobile/android/toolchain.sh') }}
+            ${{ env.CONCH_CACHE }}/android-sdk/cmdline-tools
+          key: android-spike-bootstrap-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('spikes/mobile/android/toolchain.sh') }}
+
+      - name: bootstrap and identify the Android CLI
+        id: android-cli
+        env:
+          CONCH_ACCEPT_ANDROID_LICENCES: '1'
+        run: |
+          install_home=$(mktemp -d "$TMPDIR/home.XXXXXX")
+          trap 'rm -rf "$install_home"' EXIT
+          version=$(HOME="$install_home" ./toolchain.sh --cli-version)
+          test ! -e "$install_home/.android"
+          test -x "$CONCH_CACHE/android-user-home/bin/android-cli"
+          test -d "$CONCH_CACHE/android-user-home/cli/bundles"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # Keep the CLI from the bootstrap step and restore SDK package state
+      # only for that CLI version. The Gradle home is too large to cache here.
+      - name: Android SDK cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.CONCH_CACHE }}/android-sdk/*
+            !${{ env.CONCH_CACHE }}/android-sdk/cmdline-tools
+          key: android-spike-sdk-${{ runner.os }}-${{ runner.arch }}-${{ steps.android-cli.outputs.version }}-${{ hashFiles('spikes/mobile/android/toolchain.sh') }}
 
       - name: install pinned Android toolchain
         env:
@@ -1197,8 +1226,6 @@ jobs:
           # describes the flag even when the CLI was invoked with it.
           HOME="$install_home" ./toolchain.sh
           test ! -e "$install_home/.android"
-          test -x "$CONCH_CACHE/android-user-home/bin/android-cli"
-          test -d "$CONCH_CACHE/android-user-home/cli/bundles"
           test -s "$CONCH_CACHE/android-sdk/licenses/android-sdk-license"
 
       - name: install npm dependencies and check licences, types and unit tests
@@ -1447,8 +1474,10 @@ jobs:
           path: ~/.cache/conch/electron
           key: desktop-electron-${{ runner.os }}-${{ hashFiles('scripts/desktop-pins.sh') }}
 
-      - name: virtual display
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends xvfb
+      # gnome-keyring gives the persistence smoke test (#2077) a real, isolated
+      # Secret Service on a private bus; without it that spec skips.
+      - name: virtual display and keyring
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends xvfb gnome-keyring dbus
 
       # The browser build must not change because the desktop shell exists:
       # web/dist is hashed before and after the desktop build, and holds no

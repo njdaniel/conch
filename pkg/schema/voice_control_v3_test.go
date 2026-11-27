@@ -23,6 +23,8 @@ const voiceControlV3Dir = "voice-control-v3"
 // is v1 (its shape is frozen) and is read with the v1 reader.
 const voiceControlV3Hello = "event-hello-v1-v2-and-v3.json"
 
+const voiceControlV3Streams = "event-state-share-audio-streams.json"
+
 // voiceControlV3Golden is every single-message fixture of v3 and the type it
 // is.
 var voiceControlV3Golden = []struct {
@@ -62,6 +64,7 @@ var voiceControlV3Golden = []struct {
 	{file: "event-state-failed.json", event: true, new: func() any { return new(VoiceControlStateV3) }},
 	// The share's sound: on, each reason it is not, and its mute.
 	{file: "event-state-share-audio-on.json", event: true, new: func() any { return new(VoiceControlStateV3) }},
+	{file: voiceControlV3Streams, event: true, new: func() any { return new(VoiceControlStateV3) }},
 	{file: "event-state-share-audio-muted.json", event: true, new: func() any { return new(VoiceControlStateV3) }},
 	{file: "event-state-share-audio-no-sources.json", event: true, new: func() any { return new(VoiceControlStateV3) }},
 	{file: "event-state-share-audio-transmitting.json", event: true, new: func() any { return new(VoiceControlStateV3) }},
@@ -1245,10 +1248,9 @@ func TestVoiceControlV3AndThePipe(t *testing.T) {
 	}
 }
 
-// The fields of each v3 message are an exact list, as v1's and v2's are. The
-// one new owner-to-helper text field, application_name, was reviewed as
-// printable ASCII that the helper never repeats; the state gained three
-// vocabulary words and a number, and no text.
+// The fields of each v3 message are an exact list, as v1's and v2's are.
+// The command's application_name is printable ASCII. The optional stream
+// diagnostics carry bounded display labels from the audio system.
 func TestVoiceControlV3FieldsAreAnExactList(t *testing.T) {
 	head := []string{"schema", "kind"}
 	want := map[string][]string{
@@ -1263,7 +1265,7 @@ func TestVoiceControlV3FieldsAreAnExactList(t *testing.T) {
 		"VoiceControlSetShareAudioMuteV3": append(slices.Clone(head), "id", "muted"),
 		"VoiceControlAckV3":               append(slices.Clone(head), "seq", "id", "ok", "error"),
 		"VoiceControlStateV3": append(slices.Clone(head), "seq", "phase", "reason", "retry_in_ms", "capture", "playback", "transmitting", "muted", "deafened", "blocked", "talk_mode", "ptt", "ptt_problem",
-			"share_audio", "share_audio_muted", "share_audio_problem", "share_audio_sources"),
+			"share_audio", "share_audio_muted", "share_audio_problem", "share_audio_sources", "share_audio_streams"),
 		"VoiceControlProtocolErrorV3": append(slices.Clone(head), "seq", "code"),
 	}
 	for _, msg := range voiceControlV3Types {
@@ -1281,7 +1283,7 @@ func TestVoiceControlV3FieldsAreAnExactList(t *testing.T) {
 // TestVoiceControlV3MessagesAreV2sAndMore holds each v3 type to the v2 type
 // it carries on: the same fields, in the same order, with the same tags and
 // the same types, the kind of a command aside (it is v3's vocabulary), and,
-// for the state, four more at the end. So a v2 field cannot be renamed,
+// for the state, five more at the end. So a v2 field cannot be renamed,
 // retyped, made optional or dropped in v3 by accident.
 func TestVoiceControlV3MessagesAreV2sAndMore(t *testing.T) {
 	pairs := []struct {
@@ -1296,7 +1298,7 @@ func TestVoiceControlV3MessagesAreV2sAndMore(t *testing.T) {
 		{VoiceControlSetDevicesV2{}, VoiceControlSetDevicesV3{}, 0},
 		{VoiceControlSetTalkModeV2{}, VoiceControlSetTalkModeV3{}, 0},
 		{VoiceControlAckV2{}, VoiceControlAckV3{}, 0},
-		{VoiceControlStateV2{}, VoiceControlStateV3{}, 4},
+		{VoiceControlStateV2{}, VoiceControlStateV3{}, 5},
 		{VoiceControlProtocolErrorV2{}, VoiceControlProtocolErrorV3{}, 0},
 	}
 	commandKinds := [2]reflect.Type{reflect.TypeFor[VoiceControlCommandKind](), reflect.TypeFor[VoiceControlCommandKindV3]()}

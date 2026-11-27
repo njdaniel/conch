@@ -5,6 +5,7 @@ import { NotificationSettings } from '../../NotificationSettings';
 import { credentials } from './credentials';
 import { DesktopShell } from './Shell';
 import { SWAP_GUARD_MS } from './ui/InviteLink';
+import { setPageModal } from '../../pageModal';
 import { serverOrigin, setServerOrigin } from './state';
 
 const ID_A = 'a'.repeat(32);
@@ -19,7 +20,7 @@ function compat(over: Partial<CompatView> = {}): CompatView {
 }
 
 function view(over: Partial<ProfilesView> = {}): ProfilesView {
-  return { profiles: [], active: null, storage: { kind: 'protected' }, recovery: false, notice: null, compat: compat(), platform: 'linux', ...over };
+  return { profiles: [], active: null, storage: { kind: 'protected' }, keep: true, keepHelp: null, recovery: false, notice: null, compat: compat(), platform: 'linux', ...over };
 }
 
 function install(overrides: Partial<ConchDesktopBridge & DesktopInviteBridge>): void {
@@ -54,6 +55,7 @@ function install(overrides: Partial<ConchDesktopBridge & DesktopInviteBridge>): 
     profileRemove: never,
     profileSwitch: never,
     storageRetry: never,
+    profileKeep: never,
     profilesRecover: never,
     uploadFile: never,
     downloadFile: never,
@@ -266,6 +268,16 @@ describe('with a server active', () => {
     install({ profiles: () => Promise.resolve(view({ ...active, notice: 'revocation-unsent' })) });
     render(<DesktopShell>{child}</DesktopShell>);
     expect((await screen.findByRole('banner', { name: 'Server' })).textContent).toMatch(/cannot prove the sign-in was ended there/);
+  });
+
+  it('names the server and tells users how to end the old sign-in', async () => {
+    install({ profiles: () => Promise.resolve(view({ ...active, notice: 'legacy-not-ended' })) });
+    render(<DesktopShell>{child}</DesktopShell>);
+    const line =
+      'A sign-in saved by an older Conch for chat.example.org may still be active. Sign in to that server with the same account and open Settings → Your sign-ins. If you recognize the old entry by its label and the date next to “since”, choose End this sign-in. You can also choose Sign out everywhere in Settings or ask an operator to revoke the old sign-in.';
+    expect((await screen.findByRole('banner', { name: 'Server' })).textContent).toContain(line);
+    fireEvent.click(await screen.findByRole('button', { name: 'Servers' }));
+    expect((await screen.findByRole('region', { name: 'Servers' })).textContent).toContain(line);
   });
 });
 
@@ -1067,5 +1079,40 @@ describe('opening an invite link (issue #1591)', () => {
     render(<DesktopShell>{child}</DesktopShell>);
     await screen.findByLabelText('Server address');
     expect(screen.queryByLabelText('Invite link')).toBeNull();
+  });
+});
+
+// Issue #2189: the desktop strip is outside the lobby; while a modal of the
+// lobby (Settings, re-authentication, the voice options sheet) is up it is
+// inert, so the keyboard cannot reach Desktop app and Servers behind it.
+describe('behind a modal of the lobby', () => {
+  afterEach(() => {
+    act(() => {
+      setPageModal(false);
+    });
+  });
+
+  it('makes the strip and what it opens inert, and gives them back', async () => {
+    const active = view({ profiles: [profile(ID_A, 'a.example.org', 'ada', true)], active: ID_A });
+    install({ profiles: () => Promise.resolve(active) });
+    render(<DesktopShell>{child}</DesktopShell>);
+    const servers = await screen.findByRole('button', { name: 'Servers' });
+    const app = screen.getByRole('button', { name: 'Desktop app' });
+    expect(servers.closest('[inert]')).toBeNull();
+    fireEvent.click(app);
+    expect(screen.getByRole('button', { name: 'Desktop app' }).closest('[inert]')).toBeNull();
+    act(() => {
+      setPageModal(true);
+    });
+    expect(servers.closest('[inert]')).not.toBeNull();
+    expect(app.closest('[inert]')).not.toBeNull();
+    // What the strip opened below it is behind the modal too.
+    expect(document.querySelector('.page-scope')?.hasAttribute('inert')).toBe(true);
+    expect(screen.getByText('the client').closest('[inert]')).toBeNull();
+    act(() => {
+      setPageModal(false);
+    });
+    expect(servers.closest('[inert]')).toBeNull();
+    expect(app.closest('[inert]')).toBeNull();
   });
 });

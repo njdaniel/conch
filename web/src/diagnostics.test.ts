@@ -151,7 +151,18 @@ describe('what api.ts records', () => {
 
   it('records sockets by what they carry: opens, closes with their codes, and the tries after a loss', async () => {
     await signIn();
-    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(json({ ticket, expires_at: '2026-10-16T10:00:00Z' }, 201))));
+    // Every call gets a ticket, except the voice feed's presence probe, which a
+    // current server answers with a v3 document, so the v3 feed opens.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) =>
+        Promise.resolve(
+          String(input instanceof Request ? input.url : input).includes('schema=conch.voice_presence.v3')
+            ? json({ schema: 'conch.voice_presence.v3', channel_id: 1, configured: false, available: false, rooms: [] })
+            : json({ ticket, expires_at: '2026-10-16T10:00:00Z' }, 201),
+        ),
+      ),
+    );
     const sockets: { url: string; onopen: (() => void) | null; onclose: ((e: { code: number; reason: string }) => void) | null }[] = [];
     vi.stubGlobal(
       'WebSocket',
@@ -181,6 +192,28 @@ describe('what api.ts records', () => {
       { kind: 'socket_close', socket: 'messages', code: 1008 },
       { kind: 'reconnect', socket: 'messages', attempt: 2 },
       { kind: 'socket_open', socket: 'messages' },
+      { kind: 'socket_open', socket: 'voice' },
+    ]);
+    expectClean();
+  });
+
+  it('records a voice reconnect after a failed presence probe', async () => {
+    await signIn();
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(null, { status: 503 }))
+      .mockResolvedValueOnce(json({ schema: 'conch.voice_presence.v3', channel_id: 1, configured: false, available: false, rooms: [] }))
+      .mockResolvedValueOnce(json({ ticket, expires_at: '2026-10-16T10:00:00Z' }, 201));
+    vi.stubGlobal('fetch', fetch);
+    const socket = { onopen: null as (() => void) | null, close: vi.fn() };
+    vi.stubGlobal('WebSocket', vi.fn(function () {
+      return socket;
+    }));
+    const events = { onOpen: vi.fn(), onFrame: vi.fn(), onClose: vi.fn() };
+    expect((await api.openVoiceSocket(channelName, events)).ok).toBe(false);
+    expect((await api.openVoiceSocket(channelName, events)).ok).toBe(true);
+    socket.onopen?.();
+    expect(timeless().filter(({ socket }) => socket === 'voice')).toEqual([
+      { kind: 'reconnect', socket: 'voice', attempt: 1 },
       { kind: 'socket_open', socket: 'voice' },
     ]);
     expectClean();
@@ -269,6 +302,8 @@ describe('what the voice client records', () => {
       level: () => 0,
       close: () => Promise.resolve(),
       ...noCamera(),
+      attachShareSelf: () => undefined,
+      shareSurface: () => null,
     });
     const client = new VoiceClient(
       {

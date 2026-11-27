@@ -6,8 +6,8 @@ import { act, cleanup, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ApiResult } from '../api';
 import type { ChannelV0 } from '../schema/channel';
-import type { VoicePresenceV2 } from '../schema/voice';
-import type { FeedSocket, SocketEvents } from '../state/feed';
+import { voicePresenceV3Schema, type VoicePresenceV2, type VoicePresenceV3 } from '../schema/voice';
+import { firstDelay, type FeedSocket, type SocketEvents } from '../state/feed';
 
 // One presence socket the page asked for: its channel, the events it was
 // given and whether the page has closed it.
@@ -1008,7 +1008,7 @@ describe('presence of the channel on screen', () => {
   });
 
   it('is not allowed after a 1008 close when the read says voice is withdrawn, and nothing is tried again', async () => {
-    fake.read = () => Promise.resolve({ ok: false, failure: 'invalid', code: 'voice_not_allowed' });
+    fake.read = () => Promise.resolve({ ok: false, failure: 'invalid', status: 403, code: 'voice_not_allowed' });
     const { result, rerender, unauthorized } = hook();
     await flush();
     open([3]);
@@ -1027,7 +1027,7 @@ describe('presence of the channel on screen', () => {
   });
 
   it('is gone after a 1008 close for any other reason', async () => {
-    fake.read = () => Promise.resolve({ ok: false, failure: 'invalid', code: 'channel_not_found' });
+    fake.read = () => Promise.resolve({ ok: false, failure: 'invalid', status: 404, code: 'channel_not_found' });
     const { result } = hook();
     await flush();
     open([3]);
@@ -1042,18 +1042,47 @@ describe('presence of the channel on screen', () => {
   // Issue #1409: a moderator's voice-only removal closes the socket 1008 with
   // the text `voice_removed`. Still a member: presence is read and shown, the
   // socket comes back through its backoff, and the channel is never gone.
-  it('is not gone after a 1008 voice_removed close, and reads presence as for any other reason', async () => {
-    fake.read = () => Promise.resolve({ ok: true, value: presence([5]) });
+  it('keeps the 1008 voice_removed follow-up roster through the retry wait while browsing', async () => {
+    const read = presence([5]);
+    fake.read = () => Promise.resolve({ ok: true, value: read });
     const { result } = hook();
     await flush();
     open([3]);
     drop(1008, 'voice_removed');
     await flush();
     expect(fake.reads).toEqual(['c']);
-    expect(result.current.snapshot).not.toEqual({ kind: 'gone' });
+    expect(result.current.snapshot).toEqual({ kind: 'presence', presence: read });
     expect(result.current.state.phase).toBe('idle');
     expect(result.current.state.why).toBeNull();
-    await pass(1000);
+    await pass(firstDelay - 1);
+    expect(fake.opened).toHaveLength(1);
+    expect(result.current.snapshot).toEqual({ kind: 'presence', presence: read });
+    await pass(1);
+    expect(fake.opened).toHaveLength(2);
+    open([6]);
+    expect(result.current.snapshot).toEqual({ kind: 'presence', presence: presence([6]) });
+  });
+
+  it.each<{ name: string; answer: ApiResult<VoicePresenceV2> }>([
+    { name: 'no answer', answer: { ok: false, failure: 'network' } },
+    { name: 'HTTP 503', answer: { ok: false, failure: 'invalid', status: 503 } },
+    // conchd itself answers 500 on this route; 502 and 504 come from a proxy.
+    { name: 'HTTP 500', answer: { ok: false, failure: 'invalid', status: 500 } },
+    { name: 'HTTP 502', answer: { ok: false, failure: 'invalid', status: 502 } },
+    { name: 'HTTP 504', answer: { ok: false, failure: 'invalid', status: 504 } },
+    { name: 'HTTP 429', answer: { ok: false, failure: 'invalid', status: 429, code: 'rate_limited' } },
+  ])('backs off and retries when the 1008 follow-up read gets $name', async ({ answer }) => {
+    fake.read = () => Promise.resolve(answer);
+    const { result } = hook();
+    await flush();
+    open([3]);
+    drop(1008);
+    await flush();
+    expect(fake.reads).toEqual(['c']);
+    expect(result.current.snapshot).toEqual({ kind: 'unreachable' });
+    await pass(firstDelay - 1);
+    expect(fake.opened).toHaveLength(1);
+    await pass(1);
     expect(fake.opened).toHaveLength(2);
     open([5]);
     expect(result.current.snapshot).toEqual({ kind: 'presence', presence: presence([5]) });
@@ -1077,6 +1106,30 @@ describe('presence of the channel on screen', () => {
     afterEach(() => {
       fake.session = () => new Promise(() => undefined);
       fake.room = () => ({});
+    });
+
+    it('passes the socket schema and reconciles the 1008 follow-up read with null', async () => {
+      const read = presence([5, 7]);
+      fake.read = () => Promise.resolve({ ok: true, value: read });
+      const { result } = hook();
+      const told = vi.spyOn(result.current.client, 'presence');
+      await flush();
+      act(() => {
+        result.current.join();
+      });
+      await flush();
+      expect(result.current.state.phase).toBe('connected');
+
+      const frame: VoicePresenceV3 = { ...presence([3, 7]), schema: voicePresenceV3Schema };
+      act(() => {
+        last().events.onOpen();
+        last().events.onFrame(JSON.stringify(frame));
+      });
+      expect(told).toHaveBeenLastCalledWith(frame, voicePresenceV3Schema);
+
+      drop(1008);
+      await flush();
+      expect(told).toHaveBeenLastCalledWith(read, null);
     });
 
     it('a 1008 voice_removed close leaves voice saying so, does not rejoin, and a deliberate join works', async () => {
@@ -1186,11 +1239,13 @@ describe('presence of the channel on screen', () => {
     expect(fake.opened).toHaveLength(1);
     expect(live()).toHaveLength(1);
     // On joining, the client has the last snapshot; and every frame after.
-    expect(told).toHaveBeenLastCalledWith(presence([3]));
+    const before = presence([3]);
+    expect(told).toHaveBeenLastCalledWith(before, before.schema);
+    const after = presence([2, 3]);
     act(() => {
-      last().events.onFrame(JSON.stringify(presence([2, 3])));
+      last().events.onFrame(JSON.stringify(after));
     });
-    expect(told).toHaveBeenLastCalledWith(presence([2, 3]));
+    expect(told).toHaveBeenLastCalledWith(after, after.schema);
     act(() => {
       result.current.leave();
     });

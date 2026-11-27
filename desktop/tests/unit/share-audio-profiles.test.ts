@@ -116,6 +116,7 @@ describe('through the profiles service', () => {
       compat: { servers: ['v1.0.0'], override: false },
       desktopVersion: '0.0.0',
       readHealth: () => Promise.resolve({ kind: 'answered', version: 'v1.0.0' }),
+      readSweepHealth: () => Promise.resolve({ kind: 'answered', version: 'v1.0.0' }),
       verifyStored: () => Promise.resolve({ kind: 'rejected' }),
       revokeStored: () => Promise.resolve('ended'),
     });

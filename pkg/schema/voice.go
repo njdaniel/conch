@@ -71,10 +71,15 @@ const VoicePresenceSchemaV2 = "conch.voice_presence.v2"
 
 // VoicePresenceSchemaParam is the optional query parameter of
 // GET /v1/channels/{channel}/voice and GET /v1/voice/ws naming the presence
-// version the caller reads: VoicePresenceSchemaV1 or VoicePresenceSchemaV2,
-// the same string the document carries in its schema field. Absent means v1.
-// Any other value is 400 invalid_request, read before the channel, so it says
-// nothing about the channel. The occupancy document takes no parameter.
+// version the caller reads: VoicePresenceSchemaV1, VoicePresenceSchemaV2 or
+// VoicePresenceSchemaV3, the same string the document carries in its schema
+// field. Absent means v1. It is also accepted by POST
+// /v1/channels/{channel}/voice/share, where v3 enables the extended quality
+// vocabulary for the claim body and answer. Any other value, or a repeated
+// value, is 400 invalid_request. Presence routes check it before looking up
+// the channel, so the refusal says nothing about the channel. The share claim
+// checks it after the caller and session. The occupancy document takes no
+// parameter.
 const VoicePresenceSchemaParam = "schema"
 
 // Error codes returned by the voice endpoints in Error.Code. The package
@@ -933,28 +938,33 @@ func (r VoiceShareRequestV1) Validate() error {
 // still finds an *http.MaxBytesError; an error before the first byte is the
 // reader's, never an empty body.
 func DecodeVoiceShareRequestV1(r io.Reader) (VoiceShareRequestV1, error) {
+	return decodeVoiceShareRequest[VoiceShareRequestV1](r)
+}
+
+func decodeVoiceShareRequest[T interface{ Validate() error }](r io.Reader) (T, error) {
 	dec := json.NewDecoder(r)
 	dec.DisallowUnknownFields()
 	// Decoded through a pointer so that a JSON null, which leaves the pointer
 	// nil, can be told from an empty object, which allocates the zero request.
-	var req *VoiceShareRequestV1
+	var req *T
+	var zero T
 	switch err := dec.Decode(&req); {
 	case errors.Is(err, io.EOF):
-		return VoiceShareRequestV1{}, nil
+		return zero, nil
 	case err != nil:
-		return VoiceShareRequestV1{}, fmt.Errorf("schema: decode voice share request: %w", err)
+		return zero, fmt.Errorf("schema: decode voice share request: %w", err)
 	case req == nil:
-		return VoiceShareRequestV1{}, errors.New("schema: voice share request body must be a JSON object, not null")
+		return zero, errors.New("schema: voice share request body must be a JSON object, not null")
 	}
 	var extra json.RawMessage
 	switch err := dec.Decode(&extra); {
 	case err == nil:
-		return VoiceShareRequestV1{}, errors.New("schema: voice share request body must contain one JSON object")
+		return zero, errors.New("schema: voice share request body must contain one JSON object")
 	case !errors.Is(err, io.EOF):
-		return VoiceShareRequestV1{}, fmt.Errorf("schema: decode voice share request: %w", err)
+		return zero, fmt.Errorf("schema: decode voice share request: %w", err)
 	}
-	if err := req.Validate(); err != nil {
-		return VoiceShareRequestV1{}, err
+	if err := (*req).Validate(); err != nil {
+		return zero, err
 	}
 	return *req, nil
 }

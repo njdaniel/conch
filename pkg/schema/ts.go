@@ -88,6 +88,8 @@ var TSConstants = []TSConstant{
 	{Name: "VOICE_CONTROL_MAX_HELPER_VERSION_BYTES", Value: VoiceControlMaxHelperVersionBytes},
 	{Name: "VOICE_CONTROL_MAX_SERVER_BYTES", Value: VoiceControlMaxServerBytes},
 	{Name: "VOICE_CONTROL_MAX_CHANNEL_BYTES", Value: VoiceControlMaxChannelBytes},
+	{Name: "VOICE_CONTROL_MAX_SHARE_AUDIO_STREAMS", Value: VoiceControlMaxShareAudioStreams},
+	{Name: "VOICE_CONTROL_MAX_SHARE_AUDIO_LABEL_BYTES", Value: VoiceControlMaxShareAudioLabelBytes},
 	{Name: "VOICE_CONTROL_MAX_RETRY_IN_MS", Value: VoiceControlMaxRetryInMS},
 	{Name: "VOICE_CONTROL_V4_MIN_LEVEL_DB", Value: VoiceControlV4MinLevelDB},
 	{Name: "VOICE_CONTROL_V4_MAX_LOSS_BASIS_POINTS", Value: VoiceControlV4MaxLossBasisPoints},
@@ -257,6 +259,10 @@ var TSTypes = []TSType{
 	{Value: VoiceParticipantV2{}},
 	{Value: VoicePresenceRoomV2{}},
 	{Value: VoicePresenceV2{}, Family: "voice-presence-v2", Schema: VoicePresenceSchemaV2},
+	{Value: VoiceShareQualityV3{}},
+	{Value: VoiceParticipantV3{}},
+	{Value: VoicePresenceRoomV3{}},
+	{Value: VoicePresenceV3{}, Family: "voice-presence-v3", Schema: VoicePresenceSchemaV3},
 	{Value: VoiceTransmitReportV1{}, Family: "voice-transmit-report-v1"},
 	// Companion and viewer participants (issue #933).
 	{Value: VoiceCompanionRequestV1{}, Family: "voice-companion-request-v1"},
@@ -272,6 +278,8 @@ var TSTypes = []TSType{
 	{Value: VoiceShareRequestV1{}, Family: "voice-share-request-v1"},
 	{Value: VoiceShareV1{}, Family: "voice-share-v1"},
 	{Value: VoiceShareV2{}, Family: "voice-share-v2"},
+	{Value: VoiceShareRequestV2{}, Family: "voice-share-request-v2"},
+	{Value: VoiceShareV3{}, Family: "voice-share-v3"},
 	// The camera claim (ADR-015, issue #1238): the page may publish a camera
 	// while conchd holds it. Presence says who has one (VoiceParticipant).
 	{Value: VoiceCameraV1{}, Family: "voice-camera-v1"},
@@ -316,6 +324,7 @@ var TSTypes = []TSType{
 	{Value: VoiceControlSetShareAudioV3{}, Schema: VoiceControlSchemaV3},
 	{Value: VoiceControlSetShareAudioMuteV3{}, Schema: VoiceControlSchemaV3},
 	{Value: VoiceControlAckV3{}, Schema: VoiceControlSchemaV3},
+	{Value: VoiceControlShareAudioStreamV3{}},
 	{Value: VoiceControlStateV3{}, Schema: VoiceControlSchemaV3},
 	{Value: VoiceControlProtocolErrorV3{}, Schema: VoiceControlSchemaV3},
 	// v4 (issues #2039 and #2085): a start that names a channel or a private
@@ -819,8 +828,9 @@ var TSVocabularyModes = map[string]TSVocabularyMode{
 	// the picker's closed vocabulary; a new value is a new version of
 	// presence, as a new end reason is, and the page sends only what its
 	// picker offers.
-	"VoiceShareResolution": TSStrict,
-	"VoiceTransmitState":   TSStrict,
+	"VoiceShareResolution":   TSStrict,
+	"VoiceShareResolutionV3": TSStrict,
+	"VoiceTransmitState":     TSStrict,
 
 	// Strict: written by the page itself in a problem report (issue #446);
 	// the server validates what it is sent, and the page sends only what it
@@ -851,12 +861,13 @@ var TSVocabularyModes = map[string]TSVocabularyMode{
 
 	// Strict, for the same reason: the v3 share-audio and v4 diagnostics
 	// vocabularies and their versioned command and event kinds.
-	"VoiceControlCommandKindV3":     TSStrict,
-	"VoiceControlCommandKindV4":     TSStrict,
-	"VoiceControlEventKindV4":       TSStrict,
-	"VoiceControlGateWhyV4":         TSStrict,
-	"VoiceControlShareAudio":        TSStrict,
-	"VoiceControlShareAudioProblem": TSStrict,
+	"VoiceControlCommandKindV3":          TSStrict,
+	"VoiceControlCommandKindV4":          TSStrict,
+	"VoiceControlEventKindV4":            TSStrict,
+	"VoiceControlGateWhyV4":              TSStrict,
+	"VoiceControlShareAudio":             TSStrict,
+	"VoiceControlShareAudioProblem":      TSStrict,
+	"VoiceControlShareAudioStreamReason": TSStrict,
 
 	// Phone push and notification preferences (issue #1712). Strict: the
 	// policy and the platform, which a client writes itself, and the end

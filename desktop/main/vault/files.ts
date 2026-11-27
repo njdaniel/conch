@@ -2,12 +2,14 @@
 // the file 0600, replaced atomically (temp file, fsync, rename, fsync of the
 // directory).
 //
-// Input: a root directory and a profile id. Output: bytes in, bytes out. This
+// Input: a root directory and a profile id. Output: bytes in, bytes out, and
+// the list of profile ids for the start sweep of issue #2217. This
 // is the only module under desktop/main that writes a secret's ciphertext to
 // disk (a unit test greps for that). It never sees a plaintext secret and
 // logs nothing.
 import { randomBytes } from 'node:crypto';
-import { chmod, lstat, mkdir, open, readFile, rename, rm } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import { chmod, lstat, mkdir, open, opendir, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { isProfileId } from '../profiles/ids.ts';
@@ -146,12 +148,33 @@ export type ReadResult =
   | { readonly kind: 'absent' }
   | { readonly kind: 'bytes'; readonly data: Buffer }
   | { readonly kind: 'corrupt' }
+  // A regular file of ours, of a sane size, but open to group or others
+  // (issue #2217's review, R1): not read, since it cannot be trusted. A get
+  // treats it as corrupt; the start sweep deletes it unopened.
+  | { readonly kind: 'loose-mode' }
   // The root exists but is not ours, private and plain: nothing is read from it.
   | { readonly kind: 'unsafe-root' };
 
+export interface ReadHooks {
+  // Test seam: runs after the path checks and before the file is opened, so a
+  // test can swap the file for a symlink in between.
+  readonly beforeOpen?: (() => Promise<void>) | undefined;
+}
+
+// Where the platform has it (Linux, macOS), opening a symlink fails instead of
+// following it. Windows has none; there the lstat before the open is the check.
+const NO_FOLLOW = 'O_NOFOLLOW' in fsConstants ? fsConstants.O_NOFOLLOW : 0;
+
 // readCredential reads the profile's file. A missing file is absent; an empty,
 // oversized or non-regular one is corrupt (and is left where it is).
-export async function readCredential(root: string, id: string): Promise<ReadResult> {
+//
+// The path is checked with lstat, then the file is opened without following a
+// symlink, and the open handle is checked again with fstat (a regular file of a
+// sane size and, where there are uids, owned by this user and closed to group
+// and others) and read through that handle, at most MAX_FILE_BYTES (issue
+// #2217's review): a file swapped for a symlink or another file between the
+// check and the read is not read.
+export async function readCredential(root: string, id: string, hooks: ReadHooks = {}): Promise<ReadResult> {
   const dir = profileDir(root, id);
   const file = join(dir, FILE_NAME);
   let st;
@@ -176,7 +199,73 @@ export async function readCredential(root: string, id: string): Promise<ReadResu
   if (!st.isFile() || st.size === 0 || st.size > MAX_FILE_BYTES) {
     return { kind: 'corrupt' };
   }
-  return { kind: 'bytes', data: await readFile(file) };
+  await hooks.beforeOpen?.();
+  let fh;
+  try {
+    fh = await open(file, fsConstants.O_RDONLY | NO_FOLLOW);
+  } catch (err) {
+    if (isCode(err, 'ENOENT') || isCode(err, 'ENOTDIR')) return { kind: 'absent' };
+    // ELOOP (EMLINK on some BSDs): it became a symlink after the check.
+    if (isCode(err, 'ELOOP') || isCode(err, 'EMLINK')) return { kind: 'corrupt' };
+    throw err;
+  }
+  try {
+    const held = await fh.stat();
+    if (!held.isFile() || held.size === 0 || held.size > MAX_FILE_BYTES) return { kind: 'corrupt' };
+    if (typeof process.getuid === 'function') {
+      if (held.uid !== process.getuid()) return { kind: 'corrupt' };
+      if ((held.mode & 0o077) !== 0) return { kind: 'loose-mode' };
+    }
+    // One byte more than the limit, to see a file that grew after the fstat.
+    const buf = Buffer.alloc(MAX_FILE_BYTES + 1);
+    let length = 0;
+    for (;;) {
+      const { bytesRead } = await fh.read(buf, length, buf.length - length, length);
+      if (bytesRead === 0) break;
+      length += bytesRead;
+      if (length > MAX_FILE_BYTES) return { kind: 'corrupt' };
+    }
+    if (length === 0) return { kind: 'corrupt' };
+    return { kind: 'bytes', data: Buffer.from(buf.subarray(0, length)) };
+  } finally {
+    await fh.close();
+  }
+}
+
+// The most directory entries a listing looks at (issue #2217): the store keeps
+// at most 32 profiles, so a folder with more than this holds things that are
+// not ours, and the rest are not looked at.
+const MAX_LISTED = 256;
+
+// profileIds lists the names under <root>/profiles that are profile ids and
+// are directories, at most MAX_LISTED entries looked at, sorted. It follows
+// nothing: a symlink, a file or a name that is not an id is skipped, and each
+// id's file is then read by readCredential with its own lstat checks. A root
+// that is missing, or that is not ours, plain and private, lists none.
+export async function profileIds(root: string): Promise<readonly string[]> {
+  try {
+    if (!(await checkRoot(root))) return [];
+  } catch (err) {
+    if (err instanceof UnsafeRoot) return [];
+    throw err;
+  }
+  const dir = join(root, 'profiles');
+  let st;
+  try {
+    st = await lstat(dir);
+  } catch (err) {
+    if (isCode(err, 'ENOENT') || isCode(err, 'ENOTDIR')) return [];
+    throw err;
+  }
+  if (st.isSymbolicLink() || !st.isDirectory()) return [];
+  const ids: string[] = [];
+  let seen = 0;
+  // Leaving the loop early closes the directory.
+  for await (const entry of await opendir(dir)) {
+    if (++seen > MAX_LISTED) break;
+    if (entry.isDirectory() && validProfileId(entry.name)) ids.push(entry.name);
+  }
+  return ids.sort();
 }
 
 // removeProfile deletes the profile's directory and what is in it. Missing is

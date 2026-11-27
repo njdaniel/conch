@@ -100,7 +100,7 @@ interface Stub {
   baseline: ReadonlySet<string>;
   // Issue #444: what the room was made and joined with, the share's tracks
   // as captured, and what was published with which options.
-  roomOptions: unknown;
+  roomOptions: RoomOptions | undefined;
   connectOptions: unknown;
   screenOptions: unknown;
   screenTracks: StubScreenTrack[];
@@ -192,6 +192,10 @@ interface StubScreenTrack {
   sender?: StubSender;
   publishOptions?: unknown;
   stop: () => void;
+  // The elements it plays into (the sharer's preview).
+  attached: unknown[];
+  attach: (el: unknown) => unknown;
+  detach: (el?: unknown) => unknown[];
 }
 // A camera's capture, as the browser gives it and as the page wraps it.
 interface StubVideo {
@@ -301,6 +305,15 @@ vi.mock('livekit-client', () => {
     const track: StubScreenTrack = {
       source,
       stopped: 0,
+      attached: [],
+      attach: (el) => {
+        track.attached.push(el);
+        return el;
+      },
+      detach: (el) => {
+        track.attached = track.attached.filter((e) => el !== undefined && e !== el);
+        return [];
+      },
       setDegradationPreference: (preference) => {
         if (track.sender !== undefined) track.sender.parameters.degradationPreference = preference;
         return Promise.resolve();
@@ -519,6 +532,7 @@ vi.mock('livekit-client', () => {
     };
   }
   class Room {
+    readonly options: RoomOptions;
     // Read with permission requests as asked: the stub never asks for any.
     static getLocalDevices(kind: string, requestPermissions: boolean) {
       state.listed.push([kind, requestPermissions]);
@@ -594,8 +608,9 @@ vi.mock('livekit-client', () => {
         return Promise.resolve(undefined);
       },
     };
-    constructor(options: unknown) {
-      state.roomOptions = options;
+    constructor(options: RoomOptions) {
+      this.options = { ...options };
+      state.roomOptions = this.options;
       state.room = this;
     }
     on(event: string, fn: (...args: unknown[]) => void) {
@@ -716,7 +731,7 @@ vi.mock('livekit-client', () => {
 import { cameraOptions, cameraPublishOptions, captureOptions, grantWait, newLiveKitRoom, principalOf, sdkLog, shareEncodings, wanted, type ShareLayer } from './sdk';
 import type { Room, RoomEvents } from './connection';
 import { CameraClient } from './camera';
-import { Track } from 'livekit-client';
+import { Track, type RoomOptions } from 'livekit-client';
 
 // What the module did to the SDK's loggers when it loaded, before any test.
 const atLoad = { levelCalls: [...state.levelCalls], factoryReplaced: state.logger.methodFactory !== state.stubFactory, calls: [...state.calls] };
@@ -1122,6 +1137,24 @@ describe('the SDK adapter', () => {
     await room.setSending(true);
     republish?.(pub);
     expect(state.calls.filter((c) => c === 'republish-mute')).toHaveLength(1);
+  });
+
+  it('reports the local participant apart from the remote speakers (UI-talk-1)', async () => {
+    const seen: [readonly number[], boolean][] = [];
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', true, { ...events, onSpeakers: (ids, local) => void seen.push([ids, local]) });
+    const speakers = state.handlers.get('as');
+    const local = state.room?.localParticipant;
+    speakers?.([local, { identity: 'p3' }]);
+    // Another client of the same person, p7 here, is remote and counts; the
+    // local participant is told apart by being the room's own, not by principal.
+    speakers?.([{ identity: 'p7' }]);
+    speakers?.([{ identity: 'p7.view' }]);
+    expect(seen).toEqual([
+      [[3], true],
+      [[7], false],
+      [[], false],
+    ]);
   });
 
   it('mutes again after a remote unmute while the gate is shut, and only then', async () => {
@@ -1999,6 +2032,72 @@ describe('sharing a screen', () => {
     }
   });
 
+  // The sharer's preview (#2197): the raw capture's picture alone, never the
+  // share's sound, never through the SDK's attach() (whose visibility handler
+  // restarts a muted or ended track with the camera on a phone), and nothing
+  // left of it once the share is stopped, kept or replaced.
+  describe('the sharer\'s preview', () => {
+    class Stream {
+      constructor(readonly tracks: unknown[]) {}
+    }
+    const playing = (el: HTMLVideoElement): unknown[] | null => (el.srcObject as Stream | null)?.tracks ?? null;
+    beforeEach(() => {
+      vi.stubGlobal('MediaStream', Stream);
+    });
+
+    it('plays the raw picture, not its sound, and lets it go on stop', async () => {
+      const room = await connected();
+      const el = document.createElement('video');
+      room.attachShareSelf(el);
+      await room.pickScreen();
+      await room.publishScreen();
+      const [picture, sound] = state.screenTracks;
+      expect(playing(el)).toEqual([picture?.mediaStreamTrack]);
+      expect(sound?.mediaStreamTrack).not.toBe(picture?.mediaStreamTrack);
+      // The SDK's attach registers its visibility handler: never called.
+      expect(picture?.attached).toEqual([]);
+      expect(sound?.attached).toEqual([]);
+      await room.stopScreen();
+      expect(el.srcObject).toBeNull();
+      await room.close();
+    });
+
+    it('plays a capture picked before the preview is there, and follows a replaced capture', async () => {
+      const room = await connected();
+      await room.pickScreen();
+      const first = state.screenTracks[0];
+      const el = document.createElement('video');
+      room.attachShareSelf(el);
+      expect(playing(el)).toEqual([first?.mediaStreamTrack]);
+      await room.pickScreen();
+      const second = state.screenTracks[2];
+      expect(playing(el)).toEqual([second?.mediaStreamTrack]);
+      room.attachShareSelf(null);
+      expect(el.srcObject).toBeNull();
+      expect([first, second].flatMap((t) => t?.attached ?? [])).toEqual([]);
+      await room.close();
+    });
+
+    it('is cleared when the capture is kept, plays it again when adopted, and is cleared on close', async () => {
+      const room = await connected();
+      const el = document.createElement('video');
+      room.attachShareSelf(el);
+      await room.pickScreen();
+      const capture = state.screenTracks[0]?.mediaStreamTrack;
+      expect(playing(el)).toEqual([capture]);
+      const kept = room.keepScreen();
+      if (kept === null) throw new Error('nothing kept');
+      expect(el.srcObject).toBeNull();
+      await room.close();
+      const next = await connected();
+      next.attachShareSelf(el);
+      next.adoptScreen(kept);
+      expect(playing(el)).toEqual([capture]);
+      await next.close();
+      expect(el.srcObject).toBeNull();
+    });
+  });
+
   it('keeps the asked sender rate when capture settings report 1 fps', async () => {
     state.captured = { width: 1920, height: 1080, frameRate: 1 };
     const room = await connected();
@@ -2599,6 +2698,7 @@ describe("a share's encodings", () => {
     { what: 'a 1920-wide strip', width: 1920, height: 400, bitrate: 6_000_000, lower: [{ ...p720, width: 1280, height: 266 }] },
     // Inside both boxes: no layer would be smaller, so none.
     { what: 'a small window', width: 1000, height: 700, bitrate: 6_000_000, lower: [] },
+    { what: 'a window within the 854 px cap', width: 800, height: 600, bitrate: 2_000_000, lower: [] },
   ])('$what capture ($width x $height at 60 fps)', ({ width, height, bitrate, lower }) => {
     expect(sourceEncodings({ width, height, frameRate: 60 })).toEqual({ top: { width, height, maxBitrate: bitrate, maxFramerate: 60 }, lower });
   });
@@ -3173,6 +3273,85 @@ describe('the screen companion room (issue #1581)', () => {
     };
     return p;
   };
+
+  // Minimal Chromium VP8 offer. The real SDK chooses the layout and writes
+  // the bitrate fmtp before passing the resulting offer to signaling.
+  interface OfferSection {
+    mid: string;
+    kind: string;
+    direction: RTCRtpTransceiverDirection;
+    sender: { track: MediaStreamTrack | null };
+  }
+
+  class OfferPeerConnection {
+    signalingState: RTCSignalingState = 'stable';
+    private readonly transceivers: OfferSection[] = [];
+
+    addTransceiver(trackOrKind: string | MediaStreamTrack, init: RTCRtpTransceiverInit) {
+      const [kind, track] = typeof trackOrKind === 'string' ? [trackOrKind, null] : [trackOrKind.kind, trackOrKind];
+      const section: OfferSection = {
+        mid: String(this.transceivers.length), kind, direction: init.direction ?? 'sendrecv', sender: { track },
+      };
+      this.transceivers.push(section);
+      return section;
+    }
+
+    getTransceivers() { return this.transceivers; }
+    getSenders() { return []; }
+    createDataChannel() { return { close: () => undefined }; }
+    close() { this.signalingState = 'closed'; }
+    setLocalDescription() { return Promise.resolve(); }
+
+    createOffer(): Promise<RTCSessionDescriptionInit> {
+      const video = this.transceivers.filter((section) => section.kind === 'video');
+      const sdp = [
+        'v=0', 'o=- 0 0 IN IP4 127.0.0.1', 's=-', 't=0 0',
+        `a=group:BUNDLE ${video.map((section) => section.mid).join(' ')}`,
+        ...video.flatMap(({ mid, direction, sender }) => [
+          'm=video 9 UDP/TLS/RTP/SAVPF 96', 'c=IN IP4 0.0.0.0', `a=mid:${mid}`, `a=${direction}`,
+          'a=rtpmap:96 VP8/90000', ...(sender.track === null ? [] : [`a=msid:stream ${sender.track.id}`]),
+        ]), '',
+      ].join('\r\n');
+      return Promise.resolve({ type: 'offer', sdp });
+    }
+  }
+
+  it.each([false, true])('keeps VP8 receive placeholders out of the publisher offer for companion=%s (issue #2055)', async (companion) => {
+    const adapter = newLiveKitRoom();
+    adapter.setWatches(new Set(), null);
+    await adapter.switchOutput('out-1');
+    if (companion) adapter.setCompanion?.(true);
+    await adapter.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+
+    const { Room: RealRoom } = await vi.importActual<typeof import('livekit-client')>('livekit-client');
+    const { engine, options } = new RealRoom(state.roomOptions);
+    vi.stubGlobal('RTCPeerConnection', OfferPeerConnection);
+    // Defer the V1 offer until after the join. Both V1 paths add the same
+    // receive sections. The V0 path skips them entirely.
+    vi.stubGlobal('CompressionStream', undefined);
+    const join = vi.spyOn(engine.client, 'join');
+    join.mockResolvedValue({ subscriberPrimary: true, serverVersion: 'test' } as Awaited<ReturnType<typeof engine.client.join>>);
+    const sendOffer = vi.spyOn(engine.client, 'sendOffer').mockImplementation(() => undefined);
+    try {
+      await engine.join('wss://lk.example', 'tok-abcdef', {
+        autoSubscribe: false, e2eeEnabled: false, maxRetries: 0, websocketTimeout: 0,
+      }, undefined, !options.singlePeerConnection);
+      const publisher = engine.pcManager?.publisher;
+      if (publisher === undefined) throw new Error('LiveKit did not create a publisher transport');
+      publisher.addTransceiver({ id: 'screen', kind: 'video' } as MediaStreamTrack, { direction: 'sendonly' });
+      publisher.setTrackCodecBitrate({ cid: 'screen', codec: 'vp8', maxbr: 6000, isScreenShare: true });
+      await publisher.createAndSendOffer();
+      expect(sendOffer).toHaveBeenCalledTimes(1);
+      const sdp = sendOffer.mock.calls[0]?.[0].sdp ?? '';
+      const video = sdp.split('m=video ').slice(1);
+      expect(video.map((section) => section.match(/^a=fmtp:96 ([^\r\n]+)/m)?.[1])).toEqual(companion
+        ? ['x-google-start-bitrate=5400']
+        : [undefined, undefined, undefined, 'x-google-start-bitrate=5400']);
+    } finally {
+      vi.unstubAllGlobals();
+      await Promise.all([engine.close(), adapter.close()]);
+    }
+  });
 
   it('subscribes to no microphone, however it arrives, and to a watched share alone', async () => {
     const mic = remotePub('microphone', 'audio');

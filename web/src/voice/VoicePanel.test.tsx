@@ -2,19 +2,22 @@
 // and Watch only name the channel they join, Watch only says the room is
 // heard, and the channel voice is in is a way back to it while another is on
 // screen. Driven by a fake VoiceControl: no SDK, no network, no device.
-import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, createEvent, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ChannelV0 } from '../schema/channel';
 import type { VoicePresenceV2 } from '../schema/voice';
 import type { Person } from '../useLiveChannel';
+import type { Occupant } from './presence';
 import { initialVoice, VoiceClient, type Phase, type Processing, type VoiceState } from './connection';
 import { FakeClock } from './fakes';
 import { ownPageNote, soundNote, type ShareFeatures, type ShareQuality } from './share';
-import { ShareQualityMenu, sourceSixtyNote } from './ShareQualityMenu';
+import { ShareQualityMenu, autoNote, sourceSixtyNote } from './ShareQualityMenu';
+import { resetSharePreview, SelfShareView } from './ShareView';
 import { useState } from 'react';
-import { MicTestShown, VoiceLive, VoiceStrip } from '../phone';
+import { MicTestShown, VoiceLive, VoiceSheet, VoiceStrip } from '../phone';
+import { StageHost } from '../stage';
 import type { Snapshot, VoiceControl } from './useVoice';
-import { followsNote, hearLabel, meterNote, meterStripNote, missingNote, noOtherOutputs, noOutputChoice, processingLabel, processingOffNote, processingUseNote, reportedNote, stoppedFor, thresholdHint, VoicePanel } from './VoicePanel';
+import { followsNote, hearLabel, meterNote, meterStripNote, missingNote, noOtherOutputs, noOutputChoice, processingLabel, processingOffNote, processingUseNote, reportedNote, stoppedFor, thresholdHint, Roster, VoicePanel } from './VoicePanel';
 
 const chrome: ShareFeatures = { canShare: true, chromium: true, platform: 'linux' };
 const presence: VoicePresenceV2 = { schema: 'conch.voice_presence.v2', channel_id: 1, configured: true, available: true, rooms: [] };
@@ -242,6 +245,12 @@ describe('Join voice and Watch only', () => {
     expect(within(voice).getByRole('button', { name: 'Watch only in #book-club' })).toBeTruthy();
   });
 
+  it('says Microphone off once, in the hint, and has no standalone line for it (issue #2198, UI-talk-7)', () => {
+    const { voice } = panel(initialVoice, 'general');
+    expect((voice.textContent.match(/Microphone off/g) ?? [])).toHaveLength(1);
+    expect(voice.querySelector('.voice-sub')).toBeNull();
+  });
+
   it('Watch only is described, in a hint on screen, as keeping the microphone off and hearing the room', () => {
     const { voice } = panel(initialVoice, 'general');
     const said = 'Microphone off. You hear the room and can watch a share.';
@@ -282,13 +291,16 @@ describe('controls that cannot act', () => {
     expect(within(voice).getByRole('button', { name: 'Watch only in #c', description: watchHint })).toBeTruthy();
   });
 
+  // The default talk key's label in the fake control, and its note.
+  const talkKeyDescription = 'Talk key: ` (backtick). It works only while this tab has focus, and not while you are typing.';
   const silenced = (patch: Partial<VoiceState>): VoiceState => ({ ...inVoice('connected', 'c'), ...patch });
   it.each([
     ['muted', { muted: true }, 'Hold to talk sends nothing while you are muted. Unmute to talk.'],
     ['deafened', { muted: true, deafened: true }, 'Hold to talk sends nothing while you are deafened. Undeafen to talk.'],
   ])('Hold to talk says why it will not send while %s, and a press sends nothing', (_what, patch, said) => {
     const { voice, client } = panel(silenced(patch), 'c');
-    const talk = within(voice).getByRole('button', { name: 'Hold to talk', description: said });
+    // The talk key is in the description after the reason (issue #2198).
+    const talk = within(voice).getByRole('button', { name: 'Hold to talk', description: `${said} ${talkKeyDescription}` });
     expect(talk.getAttribute('aria-disabled')).toBe('true');
     expect(document.getElementById('voice-talk-why')?.textContent).toBe(said);
     // The press still reaches the client, whose gate is shut while muted or
@@ -299,11 +311,13 @@ describe('controls that cannot act', () => {
     expect(client.snapshot().transmitting).toBe(false);
   });
 
-  it('Hold to talk is not marked off, or described, while it can send', () => {
+  it('Hold to talk is not marked off, or described but by its talk key, while it can send', () => {
     const { voice } = panel(inVoice('connected', 'c'), 'c');
     const talk = within(voice).getByRole('button', { name: 'Hold to talk' });
     expect(talk.hasAttribute('aria-disabled')).toBe(false);
-    expect(talk.hasAttribute('aria-describedby')).toBe(false);
+    expect(talk.getAttribute('aria-describedby')).toBe('voice-talk-key');
+    expect(talk.getAttribute('title')).toBe('Talk key: ` (backtick)');
+    expect(talk.getAttribute('aria-describedby')).not.toContain('voice-talk-why');
     expect(voice.querySelector('#voice-talk-why')).toBeNull();
   });
 });
@@ -550,6 +564,57 @@ describe('the strip in voice', () => {
   const shape = (voice: HTMLElement) =>
     Array.from(voice.querySelectorAll('.voice-bar, .voice-bar *')).map((el) => `${el.tagName}.${el.getAttribute('class') ?? ''}`);
 
+  // Issue #2202: the page's own chip arrives with a presence snapshot a moment
+  // after the join; the room for it, in the real chip's markup, is there before.
+  it('holds the height of the roster, unseen, before the first chip arrives', () => {
+    const { voice } = panel(joined(false), 'c', { kind: 'presence', presence });
+    const bar = voice.querySelector('.voice-bar');
+    expect(Array.from(bar?.children ?? []).map((el) => el.className)).toEqual(['voice-who reserved', 'voice-row']);
+    expect(bar?.querySelector('.voice-who')?.getAttribute('aria-hidden')).toBe('true');
+    expect(within(voice).queryByRole('heading', { name: /in voice$/ })).toBeNull();
+  });
+
+  describe('the own chip held before presence lists the viewer', () => {
+    const people: ReadonlyMap<number, Person> = new Map([[3, { name: 'Ana' } as Person], [7, { name: 'Bartholomew' } as Person]]);
+    const drawn = (roster: readonly Occupant[], mayModerate: boolean) => {
+      const r = render(<Roster channel="c" mayModerate={mayModerate} reserve roster={roster} people={people} viewer={3} viewerName="Ana" elsewhere={false} speaking={new Set()} volumes={new Map()} />);
+      return r.container;
+    };
+    const other: Occupant = { principal: 7, transmitting: false, camera: false, sharing: false, sharingAudio: false, joinedAt: '2026-10-18T00:00:00Z' };
+    const own: Occupant = { ...other, principal: 3 };
+
+    it('carries the moderation button when the viewer may moderate, hidden and inert', () => {
+      const chip = drawn([], true).querySelector('li.reserved');
+      expect(chip?.getAttribute('aria-hidden')).toBe('true');
+      expect(chip?.hasAttribute('inert')).toBe(true);
+      expect(chip?.textContent).toBe('AnaRemove from voice');
+      expect(chip?.querySelector('button')?.tabIndex).toBe(-1);
+      expect(screen.queryByRole('button', { name: /Remove/ })).toBeNull();
+    });
+
+    it('has no button for a viewer who may not moderate', () => {
+      expect(drawn([], false).querySelector('li.reserved button')).toBeNull();
+    });
+
+    // The held chip takes the slot the real one will sort into (by principal).
+    it.each([
+      ['last, after lower ids', [1, 2], 2],
+      ['first, before higher ids', [7, 9], 0],
+      ['between lower and higher ids', [1, 7], 1],
+    ])('sits %s', (_, ids, at) => {
+      const chips = Array.from(drawn(ids.map((principal) => ({ ...other, principal })), true).querySelectorAll('li'));
+      expect(chips).toHaveLength(ids.length + 1);
+      expect(chips.findIndex((c) => c.classList.contains('reserved'))).toBe(at);
+    });
+
+    it('is replaced by the real chip when presence lists the viewer', () => {
+      const container = drawn([other, own], true);
+      expect(container.querySelectorAll('li.reserved')).toHaveLength(0);
+      expect(container.querySelectorAll('li')).toHaveLength(2);
+      expect(screen.getByRole('button', { name: 'Remove Ana from voice' })).toBeTruthy();
+    });
+  });
+
   it('is the roster, then a row of the state and the controls, with Leave voice last', () => {
     const { voice } = panel(joined(false), 'c', { kind: 'presence', presence: someone });
     const bar = voice.querySelector('.voice-bar');
@@ -570,19 +635,225 @@ describe('the strip in voice', () => {
   });
 });
 
-// Issue #965: the strip says Transmitting only while audio is sent; a press
+// Issue #965: the strip says Sending only while audio is sent (#2198); a press
 // that waits for conchd's answer says so, and Hold to talk shows pressed.
 // The release delay is set in Voice options.
 describe('what is sent, as the strip says it', () => {
+  // Issue #2198 (UI-talk-3, UI-talk-4, UI-talk-6, UI-talk-7).
+  it('says Open mic: sending, and Muted: not sending, in the strip, with no chip for the microphone', () => {
+    const { voice, redraw } = panel({ ...inVoice('connected', 'c'), mode: 'open', talking: true, transmitting: true }, 'c');
+    expect(voice.querySelector('.voice-tx')?.textContent).toBe('Open mic: sending');
+    expect(within(voice).queryByText('Microphone in use')).toBeNull();
+    redraw({ ...inVoice('connected', 'c'), mode: 'open', muted: true });
+    expect(voice.querySelector('.voice-tx')?.textContent).toBe('Muted: not sending');
+    expect(voice.querySelector('.voice-state .chip')).toBeNull();
+  });
+
+  it('says in Voice options, while the page holds the microphone, that it does', () => {
+    const { voice, redraw } = panel(inVoice('connected', 'c'), 'c');
+    const options = () => voice.querySelector('#voice-options')?.textContent ?? '';
+    expect(options()).toContain('This page is using your microphone.');
+    redraw({ ...inVoice('connected', 'c'), watchOnly: true });
+    expect(options()).not.toContain('This page is using your microphone.');
+    redraw({ ...inVoice('connected', 'c'), missing: true });
+    expect(options()).not.toContain('This page is using your microphone.');
+  });
+
+  it('keeps the talk key and sharing notes behind About talking and sharing, which toggles them', () => {
+    const { voice } = panel(inVoice('connected', 'c'), 'c');
+    const about = within(voice).getByRole('button', { name: 'About talking and sharing' });
+    expect(about.getAttribute('aria-expanded')).toBe('false');
+    expect(voice.querySelector('.voice-notes .talk-key-note')).toBeNull();
+    expect(voice.querySelector('.voice-notes .share-line')).toBeNull();
+    fireEvent.click(about);
+    expect(about.getAttribute('aria-expanded')).toBe('true');
+    expect(voice.querySelector('.voice-notes .talk-key-note')).not.toBeNull();
+    expect(voice.querySelector('.voice-notes .share-line')).not.toBeNull();
+    fireEvent.click(about);
+    expect(about.getAttribute('aria-expanded')).toBe('false');
+    expect(voice.querySelector('.voice-notes .talk-key-note')).toBeNull();
+    expect(voice.querySelector('.voice-notes .share-line')).toBeNull();
+  });
+
+  it('puts the talk key in the title and the description of Hold to talk, with the notes closed', () => {
+    const { voice } = panel(inVoice('connected', 'c'), 'c');
+    const talk = within(voice).getByRole('button', { name: 'Hold to talk', description: 'Talk key: ` (backtick). It works only while this tab has focus, and not while you are typing.' });
+    expect(talk.getAttribute('title')).toBe('Talk key: ` (backtick)');
+  });
+
+  // Round 2 (codex review of #2201).
+  it('has no About talking and sharing where there is nothing to disclose, and has it where there is', () => {
+    const { voice, redraw } = panel(inVoice('connected', 'c'), 'c');
+    const about = () => within(voice).queryByRole('button', { name: 'About talking and sharing' });
+    expect(about()).not.toBeNull();
+    // Open microphone: the sharing line is still there to disclose.
+    redraw({ ...inVoice('connected', 'c'), mode: 'open' });
+    expect(about()).not.toBeNull();
+    // Listen only: no talk key and no sharing line.
+    redraw({ ...inVoice('connected', 'c'), listenOnly: true });
+    expect(about()).toBeNull();
+    // Sharing now: the talk-key line is all there is, in push to talk.
+    redraw({ ...inVoice('connected', 'c'), share: { kind: 'stopping' } });
+    expect(about()).not.toBeNull();
+    redraw({ ...inVoice('connected', 'c'), mode: 'open', share: { kind: 'stopping' } });
+    expect(about()).toBeNull();
+  });
+
+  it('opens notes that the compact call keeps: they are not the supplemental ones it hides', () => {
+    const { voice } = panel(inVoice('connected', 'c'), 'c');
+    fireEvent.click(within(voice).getByRole('button', { name: 'About talking and sharing' }));
+    for (const selector of ['.voice-notes .talk-key-note', '.voice-notes .share-line']) {
+      const note = voice.querySelector(selector);
+      expect(note, selector).not.toBeNull();
+      expect(note?.classList.contains('voice-supplemental'), selector).toBe(false);
+    }
+  });
+
   it.each([
-    ['nothing held', { talking: false, transmitting: false }, 'Not transmitting', 'false'],
+    ['plain', {}, 'Talk key: ` (backtick). It works only while this tab has focus, and not while you are typing.'],
+    ['muted', { muted: true }, 'Hold to talk sends nothing while you are muted. Unmute to talk. Talk key: ` (backtick). It works only while this tab has focus, and not while you are typing.'],
+    ['listen only', { listenOnly: true }, 'Hold to talk is off: this session is listen only.'],
+    ['watch only', { watchOnly: true }, 'Hold to talk is off: you are in Watch only. Use microphone to talk.'],
+    ['watch only and muted', { watchOnly: true, muted: true }, 'Hold to talk is off: you are in Watch only. Use microphone to talk.'],
+  ] as const)('Hold to talk, %s: its description is %j, and points only at what is drawn', (_what, patch, said) => {
+    const { voice } = panel({ ...inVoice('connected', 'c'), ...patch }, 'c');
+    const talk = within(voice).getByRole('button', { name: 'Hold to talk' });
+    const ids = (talk.getAttribute('aria-describedby') ?? '').split(' ').filter((id) => id !== '');
+    expect(ids.length).toBeGreaterThan(0);
+    for (const id of ids) expect(document.getElementById(id), `#${id} is drawn`).not.toBeNull();
+    expect(ids.map((id) => document.getElementById(id)?.textContent).join(' ')).toBe(said);
+    // Where nothing can be sent the key is not advertised, in the title either.
+    if (_what.includes('only')) expect(talk.getAttribute('title')).not.toContain('Talk key');
+  });
+
+  // Round 3 (independent review of #2201).
+  it('draws no About talking and sharing on a touch screen that cannot share: nothing would open', () => {
+    vi.stubGlobal('matchMedia', (query: string) => ({ matches: query.includes('pointer: coarse'), media: query, addEventListener: () => undefined, removeEventListener: () => undefined, addListener: () => undefined, removeListener: () => undefined }));
+    try {
+      const noShare = { ...chrome, canShare: false };
+      render(<VoicePanel voice={{ ...control(inVoice('connected', 'c'), [], { kind: 'presence', presence }), features: noShare }} viewer={7} viewerName="" people={new Map()} viewed="c" onOpen={() => undefined} />);
+      const voice = screen.getByRole('region', { name: 'Voice' });
+      expect(within(voice).queryByRole('button', { name: 'About talking and sharing' })).toBeNull();
+      // No keyboard key is named for Hold to talk either (F18).
+      const talk = within(voice).getByRole('button', { name: 'Hold to talk' });
+      expect(talk.hasAttribute('title')).toBe(false);
+      expect(talk.hasAttribute('aria-describedby')).toBe(false);
+      expect(document.getElementById('voice-talk-key')).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('points About talking and sharing at the notes it opens, and closes it on Leave voice and a rejoin', () => {
+    const { voice, redraw } = panel(inVoice('connected', 'c'), 'c');
+    const about = () => within(voice).getByRole('button', { name: 'About talking and sharing' });
+    expect(document.getElementById(about().getAttribute('aria-controls') ?? '')).toBe(voice.querySelector('.voice-notes'));
+    fireEvent.click(about());
+    expect(about().getAttribute('aria-expanded')).toBe('true');
+    redraw(initialVoice);
+    redraw(inVoice('connected', 'c'));
+    expect(about().getAttribute('aria-expanded')).toBe('false');
+    expect(voice.querySelector('.voice-notes .talk-key-note')).toBeNull();
+  });
+
+  it('says for a viewer beside their voice on another device what is true, not Use microphone', () => {
+    const { voice } = panel({ ...inVoice('connected', 'c'), watchOnly: true, viewer: true }, 'c');
+    const talk = within(voice).getByRole('button', { name: 'Hold to talk' });
+    const said = 'Hold to talk is off: you are watching beside your voice on another device.';
+    expect(talk.getAttribute('title')).toBe(said);
+    expect(document.getElementById('voice-talk-key')?.textContent).toBe(said);
+    expect(within(voice).queryByRole('button', { name: 'Use microphone' })).toBeNull();
+  });
+
+  it('shows "x stopped sharing." in the strip, and nothing in the stage, when no stage content is left', () => {
+    const stage = document.createElement('div');
+    document.body.append(stage);
+    const bob: ReadonlyMap<number, Person> = new Map([[3, { name: 'bob', kind: null }]]);
+    const sharing = (on: boolean): Snapshot => ({ kind: 'presence', presence: { ...presence, rooms: [{ participants: [{ principal_id: 3, can_publish: true, transmitting: false, joined_at: '2026-10-18T00:00:00Z', sharing: on, ...(on ? { share_started_at: '2026-10-18T00:00:00Z' } : {}) }] }] } });
+    const mount = (state: VoiceState, snapshot: Snapshot) => (
+      <StageHost.Provider value={stage}>
+        <VoiceStrip.Provider value={() => undefined}>
+          <VoicePanel voice={control(state, [], snapshot)} viewer={7} viewerName="" people={bob} viewed="c" onOpen={() => undefined} />
+        </VoiceStrip.Provider>
+      </StageHost.Provider>
+    );
+    const view = render(mount({ ...inVoice('connected', 'c'), watched: new Set([3]) }, sharing(true)));
+    view.rerender(mount({ ...inVoice('connected', 'c'), watched: new Set() }, sharing(false)));
+    const voice = screen.getByRole('region', { name: 'Voice' });
+    expect(within(voice).getByText('bob stopped sharing.').getAttribute('role')).toBe('status');
+    // The stage stays empty, so the share layout does not claim the page.
+    expect(stage.childElementCount).toBe(0);
+    view.unmount();
+    stage.remove();
+  });
+
+  it('shows one badge in the roster for sending audio: speaking, else sending', () => {
+    const sending = { principal_id: 3, can_publish: true, transmitting: true, joined_at: '2026-10-18T00:00:00Z' };
+    const bob: ReadonlyMap<number, Person> = new Map([[3, { name: 'bob', kind: null }]]);
+    const snap: Snapshot = { kind: 'presence', presence: { ...presence, rooms: [{ participants: [sending] }] } };
+    const { voice, redraw } = panel(inVoice('connected', 'c'), 'c', snap, bob);
+    const chip = () => voice.querySelector('.voice-roster li:not(.me)')?.textContent ?? '';
+    expect(chip()).toContain('(sending)');
+    expect(chip()).not.toContain('speaking');
+    redraw({ ...inVoice('connected', 'c'), speaking: new Set([3]) }, snap);
+    expect(chip()).toContain('speaking');
+    expect(chip()).not.toContain('sending');
+    expect(voice.querySelector('.voice-roster li.speaking')).not.toBeNull();
+  });
+
+  // Issue #2211: the badge was a pill after the name, and on a phone a manager's
+  // chip (with Remove from voice) wrapped onto a second line when it showed. The
+  // mark is out of the chip's flow: the chip's children are the same with it and
+  // without it, and its word stays in the text read out.
+  describe('the sending and speaking mark on a chip', () => {
+    const people: ReadonlyMap<number, Person> = new Map([[3, { name: 'Ana' } as Person], [7, { name: 'Bartholomew' } as Person]]);
+    const occupant = (principal: number, transmitting: boolean): Occupant => ({ principal, transmitting, camera: false, sharing: false, sharingAudio: false, joinedAt: '2026-10-18T00:00:00Z' });
+    const chipOf = (transmitting: boolean, speaking: ReadonlySet<number>, mayModerate: boolean) => {
+      const r = render(<Roster channel="c" mayModerate={mayModerate} roster={[occupant(3, false), occupant(7, transmitting)]} people={people} viewer={3} viewerName="Ana" elsewhere={false} speaking={speaking} volumes={new Map()} />);
+      const chip = Array.from(r.container.querySelectorAll('li')).find((li) => li.textContent.includes('Bartholomew'));
+      if (chip === undefined) throw new Error('no chip');
+      return chip;
+    };
+    const shape = (chip: Element) => Array.from(chip.querySelectorAll(':scope > *:not(.face):not(.said), :scope > .face > *:not(.state)')).filter((el) => !el.classList.contains('state')).map((el) => `${el.tagName}.${el.className}`);
+
+    it.each([[true], [false]])('does not change what is in the chip\'s flow, for a manager: %s', (mayModerate) => {
+      const quiet = chipOf(false, new Set(), mayModerate);
+      cleanup();
+      const sending = chipOf(true, new Set(), mayModerate);
+      cleanup();
+      const speaking = chipOf(true, new Set([7]), mayModerate);
+      expect(shape(sending)).toEqual(shape(quiet));
+      expect(shape(speaking)).toEqual(shape(quiet));
+      expect(quiet.querySelector('.state')).toBeNull();
+    });
+
+    it('is one mark in the chip, with the word read out and no pill', () => {
+      const sending = chipOf(true, new Set(), true);
+      expect(sending.querySelectorAll('.state')).toHaveLength(1);
+      expect(sending.querySelector('.state.sending')).not.toBeNull();
+      expect(sending.querySelector('.said')?.textContent).toBe(' (sending)');
+      expect(sending.querySelector('.tag')).toBeNull();
+      cleanup();
+      const speaking = chipOf(true, new Set([7]), true);
+      expect(speaking.querySelectorAll('.state')).toHaveLength(1);
+      expect(speaking.querySelector('.state.speaking')).not.toBeNull();
+      expect(speaking.querySelector('.said')?.textContent).toBe(' (speaking)');
+    });
+
+    it('reads out "(sending)" after the name and the button, as the pill did', () => {
+      expect(chipOf(true, new Set(), true).textContent).toBe('BartholomewRemove from voice (sending)');
+    });
+  });
+
+  it.each([
+    ['nothing held', { talking: false, transmitting: false }, 'Push to talk: not sending', 'false'],
     ['a press waiting for its answer', { talking: true, transmitting: false }, 'Waiting for the server', 'true'],
-    ['a press sending', { talking: true, transmitting: true }, 'Transmitting', 'true'],
+    ['a press sending', { talking: true, transmitting: true }, 'Sending', 'true'],
   ] as const)('%s', (_what, patch, said, pressed) => {
     const { voice } = panel({ ...inVoice('connected', 'c'), ...patch }, 'c');
     const line = voice.querySelector('.voice-tx')?.textContent ?? '';
-    expect(line.endsWith(said)).toBe(true);
-    if (said !== 'Transmitting') expect(line.endsWith('Transmitting') && !line.endsWith('Not transmitting')).toBe(false);
+    expect(line).toBe(said);
+    expect(line.includes('Transmitting') || line.includes('Not transmitting')).toBe(false);
     expect(within(voice).getByRole('button', { name: 'Hold to talk' }).getAttribute('aria-pressed')).toBe(pressed);
     expect(voice.classList.contains('sending')).toBe(patch.transmitting);
   });
@@ -611,6 +882,409 @@ describe('what is sent, as the strip says it', () => {
     expect(slider.getAttribute('step')).toBe('50');
     fireEvent.keyDown(slider, { key });
     expect(calls).toContain(said);
+  });
+});
+
+// Issue #2189: Voice options is a panel over the page. Escape closes it and
+// puts focus back on its button.
+describe('Voice options as a panel', () => {
+  const open = () => {
+    const made = panel(inVoice('connected', 'c'), 'c');
+    const button = within(made.voice).getByRole('button', { name: 'Voice options' });
+    fireEvent.click(button);
+    expect(button.getAttribute('aria-expanded')).toBe('true');
+    return { ...made, button };
+  };
+
+  it('Escape closes it and returns focus to the Voice options button', () => {
+    const { voice, button } = open();
+    const slider = within(voice).getByRole('slider', { name: /Release delay/ });
+    slider.focus();
+    fireEvent.keyDown(slider, { key: 'Escape' });
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+    expect(voice.querySelector('#voice-options')?.hasAttribute('hidden')).toBe(true);
+    expect(document.activeElement).toBe(button);
+  });
+
+  it('a press inside does not close it', () => {
+    const { voice, button } = open();
+    const slider = within(voice).getByRole('slider', { name: /Release delay/ });
+    slider.focus();
+    fireEvent.mouseDown(slider);
+    expect(button.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('the button still toggles it', () => {
+    const { button } = open();
+    fireEvent.mouseDown(button);
+    fireEvent.click(button);
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.mouseDown(button);
+    fireEvent.click(button);
+    expect(button.getAttribute('aria-expanded')).toBe('true');
+  });
+});
+
+// Issue #2189: re-authentication outranks the sheet; the lobby says so
+// (blocked), and Voice options closes and stays closed.
+it('Voice options closes when re-authentication blocks it', () => {
+  const voice = control(inVoice('connected', 'c'), [], { kind: 'presence', presence });
+  const drawn = (blocked: boolean) => (
+    <VoiceSheet.Provider value={{ report: () => undefined, blocked, behind: blocked }}>
+      <VoicePanel voice={voice} viewer={7} people={new Map()} viewed="c" onOpen={() => undefined} />
+    </VoiceSheet.Provider>
+  );
+  const { rerender } = render(drawn(false));
+  const button = screen.getByRole('button', { name: 'Voice options' });
+  fireEvent.click(button);
+  expect(button.getAttribute('aria-expanded')).toBe('true');
+  rerender(drawn(true));
+  expect(screen.getByRole('button', { name: 'Voice options' }).getAttribute('aria-expanded')).toBe('false');
+  // Re-authentication done: it stays closed until it is opened again.
+  rerender(drawn(false));
+  expect(screen.getByRole('button', { name: 'Voice options' }).getAttribute('aria-expanded')).toBe('false');
+  expect(document.querySelector('#voice-options')?.hasAttribute('hidden')).toBe(true);
+});
+
+// Issue #2189: Settings opened over the sheet makes the dock inert and the
+// sheet loses focus; when Settings closes (behind goes) focus is given back to
+// the sheet's Close, not left on the body.
+it('Voice options takes focus back when what was over it goes', () => {
+  const voice = control(inVoice('connected', 'c'), [], { kind: 'presence', presence });
+  const drawn = (behind: boolean) => (
+    <VoiceSheet.Provider value={{ report: () => undefined, blocked: false, behind }}>
+      <VoicePanel voice={voice} viewer={7} people={new Map()} viewed="c" onOpen={() => undefined} />
+    </VoiceSheet.Provider>
+  );
+  // jsdom has no layout: the panel is a sheet where the section's top is above 40% of the window.
+  const top = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0, toJSON: () => ({}) });
+  const height = vi.spyOn(document.documentElement, 'clientHeight', 'get').mockReturnValue(800);
+  try {
+    const { rerender } = render(drawn(false));
+    fireEvent.click(screen.getByRole('button', { name: 'Voice options' }));
+    const close = document.querySelector<HTMLElement>('.voice-options-close');
+    expect(document.activeElement).toBe(close);
+    rerender(drawn(true));
+    // The dock went inert and took the focus with it.
+    close?.blur();
+    expect(document.activeElement).toBe(document.body);
+    rerender(drawn(false));
+    expect(document.activeElement).toBe(close);
+  } finally {
+    top.mockRestore();
+    height.mockRestore();
+  }
+});
+
+// Issue #2189: Settings over the open sheet. A press on its Close or its
+// backdrop is Settings' own: the outside-press handler leaves the sheet open,
+// and focus goes back into it once Settings is gone.
+it('Voice options stays open under a press, and under Escape, while Settings is over it', () => {
+  const voice = control(inVoice('connected', 'c'), [], { kind: 'presence', presence });
+  const drawn = (behind: boolean) => (
+    <VoiceSheet.Provider value={{ report: () => undefined, blocked: false, behind }}>
+      <VoicePanel voice={voice} viewer={7} people={new Map()} viewed="c" onOpen={() => undefined} />
+      <div className="backdrop" data-testid="backdrop" />
+      <button type="button">Settings Close</button>
+    </VoiceSheet.Provider>
+  );
+  const top = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0, toJSON: () => ({}) });
+  const height = vi.spyOn(document.documentElement, 'clientHeight', 'get').mockReturnValue(800);
+  try {
+    const { rerender } = render(drawn(false));
+    const button = screen.getByRole('button', { name: 'Voice options' });
+    fireEvent.click(button);
+    const close = document.querySelector<HTMLElement>('.voice-options-close');
+    rerender(drawn(true));
+    close?.blur();
+    fireEvent.mouseDown(screen.getByRole('button', { name: 'Settings Close' }));
+    fireEvent.mouseDown(screen.getByTestId('backdrop'));
+    expect(screen.getByRole('button', { name: 'Voice options' }).getAttribute('aria-expanded')).toBe('true');
+    // Focus fell to the body (a click on content that takes none): Escape is
+    // still Settings' and does not close the panel beneath it.
+    fireEvent.keyDown(document.body, { key: 'Escape' });
+    expect(screen.getByRole('button', { name: 'Voice options' }).getAttribute('aria-expanded')).toBe('true');
+    rerender(drawn(false));
+    expect(document.activeElement).toBe(close);
+    // With nothing over it, a press outside closes it as before.
+    fireEvent.mouseDown(screen.getByTestId('backdrop'));
+    expect(screen.getByRole('button', { name: 'Voice options' }).getAttribute('aria-expanded')).toBe('false');
+  } finally {
+    top.mockRestore();
+    height.mockRestore();
+  }
+});
+
+// Issue #2189: whatever modal has focus, the sheet does not take it. A foreign
+// aria-modal dialog (one the lobby was never told of) holds it against the
+// sheet opening.
+it('Voice options does not take focus from another open modal dialog', () => {
+  const voice = control(inVoice('connected', 'c'), [], { kind: 'presence', presence });
+  const top = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0, toJSON: () => ({}) });
+  const height = vi.spyOn(document.documentElement, 'clientHeight', 'get').mockReturnValue(800);
+  try {
+    render(
+      <>
+        <div role="dialog" aria-modal="true" aria-label="Elsewhere"><input aria-label="Field" /></div>
+        <VoicePanel voice={voice} viewer={7} people={new Map()} viewed="c" onOpen={() => undefined} />
+      </>,
+    );
+    const field = screen.getByLabelText('Field');
+    field.focus();
+    fireEvent.click(screen.getByRole('button', { name: 'Voice options' }));
+    expect(document.querySelector('#voice-options')?.classList.contains('sheet')).toBe(true);
+    expect(document.activeElement).toBe(field);
+  } finally {
+    top.mockRestore();
+    height.mockRestore();
+  }
+});
+
+// Issue #2189: an anchored panel the window narrows under closes, rather than
+// becoming a sheet over what else is open; a sheet is only opened by a press.
+it('an open anchored panel closes when it would become a sheet, with focus on its button if it was in it', () => {
+  const voice = control(inVoice('connected', 'c'), [], { kind: 'presence', presence });
+  let top = 700;
+  const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(() => ({ top, left: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: top, toJSON: () => ({}) }));
+  const height = vi.spyOn(document.documentElement, 'clientHeight', 'get').mockReturnValue(800);
+  try {
+    render(<VoicePanel voice={voice} viewer={7} people={new Map()} viewed="c" onOpen={() => undefined} />);
+    const button = screen.getByRole('button', { name: 'Voice options' });
+    fireEvent.click(button);
+    expect(document.querySelector('#voice-options')?.classList.contains('sheet')).toBe(false);
+    const slider = screen.getByRole('slider', { name: /Release delay/ });
+    slider.focus();
+    top = 100;
+    act(() => {
+      window.dispatchEvent(new Event('resize'));
+    });
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(button);
+    // Focus outside the panel is left alone.
+    fireEvent.click(button);
+    top = 700;
+    act(() => {
+      window.dispatchEvent(new Event('resize'));
+    });
+    const other = document.createElement('input');
+    document.body.append(other);
+    other.focus();
+    top = 100;
+    act(() => {
+      window.dispatchEvent(new Event('resize'));
+    });
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(other);
+    other.remove();
+  } finally {
+    rect.mockRestore();
+    height.mockRestore();
+  }
+});
+
+// Issue #2189: every way Voice options goes out of sight closes it, so that
+// coming back never reopens it: the phone's Chat and Channels views (the
+// strip), and leaving voice.
+describe('Voice options closes when it goes out of sight', () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  const drawn = (state: VoiceState, strip: boolean) => (
+    <VoiceStrip.Provider value={strip ? () => undefined : null}>
+      <VoicePanel voice={control(state, [], { kind: 'presence', presence })} viewer={7} people={new Map()} viewed="c" onOpen={() => undefined} />
+    </VoiceStrip.Provider>
+  );
+  const expanded = () => screen.queryByRole('button', { name: 'Voice options' })?.getAttribute('aria-expanded');
+
+  it.each(['Chat', 'Channels'])('keeps focus on %s and stays closed on return to Voice', (view) => {
+    const state = inVoice('connected', 'c');
+    vi.spyOn(document.documentElement, 'clientHeight', 'get').mockReturnValue(520);
+    const { rerender } = render(drawn(state, false));
+    fireEvent.click(screen.getByRole('button', { name: 'Voice options' }));
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Close' }));
+    render(<nav className="phone-nav">
+      <button type="button" aria-current="page">Voice</button>
+      <button type="button" onClick={() => { rerender(drawn(state, true)); }}><span>{view}</span></button>
+    </nav>);
+    const destination = screen.getByRole('button', { name: view });
+    const label = within(destination).getByText(view);
+    // jsdom needs the browser's default mousedown focus action simulated.
+    if (fireEvent.mouseDown(label)) act(() => { destination.focus(); });
+    fireEvent.click(label, { detail: 1 });
+    expect(document.activeElement).toBe(destination);
+    expect(document.querySelector('#voice-options')?.hasAttribute('hidden')).toBe(true);
+    rerender(drawn(state, false));
+    expect(expanded()).toBe('false');
+    expect(document.activeElement).toBe(destination);
+  });
+
+  it('does not come back after leaving voice and joining again', () => {
+    const { rerender } = render(drawn(inVoice('connected', 'c'), false));
+    fireEvent.click(screen.getByRole('button', { name: 'Voice options' }));
+    rerender(drawn(initialVoice, false));
+    rerender(drawn(inVoice('connected', 'c'), false));
+    expect(expanded()).toBe('false');
+  });
+});
+
+// Issue #2189: the anchored panel is a popover: focus gained by anything but
+// the panel or its button closes it, wherever focus went; losing the window's
+// focus (Alt-Tab, a native picker) does not.
+describe('the anchored Voice options panel and focus leaving it', () => {
+  const setup = () => {
+    const voice = control(inVoice('connected', 'c'), [], { kind: 'presence', presence });
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ top: 700, left: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 700, toJSON: () => ({}) });
+    const height = vi.spyOn(document.documentElement, 'clientHeight', 'get').mockReturnValue(800);
+    render(
+      <>
+        <p>Selectable chat text</p>
+        <input aria-label="Message" />
+        <div data-testid="blank-space" />
+        <VoicePanel voice={voice} viewer={7} people={new Map()} viewed="c" onOpen={() => undefined} />
+      </>,
+    );
+    const other = screen.getByRole('textbox', { name: 'Message' });
+    const button = screen.getByRole('button', { name: 'Voice options' });
+    fireEvent.click(button);
+    expect(document.querySelector('#voice-options')?.classList.contains('sheet')).toBe(false);
+    return { button, other, done: () => { rect.mockRestore(); height.mockRestore(); } };
+  };
+
+  it('dismisses on an outside press and preserves a delayed drag selection', async () => {
+    const { button, done } = setup();
+    const selection = window.getSelection();
+    try {
+      const text = screen.getByText('Selectable chat text');
+      const slider = screen.getByRole('slider', { name: /Release delay/ });
+      slider.focus();
+      const press = createEvent.mouseDown(text);
+      // jsdom needs the browser's focus and selection defaults simulated.
+      act(() => {
+        if (fireEvent(text, press)) slider.blur();
+      });
+      expect(press.defaultPrevented).toBe(false);
+      expect(button.getAttribute('aria-expanded')).toBe('false');
+      await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 10)); });
+      fireEvent.mouseMove(text, { buttons: 1 });
+      selection?.selectAllChildren(text);
+      fireEvent.mouseUp(text);
+      expect(document.activeElement).not.toBe(button);
+      expect(selection?.toString()).toBe('Selectable chat text');
+    } finally {
+      selection?.removeAllRanges();
+      done();
+    }
+  });
+
+  it('dismisses on a press that focuses an outside input and keeps focus there', () => {
+    const { button, other, done } = setup();
+    try {
+      screen.getByRole('slider', { name: /Release delay/ }).focus();
+      // jsdom needs the default mousedown focus action simulated.
+      if (fireEvent.mouseDown(other)) other.focus();
+      expect(button.getAttribute('aria-expanded')).toBe('false');
+      expect(document.activeElement).toBe(other);
+      fireEvent.mouseUp(other);
+      expect(document.activeElement).toBe(other);
+    } finally {
+      done();
+    }
+  });
+
+  it('restores focus on release after a press on blank space with a collapsed selection', async () => {
+    const { button, done } = setup();
+    try {
+      const blank = screen.getByTestId('blank-space');
+      const slider = screen.getByRole('slider', { name: /Release delay/ });
+      slider.focus();
+      // A blank press blurs the focused control without focusing a new one.
+      act(() => {
+        if (fireEvent.mouseDown(blank)) slider.blur();
+      });
+      expect(button.getAttribute('aria-expanded')).toBe('false');
+      expect(window.getSelection()?.isCollapsed).toBe(true);
+      await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 10)); });
+      expect(document.activeElement === document.body).toBe(true);
+      fireEvent.mouseUp(blank);
+      expect(document.activeElement).toBe(button);
+    } finally {
+      done();
+    }
+  });
+
+  it('leaves focus alone when an outside press is cancelled', async () => {
+    const { button, done } = setup();
+    try {
+      const blank = screen.getByTestId('blank-space');
+      const slider = screen.getByRole('slider', { name: /Release delay/ });
+      slider.focus();
+      fireEvent.pointerDown(blank, { pointerId: 1, pointerType: 'mouse', isPrimary: true });
+      act(() => {
+        if (fireEvent.mouseDown(blank)) slider.blur();
+      });
+      expect(button.getAttribute('aria-expanded')).toBe('false');
+      fireEvent.pointerCancel(blank, { pointerId: 1, pointerType: 'mouse', isPrimary: true });
+      fireEvent.mouseUp(blank);
+      await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 10)); });
+      expect(document.activeElement === document.body).toBe(true);
+    } finally {
+      done();
+    }
+  });
+
+  it('closes when focus goes to something else, and leaves focus there', () => {
+    const { button, other, done } = setup();
+    try {
+      const slider = screen.getByRole('slider', { name: /Release delay/ });
+      slider.focus();
+      fireEvent.focusIn(slider);
+      expect(button.getAttribute('aria-expanded')).toBe('true');
+      button.focus();
+      fireEvent.focusIn(button);
+      expect(button.getAttribute('aria-expanded')).toBe('true');
+      other.focus();
+      fireEvent.focusIn(other);
+      expect(button.getAttribute('aria-expanded')).toBe('false');
+      expect(document.activeElement).toBe(other);
+    } finally {
+      done();
+    }
+  });
+
+  it('stays open when focus goes into another modal dialog (the quick switcher)', () => {
+    const { button, done } = setup();
+    const dialog = document.createElement('div');
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    const field = document.createElement('input');
+    dialog.append(field);
+    document.body.append(dialog);
+    try {
+      const slider = screen.getByRole('slider', { name: /Release delay/ });
+      slider.focus();
+      field.focus();
+      fireEvent.focusIn(field);
+      expect(button.getAttribute('aria-expanded')).toBe('true');
+    } finally {
+      dialog.remove();
+      done();
+    }
+  });
+
+  it('stays open when the window loses focus, and when it comes back to the panel', () => {
+    const { button, done } = setup();
+    try {
+      const slider = screen.getByRole('slider', { name: /Release delay/ });
+      slider.focus();
+      // Alt-Tab: a focusout with no related target, and the window's blur.
+      fireEvent.focusOut(slider, { relatedTarget: null });
+      fireEvent.blur(window);
+      expect(button.getAttribute('aria-expanded')).toBe('true');
+      fireEvent.focus(window);
+      fireEvent.focusIn(slider);
+      expect(button.getAttribute('aria-expanded')).toBe('true');
+    } finally {
+      done();
+    }
   });
 });
 
@@ -672,7 +1346,10 @@ describe('the keyboard', () => {
   it('says, in the strip and in Voice options, that the talk key does not work while typing', () => {
     const { voice } = talking();
     const said = 'It works only while this tab has focus, and not while you are typing.';
-    expect(voice.querySelector('.talk-key-note')?.textContent).toBe(`Talk key: \` (backtick). ${said}`);
+    // Behind About talking and sharing, closed to begin with (issue #2198).
+    expect(voice.querySelector('.voice-notes .talk-key-note')).toBeNull();
+    fireEvent.click(within(voice).getByRole('button', { name: 'About talking and sharing' }));
+    expect(voice.querySelector('.voice-notes .talk-key-note')?.textContent).toBe(`Talk key: \` (backtick). ${said}`);
     const options = voice.querySelector('#voice-options');
     expect(options?.textContent).toContain('Talk key: ` (backtick).');
     expect(options?.textContent).toContain('The talk key works only while this tab has focus, and not while you are typing.');
@@ -724,6 +1401,53 @@ describe('talk-key capture', () => {
     return { setTalkKey, capture };
   };
 
+  // Issue #2189: while the talk key is chosen the capture has Tab and Shift+Tab
+  // too: the panel's Tab routing leaves them alone and focus stays put.
+  it('leaves Shift+Tab to the capture: no focus move to the button, the panel stays open', () => {
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ top: 700, left: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 700, toJSON: () => ({}) });
+    const height = vi.spyOn(document.documentElement, 'clientHeight', 'get').mockReturnValue(800);
+    // jsdom draws nothing: every element counts as drawn for the Tab routing.
+    const drawn = vi.spyOn(HTMLElement.prototype, 'getClientRects').mockReturnValue([{}] as unknown as DOMRectList);
+    try {
+      capturing();
+      const panel = document.querySelector<HTMLElement>('#voice-options');
+      const first = panel?.querySelector<HTMLElement>('button:not(:disabled), select:not(:disabled), input:not(:disabled)');
+      if (first === null || first === undefined) throw new Error('no control in the panel');
+      first.focus();
+      const button = screen.getByRole('button', { name: 'Voice options' });
+      // (The capture itself takes the key and prevents its default.)
+      fireEvent.keyDown(first, { key: 'Tab', shiftKey: true });
+      expect(document.activeElement).toBe(first);
+      expect(document.activeElement).not.toBe(button);
+      expect(button.getAttribute('aria-expanded')).toBe('true');
+    } finally {
+      rect.mockRestore();
+      height.mockRestore();
+      drawn.mockRestore();
+    }
+  });
+
+  // Issue #2189: the capture ends with the panel, by whatever route it closes,
+  // and Escape during a capture cancels only the capture.
+  it('ends the capture when the panel closes by a press outside, or by its button', () => {
+    const { capture } = capturing();
+    fireEvent.mouseDown(document.body);
+    expect(capture).toHaveBeenCalledWith(false);
+    capture.mockClear();
+    fireEvent.click(screen.getByRole('button', { name: 'Voice options' }));
+    expect(capture).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Voice options' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Voice options' }));
+    expect(capture).toHaveBeenCalledWith(false);
+  });
+
+  it('Escape during a capture cancels the capture and leaves the panel open', () => {
+    const { capture } = capturing();
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Press a key or Mouse 4/5 (Escape cancels)' }), { code: 'Escape', key: 'Escape' });
+    expect(capture).toHaveBeenCalledWith(false);
+    expect(screen.getByRole('button', { name: 'Voice options' }).getAttribute('aria-expanded')).toBe('true');
+  });
+
   it.each([
     [3, 'Mouse4'],
     [4, 'Mouse5'],
@@ -753,7 +1477,9 @@ describe('talk-key capture', () => {
     ['Mouse5', 'Mouse 5'],
   ])('labels %s as %s', (talkKey, label) => {
     capturing(talkKey);
-    expect(screen.getByRole('region', { name: 'Voice' }).querySelector('.talk-key-note')?.textContent).toContain(`Talk key: ${label}.`);
+    const voice = screen.getByRole('region', { name: 'Voice' });
+    expect(voice.querySelector('.talk-key-note')?.textContent).toContain(`Talk key: ${label}.`);
+    expect(within(voice).getByRole('button', { name: 'Hold to talk' }).getAttribute('title')).toBe(`Talk key: ${label}`);
   });
 });
 
@@ -911,6 +1637,28 @@ describe('what the strip says is true', () => {
       expect(shown(voice)).toBeNull();
     });
 
+    // Issue #2198 (UI-stream-5): where the stage was, not after the help line.
+    it('shows the notice in the stage, as a status, and takes it away after the same time', () => {
+      vi.useFakeTimers();
+      const stage = document.createElement('div');
+      document.body.append(stage);
+      const mount = (state: VoiceState, snapshot: Snapshot) => (
+        <StageHost.Provider value={stage}>
+          <VoicePanel voice={control(state, [], snapshot)} viewer={7} viewerName="" people={bob} viewed="c" onOpen={() => undefined} />
+        </StageHost.Provider>
+      );
+      const view = render(mount(joined({ watched: new Set([3]) }), bobShares));
+      view.rerender(mount(joined({ watched: new Set() }), nobodyShares));
+      const voice = screen.getByRole('region', { name: 'Voice' });
+      const notice = within(stage).getByText(said);
+      expect(notice.getAttribute('role')).toBe('status');
+      expect(voice.textContent).not.toContain(said);
+      act(() => { vi.advanceTimersByTime(stoppedFor); });
+      expect(within(stage).queryByText(said)).toBeNull();
+      view.unmount();
+      stage.remove();
+    });
+
     it('says the holder stopped when the share and the watching end in one frame', () => {
       const { voice, redraw } = panel(joined({ watched: new Set([3]) }), 'c', bobShares, bob);
       redraw(joined({ watched: new Set() }), nobodyShares);
@@ -1001,6 +1749,21 @@ describe('what the strip says is true', () => {
       expect(alone.calls).toEqual(['watch only']);
     });
 
+    it('keeps the voice row buttons in the same order from connecting to connected as a viewer (#2210)', () => {
+      const { voice, redraw } = panel(initialVoice, 'c', room(one(7)));
+      const buttons = () => Array.from(voice.querySelectorAll('.voice-controls button'), (button) =>
+        button.getAttribute('aria-label') ?? button.textContent.trim());
+      // The join sets viewer before the grant confirms the session is listen only.
+      const connecting = { ...inVoice('connecting', 'c'), watchOnly: true, viewer: true };
+      redraw(connecting);
+      const first = buttons();
+      const firstStatus = voice.querySelector('.voice-sub')?.textContent;
+      redraw({ ...connecting, phase: 'connected', listenOnly: true });
+      expect(buttons()).toEqual(first);
+      expect(first).toEqual(['Hold to talk', 'Open mic', 'Mute', 'Deafen', 'Voice options', 'Leave voice']);
+      expect(voice.querySelector('.voice-sub')?.textContent).toBe(firstStatus);
+    });
+
     it('says so on a page another device took over', () => {
       const why = 'Another device took over your place in this voice room';
       const { voice } = panel({ ...initialVoice, phase: 'stopped', why }, 'c', room(one(7)));
@@ -1045,6 +1808,9 @@ describe('the notes about sharing', () => {
 
   it('are one line before a share, with More about sharing; the full notes wait in Voice options', () => {
     const { voice } = panel(joined(), 'c', nobodyShares, bob);
+    // The line is behind About talking and sharing (issue #2198).
+    expect(within(voice).queryByText(line)).toBeNull();
+    fireEvent.click(within(voice).getByRole('button', { name: 'About talking and sharing' }));
     const short = within(voice).getByText(line);
     expect(short.classList.contains('hint')).toBe(true);
     expect(within(short).getByRole('button', { name: 'More about sharing' })).toBeTruthy();
@@ -1059,6 +1825,7 @@ describe('the notes about sharing', () => {
 
   it('More about sharing opens Voice options at the full notes, in one press', () => {
     const { voice } = panel(joined(), 'c', nobodyShares, bob);
+    fireEvent.click(within(voice).getByRole('button', { name: 'About talking and sharing' }));
     fireEvent.click(within(voice).getByRole('button', { name: 'More about sharing' }));
     expect(within(voice).getByRole('button', { name: 'Voice options', expanded: true })).toBeTruthy();
     expect(voice.querySelector('#voice-options')?.hasAttribute('hidden')).toBe(false);
@@ -1069,6 +1836,7 @@ describe('the notes about sharing', () => {
 
   it('stay one line beside another stream, with Watch on its tile and the full notes in Voice options', () => {
     const { voice, redraw } = panel(joined(), 'c', bobShares, bob);
+    fireEvent.click(within(voice).getByRole('button', { name: 'About talking and sharing' }));
     expect(within(voice).getByText(line)).toBeTruthy();
     expect(within(voice).getByRole('button', { name: 'More about sharing' })).toBeTruthy();
     expect(voice.querySelector('#voice-options')?.hasAttribute('hidden')).toBe(true);
@@ -1166,6 +1934,8 @@ describe('where else people are in voice', () => {
 // Issue #658: the choice of microphone in Voice options, the device in use,
 // and the note while the microphone is missing.
 describe('the microphone chosen', () => {
+  // Voice options says it while the page holds the microphone (issue #2198).
+  const inUseLine = 'This page is using your microphone.';
   const list = [
     { id: 'default', label: 'Default - Headset' },
     { id: 'mic-1', label: 'Headset' },
@@ -1224,13 +1994,15 @@ describe('the microphone chosen', () => {
     expect(opts.textContent).not.toContain('Microphones are listed');
   });
 
-  it('while missing: the note, no Microphone in use, nothing in use, and the list asks for a choice', () => {
+  it('while missing: the note, no line that the microphone is in use, and the list asks for a choice', () => {
     const { voice, redraw } = panel(using({ microphone: headset, inUse: 'mic-1' }), 'c');
-    expect(within(voice).getByText('Microphone in use')).toBeTruthy();
+    // In Voice options, not a chip in the strip (issue #2198, UI-talk-3).
+    expect(voice.querySelector('#voice-options')?.textContent).toContain(inUseLine);
+    expect(within(voice).queryByText('Microphone in use')).toBeNull();
     expect(within(voice).queryByText(missingNote)).toBeNull();
     redraw(using({ microphone: headset, inUse: null, missing: true }));
     expect(within(voice).getByText(missingNote).getAttribute('role')).toBe('status');
-    expect(within(voice).queryByText('Microphone in use')).toBeNull();
+    expect(voice.querySelector('#voice-options')?.textContent).not.toContain(inUseLine);
     const opts = options(voice);
     const select = choice(opts);
     expect(select.selectedOptions[0]?.textContent).toBe('Choose a microphone');
@@ -1736,7 +2508,7 @@ describe('the phone strip under Chat and Channels (issue #1028)', () => {
     expect(voice.querySelector('.voice-notes')?.hasAttribute('hidden')).toBe(false);
   });
 
-  it('keeps Voice options as they were left across the strip and the Voice view', () => {
+  it('closes Voice options when the strip hides them, and leaves them closed in the Voice view (issue #2189)', () => {
     const voiceControl = control(inVoice('connected', 'channel-a'), [], crowd);
     const page = (opens: (() => void) | null) => (
       <VoiceStrip.Provider value={opens}>
@@ -1751,7 +2523,7 @@ describe('the phone strip under Chat and Channels (issue #1028)', () => {
     rerender(page(() => undefined));
     expect(options()).toBe(true);
     rerender(page(null));
-    expect(options()).toBe(false);
+    expect(options()).toBe(true);
   });
 
   it('is not the strip out of voice: Join voice is the Voice view\'s, and the lobby hides the dock', () => {
@@ -1842,12 +2614,14 @@ describe('the compact call workspace (issue #1498)', () => {
       expect(t.call.textContent).toContain(text);
       expect(t.voice.querySelector('.voice-bar')?.textContent).toContain(text);
     };
-    both('Microphone in use');
+    // The microphone is a tooltip's word, not a chip (issue #2198).
+    expect(t.call.textContent).not.toContain('Microphone in use');
+    expect(t.voice.querySelector('.voice-bar')?.textContent).not.toContain('Microphone in use');
     both('Camera in use');
-    both('Push to talk.');
+    both('Push to talk: not sending');
     both('Waiting for the picture');
     t.redraw(watching({ muted: true, cameraTrack: 'captured' }));
-    both('Muted.');
+    both('Muted: not sending');
     t.redraw(watching({ muted: true, deafened: true, cameraTrack: 'captured' }));
     both('Deafened (you hear no one, and you are muted).');
     t.redraw(watching({ cameraTrack: 'published' }));
@@ -1960,7 +2734,7 @@ describe('the share quality menu', () => {
     fireEvent.click(screen.getByRole('menuitemradio', { name: '60 fps' }));
     expect(chosen()).toBe('source/60');
     expect(screen.getByRole('menuitemradio', { name: /^Source/ }).getAttribute('aria-checked')).toBe('true');
-    expect(screen.getByText(sourceSixtyNote)).toBeTruthy();
+    expect(screen.getByText(sourceSixtyNote).getAttribute('aria-hidden')).toBeNull();
   });
 
   it.each([
@@ -1970,7 +2744,25 @@ describe('the share quality menu', () => {
   ] as const)('says the 4K60 caution only for $what', ({ start, shown }) => {
     render(<Harness start={start} />);
     fireEvent.click(opener());
-    expect(screen.queryByText(sourceSixtyNote) !== null).toBe(shown);
+    expect(screen.getByText(sourceSixtyNote).hasAttribute('aria-hidden')).toBe(!shown);
+  });
+
+  // #2194: the menu never changes size on a choice, so the note slot is always
+  // laid out, holds both texts, and announces only the one that applies.
+  it.each([
+    { what: 'Auto', start: { resolution: 'auto', frameRate: 30 }, live: autoNote, inactive: sourceSixtyNote },
+    { what: 'Source at 60 fps', start: { resolution: 'source', frameRate: 60 }, live: sourceSixtyNote, inactive: autoNote },
+    { what: '1080p', start: { resolution: '1080p', frameRate: 30 }, live: null, inactive: null },
+  ] as const)('in $what the note slot is a status region and only the live paragraph is left out of aria-hidden', ({ start, live, inactive }) => {
+    render(<Harness start={start} />);
+    fireEvent.click(opener());
+    const slot = screen.getByRole('menu', { name: 'Share quality' }).querySelector('.share-chooser-notes');
+    if (slot === null) throw new Error('the note slot must be present');
+    expect(slot.getAttribute('role')).toBe('status');
+    const hidden = Array.from(slot.querySelectorAll('p')).filter((p) => p.getAttribute('aria-hidden') === 'true').map((p) => p.textContent);
+    const shown = Array.from(slot.querySelectorAll('p')).filter((p) => !p.hasAttribute('aria-hidden')).map((p) => p.textContent);
+    expect(shown).toEqual(live === null ? [] : [live]);
+    expect(hidden).toEqual(live === null ? [autoNote, sourceSixtyNote] : [inactive]);
   });
 
   it('Auto is 30 fps: the frame rates are off and the choice says what Auto does', () => {
@@ -2072,5 +2864,118 @@ describe('the share quality menu', () => {
     const { voice } = panel(joined({ share: { kind: 'sharing', audio: false } }), 'c');
     expect(within(voice).queryByRole('button', { name: 'Share quality' })).toBeNull();
     expect(within(voice).getByRole('button', { name: 'Stop sharing' })).toBeTruthy();
+  });
+});
+
+// The sharer's preview of their own screen (#2197): the local picture, muted,
+// in the same frame as a watched share, which the sharer may hide.
+describe('the sharer\'s preview', () => {
+  const mine = {
+    principal_id: 7,
+    can_publish: true,
+    transmitting: false,
+    joined_at: '2026-10-18T00:00:00Z',
+    sharing: true,
+    share_started_at: '2026-10-16T00:00:00.000Z',
+  };
+  const sharing: Snapshot = { kind: 'presence', presence: { ...presence, rooms: [{ participants: [mine] }] } };
+  const joined: VoiceState = { ...inVoice('connected', 'c'), share: { kind: 'sharing', audio: false } };
+  afterEach(resetSharePreview);
+
+  it('plays the local picture muted and inline, and names it', () => {
+    panel(joined, 'c', sharing);
+    const own = screen.getByRole('region', { name: 'Your stream' });
+    const video = own.querySelector('video');
+    expect(video).not.toBeNull();
+    expect(video?.muted).toBe(true);
+    expect(video?.hasAttribute('playsinline')).toBe(true);
+    expect(video?.getAttribute('aria-label')).toBe('Preview of your screen');
+    expect(own.querySelector('audio')).toBeNull();
+    expect(within(own).getByText(/You · LIVE/)).toBeTruthy();
+    expect(within(own).getByRole('button', { name: 'Stop sharing' })).toBeTruthy();
+  });
+
+  it('attaches the video to the client, and lets it go when the tile goes', () => {
+    const calls: (HTMLVideoElement | null)[] = [];
+    const spy = vi.spyOn(VoiceClient.prototype, 'attachShareSelf').mockImplementation((el) => { calls.push(el); });
+    try {
+      const { unmount } = panel(joined, 'c', sharing);
+      const video = screen.getByRole('region', { name: 'Your stream' }).querySelector('video');
+      expect(calls).toEqual([video]);
+      unmount();
+      expect(calls).toEqual([video, null]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('is hidden and shown again by its toggle, which the session keeps', () => {
+    const calls: (HTMLVideoElement | null)[] = [];
+    const spy = vi.spyOn(VoiceClient.prototype, 'attachShareSelf').mockImplementation((el) => { calls.push(el); });
+    try {
+      const first = panel(joined, 'c', sharing);
+      const own = () => screen.getByRole('region', { name: 'Your stream' });
+      fireEvent.click(within(own()).getByRole('button', { name: 'Hide preview of your screen' }));
+      expect(own().querySelector('video')).toBeNull();
+      expect(calls.at(-1)).toBeNull();
+      expect(within(own()).getByRole('button', { name: 'Show preview of your screen' }).textContent).toBe('Show preview');
+      expect(within(own()).getByRole('button', { name: 'Stop sharing' })).toBeTruthy();
+      // Drawn again elsewhere (another layout): still hidden.
+      first.unmount();
+      panel(joined, 'c', sharing);
+      expect(own().querySelector('video')).toBeNull();
+      fireEvent.click(within(own()).getByRole('button', { name: 'Show preview of your screen' }));
+      const video = own().querySelector('video');
+      expect(video).not.toBeNull();
+      expect(calls.at(-1)).toBe(video);
+      expect(within(own()).getByRole('button', { name: 'Hide preview of your screen' }).textContent).toBe('Hide preview');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('keeps the toggle\'s name in the compact strip, where it is an icon with the words as its title', () => {
+    const { client } = panel(joined, 'c', sharing);
+    cleanup();
+    render(<SelfShareView client={client} compact />);
+    const toggle = screen.getByRole('button', { name: 'Hide preview of your screen' });
+    expect(toggle.classList.contains('icon')).toBe(true);
+    expect(toggle.getAttribute('title')).toBe('Hide preview');
+    expect(screen.getByRole('button', { name: 'Stop sharing' })).toBeTruthy();
+  });
+
+  it.each([
+    { surface: 'monitor', words: 'You · LIVE · your entire screen · 1080p' },
+    { surface: 'window', words: 'You · LIVE · a window · 1080p' },
+    { surface: 'browser', words: 'You · LIVE · a tab · 1080p' },
+    { surface: null, words: 'You · LIVE · 1080p' },
+  ] as const)('names a $surface capture in the title', ({ surface, words }) => {
+    const { client } = panel(joined, 'c', sharing);
+    cleanup();
+    vi.spyOn(client, 'shareSurface').mockReturnValue(surface);
+    render(<SelfShareView client={client} quality="1080p" />);
+    expect(screen.getByRole('region', { name: 'Your stream' }).querySelector('.share-title')?.textContent).toBe(words);
+  });
+
+  it('draws a different icon for hiding and for showing', () => {
+    panel(joined, 'c', sharing);
+    const icon = () => screen.getByRole('button', { name: /preview of your screen$/ }).querySelector('svg')?.innerHTML;
+    const title = screen.getByRole('region', { name: 'Your stream' }).querySelector('.share-title svg')?.innerHTML;
+    const hide = icon();
+    fireEvent.click(screen.getByRole('button', { name: 'Hide preview of your screen' }));
+    const show = icon();
+    expect(hide).not.toBe(show);
+    expect(hide).not.toBe(title);
+    expect(show).not.toBe(title);
+  });
+
+  it('has none of a watched share\'s controls', () => {
+    panel(joined, 'c', sharing);
+    const own = screen.getByRole('region', { name: 'Your stream' });
+    for (const name of [/mute/i, /volume/i, /full screen/i, /pop out/i, /tap to play/i]) {
+      expect(within(own).queryByRole('button', { name })).toBeNull();
+    }
+    expect(within(own).queryByRole('slider')).toBeNull();
+    expect(own.classList.contains('idle')).toBe(false);
   });
 });
