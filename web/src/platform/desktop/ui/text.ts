@@ -133,10 +133,10 @@ export const noticeLines: Readonly<Record<Exclude<ProfileNotice, 'legacy-not-end
   'teardown-slow': 'Something that was using the old sign-in did not stop in time. It was left behind, and the new server was started without it.',
 };
 
-// The legacy sweep could not confirm that the server ended a sign-in saved
-// by an older Conch (issue #2217). server is the active profile's host.
+// Conch could not confirm that a saved sign-in was ended at the server.
+// server is the active profile's host.
 export const legacyNotEnded = (server: string): string =>
-  `A sign-in saved by an older Conch for ${server} may still be active. Sign in to that server with the same account and open Settings → Your sign-ins. If you recognize the old entry by its label and the date next to “since”, choose End this sign-in. You can also choose Sign out everywhere in Settings or ask an operator to revoke the old sign-in.`;
+  `A saved sign-in for ${server} may still be active. Sign in to that server with the same account and open Settings → Your sign-ins. If you recognize the sign-in by its label and the date next to “since”, choose End this sign-in. You can also choose Sign out everywhere in Settings or ask an operator to revoke the sign-in.`;
 
 // noticeLine is what a notice says, for the active profile's server.
 export function noticeLine(notice: ProfileNotice, server: string | null): string {

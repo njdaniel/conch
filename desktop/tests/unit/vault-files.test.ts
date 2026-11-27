@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readdir, rm, stat, symlink, writeFile, mkdir, readFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readdir, rename, rm, stat, symlink, writeFile, mkdir, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -42,11 +42,11 @@ describe('modes', () => {
     expect(await mode(join(root, 'profiles', 'alpha', 'credential.bin'))).toBe(0o600);
   });
 
-  it('tightens loose directories inside a private root', async () => {
+  it('tightens readable, non-writable directories inside a private root', async () => {
     await mkdir(root, { mode: 0o700 });
     await mkdir(join(root, 'profiles', 'alpha'), { recursive: true });
-    await chmod(join(root, 'profiles'), 0o777);
-    await chmod(join(root, 'profiles', 'alpha'), 0o777);
+    await chmod(join(root, 'profiles'), 0o755);
+    await chmod(join(root, 'profiles', 'alpha'), 0o755);
     await writeCredential(root, 'alpha', Buffer.from('x'));
     expect(await mode(join(root, 'profiles'))).toBe(0o700);
     expect(await mode(join(root, 'profiles', 'alpha'))).toBe(0o700);
@@ -159,6 +159,22 @@ describe('reading through the opened handle', () => {
     });
     // Not read: reported as open to others (R1), with no bytes.
     expect(read).toEqual({ kind: 'loose-mode' });
+  });
+
+  it('rejects a different inode if the directory is loosened during lookup, then refuses the unsafe directory', async () => {
+    await writeCredential(root, 'alpha', Buffer.from('v10ours'));
+    const dir = join(root, 'profiles', 'alpha');
+    const replacement = join(dir, 'replacement');
+    await writeFile(replacement, 'v10planted', { mode: 0o600 });
+    const read = await readCredential(root, 'alpha', {
+      checkAncestors: true,
+      beforeOpen: async () => {
+        await chmod(dir, 0o770);
+        await rename(replacement, file());
+      },
+    });
+    expect(read).toEqual({ kind: 'corrupt' });
+    expect(await readCredential(root, 'alpha', { checkAncestors: true })).toEqual({ kind: 'unsafe-directory' });
   });
 
   it('a file that grows past the limit between the check and the read is not read', async () => {

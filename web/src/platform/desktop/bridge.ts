@@ -86,9 +86,8 @@ export type StorageStatus =
 // not-kept: the keyring did not take this sign-in, so it lasts until the app
 // closes. sign-in-ended: the server no longer accepts the saved sign-in
 // (signed out elsewhere, revoked or expired), issue #2077. legacy-not-ended:
-// a sign-in an older build saved for the active profile, sealed with a key that
-// protects nothing, was deleted but the server could not be asked to end it
-// (issue #2217); the line names the active profile's server.
+// Conch could not confirm that a saved sign-in for the active profile was
+// ended at the server (issues #2217 and #2227); the line names that server.
 export type ProfileNotice =
   | 'operator-window-only'
   | 'sign-in-again'
