@@ -381,6 +381,10 @@ func (w *world) revoke(v *voiceA, bounds voiceBounds) ([]timing, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := w.checkDMMessageCredentials(ann, second); err != nil {
+		return nil, fmt.Errorf("DM message routes: %w", err)
+	}
+	w.h.say("ok   DM messages: all four routes refused Ann's act-as credential and her revoked self-issued sign-in on her own conversation")
 	secondPush, err := w.registerPush(second.api, w.aName("pushsecond"), true)
 	if err != nil {
 		return nil, fmt.Errorf("ann's second credential registers for push: %w", err)

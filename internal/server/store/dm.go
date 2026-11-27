@@ -109,7 +109,25 @@ func (s *Store) openDM(ctx context.Context, caller, peer int64, credential *int6
 
 func (s *Store) withDMWrite(ctx context.Context, caller int64, credential *int64, clock func() time.Time, write func(execer, time.Time) (DMConversation, error)) (DMConversation, error) {
 	var out DMConversation
-	err := s.withImmediateTx(ctx, func(tx execer) error {
+	err := s.withDMCredentialWrite(ctx, caller, credential, clock, func(tx execer, now time.Time) error {
+		var err error
+		out, err = write(tx, now)
+		return err
+	})
+	if errors.Is(err, ErrCredentialInvalid) {
+		return DMConversation{}, ErrDMNoStanding
+	}
+	if err != nil {
+		return DMConversation{}, err
+	}
+	return out, nil
+}
+
+// withDMCredentialWrite rechecks the request credential under the write lock,
+// so revocation cannot race a DM write. A nil credential is for store callers
+// that do not act on behalf of an authenticated request.
+func (s *Store) withDMCredentialWrite(ctx context.Context, caller int64, credential *int64, clock func() time.Time, write func(execer, time.Time) error) error {
+	return s.withImmediateTx(ctx, func(tx execer) error {
 		now := clock()
 		if credential != nil {
 			actor := PrivateCallActor{PrincipalID: caller, CredentialID: *credential}
@@ -118,17 +136,11 @@ func (s *Store) withDMWrite(ctx context.Context, caller int64, credential *int64
 				return err
 			}
 			if !live {
-				return ErrDMNoStanding
+				return ErrCredentialInvalid
 			}
 		}
-		var err error
-		out, err = write(tx, now)
-		return err
+		return write(tx, now)
 	})
-	if err != nil {
-		return DMConversation{}, err
-	}
-	return out, nil
 }
 
 func openDMTx(ctx context.Context, tx execer, caller, peer int64, now time.Time, limitNew func(time.Time) error) (DMConversation, error) {
@@ -306,11 +318,27 @@ type DMPost struct {
 //     conversation again (an archived one stays archived: it still counts as
 //     unread). The peer's view of the conversation begins with this message.
 func (s *Store) InsertDMMessage(ctx context.Context, post DMPost, now time.Time) (msg DMMessage, replayed bool, err error) {
-	now = now.Truncate(time.Millisecond)
-	err = s.withImmediateTx(ctx, func(tx execer) error {
+	return s.insertDMMessage(ctx, post, nil, func() time.Time { return now }, nil, nil)
+}
+
+// InsertDMMessageFromCredential sends after rechecking the credential. It
+// spends the send budget before the conversation lookup and the new-pair
+// budget only for the first message, under the same write lock.
+func (s *Store) InsertDMMessageFromCredential(ctx context.Context, post DMPost, credential int64, clock func() time.Time, limitSend, limitNew func(time.Time) error) (DMMessage, bool, error) {
+	return s.insertDMMessage(ctx, post, &credential, clock, limitSend, limitNew)
+}
+
+func (s *Store) insertDMMessage(ctx context.Context, post DMPost, credential *int64, clock func() time.Time, limitSend, limitNew func(time.Time) error) (msg DMMessage, replayed bool, err error) {
+	err = s.withDMCredentialWrite(ctx, post.AuthorID, credential, clock, func(tx execer, now time.Time) error {
 		if err := dmWriteGateTx(ctx, tx, post.AuthorID); err != nil {
 			return err
 		}
+		if limitSend != nil {
+			if err := limitSend(now); err != nil {
+				return err
+			}
+		}
+		now = now.Truncate(time.Millisecond)
 		row, err := dmViewTx(ctx, tx, post.AuthorID, post.ConversationID)
 		if err != nil {
 			return err
@@ -348,6 +376,11 @@ func (s *Store) InsertDMMessage(ctx context.Context, post DMPost, now time.Time)
 		rev, err := dmNextRevisionTx(ctx, tx, post.ConversationID)
 		if err != nil {
 			return err
+		}
+		if rev == 1 && limitNew != nil {
+			if err := limitNew(now); err != nil {
+				return err
+			}
 		}
 		res, err := tx.ExecContext(ctx,
 			`INSERT INTO direct_messages (conversation_id, author_id, body, created_at, client_nonce, revision) VALUES (?, ?, ?, ?, ?, ?)`,
@@ -413,10 +446,25 @@ type DMMessageEdit struct {
 // the clock does. No audit row is written. Its size is the caller's check; an
 // empty or whitespace-only body is ErrDMEmptyBody.
 func (s *Store) EditDMMessage(ctx context.Context, editor, convID, messageID int64, body string, clock func() time.Time) (DMMessageEdit, error) {
+	return s.editDMMessage(ctx, editor, convID, messageID, body, nil, clock, nil)
+}
+
+// EditDMMessageFromCredential edits after rechecking the credential and
+// spends the edit budget before looking up the conversation.
+func (s *Store) EditDMMessageFromCredential(ctx context.Context, editor, credential, convID, messageID int64, body string, clock func() time.Time, limitEdit func(time.Time) error) (DMMessageEdit, error) {
+	return s.editDMMessage(ctx, editor, convID, messageID, body, &credential, clock, limitEdit)
+}
+
+func (s *Store) editDMMessage(ctx context.Context, editor, convID, messageID int64, body string, credential *int64, clock func() time.Time, limitEdit func(time.Time) error) (DMMessageEdit, error) {
 	var out DMMessageEdit
-	err := s.withImmediateTx(ctx, func(tx execer) error {
+	err := s.withDMCredentialWrite(ctx, editor, credential, clock, func(tx execer, now time.Time) error {
 		if err := dmWriteGateTx(ctx, tx, editor); err != nil {
 			return err
+		}
+		if limitEdit != nil {
+			if err := limitEdit(now); err != nil {
+				return err
+			}
 		}
 		row, err := dmViewTx(ctx, tx, editor, convID)
 		if err != nil {
@@ -443,7 +491,7 @@ func (s *Store) EditDMMessage(ctx context.Context, editor, convID, messageID int
 			out = DMMessageEdit{Message: msg}
 			return err
 		}
-		now := clock().Truncate(time.Millisecond)
+		now = now.Truncate(time.Millisecond)
 		if now.UnixMilli()-created.UnixMilli() > schema.MessageEditWindowSeconds*1000 {
 			return ErrMessageEditWindowClosed
 		}
@@ -518,8 +566,17 @@ type DMMessageRemoval struct {
 // a message already removed writes nothing. Removing is allowed whatever the
 // peer's state or the contact rules: it reduces what is kept. No audit row.
 func (s *Store) RemoveDMMessage(ctx context.Context, remover, convID, messageID int64, now time.Time) (DMMessageRemoval, error) {
+	return s.removeDMMessage(ctx, remover, convID, messageID, nil, func() time.Time { return now })
+}
+
+// RemoveDMMessageFromCredential rechecks the credential before author removal.
+func (s *Store) RemoveDMMessageFromCredential(ctx context.Context, remover, credential, convID, messageID int64, clock func() time.Time) (DMMessageRemoval, error) {
+	return s.removeDMMessage(ctx, remover, convID, messageID, &credential, clock)
+}
+
+func (s *Store) removeDMMessage(ctx context.Context, remover, convID, messageID int64, credential *int64, clock func() time.Time) (DMMessageRemoval, error) {
 	var out DMMessageRemoval
-	err := s.withImmediateTx(ctx, func(tx execer) error {
+	err := s.withDMCredentialWrite(ctx, remover, credential, clock, func(tx execer, now time.Time) error {
 		if _, err := dmViewTx(ctx, tx, remover, convID); err != nil {
 			return err
 		}

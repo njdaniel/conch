@@ -525,7 +525,7 @@ func TestInsertAndListDMMessages(t *testing.T) {
 		}
 		want = append(want, f.send(t, conv, who, fmt.Sprintf("m%d", i)).ID)
 	}
-	f.send(t, other, f.alice, "elsewhere")
+	foreign := f.send(t, other, f.alice, "elsewhere")
 	ids := func(ms []DMMessage) []int64 {
 		out := []int64{}
 		for _, m := range ms {
@@ -560,6 +560,15 @@ func TestInsertAndListDMMessages(t *testing.T) {
 	// The conversation of another pair is not bob's.
 	if _, err := f.s.ListDMMessagesPage(ctx, f.bob.ID, other.ID, MessagePage{}, 5); !errors.Is(err, ErrDMNotFound) {
 		t.Errorf("bob lists alice and carol's conversation: %v", err)
+	}
+	for _, page := range []MessagePage{
+		{After: foreign.ID},
+		{Before: foreign.ID, NewestFirst: true},
+		{After: foreign.ID + 1},
+	} {
+		if _, err := f.s.ListDMMessagesPage(ctx, f.alice.ID, conv.ID, page, 5); err == nil {
+			t.Errorf("page accepted cursor outside the requested conversation: %+v", page)
+		}
 	}
 	// The nonce shows on its author's copy only.
 	mine, _ := f.s.ListDMMessagesPage(ctx, f.alice.ID, conv.ID, MessagePage{}, 1)

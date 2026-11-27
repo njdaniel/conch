@@ -479,10 +479,14 @@ func (s *Store) DMMessageFor(ctx context.Context, viewer, convID, messageID int6
 	return out, err
 }
 
+// ErrDMHistoryCursor covers an unknown or foreign history anchor.
+var ErrDMHistoryCursor = errors.New("store: direct message cursor is not in the requested conversation")
+
 // ListDMMessagesPage returns up to limit messages of conversation convID as
 // viewer reads them, in the direction of page (the channel MessagePage's
 // rules: After with ascending reads, Before with newest-first ones), or
-// ErrDMNotFound. Removed messages are in the page, as tombstones.
+// ErrDMNotFound. A nonzero cursor must be the id of a message in the same
+// conversation. Tombstones remain valid anchors.
 func (s *Store) ListDMMessagesPage(ctx context.Context, viewer, convID int64, page MessagePage, limit int) ([]DMMessage, error) {
 	if limit <= 0 {
 		return nil, fmt.Errorf("store: list direct messages: limit must be positive, got %d", limit)
@@ -505,6 +509,17 @@ func (s *Store) ListDMMessagesPage(ctx context.Context, viewer, convID int64, pa
 	err := s.dmReadTx(ctx, func(tx execer) error {
 		if _, err := dmViewTx(ctx, tx, viewer, convID); err != nil {
 			return err
+		}
+		if anchor := max(page.After, page.Before); anchor != 0 {
+			var found bool
+			err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM direct_messages WHERE conversation_id = ? AND id = ?)`,
+				convID, anchor).Scan(&found)
+			if err != nil {
+				return fmt.Errorf("store: check message cursor in conversation %d: %w", convID, err)
+			}
+			if !found {
+				return ErrDMHistoryCursor
+			}
 		}
 		rows, err := tx.QueryContext(ctx, `SELECT `+dmMessageColumns+dmMessageFrom+
 			` WHERE m.conversation_id = ? AND m.id > ? AND m.id < ? ORDER BY m.id `+order+` LIMIT ?`,

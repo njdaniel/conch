@@ -219,13 +219,17 @@ func (s *Server) routeTable() []route {
 		rt("GET /v1/notifications/preferences", accessAuthenticated, s.membersOnly(hf(s.handleGetNotificationPreferences))),
 		rt("PUT /v1/notifications/preferences", accessAuthenticated, s.membersOnly(hf(s.handlePutNotificationPreferences))),
 		rt("GET /v1/notifications/pending", accessAuthenticated, s.membersOnly(hf(s.handleListPendingNotifications))),
-		// Local direct messages (issue #2019, ADR-017; see dms.go). Every route
+		// Local direct messages (issues #2019 and #2021, ADR-017). Every route
 		// is in selfMadeCredentialRoutes: an operator-made credential gets 403
 		// own_sign_in_required, reads included. Not previewable.
 		rt("POST /v1/dms", accessAuthenticated, hf(s.handleOpenDM)),
 		rt("GET /v1/dms", accessAuthenticated, hf(s.handleListDMs)),
 		rt("GET /v1/dms/{conversation}", accessAuthenticated, hf(s.handleGetDM)),
 		rt("PUT /v1/dms/{conversation}/state", accessAuthenticated, hf(s.handleSetDMState)),
+		rt("GET /v1/dms/{conversation}/messages", accessAuthenticated, hf(s.handleListDMMessages)),
+		rt("POST /v1/dms/{conversation}/messages", accessAuthenticated, hf(s.handlePostDMMessage)),
+		rt("PATCH /v1/dms/{conversation}/messages/{message}", accessAuthenticated, hf(s.handleEditDMMessage)),
+		rt("DELETE /v1/dms/{conversation}/messages/{message}", accessAuthenticated, hf(s.handleRemoveDMMessage)),
 		// Personal blocks (issue #1832, docs/design/blocks.md): the caller's
 		// own list, for people with a full credential; see blocks.go.
 		rt("GET /v1/blocks", accessAuthenticated, s.membersOnly(hf(s.handleListBlocks))),

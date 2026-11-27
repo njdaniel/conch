@@ -144,6 +144,14 @@ func checkMessageReads(t *testing.T, fset *token.FileSet, path string, file *ast
 			// a read named, say, MessagesSince or LastMessage.
 			if recv := types.ExprString(sel.X); (recv == "store" || strings.HasSuffix(recv, ".store")) && strings.Contains(name, "Message") {
 				switch name {
+				case "ListDMMessagesPage", "InsertDMMessageFromCredential", "EditDMMessageFromCredential", "RemoveDMMessageFromCredential":
+					// These store methods apply pair visibility through dmViewTx.
+					// TestDMMessageRouteAccess exercises the request's caller and
+					// credential on each of the DM message routes.
+					if filepath.Base(path) != "dm_messages.go" {
+						t.Errorf("%s: %s calls %s outside the DM message handlers", path, fset.Position(x.Pos()), name)
+					}
+					return true
 				// SearchVisibleMessages (issue #22) is the other visibility
 				// function; it is held to the same reader rule below.
 				// ListThreadMessages, ReplyRootMessage and InsertReplyMessage

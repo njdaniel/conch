@@ -292,7 +292,9 @@ type Server struct {
 	channelWriteLimits *channelWriteLimiter
 	// dmNewLimits bounds how many new conversations one person introduces
 	// (dm_limits.go), in memory only; tests replace it with setDMNewLimit.
-	dmNewLimits *dmNewLimiter
+	dmNewLimits  *dmWriteLimiter
+	dmSendLimits *dmWriteLimiter
+	dmEditLimits *dmWriteLimiter
 	// notificationLimits bounds the notification routes
 	// (notification_limits.go), in memory only; its clock is now. Tests
 	// replace it with setNotificationLimits before serving.
@@ -365,8 +367,11 @@ func New(cfg Config, st *store.Store) *Server {
 				"missing", strings.Join(missing, ", "), "not_sent", ntfyNotSent(missing))
 		}
 	}
-	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, sessionSweepInterval: defaultSessionSweepInterval, now: time.Now, renameFile: os.Rename, inviteLimits: newInviteLimiter(inviteLimitsFor(cfg)), reportLimits: newReportLimiter(defaultReportLimit()), reactionLimits: newReactionLimiter(defaultReactionLimit()), channelWriteLimits: newChannelWriteLimiter(defaultChannelWriteLimit()), dmNewLimits: newDMNewLimiter(defaultDMNewLimit()), notificationLimits: newNotificationLimiter(defaultNotificationWriteLimit(), defaultNotificationReadLimit()), agentUploadLimits: newAgentUploadLimiter(cfg.AgentUploadsPerHour), mcpLargeSlots: make(chan struct{}, mcpLargeRequestSlots),
-		passwords: newPasswords(), logins: newLoginLimiter(loginLimitsFor(cfg)), addressMAC: newAddressMACKey(),
+	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, sessionSweepInterval: defaultSessionSweepInterval, now: time.Now, renameFile: os.Rename, inviteLimits: newInviteLimiter(inviteLimitsFor(cfg)), reportLimits: newReportLimiter(defaultReportLimit()), reactionLimits: newReactionLimiter(defaultReactionLimit()), channelWriteLimits: newChannelWriteLimiter(defaultChannelWriteLimit()), notificationLimits: newNotificationLimiter(defaultNotificationWriteLimit(), defaultNotificationReadLimit()), agentUploadLimits: newAgentUploadLimiter(cfg.AgentUploadsPerHour), mcpLargeSlots: make(chan struct{}, mcpLargeRequestSlots),
+		dmNewLimits:  newDMWriteLimiter(defaultDMNewLimit()),
+		dmSendLimits: newDMWriteLimiter(inviteLimit{"dm_sends_per_principal", 20, 40 * time.Second}),
+		dmEditLimits: newDMWriteLimiter(defaultMessageEditLimit()),
+		passwords:    newPasswords(), logins: newLoginLimiter(loginLimitsFor(cfg)), addressMAC: newAddressMACKey(),
 		setupLimits: newSetupLimiter(cfg), messageEditLimits: newMessageEditLimiter(defaultMessageEditLimit())}
 	// The server's name is a permanent name nobody may take (issue #760):
 	// the store refuses it on every write of a name from here on.

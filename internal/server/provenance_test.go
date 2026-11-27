@@ -17,11 +17,8 @@ import (
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
-// selfMadeStandIn is a route that is in selfMadeCredentialRoutes only for
-// these tests: the DM and call routes and the per-person stream (#2019,
-// #2021, #2030, #2040) do not exist yet, and the guard must be shown to
-// work before they do. Each real one, once listed, is driven by the same
-// table.
+// selfMadeStandIn gives the provenance tests a handler that succeeds
+// whenever the guard lets it run. The same table exercises the real routes.
 const selfMadeStandIn = "GET /v1/test-only/self-made"
 
 // provenanceFixture is the auth fixture with joiner, a member who joined by
@@ -210,6 +207,10 @@ func TestSelfMadeCredentialRoutesIncludeRequired(t *testing.T) {
 		"GET /v1/dms",                      // the inbox
 		"GET /v1/dms/{conversation}",       // one conversation
 		"PUT /v1/dms/{conversation}/state", // per-viewer archive, hide, reopen
+		"GET /v1/dms/{conversation}/messages",
+		"POST /v1/dms/{conversation}/messages",
+		"PATCH /v1/dms/{conversation}/messages/{message}",
+		"DELETE /v1/dms/{conversation}/messages/{message}",
 		// The private call routes (#2030).
 		"POST /v1/dms/{conversation}/calls",
 		"GET /v1/dms/{conversation}/calls",

@@ -224,6 +224,11 @@ func jsonEscaped(s string) string {
 func (m *markers) walk(v any, container, key string, a asked, out *[]string) {
 	switch t := v.(type) {
 	case map[string]any:
+		docSchema, _ := t["schema"].(string)
+		switch docSchema {
+		case schema.DMMessageSchemaV1, schema.DMConversationSchemaV1, schema.DMReadStateSchemaV1:
+			key = docSchema
+		}
 		for k, child := range t {
 			m.walk(child, key, k, a, out)
 		}
@@ -282,12 +287,9 @@ var idKeys = map[string]string{
 	"session_id": "session", "run_id": "run", "intervention_id": "intervention",
 	"approval_id": "approval", "invite_id": "invite", "report_id": "report", "net_id": "net",
 	"credential_id": "credential", "sign_in_link_id": "sign_in_link",
-	// Direct messages (issue #2019): a conversation has an id space of its
-	// own; its pair is two principals. A DM message id is a space of its own
-	// too, so last_message_id is passed over rather than read as a channel
-	// message id (a small DM id would otherwise match one of A's messages).
+	// Conversations and their messages each have their own ID space.
 	"conversation_id": "conversation", "peer_id": "principal", "participant_ids": "principal",
-	"last_message_id": "-",
+	"last_message_id": "dm_message",
 	"request_id":      "-",
 }
 
@@ -309,11 +311,15 @@ var holders = map[string]string{
 	"credential": "credential", "credentials": "credential",
 	"sign_in_link": "sign_in_link", "sign_in_links": "sign_in_link",
 	"conversation": "conversation", "conversations": "conversation",
+	schema.DMConversationSchemaV1: "conversation", schema.DMMessageSchemaV1: "dm_message",
 }
 
 // idKind is the kind of id a number under key, inside an object held by
 // container, is; "" when the keys do not say.
 func idKind(container, key string) string {
+	if key == "last_read_id" && (container == schema.DMConversationSchemaV1 || container == schema.DMReadStateSchemaV1) {
+		return "dm_message"
+	}
 	if k, ok := idKeys[key]; ok {
 		return k
 	}
