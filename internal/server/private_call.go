@@ -22,7 +22,9 @@ const (
 	privateCallActionRefill = time.Second
 )
 
-func (s *Server) privateCallActor(w http.ResponseWriter, r *http.Request) (store.PrivateCallActor, bool) {
+// privateCallActor reads the identity admitted by requireDMCredential.
+// Under AuthOff there is no caller or credential to act on a call.
+func privateCallActor(w http.ResponseWriter, r *http.Request) (store.PrivateCallActor, bool) {
 	w.Header().Set("Cache-Control", "no-store")
 	p, ok := callerFrom(r.Context())
 	credentialID, authenticated := credentialIDFrom(r.Context())
@@ -30,13 +32,6 @@ func (s *Server) privateCallActor(w http.ResponseWriter, r *http.Request) (store
 		writeDMRefusal(w, http.StatusBadRequest, schema.ErrorCodeDMRequireAuth)
 		return store.PrivateCallActor{}, false
 	}
-	if p.Kind != store.PrincipalHuman || (p.GuestState != "" && p.GuestState != schema.GuestStateConverted) {
-		writeError(w, http.StatusForbidden, errForbidden.Code, "private calls require a human member")
-		return store.PrivateCallActor{}, false
-	}
-	// An act-as credential (and an agent) never gets here: every call route is
-	// in selfMadeCredentialRoutes (provenance.go), whose one guard refuses it
-	// with 403 own_sign_in_required before this runs.
 	return store.PrivateCallActor{PrincipalID: p.ID, CredentialID: credentialID}, true
 }
 
@@ -57,7 +52,7 @@ func (s *Server) privateCallInviteHandler() http.Handler {
 }
 
 func (s *Server) handleInvitePrivateCall(w http.ResponseWriter, r *http.Request, limit *channelWriteLimiter) {
-	actor, ok := s.privateCallActor(w, r)
+	actor, ok := privateCallActor(w, r)
 	if !ok {
 		return
 	}
@@ -80,7 +75,7 @@ func (s *Server) handleInvitePrivateCall(w http.ResponseWriter, r *http.Request,
 
 func (s *Server) privateCallAction(event string, limit *channelWriteLimiter) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		actor, ok := s.privateCallActor(w, r)
+		actor, ok := privateCallActor(w, r)
 		if !ok {
 			return
 		}
@@ -104,7 +99,7 @@ func (s *Server) privateCallAction(event string, limit *channelWriteLimiter) htt
 }
 
 func (s *Server) handleCurrentPrivateCall(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.privateCallActor(w, r)
+	actor, ok := privateCallActor(w, r)
 	if !ok {
 		return
 	}
@@ -117,7 +112,7 @@ func (s *Server) handleCurrentPrivateCall(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleListPrivateCalls(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.privateCallActor(w, r)
+	actor, ok := privateCallActor(w, r)
 	if !ok {
 		return
 	}

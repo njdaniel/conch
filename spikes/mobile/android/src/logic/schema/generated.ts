@@ -209,6 +209,15 @@ export const permission = tolerant<KnownPermission>({
   use_camera: true,
 });
 
+// schema.WhoAmICapabilitiesV1
+export interface WhoAmICapabilitiesV1 {
+  dm?: boolean;
+}
+
+export const whoAmICapabilitiesV1 = object<WhoAmICapabilitiesV1>({
+  dm: optional(bool),
+});
+
 // schema.WhoAmIResponseV1
 export interface WhoAmIResponseV1 {
   id: number;
@@ -226,6 +235,7 @@ export interface WhoAmIResponseV1 {
   server_mode?: ServerMode;
   permissions?: Permission[];
   permissions_revision?: number;
+  capabilities?: WhoAmICapabilitiesV1;
 }
 
 export const whoAmIResponseV1 = object<WhoAmIResponseV1>({
@@ -244,6 +254,7 @@ export const whoAmIResponseV1 = object<WhoAmIResponseV1>({
   server_mode: optional(serverMode),
   permissions: optional(array(permission)),
   permissions_revision: optional(int),
+  capabilities: optional(whoAmICapabilitiesV1),
 });
 
 // schema.ChannelVisibility
