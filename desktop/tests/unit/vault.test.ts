@@ -318,7 +318,7 @@ describe('remove', () => {
   });
 
   it('removes a profile left with a stray temp file', async () => {
-    await mkdir(join(root, 'profiles', 'alpha'), { recursive: true });
+    await mkdir(join(root, 'profiles', 'alpha'), { recursive: true, mode: 0o700 });
     await writeFile(join(root, 'profiles', 'alpha', 'credential.bin.dead.tmp'), 'x');
     await vault.remove('alpha');
     expect(await readdir(join(root, 'profiles'))).toEqual([]);

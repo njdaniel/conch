@@ -4,6 +4,7 @@ import { TeardownHooks } from '../../main/profiles/hooks.ts';
 import type { HealthResult } from '../../main/compat.ts';
 import { keepHelpFor, ProfilesService, type ProbeResult, type StoredCheck } from '../../main/profiles/service.ts';
 import { ProfileStore } from '../../main/profiles/store.ts';
+import type { GetResult } from '../../main/vault/vault.ts';
 import { fakeFactory, fakeVault, memoryFiles, ORIGIN_A, ORIGIN_B, type FakeActivation, type FakeVault } from './profiles-support.ts';
 
 async function setup(options: { vault?: FakeVault; probe?: ProbeResult; stepBoundMs?: number; files?: string; vaultBoundMs?: number; verify?: (origin: string, token: string) => StoredCheck; servers?: string[]; override?: boolean; health?: (origin: string) => Promise<HealthResult>; sweepHealth?: (origin: string) => Promise<HealthResult>; healthBoundMs?: number; revoke?: (origin: string, token: string) => Promise<'ended' | 'unconfirmed' | 'unsent'>; revokeBoundMs?: number; background?: boolean } = {}) {
@@ -1338,6 +1339,41 @@ describe('the start sweep of sign-ins an older build saved with the built-in key
     expect(vault.calls).not.toContain('find-legacy');
     expect(vault.legacy.has(A)).toBe(true);
     expect(sweepLines(t.log)).toEqual(['log: conch-desktop: a sign-in saved by an older build (v10): skipped']);
+  });
+
+  it.each([
+    { result: { kind: 'exposed', removed: true }, line: 'a saved sign-in open to group or others: deleted-loose-mode' },
+    { result: { kind: 'legacyRemoved' }, line: 'a sign-in saved by an older build was deleted unread; sign in again' },
+  ] satisfies { result: GetResult; line: string }[])('records $result.kind for the right profile after its lookup was superseded', async ({ result, line }) => {
+    const s = await setup({ files: profilesJson(A) });
+    let startGet = (): void => undefined;
+    const started = new Promise<void>((resolve) => {
+      startGet = resolve;
+    });
+    let finishCleanup = (): void => undefined;
+    const cleanup = new Promise<GetResult>((resolve) => {
+      finishCleanup = () => {
+        resolve(result);
+      };
+    });
+    const get = s.vault.get.bind(s.vault);
+    s.vault.get = (id) => {
+      if (id !== B) return get(id);
+      startGet();
+      return cleanup;
+    };
+
+    const opening = s.service.switchTo(B);
+    await started;
+    const superseding = s.service.switchTo(A);
+    finishCleanup();
+    await Promise.all([opening, superseding]);
+    s.vault.get = get;
+
+    expect(s.service.view().notice).toBeNull();
+    expect(s.log).toContain(`log: conch-desktop: ${line}`);
+    await s.service.switchTo(B);
+    expect(s.service.view().notice).toBe('legacy-not-ended');
   });
 
   // Issue #2217's review, N2: whenever an entry is not confirmed ended at the

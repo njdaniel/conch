@@ -72,8 +72,8 @@ async function checkRoot(root: string): Promise<boolean> {
   return true;
 }
 
-// Thrown for a root that is not private to this user; the vault turns it into
-// the session-only reason 'unsafe-root'.
+// Thrown when a vault path fails a directory safety check. The vault maps
+// it to the session-only reason 'unsafe-root' when a write is refused.
 export class UnsafeRoot extends Error {}
 
 // prepareRoot checks the data root's ancestors at startup. Inside the
@@ -84,14 +84,11 @@ function safeDirectory(st: Stats): boolean {
   return st.isDirectory() && (uid === undefined || ((st.uid === uid || st.uid === 0) && (st.mode & 0o022) === 0));
 }
 
-// privateDir makes dir (and its missing parents) and leaves it 0700 whatever
-// the umask was, refusing a symlink or a non-directory in its place.
+// privateDir makes dir and leaves it 0700, refusing to chmod a directory
+// that fails the owner, mode or plain-directory check.
 async function privateDir(dir: string): Promise<void> {
   await mkdir(dir, { recursive: true, mode: DIR_MODE });
-  const st = await lstat(dir);
-  if (st.isSymbolicLink() || !st.isDirectory()) {
-    throw new Error('vault path is not a plain directory');
-  }
+  if (!safeDirectory(await lstat(dir))) throw new UnsafeRoot('unsafe vault directory');
   await chmod(dir, DIR_MODE);
 }
 
@@ -159,8 +156,10 @@ export type ReadResult =
   // A regular file of ours, of a sane size, with group or other mode bits.
   // Its contents are refused. Linux vault cleanup deletes it unread.
   | { readonly kind: 'loose-mode' }
-  // The vault path failed its ownership, directory or permission checks.
-  | { readonly kind: 'unsafe-root' };
+  // The root failed its ownership, directory or permission checks.
+  | { readonly kind: 'unsafe-root' }
+  // A directory below the vault root is unsafe to traverse.
+  | { readonly kind: 'unsafe-directory' };
 
 interface ReadOptions {
   readonly checkAncestors?: boolean;
@@ -190,12 +189,12 @@ export async function readCredential(root: string, id: string, options: ReadOpti
     if (!(await checkRoot(root))) {
       return { kind: 'absent' };
     }
-    if (options.checkAncestors === true && !safeDirectory(await lstat(join(root, 'profiles')))) return { kind: 'unsafe-root' };
+    if (options.checkAncestors === true && !safeDirectory(await lstat(join(root, 'profiles')))) return { kind: 'unsafe-directory' };
     const dirStat = await lstat(dir);
     if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
       return { kind: 'corrupt' };
     }
-    if (options.checkAncestors === true && !safeDirectory(dirStat)) return { kind: 'unsafe-root' };
+    if (options.checkAncestors === true && !safeDirectory(dirStat)) return { kind: 'unsafe-directory' };
     st = await lstat(file);
   } catch (err) {
     if (isCode(err, 'ENOENT') || isCode(err, 'ENOTDIR')) {
@@ -255,9 +254,9 @@ const MAX_LISTED = 256;
 // profileIds lists the names under <root>/profiles that are profile ids and
 // are directories, at most MAX_LISTED entries looked at, sorted. It follows
 // nothing: a symlink, a file or a name that is not an id is skipped, and each
-// id's file is then checked by readCredential. A missing or unsafe vault
-// path lists none.
-export async function profileIds(root: string): Promise<readonly string[]> {
+// id's file is then checked by readCredential. A missing or unsafe root
+// lists none. An unsafe profiles/ is reported without listing its contents.
+export async function profileIds(root: string): Promise<readonly string[] | 'unsafe-directory'> {
   try {
     if (!(await checkRoot(root))) return [];
   } catch (err) {
@@ -272,7 +271,7 @@ export async function profileIds(root: string): Promise<readonly string[]> {
     if (isCode(err, 'ENOENT') || isCode(err, 'ENOTDIR')) return [];
     throw err;
   }
-  if (!safeDirectory(st)) return [];
+  if (!safeDirectory(st)) return 'unsafe-directory';
   const ids: string[] = [];
   let seen = 0;
   // Leaving the loop early closes the directory.
@@ -283,10 +282,22 @@ export async function profileIds(root: string): Promise<readonly string[]> {
   return ids.sort();
 }
 
-// removeProfile deletes the profile's directory and what is in it. Missing is
-// not an error. Only this profile's directory is touched.
-export async function removeProfile(root: string, id: string): Promise<void> {
-  await rm(profileDir(root, id), { recursive: true, force: true });
+// removeProfile deletes the profile's directory and what is in it. Linux
+// checks the directories again before deletion. Missing is not an error.
+export async function removeProfile(root: string, id: string, checkAncestors: boolean): Promise<void> {
+  const dir = profileDir(root, id);
+  if (checkAncestors) {
+    try {
+      if (!(await checkRoot(root))) return;
+      if (!safeDirectory(await lstat(join(root, 'profiles'))) || !safeDirectory(await lstat(dir))) {
+        throw new UnsafeRoot('unsafe vault directory');
+      }
+    } catch (err) {
+      if (isCode(err, 'ENOENT')) return;
+      throw err;
+    }
+  }
+  await rm(dir, { recursive: true, force: true });
 }
 
 function isCode(err: unknown, code: string): boolean {

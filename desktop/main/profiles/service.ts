@@ -29,6 +29,7 @@
 // revokeStored, as sign-out does, then deleted; if not, it is deleted unopened.
 // A file open to group or others, including a keyring-sealed file, is deleted
 // unread. A later lookup that finds an exposed entry gets the same cleanup.
+// An unsafe directory is reported and left alone.
 // The profile shows a notice when a sign-in covered by this cleanup cannot
 // be confirmed ended at the server. Each outcome is one fixed log line.
 import type { MainLog } from '../diagnostics.ts';
@@ -186,8 +187,8 @@ export class ProfilesService {
   #invalid: string | null = null;
   // The sweep of #2217: whether its search of the vault has finished, the
   // whole sweep, the profiles whose old entry it is still ending (never read
-  // as a sign-in meanwhile), and those whose entry it deleted without the
-  // server ending it (the notice, while that profile is active).
+  // as a sign-in meanwhile), and those whose saved sign-in may still be
+  // active on the server (the notice, while that profile is active).
   #listed: Promise<void> = Promise.resolve();
   #swept: Promise<void> = Promise.resolve();
   readonly #sweeping = new Map<string, Promise<void>>();
@@ -253,6 +254,14 @@ export class ProfilesService {
       this.#legacyLog('not-listed');
       return;
     }
+    if (found.value === 'unsafe-directory') {
+      // We cannot tell which entries exist. Warn for profiles with an account
+      // binding because they may have a saved sign-in there.
+      for (const profile of store.list()) {
+        if (profile.principal !== null) this.#refusedDirectory(profile.id);
+      }
+      return;
+    }
     const ends = found.value.map((id) => {
       const end = (async () => {
         try {
@@ -302,6 +311,10 @@ export class ProfilesService {
     };
     const r = await within(this.#deps.vault.endLegacy(id, decide), this.#legacyBound());
     const ended = r.done ? r.value : null;
+    if (ended?.kind === 'unsafe-directory') {
+      this.#refusedDirectory(id);
+      return;
+    }
     const exposed = ended?.kind === 'loose-mode';
     let outcome: LegacyOutcome;
     if (ended !== null && ended.kind === 'ended' && ended.opened && ended.used === 'ended') {
@@ -325,6 +338,11 @@ export class ProfilesService {
   #legacyLog(outcome: LegacyOutcome, exposed = false): void {
     if (exposed) this.#deps.log(`conch-desktop: a saved sign-in open to group or others: ${outcome}`, { ring: true });
     else this.#deps.log(`conch-desktop: a sign-in saved by an older build (v10): ${outcome}`, { ring: true });
+  }
+
+  #refusedDirectory(id: string): void {
+    this.#unended.add(id);
+    this.#deps.log('conch-desktop: saved sign-in cleanup refused an unsafe vault directory', { ring: true });
   }
 
   // start loads the list, starts the sweep of #2217 without waiting for it,
@@ -374,7 +392,20 @@ export class ProfilesService {
       return null;
     }
     const read = await within(
-      this.#deps.vault.get(profile.id).catch(() => ({ kind: 'unusable' as const })),
+      this.#deps.vault.get(profile.id).then((got) => {
+        // Cleanup can finish after this activation has timed out or moved on.
+        // Its outcome still belongs to the profile whose entry was handled.
+        if (got.kind === 'legacyRemoved') {
+          if (!this.#endedLegacy.has(profile.id)) this.#unended.add(profile.id);
+          this.#deps.log('conch-desktop: a sign-in saved by an older build was deleted unread; sign in again', { ring: true });
+        } else if (got.kind === 'exposed') {
+          this.#unended.add(profile.id);
+          this.#legacyLog(got.removed ? 'deleted-loose-mode' : 'not-deleted', true);
+        } else if (got.kind === 'unsafe-directory') {
+          this.#refusedDirectory(profile.id);
+        }
+        return got;
+      }).catch(() => ({ kind: 'unusable' as const })),
       this.#deps.vaultBoundMs ?? VAULT_BOUND_MS,
     );
     // The identity this was asked for has been left: it gets nothing.
@@ -393,16 +424,12 @@ export class ProfilesService {
         this.#deps.log('conch-desktop: no saved sign-in for this server', { ring: true });
         return null;
       case 'legacyRemoved':
-        // An older build's entry the sweep did not end (it could not search
-        // the vault, or delete the file): deleted unread, so not ended at the
-        // server, unless the sweep had it ended there.
-        if (!this.#endedLegacy.has(profile.id)) this.#unended.add(profile.id);
-        else this.#notice = 'sign-in-again';
-        this.#deps.log('conch-desktop: a sign-in saved by an older build was deleted unread; sign in again', { ring: true });
+        if (this.#endedLegacy.has(profile.id)) this.#notice = 'sign-in-again';
         return null;
       case 'exposed':
-        this.#unended.add(profile.id);
-        this.#legacyLog(got.removed ? 'deleted-loose-mode' : 'not-deleted', true);
+        return null;
+      case 'unsafe-directory':
+        this.#storage = { kind: 'sessionOnly', reason: 'unsafe-root' };
         return null;
       case 'unusable':
         this.#notice = 'sign-in-again';
