@@ -34,8 +34,9 @@ var privateCallMediaWatchMigration = []string{
 	`CREATE INDEX private_calls_ended_at ON private_calls (ended_at) WHERE ended_at IS NOT NULL`,
 }
 
-// LiveKit refresh tokens have a 10-minute TTL plus about 60 seconds of
-// expiry leeway. Watch for recreated rooms on the fast pass for that long.
+// The pinned LiveKit issues refresh tokens for 10 minutes and allows about
+// 60 seconds of expiry leeway. Watch for recreated rooms on the fast pass
+// for that long after retirement. The orphan sweep checks older rooms.
 const privateCallMediaWatchWindow = 11 * time.Minute
 
 func retireCallRoom(ctx context.Context, tx execer, id string) error {
@@ -110,7 +111,9 @@ func (s *Store) withPrivateCallMedia(ctx context.Context, id string, actor Priva
 		if err != nil {
 			return err
 		}
-		if c.role(actor.PrincipalID) == "" {
+		// Unavailable invites are visible only in the original invite response
+		// and its retries. Like the action routes, treat the ID as absent.
+		if c.role(actor.PrincipalID) == "" || c.State == schema.PrivateCallStateUnavailable {
 			return ErrPrivateCallNotFound
 		}
 		if _, err := refreshPrivateCall(ctx, tx, &c, now); err != nil {

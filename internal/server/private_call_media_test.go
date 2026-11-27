@@ -207,6 +207,114 @@ func TestPrivateCallMediaSelectedEndpoints(t *testing.T) {
 	}
 }
 
+func TestPrivateCallMediaRefusesActAsCredentials(t *testing.T) {
+	f, bob, bobTok, _ := privateCallHTTPFixture(t)
+	media := addFakePrivateCallMedia(t, f.srv)
+	call := answerPrivateCallMediaTest(t, f, invitePrivateCallMediaTest(t, f, "first"), bobTok, "answer")
+	path := "/v1/calls/" + call.ID + "/session"
+	issuer := fmt.Sprintf("principal:%d", f.root.ID)
+	_, issued, err := f.srv.store.CreateCredential(t.Context(), issuer, bob.ID, "operator issued", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	link, err := f.srv.store.CreateSignInLink(t.Context(), issuer, f.root.ID,
+		bob.ID, schema.CreateSignInLinkRequestV1{}, f.srv.now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	redeemed, err := f.srv.store.RedeemSignInLink(t.Context(), store.HashSignInLinkCode(link.Code), f.srv.now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ name, token string }{
+		{"operator-issued credential", issued},
+		{"operator-issued sign-in link", redeemed.Token},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := f.do(t, "POST", path, tc.token, "")
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("session returned %d, want 403 own_sign_in_required", rec.Code)
+			}
+			assertErrorBody(t, rec, http.StatusForbidden, schema.ErrorCodeOwnSignInRequired)
+		})
+	}
+	if len(media.rooms) != 0 || len(media.signed) != 0 {
+		t.Fatal("an act-as request provisioned a room or signed a grant")
+	}
+	privateCallSessionTest(t, f.do(t, "POST", path, bobTok, ""))
+}
+
+func TestPrivateCallMediaUnavailableAttemptIsAbsent(t *testing.T) {
+	f, _, bobTok, _ := privateCallHTTPFixture(t)
+	media := addFakePrivateCallMedia(t, f.srv)
+	block := f.do(t, "PUT", fmt.Sprintf("/v1/blocks/%d", f.alice.ID), bobTok, "")
+	if block.Code != http.StatusOK {
+		t.Fatalf("block: %d, %s", block.Code, block.Body)
+	}
+	call := decodePrivateCallResponse(t, f.do(t, "POST", privateCallTestPair,
+		f.aliceTok, `{"action_id":"blocked"}`), http.StatusOK).Call
+	if call.State != schema.PrivateCallStateUnavailable {
+		t.Fatalf("invite state = %s, want unavailable", call.State)
+	}
+	for _, tc := range []struct{ role, token string }{{"caller", f.aliceTok}, {"callee", bobTok}} {
+		t.Run(tc.role, func(t *testing.T) {
+			rec := f.do(t, "POST", "/v1/calls/"+call.ID+"/session", tc.token, "")
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("session returned %d, want 404 call_not_found", rec.Code)
+			}
+			assertErrorBody(t, rec, http.StatusNotFound, schema.ErrorCodeCallNotFound)
+		})
+	}
+	if len(media.rooms) != 0 || len(media.signed) != 0 {
+		t.Fatal("an unavailable attempt provisioned a room or signed a grant")
+	}
+}
+
+func TestPrivateCallMediaRechecksPairDuringCreate(t *testing.T) {
+	for _, change := range []string{"block", "member switch", "server switch"} {
+		t.Run(change, func(t *testing.T) {
+			f, bob, bobTok, _ := privateCallHTTPFixture(t)
+			media := addFakePrivateCallMedia(t, f.srv)
+			call := answerPrivateCallMediaTest(t, f, invitePrivateCallMediaTest(t, f, "first"), bobTok, "answer")
+			media.createHook = func() {
+				var err error
+				switch change {
+				case "block":
+					block := f.do(t, "PUT", fmt.Sprintf("/v1/blocks/%d", f.alice.ID), bobTok, "")
+					if block.Code != http.StatusOK {
+						t.Fatalf("block: %d, %s", block.Code, block.Body)
+					}
+				case "member switch":
+					_, err = f.srv.store.SetDMAllowed(t.Context(), "system", 0, bob.ID, false, f.srv.now())
+				case "server switch":
+					_, err = f.srv.store.SetDMServerSettings(t.Context(), "system", 0,
+						schema.DMServerSettingsV1{DMsEnabled: false}, f.srv.now())
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			// The pair became ineligible after the first check, so the final
+			// check must refuse the grant and retire the newly provisioned room.
+			path := "/v1/calls/" + call.ID + "/session"
+			rec := f.do(t, "POST", path, f.aliceTok, "")
+			if rec.Code != http.StatusConflict {
+				t.Fatalf("session returned %d, want 409 call_state_changed", rec.Code)
+			}
+			if ended := privateCallTestConflict(t, rec, schema.PrivateCallStateEnded); ended.Reason != "" {
+				t.Fatalf("session exposed the revocation reason %q", ended.Reason)
+			}
+			if len(media.signed) != 0 || len(media.rooms) != 1 {
+				t.Fatal("expected a room created during the request and no grant signed")
+			}
+			f.srv.voice.runPrivateCallMediaPass(t.Context())
+			if len(media.rooms) != 0 {
+				t.Fatal("room survived the media pass after the pair became ineligible")
+			}
+		})
+	}
+}
+
 func TestPrivateCallMediaRevocationDuringCreate(t *testing.T) {
 	f, _, bobTok, _ := privateCallHTTPFixture(t)
 	media := addFakePrivateCallMedia(t, f.srv)
@@ -359,7 +467,8 @@ func TestPrivateCallMediaDeletionWaitsForCreate(t *testing.T) {
 	}
 }
 
-// Real-service verification (LiveKit 1.13.7, synchronized clocks):
+// Private-call integration measurements to take (LiveKit 1.13.7,
+// synchronized clocks):
 // Record grant-to-join, revocation-commit-to-disconnect and stale-rejoin-to-
 // deletion. Existing measurements in docs/design/voice-control-plane.md §10
 // found that an unused grant was accepted 55 s past exp and refused at 65 s
@@ -368,14 +477,15 @@ func TestPrivateCallMediaDeletionWaitsForCreate(t *testing.T) {
 // so the original token's expiry does not bound a client that already joined.
 // The earlier channel-room revocation test (§10, finding 10) measured that
 // with auto-create disabled, LiveKit refused its own refresh token after
-// DeleteRoom. Expect the same for private calls. With auto-create enabled,
-// either token can recreate the retired room and get another refresh token.
+// DeleteRoom. Verify the same for private calls. Auto-create must be disabled
+// in production. If enabled, either token can recreate the retired room and
+// get another refresh token.
 // For 11 minutes from retirement, expect a listed recreation to be deleted
 // on the next successful 1 s media pass, plus ListRooms/DeleteRoom RPC and
 // queue time. Later recreations wait for the 30 s sweep plus RPC/queue time.
-// On a healthy, unsaturated service, initial revocation takes up to 1 s for
-// the call-state sweep and 1 s for the media pass, plus any ListRooms RPC
-// and up to 4 s for room control.
+// On a healthy, unsaturated service, expect initial revocation to take up to
+// 1 s for the call-state sweep and 1 s for the media pass to pick it up, plus
+// any in-flight room creation, list/delete RPC latency and queue time.
 // Repeat with both endpoints connected, media unavailable at revocation and
 // restored later, and with conchd restarted before cleanup can succeed.
 func TestPrivateCallMediaRetirementRetriesAndStaleRejoin(t *testing.T) {
