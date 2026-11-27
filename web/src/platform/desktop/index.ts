@@ -80,11 +80,11 @@ export const platform: Platform = {
     origin: serverOrigin,
     sounds: new DesktopSoundSink(),
     copyText,
-    saveFile: async (id) => {
+    saveFile: async (file) => {
       const b = bridge();
       if (b === undefined) return 'failed';
       try {
-        return await b.saveFile(id);
+        return await b.saveFile(file);
       } catch {
         return 'failed';
       }

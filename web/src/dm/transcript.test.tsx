@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { DMMessageV1 } from '../schema/generated';
+import { BlocksProvider, type Blocks } from '../blocks';
+import type { DMMessageV1, DMReadStateV1 } from '../schema/generated';
 import type { DmApi } from './api';
 import { DmProvider } from './DmContext';
 import { DmRoute } from './DmRoute';
@@ -73,6 +74,106 @@ describe('the transcript', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Load earlier messages' }));
     await screen.findByText('Earlier');
     expect(scrollTo).not.toHaveBeenCalled();
+  });
+
+  it('moves focus into the last page of history when the focused paging button disappears', async () => {
+    mount(fake({ history: vi.fn<DmApi['history']>()
+      .mockResolvedValueOnce({ ok: true, value: { order: 'desc', messages: [ownMessage()], next_before: 4305 } })
+      .mockResolvedValueOnce({ ok: true, value: { order: 'desc', messages: [{ ...peerMessage(), body: 'Earlier' }] } }),
+    }));
+    await ready();
+    const older = screen.getByRole('button', { name: 'Load earlier messages' });
+    older.focus();
+    fireEvent.click(older);
+    const result = await screen.findByText('Earlier');
+    expect(document.activeElement).toBe(result.closest('li'));
+  });
+
+  it('retries a transient read-mark failure after a successful poll with no new messages', async () => {
+    const markRead = vi.fn<DmApi['markRead']>()
+      .mockResolvedValueOnce({ ok: false, failure: 'network' })
+      .mockResolvedValue({ ok: true, value: { ...fixture<DMReadStateV1>('dm-read-state-v1'), last_read_id: 4310 } });
+    const f = fake({ markRead });
+    mount(f);
+    await ready();
+    expect(markRead.mock.calls).toEqual([[12, 4310]]);
+    await act(async () => {
+      f.frames({ type: 'poll' });
+      await Promise.resolve();
+    });
+    expect(markRead.mock.calls).toEqual([[12, 4310], [12, 4310]]);
+    await act(async () => {
+      f.frames({ type: 'poll' });
+      await Promise.resolve();
+    });
+    expect(markRead).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps history and removal after a local block while hiding write controls and Retry', async () => {
+    const f = fake({ send: vi.fn<DmApi['send']>().mockResolvedValue({ ok: false, failure: 'unconfirmed' }) });
+    const view = (ids: number[]) => {
+      const blocks: Blocks = {
+        blocked: new Set(ids), list: [], loaded: true,
+        block: () => Promise.resolve(false), unblock: () => Promise.resolve(false), signal: () => undefined,
+      };
+      return (
+        <BlocksProvider value={blocks}>
+          <DmTranscript conversationId={12} api={f.api} scope={scope} viewer={me} draft="hello" onDraft={() => undefined} />
+        </BlocksProvider>
+      );
+    };
+    const { rerender } = render(view([]));
+    await ready();
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await screen.findByRole('button', { name: 'Retry' });
+    rerender(view([conversation().peer_id]));
+    expect(screen.queryByRole('button', { name: 'Send' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Edit your message/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+    expect(screen.getByRole('button', { name: /^Remove your message/ })).toBeDefined();
+    expect(bodies()).toContain('Thanks, reading it now.');
+  });
+
+  it('never offers Retry for a definitively refused send after reopening the transcript', async () => {
+    const f = fake({ send: vi.fn<DmApi['send']>().mockResolvedValue({ ok: false, failure: 'unavailable' }) });
+    const view = (id: number) => <DmProvider api={f.api} scope={scope} me={me}><DmRoute conversationId={id} /></DmProvider>;
+    const { rerender } = render(view(12));
+    await ready();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Message to Grace' }), { target: { value: 'hello' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await screen.findByRole('button', { name: 'Discard' });
+    rerender(view(13));
+    rerender(view(12));
+    await screen.findByRole('button', { name: 'Discard' });
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+  });
+
+  it('queues a DM with a secure nonce when randomUUID is unavailable on plain HTTP', async () => {
+    vi.stubGlobal('crypto', { getRandomValues: globalThis.crypto.getRandomValues.bind(globalThis.crypto) });
+    try {
+      const f = fake();
+      mount(f, 12, 'hello');
+      await ready();
+      fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+      const sent = vi.mocked(f.api.send).mock.calls[0];
+      expect(sent?.[0]).toBe(12);
+      expect(sent?.[1].body).toBe('hello');
+      expect(sent?.[1].client_nonce).toMatch(/^[A-Za-z0-9_-]{32,}$/);
+      await act(async () => {});
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('uses the native save dialog for a DM file when available', async () => {
+    const saveFile = vi.fn(() => Promise.resolve({ ok: true as const, value: null }));
+    const base = fake({ fileBytes: vi.fn<DmApi['fileBytes']>().mockResolvedValue({ ok: false, failure: 'network' }) });
+    mount({ ...base, api: { ...base.api, saveFile } });
+    const download = await screen.findByRole('button', { name: /^Download / });
+    fireEvent.click(download);
+    expect(saveFile).toHaveBeenCalledExactlyOnceWith(12, 41);
+    expect(base.api.fileBytes).not.toHaveBeenCalled();
+    await act(async () => {});
   });
 
   it('focuses the message editor or safe removal answer and restores the opening control on Escape', async () => {

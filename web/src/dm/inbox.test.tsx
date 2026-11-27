@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { useContext, useEffect } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { listChannels, restore } from '../api';
+import { BlocksProvider } from '../blocks';
 import { windowOf } from '../fakewindow';
 import { Lobby } from '../Lobby';
 import { VoiceLive } from '../phone';
@@ -28,6 +29,25 @@ afterEach(() => {
 const provide = (api: DmApi, ui: React.ReactNode, scope = 'https://a.example|3') => <DmProvider api={api} scope={scope} me={me}>{ui}</DmProvider>;
 
 describe('the inbox', () => {
+  it('hides Message for a locally blocked person even when there is an existing conversation', async () => {
+    const f = fake();
+    const card = <ProfileCard id={5} person={{ name: 'Grace', kind: 'human' }} viewer={me} />;
+    const view = (blocked: ReadonlySet<number>) => provide(f.api, (
+      <BlocksProvider value={{
+        blocked, loaded: true, list: [],
+        block: () => Promise.resolve(false), unblock: () => Promise.resolve(false), signal: () => undefined,
+      }}>
+        {card}
+      </BlocksProvider>
+    ));
+    const { rerender } = render(view(new Set()));
+    fireEvent.click(screen.getByRole('button', { name: 'Grace' }));
+    expect(await screen.findByRole('button', { name: 'Message Grace' })).toBeDefined();
+    rerender(view(new Set([5])));
+    expect(screen.queryByRole('button', { name: 'Message Grace' })).toBeNull();
+    expect(f.api.open).not.toHaveBeenCalled();
+  });
+
   it('lists conversations with the recipient, unread counts and a per-viewer hide, apart from any member directory', async () => {
     const f = fake();
     render(provide(f.api, <DmInbox />));

@@ -75,7 +75,7 @@ const DEDICATED: ReadonlySet<OperationId> = new Set<OperationId>(['logout']);
 // Operations whose answer is a stream of bytes or whose request is one: the
 // bridge's generic request carries JSON only. (Attachments have their own
 // functions, main/files.ts.)
-const NOT_JSON: ReadonlySet<OperationId> = new Set<OperationId>(['uploadFile', 'fileBytes']);
+const NOT_JSON: ReadonlySet<OperationId> = new Set<OperationId>(['uploadFile', 'fileBytes', 'uploadDmFile', 'dmFileBytes']);
 
 export function invocable(id: OperationId): boolean {
   const op = operations[id];

@@ -10,13 +10,14 @@
 // access the viewer has now. No reactions, threads, mentions or typed
 // payloads: a DM has none.
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type SyntheticEvent } from 'react';
+import { useBlocksContext } from '../blocks';
 import { Avatar } from '../Icons';
 import { formatSize } from '../fileSize';
 import type { DMConversationV1, DMFileV1, DMMessageV1, DMReadStateV1 } from '../schema/generated';
 import { dateTimeOf, timeOf } from '../time';
 import type { DmApi, DmFailure } from './api';
 import { DmComposer } from './DmComposer';
-import { cannotMessage, noAccess, peerName, type Pending, type PendingSends } from './model';
+import { canRetrySend, cannotMessage, noAccess, peerName, type Pending, type PendingSends } from './model';
 import { useDmTranscript } from './useDmTranscript';
 
 export interface DmConversationViewProps {
@@ -52,10 +53,14 @@ function FileChip({ api, conversation, id }: { readonly api: DmApi; readonly con
   if (file === null) return <span className="hint">Loading file…</span>;
   if (file === 'unavailable') return <span className="hint">File unavailable</span>;
   const held = file;
-  // The bytes are saved as the server sent them: nothing is previewed,
-  // re-encoded or interpreted here.
   async function save(button: HTMLButtonElement) {
     setProblem('');
+    if (api.saveFile !== undefined) {
+      const result = await api.saveFile(conversation, id);
+      if (button.isConnected && !result.ok) setProblem('Could not download the file.');
+      return;
+    }
+    // In the browser, download the bytes as the server sent them.
     const result = await api.fileBytes(conversation, id);
     if (!button.isConnected) return;
     if (!result.ok) {
@@ -188,7 +193,7 @@ function MessageRow({ message, mine, author, api, conversation, canWrite, onEdit
   );
 }
 
-function PendingRow({ pending, onRetry, onDiscard }: { readonly pending: Pending; readonly onRetry: () => void; readonly onDiscard: () => void }) {
+function PendingRow({ pending, canWrite, onRetry, onDiscard }: { readonly pending: Pending; readonly canWrite: boolean; readonly onRetry: () => void; readonly onDiscard: () => void }) {
   const line =
     pending.status === 'sending' ? 'Sending…' : pending.failure === 'unavailable' ? cannotMessage : pending.failure === 'dms_off' ? 'Direct messages are off.' : pending.status === 'unconfirmed' ? 'Not confirmed. It may not have been sent.' : 'Not sent.';
   return (
@@ -197,7 +202,7 @@ function PendingRow({ pending, onRetry, onDiscard }: { readonly pending: Pending
       <span role={pending.status === 'sending' ? 'status' : 'alert'} className="hint">{line}</span>
       {pending.status === 'sending' ? null : (
         <>
-          <button type="button" onClick={onRetry}>Retry</button>
+          {canWrite && canRetrySend(pending) ? <button type="button" onClick={onRetry}>Retry</button> : null}
           <button type="button" onClick={onDiscard}>Discard</button>
         </>
       )}
@@ -283,13 +288,15 @@ export function DmTranscript(props: DmConversationViewProps) {
 }
 
 function TranscriptView({ conversationId, api, scope, viewer, draft, onDraft, onRead, pendingSends, enabled = true, viewing = true }: DmConversationViewProps) {
-  const t = useDmTranscript(api, scope, conversationId, viewing, onRead, pendingSends);
-  const { state } = t;
+  const { blocked } = useBlocksContext();
+  const t = useDmTranscript(api, scope, conversationId, viewing, enabled, blocked, onRead, pendingSends);
+  const { state, canWrite } = t;
   const [searching, setSearching] = useState(false);
   // The text being written is state here (the provider's drafts only keep it
   // across a switch), so typing re-renders.
   const [text, setText] = useState(draft);
   const log = useRef<HTMLDivElement>(null);
+  const pageOpener = useRef<HTMLButtonElement | null>(null);
   const searchButton = useRef<HTMLButtonElement>(null);
   const conversation: DMConversationV1 | null = state.conversation;
   const peer = conversation === null ? '' : peerName(conversation);
@@ -301,6 +308,15 @@ function TranscriptView({ conversationId, api, scope, viewer, draft, onDraft, on
     const el = log.current;
     if (el !== null && typeof el.scrollTo === 'function') el.scrollTo({ top: el.scrollHeight });
   }, [newest, newestPending, state.status]);
+
+  useLayoutEffect(() => {
+    if (state.loadingOlder) return;
+    const opener = pageOpener.current;
+    pageOpener.current = null;
+    if (opener === null || opener.isConnected || document.activeElement !== document.body) return;
+    const target = log.current?.querySelector<HTMLElement>('ol > .dm-message') ?? log.current;
+    target?.focus();
+  }, [state.loadingOlder, state.older]);
 
   if (state.status === 'gone' || state.status === 'own_sign_in_required') {
     return (
@@ -328,7 +344,6 @@ function TranscriptView({ conversationId, api, scope, viewer, draft, onDraft, on
   }
 
   const historyAvailable = state.status === 'ready';
-  const canWrite = enabled && state.access === 'ok';
   return (
     <section aria-label={`Conversation with ${peer}`} className="dm-transcript">
       <header className="dm-header">
@@ -337,7 +352,7 @@ function TranscriptView({ conversationId, api, scope, viewer, draft, onDraft, on
         {historyAvailable ? <button ref={searchButton} type="button" aria-expanded={searching} onClick={() => { setSearching((on) => !on); }}>Search</button> : null}
         {conversation.state === 'archived' ? <span className="hint">Archived</span> : null}
       </header>
-      {state.access === 'unavailable' ? <p role="status" className="banner">{cannotMessage}</p> : null}
+      {state.access === 'unavailable' || blocked.has(conversation.peer_id) ? <p role="status" className="banner">{cannotMessage}</p> : null}
       {(!enabled || state.access === 'off') ? <p role="status" className="banner">Direct messages are off.</p> : null}
       {searching && historyAvailable ? <Search api={api} conversation={conversationId} viewer={viewer} name={peer} onClose={() => {
         setSearching(false);
@@ -346,7 +361,11 @@ function TranscriptView({ conversationId, api, scope, viewer, draft, onDraft, on
       {historyAvailable ? (
       <div ref={log} role="log" aria-label="Messages" aria-live="polite" tabIndex={0} className="dm-log">
         {state.older === null ? null : (
-          <button type="button" className="dm-older" disabled={state.loadingOlder} onClick={() => void t.loadOlder()}>
+          <button type="button" className="dm-older" aria-disabled={state.loadingOlder} onClick={(event) => {
+            if (state.loadingOlder) return;
+            pageOpener.current = document.activeElement === event.currentTarget ? event.currentTarget : null;
+            void t.loadOlder();
+          }}>
             {state.loadingOlder ? 'Loading earlier messages…' : 'Load earlier messages'}
           </button>
         )}
@@ -367,7 +386,7 @@ function TranscriptView({ conversationId, api, scope, viewer, draft, onDraft, on
             />
           ))}
           {t.pending.map((p) => (
-            <PendingRow key={p.nonce} pending={p} onRetry={() => void t.retry(p.nonce)} onDiscard={() => { t.discard(p.nonce); }} />
+            <PendingRow key={p.nonce} pending={p} canWrite={canWrite} onRetry={() => void t.retry(p.nonce)} onDiscard={() => { t.discard(p.nonce); }} />
           ))}
         </ol>
       </div>
@@ -382,7 +401,7 @@ function TranscriptView({ conversationId, api, scope, viewer, draft, onDraft, on
             setText(next);
             onDraft(conversationId, next);
           }}
-          onSend={(body, fileIds) => void t.send(body, fileIds)}
+          onSend={t.send}
         />
       ) : null}
     </section>

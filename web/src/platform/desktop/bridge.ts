@@ -245,25 +245,28 @@ export interface FeedHandlers {
 
 export type Unsubscribe = () => void;
 
+export type ChannelName = string;
+
 // A file to upload: the bytes (base64, the bridge carries data, not binary
 // objects) with the name and media type the page declares. All of it is
 // untrusted data: main caps the size, shapes the type and the name, and sends
-// the operation itself. The channel is a path value of the table.
-export type ChannelName = string;
-
-export interface UploadRequest {
-  readonly channel: ChannelName;
+// the operation itself for the named channel or DM conversation.
+export type UploadTarget = { readonly channel: ChannelName } | { readonly conversation: number };
+export type UploadRequest = UploadTarget & {
   readonly filename: string;
   readonly mediaType: string;
   readonly data: string;
-}
+};
+
+// Channel files use a file ID; DM files also require their conversation ID.
+export type FileTarget = number | { readonly conversation: number; readonly file: number };
 
 // A file's bytes (base64) for a preview, or the server's refusal or no answer.
 export type DownloadReply = BridgeReply | { readonly kind: 'bytes'; readonly data: string };
 
 // What saving a file came to. cancelled is the person closing the dialog;
-// failed is anything else (no answer, too large, not writable).
-export type SaveOutcome = 'saved' | 'cancelled' | 'failed' | 'unauthorized';
+// forbidden is a DM credential refusal. failed covers other download or write errors.
+export type SaveOutcome = 'saved' | 'cancelled' | 'failed' | 'unauthorized' | 'forbidden';
 
 // A desktop notification (issue #1590): exactly the fields main may show or
 // retain. The channel is owned by main's activation record; clicks carry only
@@ -339,15 +342,15 @@ export interface ConchDesktopBridge {
   createPrincipalCredential(request: { readonly id: number; readonly body: CreateCredentialRequestV1 }): Promise<BridgeReply>;
   createHook(request: CreateHookRequest): Promise<BridgeReply>;
 
-  // Attachments (issue #947). Upload sends the operation uploadFile; the
-  // answer is the server's, validated. Download gives a file's bytes for a
+  // Attachments (issue #947). Upload uses the channel or DM file operation
+  // and validates the answer. Download gives a file's bytes for a
   // blob preview; nothing is written or opened. Save asks main to show the
   // native save dialog (only right after the person's own click or key) and
   // write the file to the path the person chooses there: the page names a
-  // file by id and never a path, and gets no bytes back.
+  // file by its IDs and gets no bytes back.
   uploadFile(request: UploadRequest): Promise<BridgeReply>;
-  downloadFile(id: number): Promise<DownloadReply>;
-  saveFile(id: number): Promise<SaveOutcome>;
+  downloadFile(request: FileTarget): Promise<DownloadReply>;
+  saveFile(request: FileTarget): Promise<SaveOutcome>;
   // Desktop notifications (issue #1590). Support is a narrow synchronous IPC
   // because the platform's permission API is synchronous; clicks carry no text.
   notify(request: NotifyRequest): Promise<boolean>;

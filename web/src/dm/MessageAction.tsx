@@ -1,4 +1,5 @@
 import { useContext, useState } from 'react';
+import { useBlocksContext } from '../blocks';
 import type { IdentityInput } from '../identityMarks';
 import { DmOpened, useDm } from './DmContext';
 import { cannotMessage } from './model';
@@ -14,7 +15,7 @@ export function canMessage(person: IdentityInput | undefined, id: number, viewer
 }
 
 // MessageAction opens, or resumes, the conversation with one person. It is
-// offered only while the inbox is ready and DMs are on for the viewer.
+// offered while the inbox is ready, DMs are on, and the viewer hasn't blocked the peer.
 export function MessageAction({ id, name, person, viewer, onOpened }: {
   readonly id: number;
   readonly name: string;
@@ -23,10 +24,11 @@ export function MessageAction({ id, name, person, viewer, onOpened }: {
   readonly onOpened?: () => HTMLElement | null;
 }) {
   const dm = useDm();
+  const { blocked } = useBlocksContext();
   const showConversation = useContext(DmOpened);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState('');
-  if (dm === null || dm.inbox.state.status !== 'ready' || !dm.inbox.state.enabled || !canMessage(person, id, viewer ?? dm.me)) return null;
+  if (dm === null || dm.inbox.state.status !== 'ready' || !dm.inbox.state.enabled || blocked.has(id) || !canMessage(person, id, viewer ?? dm.me)) return null;
   const { open } = dm.inbox;
   async function start(button: HTMLButtonElement) {
     const focusAtStart = document.activeElement;

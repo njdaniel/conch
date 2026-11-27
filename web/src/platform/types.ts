@@ -16,8 +16,10 @@ import type {
   CompanionEvent,
   CompanionGrantResult,
   CompanionPageEnd,
+  FileTarget,
   NativeVoiceDevicesResult,
   NativeVoiceView,
+  SaveOutcome,
   ShareSoundChoice,
   ShareSoundChooseResult,
   ShareSoundStartResult,
@@ -161,8 +163,8 @@ export interface Services {
   // Saves a stored file to disk where the place does it natively: the desktop
   // shows the system save dialog and writes only where the person chooses.
   // Absent in the browser, which saves through a download link. The page names
-  // the file by id and never a path.
-  saveFile?: (id: number) => Promise<'saved' | 'cancelled' | 'failed' | 'unauthorized'>;
+  // the file by its IDs.
+  saveFile?: (file: FileTarget) => Promise<SaveOutcome>;
   // Hands a conch:// invite link to the desktop app installed on this
   // machine, through the browser's own link handling (issue #1592). Only the
   // browser has it: the desktop app is the thing being opened, and has no

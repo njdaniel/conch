@@ -42,15 +42,18 @@ export const ordered = (held: Held): DMMessageV1[] => [...held.values()].sort((a
 // The highest Revision among messages, or floor if higher.
 export const revisionOf = (messages: readonly DMMessageV1[], floor: number): number => messages.reduce((top, m) => Math.max(top, m.revision), floor);
 
-// A send the person made that the server has not confirmed yet. nonce is the
-// whole identity of the send: sending it again is safe, and the author's own
-// copy of the stored message carries it back, which ends the pending entry.
+// The nonce identifies a pending send. Retrying an unconfirmed send reuses it,
+// and the author's own copy of the stored message carries it back to settle the entry.
 export interface Pending {
   readonly nonce: string;
   readonly body: string;
   readonly fileIds: readonly number[];
   readonly status: 'sending' | 'failed' | 'unconfirmed';
   readonly failure?: DmFailure | 'unconfirmed';
+}
+
+export function canRetrySend(send: Pending): boolean {
+  return send.status === 'unconfirmed' || (send.status === 'failed' && send.failure === 'rate_limited');
 }
 
 export function settle(pending: readonly Pending[], arrived: readonly DMMessageV1[]): readonly Pending[] {

@@ -14,9 +14,8 @@ export function DmComposer({ api, conversation, name, draft, onDraft, onSend }: 
   readonly name: string;
   readonly draft: string;
   readonly onDraft: (text: string) => void;
-  // Called with the text and the files attached; the transcript keeps the send
-  // pending, with Retry, so the composer clears at once.
-  readonly onSend: (body: string, fileIds: readonly number[]) => void;
+  // Once the transcript queues the send, it owns the text and attachments.
+  readonly onSend: (body: string, fileIds: readonly number[]) => boolean;
 }) {
   const [attached, setAttached] = useState<readonly DMFileV1[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -41,7 +40,7 @@ export function DmComposer({ api, conversation, name, draft, onDraft, onSend }: 
   function send() {
     if (!canSend) return;
     const body = draft.trim() === '' ? attached.map((f) => f.filename).join(', ') : draft;
-    onSend(body, attached.map((f) => f.id));
+    if (!onSend(body, attached.map((f) => f.id))) return;
     onDraft('');
     setAttached([]);
   }

@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore } from 'react';
 import type { DMConversationV1, DMMessageV1, DMReadStateV1 } from '../schema/generated';
 import type { DmApi, DmFailure, DmFrame } from './api';
-import { merge, ordered, pendingSends, revisionOf, settle, type Held, type Pending, type PendingSends } from './model';
+import { canRetrySend, merge, ordered, pendingSends, revisionOf, settle, type Held, type Pending, type PendingSends } from './model';
 
 // What the person may write while their retained history is still readable.
 export type Access = 'ok' | 'unavailable' | 'off';
@@ -97,7 +97,8 @@ export interface Transcript {
   readonly state: TranscriptState;
   readonly messages: readonly DMMessageV1[];
   readonly pending: readonly Pending[];
-  readonly send: (body: string, fileIds: readonly number[]) => Promise<boolean>;
+  readonly canWrite: boolean;
+  readonly send: (body: string, fileIds: readonly number[]) => boolean;
   readonly retry: (nonce: string) => Promise<void>;
   readonly discard: (nonce: string) => void;
   readonly edit: (message: number, body: string) => Promise<DmFailure | null>;
@@ -106,9 +107,7 @@ export interface Transcript {
   readonly reload: () => void;
 }
 
-const newNonce = (): string => globalThis.crypto.randomUUID();
-
-export function useDmTranscript(api: DmApi, scope: string, conversation: number, viewing: boolean, onRead?: (state: DMReadStateV1) => void, kept?: PendingSends): Transcript {
+export function useDmTranscript(api: DmApi, scope: string, conversation: number, viewing: boolean, enabled: boolean, blocked: ReadonlySet<number>, onRead?: (state: DMReadStateV1) => void, kept?: PendingSends): Transcript {
   const key = `${scope}/${String(conversation)}`;
   const local = useMemo(() => pendingSends(), [key]);
   const sends = kept ?? local;
@@ -116,12 +115,13 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
   const recovery = useMemo(() => ({ after: null as number | null, running: false, requested: false, active: false, revoked: false, load: 0 }), [api, key]);
   const [raw, dispatch] = useReducer(reduce, key, empty);
   const [visible, setVisible] = useState(() => document.visibilityState !== 'hidden');
+  const [readPoll, setReadPoll] = useState(0);
   // Until the reset effect has run for a new key, show an empty state for it:
   // a render never shows the previous key's messages.
   const state = raw.key === key ? raw : empty(key);
   const live = useRef(state);
   live.current = state;
-  const reading = useRef<{ key: string; id: number } | null>(null);
+  const reading = useMemo(() => ({ id: 0, retry: false }), [api, key]);
   const read = useRef(onRead);
   read.current = onRead;
 
@@ -132,7 +132,7 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
   }, [key, sends, recovery]);
 
   const fail = useCallback((failure: DmFailure) => {
-    if (failure === 'not_found' || failure === 'unauthorized' || failure === 'own_sign_in_required') {
+    if (failure === 'not_found' || failure === 'unauthorized' || failure === 'forbidden' || failure === 'own_sign_in_required') {
       recovery.revoked = true;
       recovery.after = null;
       act({ type: 'revoked', status: failure === 'own_sign_in_required' ? failure : 'gone' });
@@ -154,14 +154,20 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
       return;
     }
     recovery.running = true;
+    // A successful poll may leave the messages unchanged. Wake a failed read mark anyway.
+    const retryRead = () => {
+      if (reading.retry) setReadPoll((poll) => poll + 1);
+    };
     try {
       if (recovery.after === null) {
         if (live.current.status === 'loading') recovery.requested = true;
         if (live.current.status === 'metadata' || live.current.status === 'ready') {
           const info = await api.get(conversation);
           if (!active()) return;
-          if (info.ok) act({ type: 'conversation', conversation: info.value });
-          else fail(info.failure);
+          if (info.ok) {
+            act({ type: 'conversation', conversation: info.value });
+            retryRead();
+          } else fail(info.failure);
         }
         return;
       }
@@ -176,6 +182,7 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
           return;
         }
         act({ type: 'merge', messages: result.value.messages });
+        retryRead();
         recovery.after = revisionOf(result.value.messages, after);
         const more = result.value.next_after !== undefined && result.value.next_after > after;
         if (!more && !requested()) return;
@@ -183,7 +190,7 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
     } finally {
       recovery.running = false;
     }
-  }, [api, conversation, act, fail, recovery]);
+  }, [api, conversation, act, fail, reading, recovery]);
 
   const load = useCallback(async () => {
     // Read the baseline before history so changes concurrent with history
@@ -260,54 +267,62 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
   const newest = messages.at(-1)?.id ?? 0;
   useEffect(() => {
     if (state.status !== 'ready' || !viewing || !visible || newest <= state.lastRead) return;
-    if (reading.current?.key === key && reading.current.id >= newest) return;
-    reading.current = { key, id: newest };
+    if (reading.id >= newest && !reading.retry) return;
+    reading.id = newest;
+    reading.retry = false;
     void api.markRead(conversation, newest).then((result) => {
       if (!recovery.active || recovery.revoked) return;
       if (!result.ok) {
-        if (reading.current?.key === key) reading.current = null;
+        if (reading.id === newest) reading.retry = result.failure === 'network' || result.failure === 'rate_limited';
         fail(result.failure);
         return;
       }
       act({ type: 'read', lastRead: result.value.last_read_id });
       read.current?.(result.value);
     });
-  }, [api, key, conversation, state.status, state.lastRead, newest, visible, viewing, act, fail, recovery]);
+  }, [api, conversation, state.status, state.lastRead, newest, visible, viewing, act, fail, reading, readPoll, recovery]);
+
+  const canWrite = enabled && state.status === 'ready' && state.access === 'ok' &&
+    state.conversation !== null && !blocked.has(state.conversation.peer_id);
 
   const discard = useCallback((nonce: string) => {
     sends.update((held) => held.filter((p) => p.nonce !== nonce));
   }, [sends]);
 
-  const transmit = useCallback(async (send: Pending): Promise<boolean> => {
+  const transmit = useCallback(async (send: Pending) => {
     const { nonce, body, fileIds } = send;
     const result = await api.send(conversation, { body, ...(fileIds.length === 0 ? {} : { file_ids: [...fileIds] }), client_nonce: nonce });
     if (result.ok) {
       act({ type: 'merge', messages: [result.message] });
       discard(nonce);
       if (recovery.after !== null && result.message.revision > recovery.after + 1) void catchUp();
-      return true;
+      return;
     }
     const status = result.failure === 'unconfirmed' || result.failure === 'network' ? 'unconfirmed' : 'failed';
     sends.update((held) => held.map((p) => p.nonce === nonce ? { ...p, status, failure: result.failure } : p));
     if (recovery.active && result.failure !== 'unconfirmed') fail(result.failure);
-    return false;
   }, [api, conversation, act, discard, recovery, catchUp, sends, fail]);
 
-  const send = useCallback(async (body: string, fileIds: readonly number[]): Promise<boolean> => {
-    if (body.trim() === '') return false;
-    const pending: Pending = { nonce: newNonce(), body, fileIds, status: 'sending' };
+  const send = useCallback((body: string, fileIds: readonly number[]): boolean => {
+    if (!canWrite || body.trim() === '') return false;
+    // getRandomValues also works on a plain-HTTP LAN origin.
+    const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+    const nonce = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+    const pending: Pending = { nonce, body, fileIds, status: 'sending' };
     sends.update((held) => [...held, pending]);
-    return transmit(pending);
-  }, [sends, transmit]);
+    void transmit(pending);
+    return true;
+  }, [canWrite, sends, transmit]);
 
   const retry = useCallback(async (nonce: string) => {
     const send = sends.get().find((p) => p.nonce === nonce);
-    if (send === undefined || send.status === 'sending') return;
+    if (!canWrite || send === undefined || !canRetrySend(send)) return;
     sends.update((held) => held.map((p) => p.nonce === nonce ? { ...p, status: 'sending' } : p));
     await transmit(send);
-  }, [sends, transmit]);
+  }, [canWrite, sends, transmit]);
 
   const edit = useCallback(async (message: number, body: string): Promise<DmFailure | null> => {
+    if (!canWrite) return 'unavailable';
     const result = await api.edit(conversation, message, body);
     if (!recovery.active || recovery.revoked) return null;
     if (result.ok) {
@@ -317,7 +332,7 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
     }
     fail(result.failure);
     return result.failure;
-  }, [api, conversation, act, fail, recovery, catchUp]);
+  }, [api, canWrite, conversation, act, fail, recovery, catchUp]);
 
   const remove = useCallback(async (message: number): Promise<DmFailure | null> => {
     const result = await api.remove(conversation, message);
@@ -348,6 +363,7 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
     state,
     pending,
     messages,
+    canWrite,
     send,
     retry,
     discard,

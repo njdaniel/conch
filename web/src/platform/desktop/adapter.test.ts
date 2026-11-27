@@ -176,6 +176,19 @@ describe('the desktop transport: a call of the table is a call of the bridge', (
     await expect(http.download(call('whoami'), STAND_IN)).rejects.toBeInstanceOf(TypeError);
   });
 
+  it('uploads and downloads DM attachments through the bridge with their conversation IDs', async () => {
+    const uploadFile = vi.fn((): Promise<BridgeReply> => Promise.resolve({ kind: 'reply', status: 201, body: { id: 41 } }));
+    const downloadFile = vi.fn(() => Promise.resolve({ kind: 'bytes' as const, data: 'AQID' }));
+    install(fakeBridge({ uploadFile, downloadFile }));
+    const input = new Uint8Array([1, 2, 3]);
+    const res = await http.upload(call('uploadDmFile', { conversation: 12 }, 'filename=a%20b.png'), STAND_IN, 'image/png', new Blob([input]), new AbortController().signal);
+    expect(res.status).toBe(201);
+    expect(uploadFile).toHaveBeenCalledExactlyOnceWith({ conversation: 12, filename: 'a b.png', mediaType: 'image/png', data: 'AQID' });
+    const download = await http.download(call('dmFileBytes', { conversation: 12, file: 41 }), STAND_IN);
+    expect(new Uint8Array(await download.arrayBuffer())).toEqual(input);
+    expect(downloadFile).toHaveBeenCalledExactlyOnceWith({ conversation: 12, file: 41 });
+  });
+
   it('ends a wait when the caller’s signal aborts', async () => {
     install(fakeBridge({ request: () => new Promise(() => undefined) }));
     const controller = new AbortController();

@@ -5590,8 +5590,7 @@ button.link {
     contain: size;
   }
 
-  .lobby:not(.phone) .conversation > .ag-run,
-  .lobby:not(.phone) .conversation > .first-run {
+  .lobby:not(.phone) .conversation > .keep-mounted > :is(.ag-run, .first-run) {
     flex: 1 1 0;
     min-height: 0;
     overflow-y: auto;

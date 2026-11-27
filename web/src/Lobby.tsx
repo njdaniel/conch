@@ -1,4 +1,4 @@
-import { useCallback, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { ChannelList } from './ChannelList';
 import { ChannelNav } from './ChannelNav';
 import { GroupsPanel } from './ChannelGroups';
@@ -419,11 +419,12 @@ export function Lobby({
     setDmFocus('return');
   }
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (dmFocus === null || modalNow || overlays > 0) return;
-    if (dmFocus === 'enter' && directOpen !== null) {
+    if (dmFocus === 'enter') {
+      if (directOpen === null) return;
       centre.current?.querySelector<HTMLElement>('[data-dm-entry]')?.focus();
-    } else if (dmFocus === 'return') {
+    } else {
       const opener = dmOpener.current?.button;
       if (opener?.isConnected === true && opener.closest('[hidden], [inert]') === null) opener.focus();
       else if (!phone || view === 'channels') lobbyEl.current?.querySelector<HTMLElement>('[data-dm-inbox-heading]')?.focus();

@@ -23,7 +23,6 @@ import { ChannelSettingsAsk } from './ChannelSettingsAsk';
 import { RenameChannel } from './RenameChannel';
 import { SetTopic } from './SetTopic';
 import { DmContext, useDmValue } from './dm/DmContext';
-import { dmApi, inertApi } from './dm/api';
 import { scopeKey } from './dm/keys';
 import { channelFromHash, messageFromHash, forgetChannel, hashForChannel, rememberChannel, rememberedChannel, showChannelInAddress, takeLinkFromAddress } from './route';
 import type { ChannelDocV1 } from './schema/channel';
@@ -208,9 +207,8 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   // A temporary guest's live visit (issue #713), and how the page names the
   // person: a guest by its attribution, never by the text of its handle.
   const visit = principal === null ? null : visitOf(principal);
-  const dm = useDmValue(principal?.kind === 'human' && visit === null ? dmApi : inertApi, scopeKey(origin, principal?.id ?? 0), principal?.id ?? 0);
-  const selectDm = dm.inbox.select;
-  const showingDm = dm.inbox.state.selected !== null;
+  const { dm, selectDm } = useDmValue(principal?.capabilities?.dm === true, scopeKey(origin, principal?.id ?? 0), principal?.id ?? 0);
+  const showingDm = (dm?.inbox.state.selected ?? null) !== null;
 
   // The lobby loads the caller's channels. A 401 here, or anywhere later,
   // sends the page back to sign-in.
@@ -1784,7 +1782,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
         <ManifestReads.Provider value={manifestReads}>
         <PreviewEntry.Provider value={previewEntry}>
         <ComposerAttachmentProvider value={composerAttachments}>
-        {/* Direct messages (ADR-017): people only, with their own sign-in. */}
+        {/* whoami reports whether the signed-in credential may use DM routes. */}
         <DmContext.Provider value={dm}>
         <BlocksProvider value={blocks}>
         <Lobby

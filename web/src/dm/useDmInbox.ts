@@ -46,7 +46,7 @@ function put(list: readonly DMConversationV1[], next: DMConversationV1): readonl
 }
 
 export function reduceInbox(state: InboxState, action: Action): InboxState {
-  if (action.type === 'reset') return state.scope === action.scope ? state : start(action.scope);
+  if (action.type === 'reset') return start(action.scope);
   if (action.scope !== state.scope) return state;
   switch (action.type) {
     case 'rows':
@@ -77,7 +77,7 @@ export interface Inbox {
   readonly read: (state: DMReadStateV1) => void;
 }
 
-export function useDmInbox(api: DmApi, scope: string): Inbox {
+export function useDmInbox(api: DmApi | null, scope: string): Inbox {
   const [raw, dispatch] = useReducer(reduceInbox, scope, start);
   const state = raw.scope === scope ? raw : start(scope);
   const act = useCallback((action: Without<Action, 'scope'>) => {
@@ -89,7 +89,7 @@ export function useDmInbox(api: DmApi, scope: string): Inbox {
   const requests = useMemo(() => ({ revision: 0, open: 0, running: null as number | null, active: false }), [api, scope]);
 
   const fail = useCallback((failure: DmFailure) => {
-    if (failure === 'unauthorized' || failure === 'own_sign_in_required' || failure === 'unsupported' || failure === 'not_found') {
+    if (failure === 'unauthorized' || failure === 'own_sign_in_required' || failure === 'forbidden' || failure === 'unsupported' || failure === 'not_found') {
       requests.open++;
       const status = failure === 'unauthorized' ? 'revoked' : failure === 'own_sign_in_required' ? failure : 'unsupported';
       act({ type: 'status', status });
@@ -99,6 +99,7 @@ export function useDmInbox(api: DmApi, scope: string): Inbox {
   }, [act, requests]);
 
   const applyRows = useCallback(async (snapshot: DMSnapshotV1 | null, isCurrent: () => boolean) => {
+    if (api === null) return;
     const rows = new Map(snapshot?.conversations.map((c) => [c.id, c]));
     if (snapshot === null || snapshot.more) {
       for (const state of ['open', 'archived'] as const) {
@@ -128,7 +129,7 @@ export function useDmInbox(api: DmApi, scope: string): Inbox {
   }, [api, act, fail]);
 
   const refresh = useCallback(async () => {
-    if (requests.running !== null || !requests.active) return;
+    if (api === null || requests.running !== null || !requests.active) return;
     const version = ++requests.revision;
     requests.running = version;
     const isCurrent = () => version === requests.revision;
@@ -148,6 +149,7 @@ export function useDmInbox(api: DmApi, scope: string): Inbox {
 
   useEffect(() => {
     dispatch({ type: 'reset', scope });
+    if (api === null) return;
     requests.active = true;
     void refresh();
     const sync = () => {
@@ -181,6 +183,7 @@ export function useDmInbox(api: DmApi, scope: string): Inbox {
   }, [requests, act]);
 
   const open = useCallback(async (peer: number, show?: () => boolean): Promise<DmResult<DMConversationV1>> => {
+    if (api === null || !requests.active) return { ok: false, failure: 'unsupported' };
     const attempt = ++requests.open;
     const result = await api.open(peer);
     if (result.ok && attempt === requests.open) {
@@ -198,9 +201,11 @@ export function useDmInbox(api: DmApi, scope: string): Inbox {
     select,
     refresh,
     setState: useCallback(async (conversation: DMConversationV1, next: DMState): Promise<DmFailure | null> => {
+      const isActive = () => requests.active;
+      if (api === null || !isActive()) return 'unsupported';
       const result = await api.setState(conversation.id, next);
       if (!result.ok) return result.failure;
-      if (!requests.active) return null;
+      if (!isActive()) return null;
       requests.revision++;
       if (next === 'hidden') act({ type: 'drop', id: conversation.id });
       else act({ type: 'upsert', conversation: result.value });

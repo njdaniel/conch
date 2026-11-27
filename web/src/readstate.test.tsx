@@ -103,7 +103,10 @@ function install() {
       const path = url.pathname;
       // Without voice, so the page opens no voice socket beside the
       // conversation's (issue #585): every socket counted here is its.
-      if (path === '/v1/whoami') return Promise.resolve(json({ id: 2, kind: 'human', name: 'ada', role: 'member', voice_allowed: false }));
+      if (path === '/v1/whoami') return Promise.resolve(json({
+        id: 2, kind: 'human', name: 'ada', role: 'member', voice_allowed: false,
+        ...(server.dms ? { capabilities: { dm: true } } : {}),
+      }));
       if (path === '/v1/channels') return Promise.resolve(json({ channels }));
       if (path === '/v1/ws-tickets') return Promise.resolve(json({ ticket: ticketValue, expires_at: at }, 201));
       if (server.events && path === '/v1/sessions' && init?.method === 'POST') {

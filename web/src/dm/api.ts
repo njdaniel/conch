@@ -9,6 +9,7 @@
 // reached, and it carries no reason (ADR-017): there is nothing here to tell
 // block from preference from switch, and nothing may be added.
 import { dmRequest, dmTransport, type DmCall } from '../api';
+import { platform } from '../platform';
 import {
   dmConversationV1,
   dmFileV1,
@@ -55,6 +56,7 @@ export type DmFailure =
   | 'unavailable' // contact_unavailable: this person cannot be messaged now, never why
   | 'dms_off' // the caller's own switch or the server's
   | 'own_sign_in_required' // an act-as credential
+  | 'forbidden' // a route-level 403 outside the DM contact policy
   | 'rate_limited'
   | 'refused'; // anything else the server said no to
 
@@ -103,6 +105,7 @@ export interface DmApi {
   fileMeta: (conversation: number, file: number) => Promise<DmResult<DMFileV1>>;
   uploadFile: (conversation: number, name: string, mediaType: string, bytes: Blob, signal: AbortSignal) => Promise<DmResult<DMFileV1>>;
   fileBytes: (conversation: number, file: number) => Promise<DmResult<Blob>>;
+  saveFile?: (conversation: number, file: number) => Promise<DmResult<null>>;
   preferences?: () => Promise<DmResult<DMPreferencesV1>>;
   setPreferences: (accept: DMAcceptPolicy) => Promise<DmResult<DMPreferencesV1>>;
   // A subscription to DM updates and signals to re-read. The returned function unsubscribes.
@@ -113,6 +116,8 @@ export interface DmApi {
 export function failureOf(status: number | undefined, code: string | undefined): DmFailure {
   if (status === 401) return 'unauthorized';
   if (status === 404 && code === undefined) return 'unsupported';
+  // A contact or send-policy refusal still allows access to retained history.
+  if (status === 403 && code !== 'contact_unavailable' && code !== 'dms_off' && code !== 'own_sign_in_required') return 'forbidden';
   if (status === 429 || code === 'rate_limited') return 'rate_limited';
   switch (code) {
     case 'dm_not_found':
@@ -142,17 +147,12 @@ async function refusal(res: Response): Promise<{ readonly code?: string; readonl
   return {};
 }
 
-async function read<T>(request: DmCall, check: Validator<T>): Promise<DmResult<T>> {
+async function readResult<T>(request: DmCall, check: Validator<T>): Promise<DmResult<T>> {
   const result = await dmTransport.read(request, check, true);
   if (result.ok) return { ok: true, value: result.value };
   if (result.failure === 'unauthorized') return { ok: false, failure: 'unauthorized' };
   if (result.failure === 'network' || result.status === undefined || result.status >= 500) return { ok: false, failure: 'network' };
   return { ok: false, failure: failureOf(result.status, result.code), ...(result.code === undefined ? {} : { code: result.code }) };
-}
-
-async function write<T>(request: DmCall, body: unknown, check: Validator<unknown> | null, value: (parsed: unknown) => T): Promise<DmResult<T>> {
-  const reply = await dmTransport.write(request, body);
-  return settled(reply, check, value);
 }
 
 async function settled<T>(reply: Awaited<ReturnType<typeof dmTransport.write>>, check: Validator<unknown> | null, value: (parsed: unknown) => T): Promise<DmResult<T>> {
@@ -178,83 +178,121 @@ const { call, queryOf } = dmRequest;
 
 const pageLimit = '50';
 
-export const dmApi: DmApi = {
-  list: (state, cursor) => read(call('listDms', undefined, queryOf({ ...(state === undefined ? {} : { state }), ...(cursor === undefined ? {} : { cursor }) })), listDMConversationsResponseV1),
-  open: async (peer) => {
-    const request: OpenDMRequestV1 = { peer_id: peer };
-    const result = await write(call('openDm'), request, openDMResponseV1, (parsed) => (parsed as OpenDMResponseV1).conversation);
+function createDmApi(access?: { readonly denied: () => boolean; readonly deny: () => void }): DmApi {
+  async function request<T>(run: () => Promise<DmResult<T>>): Promise<DmResult<T>> {
+    if (access?.denied() === true) return { ok: false, failure: 'forbidden' };
+    const result = await run();
+    if (!result.ok && (result.failure === 'forbidden' || result.failure === 'own_sign_in_required')) access?.deny();
     return result;
-  },
-  get: (conversation) => read(call('getDm', { conversation }), dmConversationV1),
-  history: (conversation, query) => {
-    const values: Record<string, string> = { order: query.order, limit: pageLimit };
-    if (query.before !== undefined) values['before'] = String(query.before);
-    if (query.after !== undefined) values['after'] = String(query.after);
-    return read(call('listDmMessages', { conversation }, queryOf(values)), listDMMessagesResponseV1);
-  },
-  changes: (conversation, after) => read(call('listDmChanges', { conversation }, queryOf({ after: String(after) })), listDMChangesResponseV1),
-  send: async (conversation, request) => {
-    const result = await write(call('postDmMessage', { conversation }), request, postDMMessageResponseV1, (parsed) => (parsed as PostDMMessageResponseV1).message);
-    if (result.ok) return { ok: true, message: result.value };
-    // A 5xx or a cut-off body may come after the server stored it.
-    return { ok: false, failure: result.failure === 'network' ? 'unconfirmed' : result.failure, ...(result.retryAfter === undefined ? {} : { retryAfter: result.retryAfter }) };
-  },
-  edit: (conversation, message, body) => {
-    const request: EditDMMessageRequestV1 = { body };
-    return write(call('editDmMessage', { conversation, message }), request, editDMMessageResponseV1, (parsed) => (parsed as EditDMMessageResponseV1).message);
-  },
-  remove: (conversation, message) => write(call('removeDmMessage', { conversation, message }), undefined, null, () => null),
-  markRead: (conversation, lastRead) => {
-    const request: MarkReadRequestV1 = { last_read_id: lastRead };
-    return write(call('markDmRead', { conversation }), request, dmReadStateV1, (parsed) => parsed as DMReadStateV1);
-  },
-  setState: (conversation, state) => {
-    const request: SetDMStateRequestV1 = { state };
-    return write(call('setDmState', { conversation }), request, dmConversationV1, (parsed) => parsed as DMConversationV1);
-  },
-  search: (conversation, words, before) => {
-    const values: Record<string, string> = { q: words, limit: pageLimit };
-    if (before !== undefined) values['before'] = String(before);
-    return read(call('searchDmMessages', { conversation }, queryOf(values)), searchDMMessagesResponseV1);
-  },
-  fileMeta: (conversation, file) => read(call('dmFileMeta', { conversation, file }), dmFileV1),
-  uploadFile: async (conversation, name, mediaType, bytes, signal) => {
-    const reply = await dmTransport.upload(call('uploadDmFile', { conversation }, `filename=${encodeURIComponent(name)}`), mediaType, bytes, signal);
-    return settled(reply, dmFileV1, (parsed) => parsed as DMFileV1);
-  },
-  fileBytes: async (conversation, file) => {
-    const reply = await dmTransport.download(call('dmFileBytes', { conversation, file }));
-    if (reply.kind === 'none') return { ok: false, failure: 'network' };
-    if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
-    if (!reply.res.ok) return { ok: false, failure: failureOf(reply.res.status, (await refusal(reply.res)).code) };
-    try {
-      return { ok: true, value: await reply.res.blob() };
-    } catch {
-      return { ok: false, failure: 'network' };
-    }
-  },
-  // The server has no preference endpoint yet. Keep the selector hidden until
-  // the adapter can read the current value.
-  setPreferences: (accept) => {
-    const request: DMPreferencesV1 = { accept };
-    return write(call('putDmPreferences'), request, dmPreferencesV1, (parsed) => parsed as DMPreferencesV1);
-  },
-  // The person socket exists (#2040), but its DM snapshot and fan-out are
-  // unwired on the server (#2022). Re-read served REST routes while visible.
-  live: (listener) => {
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') listener({ type: 'poll' });
-    }, 15_000);
-    return () => { window.clearInterval(timer); };
-  },
-};
+  }
 
-// inertApi is the API for a page that has no DMs to offer (a guest, an agent):
-// it asks the server nothing and answers as a server without the routes does,
-// so the inbox and the Message action stay out of the page without the tree
-// around them changing shape when a guest becomes a member.
-export const inertApi: DmApi = {
-  ...dmApi,
-  list: () => Promise.resolve({ ok: false, failure: 'unsupported' }),
-  live: () => () => undefined,
-};
+  const read = <T>(call: DmCall, check: Validator<T>) => request(() => readResult(call, check));
+  const write = <T>(call: DmCall, body: unknown, check: Validator<unknown> | null, value: (parsed: unknown) => T) =>
+    request(async () => settled(await dmTransport.write(call, body), check, value));
+  const nativeSave = platform.services.saveFile;
+
+  return {
+    list: (state, cursor) => read(call('listDms', undefined, queryOf({ ...(state === undefined ? {} : { state }), ...(cursor === undefined ? {} : { cursor }) })), listDMConversationsResponseV1),
+    open: async (peer) => {
+      const request: OpenDMRequestV1 = { peer_id: peer };
+      const result = await write(call('openDm'), request, openDMResponseV1, (parsed) => (parsed as OpenDMResponseV1).conversation);
+      return result;
+    },
+    get: (conversation) => read(call('getDm', { conversation }), dmConversationV1),
+    history: (conversation, query) => {
+      const values: Record<string, string> = { order: query.order, limit: pageLimit };
+      if (query.before !== undefined) values['before'] = String(query.before);
+      if (query.after !== undefined) values['after'] = String(query.after);
+      return read(call('listDmMessages', { conversation }, queryOf(values)), listDMMessagesResponseV1);
+    },
+    changes: (conversation, after) => read(call('listDmChanges', { conversation }, queryOf({ after: String(after) })), listDMChangesResponseV1),
+    send: async (conversation, request) => {
+      const result = await write(call('postDmMessage', { conversation }), request, postDMMessageResponseV1, (parsed) => (parsed as PostDMMessageResponseV1).message);
+      if (result.ok) return { ok: true, message: result.value };
+      // A 5xx or a cut-off body may come after the server stored it.
+      return { ok: false, failure: result.failure === 'network' ? 'unconfirmed' : result.failure, ...(result.retryAfter === undefined ? {} : { retryAfter: result.retryAfter }) };
+    },
+    edit: (conversation, message, body) => {
+      const request: EditDMMessageRequestV1 = { body };
+      return write(call('editDmMessage', { conversation, message }), request, editDMMessageResponseV1, (parsed) => (parsed as EditDMMessageResponseV1).message);
+    },
+    remove: (conversation, message) => write(call('removeDmMessage', { conversation, message }), undefined, null, () => null),
+    markRead: (conversation, lastRead) => {
+      const request: MarkReadRequestV1 = { last_read_id: lastRead };
+      return write(call('markDmRead', { conversation }), request, dmReadStateV1, (parsed) => parsed as DMReadStateV1);
+    },
+    setState: (conversation, state) => {
+      const request: SetDMStateRequestV1 = { state };
+      return write(call('setDmState', { conversation }), request, dmConversationV1, (parsed) => parsed as DMConversationV1);
+    },
+    search: (conversation, words, before) => {
+      const values: Record<string, string> = { q: words, limit: pageLimit };
+      if (before !== undefined) values['before'] = String(before);
+      return read(call('searchDmMessages', { conversation }, queryOf(values)), searchDMMessagesResponseV1);
+    },
+    fileMeta: (conversation, file) => read(call('dmFileMeta', { conversation, file }), dmFileV1),
+    uploadFile: (conversation, name, mediaType, bytes, signal) => request(async () => {
+      const reply = await dmTransport.upload(call('uploadDmFile', { conversation }, `filename=${encodeURIComponent(name)}`), mediaType, bytes, signal);
+      return settled(reply, dmFileV1, (parsed) => parsed as DMFileV1);
+    }),
+    fileBytes: (conversation, file) => request(async () => {
+      const reply = await dmTransport.download(call('dmFileBytes', { conversation, file }));
+      if (reply.kind === 'none') return { ok: false, failure: 'network' };
+      if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+      if (!reply.res.ok) return { ok: false, failure: failureOf(reply.res.status, (await refusal(reply.res)).code) };
+      try {
+        return { ok: true, value: await reply.res.blob() };
+      } catch {
+        return { ok: false, failure: 'network' };
+      }
+    }),
+    ...(nativeSave === undefined ? {} : {
+      saveFile: (conversation: number, file: number) => request<null>(async () => {
+        const outcome = await nativeSave({ conversation, file });
+        if (outcome === 'unauthorized' || outcome === 'forbidden') return { ok: false, failure: outcome };
+        if (outcome === 'failed') return { ok: false, failure: 'refused' };
+        return { ok: true, value: null };
+      }),
+    }),
+    // The server has no preference endpoint yet. Keep the selector hidden until
+    // the adapter can read the current value.
+    setPreferences: (accept) => {
+      const request: DMPreferencesV1 = { accept };
+      return write(call('putDmPreferences'), request, dmPreferencesV1, (parsed) => parsed as DMPreferencesV1);
+    },
+    // The person socket exists (#2040), but its DM snapshot and fan-out are
+    // unwired on the server (#2022). Re-read served REST routes while visible.
+    live: (listener) => {
+      const timer = window.setInterval(() => {
+        if (document.visibilityState === 'visible') listener({ type: 'poll' });
+      }, 15_000);
+      return () => { window.clearInterval(timer); };
+    },
+  };
+}
+
+export const dmApi = createDmApi();
+
+// Latch a credential refusal across every DM surface for this sign-in.
+// Guard further calls immediately, including pagination already in progress.
+export function createDmSession() {
+  let refused = false;
+  const listeners = new Set<() => void>();
+  const denied = () => refused;
+  const api = createDmApi({
+    denied,
+    deny: () => {
+      if (refused) return;
+      refused = true;
+      for (const listener of listeners) listener();
+    },
+  });
+  return {
+    api,
+    denied,
+    subscribe: (listener: () => void) => {
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    },
+  };
+}

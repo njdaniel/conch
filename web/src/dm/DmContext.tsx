@@ -3,8 +3,8 @@
 // the voice client's, and nothing here reads or writes it: opening, switching
 // or closing a conversation changes the middle of the page and never the
 // voice destination (the voice strip is mounted beside it, untouched).
-import { createContext, useContext, useMemo, type ReactNode } from 'react';
-import { dmApi, type DmApi } from './api';
+import { createContext, useContext, useMemo, useSyncExternalStore, type ReactNode } from 'react';
+import { createDmSession, type DmApi } from './api';
 import { pendingSends, type PendingSends } from './model';
 import { useDmInbox, type Inbox } from './useDmInbox';
 
@@ -29,11 +29,18 @@ export const DmOpened = createContext<((opener: HTMLElement) => void) | null>(nu
 // provider has no DM actions.
 export const useDm = (): DmValue | null => useContext(DmContext);
 
-export function DmProvider({ scope, me, api = dmApi, children }: { readonly scope: string; readonly me: number; readonly api?: DmApi; readonly children: ReactNode }) {
-  return <DmContext.Provider value={useDmValue(api, scope, me)}>{children}</DmContext.Provider>;
+export function DmProvider({ scope, me, api, children }: { readonly scope: string; readonly me: number; readonly api?: DmApi; readonly children: ReactNode }) {
+  const { dm } = useDmValue(true, scope, me, api);
+  return <DmContext.Provider value={dm}>{children}</DmContext.Provider>;
 }
 
-export function useDmValue(api: DmApi, scope: string, me: number): DmValue {
+const noSubscription = () => () => undefined;
+const notDenied = () => false;
+
+export function useDmValue(allowed: boolean, scope: string, me: number, source?: DmApi) {
+  const session = useMemo(() => allowed && source === undefined ? createDmSession() : null, [allowed, source, scope]);
+  const denied = useSyncExternalStore(session?.subscribe ?? noSubscription, session?.denied ?? notDenied);
+  const api = allowed && !denied ? session?.api ?? source ?? null : null;
   const inbox = useDmInbox(api, scope);
   // Drafts are per conversation (kind and id, never an id alone) and live as
   // long as the scope: an account or server change drops them.
@@ -57,5 +64,6 @@ export function useDmValue(api: DmApi, scope: string, me: number): DmValue {
       return sends;
     };
   }, [scope]);
-  return useMemo(() => ({ api, scope, me, inbox, drafts, sendsFor }), [api, scope, me, inbox, drafts, sendsFor]);
+  const dm: DmValue | null = api === null ? null : { api, scope, me, inbox, drafts, sendsFor };
+  return { dm, selectDm: inbox.select };
 }

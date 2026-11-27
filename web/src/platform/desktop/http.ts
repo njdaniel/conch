@@ -273,8 +273,12 @@ export const http: HttpTransport = {
     refusePreview(call);
     const b = await need();
     const channel = call.params?.['channel'];
+    const conversation = call.params?.['conversation'];
     const filename = filenameOf(call);
-    if (call.op !== 'uploadFile' || typeof channel !== 'string' || filename === null) return noAnswer('unsupported');
+    const target = call.op === 'uploadFile' && typeof channel === 'string' ? { channel }
+      : call.op === 'uploadDmFile' && typeof conversation === 'number' ? { conversation }
+      : null;
+    if (target === null || filename === null) return noAnswer('unsupported');
     signal.throwIfAborted();
     if (bytes.size > DESKTOP_UPLOAD_MAX_BYTES) {
       return jsonResponse(413, {
@@ -283,15 +287,20 @@ export const http: HttpTransport = {
       });
     }
     const data = await withSignal(toBase64(bytes), signal);
-    return fromReply(await withSignal(b.uploadFile({ channel, filename, mediaType, data }), signal));
+    return fromReply(await withSignal(b.uploadFile({ ...target, filename, mediaType, data }), signal));
   },
 
   async download(call) {
     refusePreview(call);
     const b = await need();
     const id = call.params?.['id'];
-    if (call.op !== 'fileBytes' || typeof id !== 'number') return noAnswer('unsupported');
-    const reply = await b.downloadFile(id);
+    const conversation = call.params?.['conversation'];
+    const file = call.params?.['file'];
+    const target = call.op === 'fileBytes' && typeof id === 'number' ? id
+      : call.op === 'dmFileBytes' && typeof conversation === 'number' && typeof file === 'number' ? { conversation, file }
+      : null;
+    if (target === null) return noAnswer('unsupported');
+    const reply = await b.downloadFile(target);
     if (reply.kind === 'bytes') return new Response(fromBase64(reply.data), { status: 200, headers: { 'Content-Type': 'application/octet-stream' } });
     return fromReply(reply);
   },

@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
+import { conversation } from './dm/testkit';
 import { windowOf } from './fakewindow';
 import { SPOILER_FILE_PREFIX } from './schema/file';
 import { attachmentNames, forgetFileNames, rememberFileName } from './spoilerFiles';
@@ -21,11 +22,12 @@ const channels = {
 
 type Handler = (auth: string | null, init?: RequestInit) => Response | Promise<Response>;
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
+const requestPath = (input: RequestInfo | URL) => typeof input === 'string' ? input : input instanceof URL ? input.pathname : input.url;
 
 // server stands in for conchd: whoami and channels, each answering by token.
 function serve(routes: Record<string, Handler>) {
   const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-    const path = typeof input === 'string' ? input : input instanceof URL ? input.pathname : input.url;
+    const path = requestPath(input);
     const headers = new Headers(init?.headers);
     const handler = routes[path];
     return Promise.resolve(handler ? handler(headers.get('Authorization'), init) : json({}, 404));
@@ -101,6 +103,70 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+});
+
+describe('DM credential capability', () => {
+  const refocus = () => act(() => {
+    window.dispatchEvent(new Event('focus'));
+    return Promise.resolve();
+  });
+
+  it.each([{}, { capabilities: { dm: false } }])('skips DM routes with whoami options %j', async (options) => {
+    const requests = serve({ ...asMember, '/v1/whoami': () => json({ ...member, ...options }) });
+    render(<App origin={origin} />);
+    signIn();
+    await screen.findByRole('button', { name: 'Settings' });
+    await refocus();
+    expect(requests.mock.calls.filter(([input]) => requestPath(input).startsWith('/v1/dms'))).toEqual([]);
+    expect(screen.queryByRole('navigation', { name: 'Direct messages' })).toBeNull();
+  });
+
+  it('stops DM requests when a DM action returns a credential refusal', async () => {
+    const list = vi.fn(() => json({ conversations: [conversation()] }));
+    const hide = vi.fn(() => json({ code: 'own_sign_in_required', message: 'Use your own sign-in' }, 403));
+    serve({
+      ...asMember,
+      '/v1/whoami': () => json({ ...member, capabilities: { dm: true } }),
+      '/v1/dms?state=open': list,
+      '/v1/dms?state=archived': () => json({ conversations: [] }),
+      '/v1/dms/12/state': hide,
+    });
+    render(<App origin={origin} />);
+    signIn();
+    fireEvent.click(await screen.findByRole('button', { name: 'Hide the conversation with Grace' }));
+    await act(async () => {});
+    expect(hide).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('navigation', { name: 'Direct messages' })).toBeNull();
+    await refocus();
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: 'Settings' })).toBeDefined();
+  });
+
+  it('handles an unexpected inbox 403 without application console errors or further requests', async () => {
+    const list = vi.fn(() => json({ code: 'forbidden', message: 'Forbidden' }, 403));
+    const requests = serve({
+      ...asMember,
+      '/v1/whoami': () => json({ ...member, capabilities: { dm: true } }),
+      '/v1/dms?state=open': list,
+    });
+    const errors = vi.spyOn(console, 'error');
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      render(<App origin={origin} />);
+      signIn();
+      await screen.findByRole('button', { name: 'Settings' });
+      await act(async () => {});
+      expect(list).toHaveBeenCalledTimes(1);
+      expect(screen.queryByRole('navigation', { name: 'Direct messages' })).toBeNull();
+      await refocus();
+      await act(() => vi.advanceTimersByTimeAsync(45_000));
+      expect(requests.mock.calls.filter(([input]) => requestPath(input).startsWith('/v1/dms'))).toHaveLength(1);
+      expect(errors).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      errors.mockRestore();
+    }
+  });
 });
 
 describe('sign-in', () => {
