@@ -54,17 +54,13 @@ describe('the operation table', () => {
   // registered; a listed operation that the server does serve fails, so this
   // list can only shrink and is empty when the server catches up.
   const awaitingServer = new Set<OperationId>([
-    'openDm',
-    'listDms',
     'dmSnapshot',
-    'getDm',
     'listDmMessages',
     'listDmChanges',
     'postDmMessage',
     'editDmMessage',
     'removeDmMessage',
     'markDmRead',
-    'setDmState',
     'searchDmMessages',
     'uploadDmFile',
     'dmFileMeta',

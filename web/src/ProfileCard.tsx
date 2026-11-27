@@ -177,7 +177,11 @@ export function ProfileCard({ id, person, viewer, name: surfaceName, className =
               {shownPerson.state}{shownPerson.live > 1 ? ` (${String(shownPerson.live)} sessions)` : ''}
             </p>
           ) : null}
-          <MessageAction id={id} name={name} person={shownPerson} viewer={viewer} onOpened={close} />
+          <MessageAction id={id} name={name} person={shownPerson} viewer={viewer} onOpened={() => {
+            openNow.current = false;
+            change(false);
+            return opener.current;
+          }} />
           <BlockToggle id={id} name={name} viewer={viewer} />
           <button ref={closeButton} type="button" className="profile-card-close" onClick={close}>Close</button>
         </div>

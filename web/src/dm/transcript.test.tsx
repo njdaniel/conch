@@ -61,6 +61,37 @@ describe('the transcript', () => {
     expect(screen.queryByRole('button', { name: 'Load earlier messages' })).toBeNull();
   });
 
+  it('does not scroll to the newest message when loading earlier history', async () => {
+    const earlier = { ...peerMessage(), id: 4300, revision: 1, body: 'Earlier' };
+    const history = vi.fn<DmApi['history']>()
+      .mockResolvedValueOnce({ ok: true, value: { order: 'desc', messages: [peerMessage()], next_before: 4310 } })
+      .mockResolvedValueOnce({ ok: true, value: { order: 'desc', messages: [earlier] } });
+    mount(fake({ history }));
+    const log = await ready();
+    const scrollTo = vi.fn();
+    Object.defineProperty(log, 'scrollTo', { value: scrollTo });
+    fireEvent.click(screen.getByRole('button', { name: 'Load earlier messages' }));
+    await screen.findByText('Earlier');
+    expect(scrollTo).not.toHaveBeenCalled();
+  });
+
+  it('focuses the message editor or safe removal answer and restores the opening control on Escape', async () => {
+    mount(fake());
+    await ready();
+    const edit = screen.getByRole('button', { name: /^Edit your message/ });
+    edit.focus();
+    fireEvent.click(edit);
+    const box = screen.getByRole('textbox', { name: 'Edit message' });
+    expect(document.activeElement).toBe(box);
+    fireEvent.keyDown(box, { key: 'Escape' });
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: /^Edit your message/ }));
+    fireEvent.click(screen.getByRole('button', { name: /^Remove your message/ }));
+    const keep = screen.getByRole('button', { name: 'Keep' });
+    expect(document.activeElement).toBe(keep);
+    fireEvent.keyDown(keep, { key: 'Escape' });
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: /^Remove your message/ }));
+  });
+
   it('refuses a whitespace-only message as channels do, and sends text with its nonce', async () => {
     const f = fake();
     const { typed } = mount(f);
@@ -215,6 +246,17 @@ describe('the transcript', () => {
     const f = fake({ get: vi.fn(() => Promise.resolve({ ok: false as const, failure: 'not_found' as const })), history: vi.fn(() => Promise.resolve({ ok: false as const, failure: 'not_found' as const })) });
     mount(f);
     expect((await screen.findByRole('alert')).textContent).toContain('no longer available');
+    expect(screen.queryByRole('textbox')).toBeNull();
+  });
+
+  it('clears displayed history and composer when a refresh loses authorization', async () => {
+    const changes = vi.fn<DmApi['changes']>().mockResolvedValue({ ok: false, failure: 'unauthorized' });
+    const f = fake({ changes });
+    mount(f);
+    await ready();
+    act(() => { f.frames({ type: 'poll' }); });
+    expect((await screen.findByRole('alert')).textContent).toContain('no longer available');
+    expect(screen.queryByRole('log')).toBeNull();
     expect(screen.queryByRole('textbox')).toBeNull();
   });
 

@@ -1,8 +1,11 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { useEffect } from 'react';
+import { useContext, useEffect } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { listChannels, restore } from '../api';
 import { windowOf } from '../fakewindow';
 import { Lobby } from '../Lobby';
+import { VoiceLive } from '../phone';
+import type { DMPreferencesV1 } from '../schema/generated';
 import { ProfileCard } from '../ProfileCard';
 import { initialChannels } from '../state/channels';
 import { dmApi, type DmApi } from './api';
@@ -11,7 +14,7 @@ import { DmInbox } from './DmInbox';
 import { DmProvider } from './DmContext';
 import { DmRoute, type DmConversationView } from './DmRoute';
 import { canMessage } from './MessageAction';
-import { conversation, fake, fixture, later, me, snapshot } from './testkit';
+import { conversation, fake, fixture, later, me, peerMessage, snapshot } from './testkit';
 
 beforeEach(() => {
   Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
@@ -59,7 +62,7 @@ describe('the inbox', () => {
     const snap = vi.fn()
       .mockResolvedValueOnce({ ok: false, failure: 'network' })
       .mockResolvedValue({ ok: true, value: snapshot() });
-    const fourth = render(provide(fake({ snapshot: snap as unknown as DmApi['snapshot'] }).api, <DmInbox />));
+    const fourth = render(provide(fake({ snapshot: snap as NonNullable<DmApi['snapshot']> }).api, <DmInbox />));
     fireEvent.click(await screen.findByRole('button', { name: 'Try again' }));
     expect(await screen.findByRole('list', { name: 'Conversations' })).toBeDefined();
     fourth.unmount();
@@ -98,6 +101,15 @@ describe('the inbox', () => {
     expect(f.api.list).not.toHaveBeenCalled();
   });
 
+  it('restores focus to the next inbox row after hiding the focused row', async () => {
+    render(provide(fake().api, <DmInbox />));
+    const hide = await screen.findByRole('button', { name: 'Hide the conversation with Grace' });
+    const next = screen.getByRole('button', { name: /^Former member/ });
+    hide.focus();
+    fireEvent.click(hide);
+    await waitFor(() => { expect(document.activeElement).toBe(next); });
+  });
+
   it('pages open and archived rows beyond the snapshot cap without double-counting overlap', async () => {
     const top = conversation();
     const older = { ...top, id: 21, peer_name: 'Ken', unread: 3 };
@@ -114,7 +126,7 @@ describe('the inbox', () => {
   });
 
   it('refreshes for incoming changes while the page stays visible', async () => {
-    const snapshotCall = vi.fn<DmApi['snapshot']>()
+    const snapshotCall = vi.fn<NonNullable<DmApi['snapshot']>>()
       .mockResolvedValueOnce({ ok: true, value: { ...snapshot(), conversations: [] } })
       .mockResolvedValueOnce({ ok: true, value: snapshot() });
     const f = fake({ snapshot: snapshotCall });
@@ -148,10 +160,61 @@ describe('the inbox', () => {
     const f = fake();
     render(provide(f.api, <DmInbox />));
     const select = await screen.findByRole<HTMLSelectElement>('combobox', { name: 'Who can message me' });
-    await waitFor(() => { expect(select.value).toBe(fixture<{ accept: string }>('dm-preferences-v1').accept); });
+    await waitFor(() => { expect(select.value).toBe(fixture<DMPreferencesV1>('dm-preferences-v1').accept); });
     fireEvent.change(select, { target: { value: 'nobody' } });
     await waitFor(() => { expect(f.api.setPreferences).toHaveBeenCalledWith('nobody'); });
     expect(select.value).toBe('nobody');
+  });
+
+  it('opens, hides and resumes through the routes main serves when history and settings are absent', async () => {
+    const row = conversation();
+    let hidden = false;
+    const json = (body: unknown) => new Response(JSON.stringify(body));
+    const calls: string[] = [];
+    window.sessionStorage.setItem('conch.web.token', 'conch_member_secret');
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(input instanceof Request ? input.url : input, window.location.href);
+      const method = init?.method ?? 'GET';
+      calls.push(`${method} ${path.pathname}`);
+      if (path.pathname === '/v1/whoami') return Promise.resolve(json({ id: me, kind: 'human', name: 'Ada', role: 'member' }));
+      if (path.pathname === '/v1/dms' && method === 'GET') {
+        return Promise.resolve(json({ conversations: hidden || path.searchParams.get('state') === 'archived' ? [] : [row] }));
+      }
+      if (path.pathname === '/v1/dms' && method === 'POST') {
+        hidden = false;
+        expect(init?.body).toBe(JSON.stringify({ peer_id: row.peer_id }));
+        return Promise.resolve(json({ conversation: row }));
+      }
+      if (path.pathname === '/v1/dms/12') return Promise.resolve(json(row));
+      if (path.pathname === '/v1/dms/12/state' && method === 'PUT') {
+        hidden = true;
+        expect(init?.body).toBe(JSON.stringify({ state: 'hidden' }));
+        return Promise.resolve(json({ ...row, state: 'hidden' }));
+      }
+      return Promise.resolve(new Response('404 page not found', { status: 404 }));
+    }));
+    try {
+      expect((await restore()).ok).toBe(true);
+      render(provide(dmApi, <><DmInbox /><ProfileCard id={row.peer_id} person={{ name: 'Grace', kind: 'human' }} viewer={me} /><DmContextProbe /></>));
+      const nav = screen.getByRole('navigation', { name: 'Direct messages' });
+      fireEvent.click(await within(nav).findByRole('button', { name: /^Grace/ }));
+      expect(screen.getByTestId('selected').textContent).toBe('12');
+      const view = render(provide(dmApi, <DmRoute conversationId={12} />));
+      expect(await within(view.container).findByRole('heading', { name: 'Grace' })).toBeDefined();
+      expect(within(view.container).getByText('Message history is unavailable on this server.')).toBeDefined();
+      expect(within(view.container).queryByRole('textbox')).toBeNull();
+      view.unmount();
+      expect(within(nav).queryByRole('combobox', { name: 'Who can message me' })).toBeNull();
+      fireEvent.click(within(nav).getByRole('button', { name: /Hide.*Grace/ }));
+      await within(nav).findByText(/No direct messages yet/);
+      fireEvent.click(screen.getByRole('button', { name: 'Grace' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Message Grace' }));
+      await within(nav).findByRole('button', { name: /^Grace/ });
+      expect(calls).not.toContain('GET /v1/dms/snapshot');
+    } finally {
+      window.sessionStorage.clear();
+      await listChannels();
+    }
   });
 });
 
@@ -269,7 +332,12 @@ describe('in the lobby', () => {
     }, [name]);
     return <p>{name}</p>;
   }
-  function lobby(api: DmApi) {
+  function ActiveVoice() {
+    const report = useContext(VoiceLive);
+    useEffect(() => { report(true); }, [report]);
+    return <Probe name="voice" />;
+  }
+  function lobby(api: DmApi, panel: React.ReactNode = <p>Nobody</p>) {
     return render(
       <DmProvider api={api} scope="https://a.example|3" me={me}>
         <Lobby
@@ -280,8 +348,8 @@ describe('in the lobby', () => {
           unread={new Map()}
           connection="connected"
           conversation={<Probe name="conversation" />}
-          panel={<p>Nobody</p>}
-          voice={<Probe name="voice" />}
+          panel={panel}
+          voice={<ActiveVoice />}
           invites={null}
           onOpen={() => undefined}
           onRetry={() => undefined}
@@ -291,6 +359,13 @@ describe('in the lobby', () => {
         />
       </DmProvider>,
     );
+  }
+  function phoneWindow() {
+    vi.stubGlobal('matchMedia', vi.fn((query: string) => ({
+      matches: query.includes('max-width'),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })));
   }
   beforeEach(() => { events.length = 0; });
 
@@ -317,5 +392,71 @@ describe('in the lobby', () => {
     fireEvent.click(rows[0] as HTMLElement);
     expect(await screen.findByRole('log', { name: 'Messages' })).toBeDefined();
     expect(events).not.toContain('unmount voice');
+  });
+
+  it('moves focus from the phone inbox into Chat and back while voice stays active', async () => {
+    phoneWindow();
+    lobby(fake().api);
+    const opener = await screen.findByRole('button', { name: /^Grace/ });
+    opener.focus();
+    fireEvent.click(opener);
+    const back = await screen.findByRole('button', { name: 'Back' });
+    expect(document.activeElement).toBe(back);
+    expect(opener.closest('[inert]')).not.toBeNull();
+    expect(screen.getByRole('button', { name: 'Voice' }).getAttribute('aria-describedby')).toBe('nav-voice-live');
+    fireEvent.keyDown(back, { key: 'Escape' });
+    expect(screen.queryByRole('button', { name: 'Back' })).toBeNull();
+    expect(document.activeElement).toBe(opener);
+    expect(events).toEqual(['mount conversation', 'mount voice']);
+  });
+
+  it('marks a new DM read only when its Chat view is visible', async () => {
+    phoneWindow();
+    const f = fake();
+    lobby(f.api);
+    fireEvent.click(await screen.findByRole('button', { name: /^Grace/ }));
+    await waitFor(() => { expect(f.api.markRead).toHaveBeenCalledWith(12, 4310); });
+    fireEvent.click(screen.getByRole('button', { name: 'Voice' }));
+    act(() => { f.frames({ type: 'message', message: { ...peerMessage(), id: 4311, revision: 7 } }); });
+    expect(f.api.markRead).not.toHaveBeenCalledWith(12, 4311);
+    fireEvent.click(screen.getByRole('button', { name: 'Chat' }));
+    await waitFor(() => { expect(f.api.markRead).toHaveBeenCalledWith(12, 4311); });
+  });
+
+  it('closes the modal Members drawer on Message and restores focus to Members from Back', async () => {
+    windowOf(false);
+    lobby(fake().api, <ProfileCard id={5} person={{ name: 'Grace', kind: 'human' }} viewer={me} />);
+    const members = screen.getByRole('button', { name: 'Members' });
+    fireEvent.click(members);
+    const drawer = screen.getByRole('region', { name: 'Members list' });
+    expect(screen.getByRole('main').hasAttribute('inert')).toBe(true);
+    fireEvent.click(within(drawer).getByRole('button', { name: 'Grace' }));
+    const message = await within(drawer).findByRole('button', { name: 'Message Grace' });
+    message.focus();
+    fireEvent.click(message);
+    const back = await screen.findByRole('button', { name: 'Back' });
+    expect(drawer.hasAttribute('hidden')).toBe(true);
+    expect(screen.getByRole('main').hasAttribute('inert')).toBe(false);
+    expect(document.activeElement).toBe(back);
+    fireEvent.click(back);
+    expect(document.activeElement).toBe(members);
+  });
+
+  it('keeps focus in Settings if it opens while Message is still pending', async () => {
+    const answer = later<Awaited<ReturnType<DmApi['open']>>>();
+    lobby(fake({ open: vi.fn(() => answer.promise) }).api, <ProfileCard id={5} person={{ name: 'Grace', kind: 'human' }} viewer={me} />);
+    const drawer = screen.getByRole('region', { name: 'Members list' });
+    fireEvent.click(within(drawer).getByRole('button', { name: 'Grace' }));
+    const message = await within(drawer).findByRole('button', { name: 'Message Grace' });
+    message.focus();
+    fireEvent.click(message);
+    fireEvent.click(screen.getByRole('button', { name: /^Settings/ }));
+    const settings = screen.getByRole('dialog', { name: 'Settings' });
+    await act(async () => {
+      answer.resolve({ ok: true, value: conversation() });
+      await answer.promise;
+    });
+    expect(settings.contains(document.activeElement)).toBe(true);
+    expect(screen.queryByRole('button', { name: 'Back' })).toBeNull();
   });
 });

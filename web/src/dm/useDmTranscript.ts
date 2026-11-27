@@ -3,18 +3,17 @@
 // by (scope, conversation): an answer that arrives for a key the hook has left
 // is dropped by the reducer, so switching conversations, accounts or servers
 // can never show another conversation's messages (no matter what is late).
-import { useCallback, useEffect, useMemo, useReducer, useRef, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore } from 'react';
 import type { DMConversationV1, DMMessageV1, DMReadStateV1 } from '../schema/generated';
 import type { DmApi, DmFailure, DmFrame } from './api';
 import { merge, ordered, pendingSends, revisionOf, settle, type Held, type Pending, type PendingSends } from './model';
 
-// What the person may do in the open conversation. 'gone' is a conversation
-// that is not theirs (any more): one state for "no such" and "not yours".
-export type Access = 'ok' | 'unavailable' | 'off' | 'own_sign_in_required';
+// What the person may write while their retained history is still readable.
+export type Access = 'ok' | 'unavailable' | 'off';
 
 export interface TranscriptState {
   readonly key: string;
-  readonly status: 'loading' | 'ready' | 'failed' | 'gone';
+  readonly status: 'loading' | 'ready' | 'metadata' | 'failed' | 'gone' | 'own_sign_in_required';
   readonly conversation: DMConversationV1 | null;
   readonly messages: Held;
   readonly older: number | null;
@@ -42,7 +41,9 @@ type Without<A, K extends string> = A extends unknown ? Omit<A, K> : never;
 type Action = { readonly key: string } & (
   | { readonly type: 'reset' }
   | { readonly type: 'loaded'; readonly conversation: DMConversationV1; readonly messages: readonly DMMessageV1[]; readonly older: number | null }
-  | { readonly type: 'status'; readonly status: 'loading' | 'failed' | 'gone' }
+  | { readonly type: 'status'; readonly status: 'loading' | 'failed' }
+  | { readonly type: 'metadata'; readonly conversation: DMConversationV1 }
+  | { readonly type: 'revoked'; readonly status: 'gone' | 'own_sign_in_required' }
   | { readonly type: 'olderStart' }
   | { readonly type: 'olderDone'; readonly messages: readonly DMMessageV1[]; readonly older: number | null }
   | { readonly type: 'olderFailed' }
@@ -69,6 +70,10 @@ export function reduce(state: TranscriptState, action: Action): TranscriptState 
     }
     case 'status':
       return { ...state, status: action.status };
+    case 'metadata':
+      return { ...state, status: 'metadata', conversation: action.conversation };
+    case 'revoked':
+      return { ...empty(state.key), status: action.status };
     case 'olderStart':
       return { ...state, loadingOlder: true, olderFailed: false };
     case 'olderDone':
@@ -103,13 +108,14 @@ export interface Transcript {
 
 const newNonce = (): string => globalThis.crypto.randomUUID();
 
-export function useDmTranscript(api: DmApi, scope: string, conversation: number, onRead?: (state: DMReadStateV1) => void, kept?: PendingSends): Transcript {
+export function useDmTranscript(api: DmApi, scope: string, conversation: number, viewing: boolean, onRead?: (state: DMReadStateV1) => void, kept?: PendingSends): Transcript {
   const key = `${scope}/${String(conversation)}`;
   const local = useMemo(() => pendingSends(), [key]);
   const sends = kept ?? local;
   const pending = useSyncExternalStore(sends.subscribe, sends.get);
-  const recovery = useMemo(() => ({ after: null as number | null, running: false, requested: false, active: false, load: 0 }), [api, key]);
+  const recovery = useMemo(() => ({ after: null as number | null, running: false, requested: false, active: false, revoked: false, load: 0 }), [api, key]);
   const [raw, dispatch] = useReducer(reduce, key, empty);
+  const [visible, setVisible] = useState(() => document.visibilityState !== 'hidden');
   // Until the reset effect has run for a new key, show an empty state for it:
   // a render never shows the previous key's messages.
   const state = raw.key === key ? raw : empty(key);
@@ -121,38 +127,52 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
 
   const act = useCallback((action: Without<Action, 'key'>) => {
     if ('messages' in action) sends.update((held) => settle(held, action.messages));
+    if (!recovery.active || (recovery.revoked && action.type !== 'revoked')) return;
     dispatch({ ...action, key });
-  }, [key, sends]);
+  }, [key, sends, recovery]);
 
   const fail = useCallback((failure: DmFailure) => {
-    if (failure === 'not_found') act({ type: 'status', status: 'gone' });
-    else if (failure === 'dms_off') act({ type: 'access', access: 'off' });
-    else if (failure === 'own_sign_in_required') act({ type: 'access', access: 'own_sign_in_required' });
+    if (failure === 'not_found' || failure === 'unauthorized' || failure === 'own_sign_in_required') {
+      recovery.revoked = true;
+      recovery.after = null;
+      act({ type: 'revoked', status: failure === 'own_sign_in_required' ? failure : 'gone' });
+      return true;
+    }
+    if (failure === 'dms_off') act({ type: 'access', access: 'off' });
     else if (failure === 'unavailable') act({ type: 'access', access: 'unavailable' });
-  }, [act]);
+    return false;
+  }, [act, recovery]);
 
   // Only history's baseline and successful changes pages advance this
   // cursor. A write reply or live frame can arrive ahead of unseen changes.
   const catchUp = useCallback(async () => {
-    const active = () => recovery.active;
+    const active = () => recovery.active && !recovery.revoked;
     const requested = () => recovery.requested;
-    if (recovery.after === null || !active()) return;
+    if (!active()) return;
     if (recovery.running) {
       recovery.requested = true;
       return;
     }
     recovery.running = true;
     try {
+      if (recovery.after === null) {
+        if (live.current.status === 'loading') recovery.requested = true;
+        if (live.current.status === 'metadata' || live.current.status === 'ready') {
+          const info = await api.get(conversation);
+          if (!active()) return;
+          if (info.ok) act({ type: 'conversation', conversation: info.value });
+          else fail(info.failure);
+        }
+        return;
+      }
       for (let page = 0; page < 20 && active(); page++) {
         recovery.requested = false;
         const after: number = recovery.after;
         const result = await api.changes(conversation, after);
         if (!active()) return;
         if (!result.ok) {
-          if (result.failure === 'not_found') {
-            recovery.after = null;
-            act({ type: 'status', status: 'gone' });
-          }
+          if (result.failure === 'unsupported') recovery.after = null;
+          else fail(result.failure);
           return;
         }
         act({ type: 'merge', messages: result.value.messages });
@@ -163,26 +183,30 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
     } finally {
       recovery.running = false;
     }
-  }, [api, conversation, act, recovery]);
+  }, [api, conversation, act, fail, recovery]);
 
   const load = useCallback(async () => {
     // Read the baseline before history so changes concurrent with history
     // never fall below the recovery cursor.
     const request = ++recovery.load;
-    const current = () => recovery.active && recovery.load === request;
+    const current = () => recovery.active && !recovery.revoked && recovery.load === request;
     const info = await api.get(conversation);
     if (!current()) return;
-    const page = info.ok ? await api.history(conversation, { order: 'desc' }) : info;
+    if (!info.ok) {
+      if (!fail(info.failure)) act({ type: 'status', status: 'failed' });
+      return;
+    }
+    const page = await api.history(conversation, { order: 'desc' });
     if (!current()) return;
-    if (!info.ok || !page.ok) {
-      const failure = !page.ok ? page.failure : 'network';
-      act({ type: 'status', status: failure === 'not_found' ? 'gone' : 'failed' });
+    if (!page.ok) {
+      if (page.failure === 'unsupported') act({ type: 'metadata', conversation: info.value });
+      else if (!fail(page.failure)) act({ type: 'status', status: 'failed' });
       return;
     }
     recovery.after = info.value.revision;
     act({ type: 'loaded', conversation: info.value, messages: [...page.value.messages].reverse(), older: page.value.next_before ?? null });
-    if (revisionOf(page.value.messages, info.value.revision) > info.value.revision) void catchUp();
-  }, [api, conversation, act, recovery, catchUp]);
+    if (recovery.requested || revisionOf(page.value.messages, info.value.revision) > info.value.revision) void catchUp();
+  }, [api, conversation, act, fail, recovery, catchUp]);
 
   useEffect(() => {
     dispatch({ type: 'reset', key });
@@ -197,7 +221,7 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
           const message = frame.type === 'message' ? frame.message : frame.frame.message;
           if (message.conversation_id !== conversation) return;
           act({ type: 'merge', messages: [message] });
-          if (recovery.after !== null && message.revision > recovery.after + 1) void catchUp();
+          if (recovery.after === null || message.revision > recovery.after + 1) void catchUp();
           return;
         }
         case 'changed':
@@ -207,7 +231,7 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
           const mine = frame.snapshot.conversations.find((c) => c.id === conversation);
           if (mine === undefined) return;
           act({ type: 'conversation', conversation: mine });
-          if (recovery.after !== null && mine.revision > recovery.after) void catchUp();
+          if (recovery.after === null || mine.revision > recovery.after) void catchUp();
           return;
         }
         case 'poll':
@@ -217,32 +241,38 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
       }
     });
     const onFocus = () => {
-      if (document.visibilityState === 'visible' && live.current.status === 'ready') void catchUp();
+      const visibleNow = document.visibilityState !== 'hidden';
+      setVisible(visibleNow);
+      if (visibleNow) void catchUp();
     };
     document.addEventListener('visibilitychange', onFocus);
+    window.addEventListener('focus', onFocus);
     return () => {
       recovery.active = false;
       stop();
       document.removeEventListener('visibilitychange', onFocus);
+      window.removeEventListener('focus', onFocus);
     };
   }, [api, key, conversation, load, catchUp, act, recovery]);
 
   // The read mark follows the newest message the person can see here.
-  const newest = useMemo(() => (state.messages.size === 0 ? 0 : Math.max(...state.messages.keys())), [state.messages]);
+  const messages = useMemo(() => ordered(state.messages), [state.messages]);
+  const newest = messages.at(-1)?.id ?? 0;
   useEffect(() => {
-    if (state.status !== 'ready' || newest <= state.lastRead || document.visibilityState === 'hidden') return;
+    if (state.status !== 'ready' || !viewing || !visible || newest <= state.lastRead) return;
     if (reading.current?.key === key && reading.current.id >= newest) return;
     reading.current = { key, id: newest };
     void api.markRead(conversation, newest).then((result) => {
-      if (!recovery.active) return;
+      if (!recovery.active || recovery.revoked) return;
       if (!result.ok) {
         if (reading.current?.key === key) reading.current = null;
+        fail(result.failure);
         return;
       }
       act({ type: 'read', lastRead: result.value.last_read_id });
       read.current?.(result.value);
     });
-  }, [api, key, conversation, state.status, state.lastRead, newest, act, recovery]);
+  }, [api, key, conversation, state.status, state.lastRead, newest, visible, viewing, act, fail, recovery]);
 
   const discard = useCallback((nonce: string) => {
     sends.update((held) => held.filter((p) => p.nonce !== nonce));
@@ -259,7 +289,7 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
     }
     const status = result.failure === 'unconfirmed' || result.failure === 'network' ? 'unconfirmed' : 'failed';
     sends.update((held) => held.map((p) => p.nonce === nonce ? { ...p, status, failure: result.failure } : p));
-    if (result.failure !== 'unconfirmed') fail(result.failure);
+    if (recovery.active && result.failure !== 'unconfirmed') fail(result.failure);
     return false;
   }, [api, conversation, act, discard, recovery, catchUp, sends, fail]);
 
@@ -279,6 +309,7 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
 
   const edit = useCallback(async (message: number, body: string): Promise<DmFailure | null> => {
     const result = await api.edit(conversation, message, body);
+    if (!recovery.active || recovery.revoked) return null;
     if (result.ok) {
       act({ type: 'merge', messages: [result.value] });
       if (recovery.after !== null && result.value.revision > recovery.after + 1) void catchUp();
@@ -290,6 +321,7 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
 
   const remove = useCallback(async (message: number): Promise<DmFailure | null> => {
     const result = await api.remove(conversation, message);
+    if (!recovery.active || recovery.revoked) return null;
     if (!result.ok) {
       fail(result.failure);
       return result.failure;
@@ -297,24 +329,25 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
     // The tombstone is the server's copy, with its revision.
     await catchUp();
     return null;
-  }, [api, conversation, catchUp, fail]);
+  }, [api, conversation, catchUp, fail, recovery]);
 
   const loadOlder = useCallback(async () => {
     const before = live.current.older;
     if (before === null || live.current.loadingOlder) return;
     act({ type: 'olderStart' });
     const result = await api.history(conversation, { order: 'desc', before });
+    if (!recovery.active || recovery.revoked) return;
     if (!result.ok) {
-      act({ type: 'olderFailed' });
+      if (!fail(result.failure)) act({ type: 'olderFailed' });
       return;
     }
     act({ type: 'olderDone', messages: result.value.messages, older: result.value.next_before ?? null });
-  }, [api, conversation, act]);
+  }, [api, conversation, act, fail, recovery]);
 
   return {
     state,
     pending,
-    messages: useMemo(() => ordered(state.messages), [state.messages]),
+    messages,
     send,
     retry,
     discard,

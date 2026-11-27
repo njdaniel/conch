@@ -7112,18 +7112,29 @@ button.link {
    mounted, without a box of its own, while a DM is open. */
 .keep-mounted { display: contents; }
 .keep-mounted[hidden] { display: none; }
+.dm-inbox { margin-block: var(--s4); }
+.dm-inbox h2 { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s2); }
 .dm-inbox ul { list-style: none; margin: 0; padding: 0; }
 .dm-row { display: flex; align-items: center; gap: 0.5rem; }
-.dm-row .dm-open { flex: 1; display: flex; align-items: center; gap: 0.5rem; text-align: start; }
+.dm-row .dm-open { flex: 1; display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; min-width: 0; text-align: start; }
+.dm-name, .dm-header h2 { overflow-wrap: anywhere; min-width: 0; }
 .dm-row.selected .dm-open { font-weight: 700; }
-.dm-route, .dm-transcript { display: flex; flex-direction: column; min-height: 0; flex: 1; }
-.dm-header { display: flex; align-items: center; gap: 0.5rem; }
-.dm-log { flex: 1; overflow-y: auto; }
+.dm-route, .dm-view, .dm-transcript { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; }
+.dm-back { align-self: start; margin: var(--s2) var(--s3); }
+.dm-header { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; padding-inline: var(--s3); }
+.dm-log { flex: 1; overflow-y: auto; padding-inline: var(--s3); }
 .dm-log ol { list-style: none; margin: 0; padding: 0; }
 .dm-body { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0.15rem 0; }
 .dm-message.pending { opacity: 0.8; }
+.dm-search, .dm-file { overflow-wrap: anywhere; }
+.dm-search { padding-inline: var(--s3); }
+.dm-search input { max-width: 100%; }
 .dm-composer textarea { width: 100%; box-sizing: border-box; }
-.message-action { display: inline-flex; gap: 0.5rem; align-items: center; }
+.message-action { display: inline-flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+
+@media (max-width: 699px) {
+  .dm-row button, .dm-back { min-height: 2.75rem; }
+}
 
 /* Personal blocks (issue #1832): a blocked person's message is one quiet row
    with Show; the confirmation reuses .member-confirm. */

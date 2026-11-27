@@ -23,9 +23,10 @@ export interface DmValue {
 }
 
 export const DmContext = createContext<DmValue | null>(null);
+export const DmOpened = createContext<((opener: HTMLElement) => void) | null>(null);
 
-// useDm is null outside a DmProvider (a guest, an agent, a page whose server
-// has no DMs): every DM control then simply is not there.
+// A signed-in page supplies the scope and its API. A surface outside that
+// provider has no DM actions.
 export const useDm = (): DmValue | null => useContext(DmContext);
 
 export function DmProvider({ scope, me, api = dmApi, children }: { readonly scope: string; readonly me: number; readonly api?: DmApi; readonly children: ReactNode }) {

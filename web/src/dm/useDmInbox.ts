@@ -3,14 +3,13 @@
 // change drops everything and ignores any answer still on its way, because ids
 // of one server mean nothing on another.
 //
-// 'unsupported' is a server that does not serve DMs (it has no such route yet):
-// nothing is offered and nothing is retried. 'off' is DMs switched off for
-// this person or the server (the snapshot says so without saying which).
+// The list route gives the inbox on its own. A DM snapshot, when available,
+// also says whether starting and sending DMs is enabled for the viewer.
 import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react';
 import type { DMConversationV1, DMReadStateV1, DMSnapshotV1, DMState } from '../schema/generated';
 import type { DmApi, DmFailure, DmFrame, DmResult } from './api';
 
-export type InboxStatus = 'loading' | 'ready' | 'failed' | 'unsupported' | 'own_sign_in_required';
+export type InboxStatus = 'loading' | 'ready' | 'failed' | 'unsupported' | 'own_sign_in_required' | 'revoked';
 
 export interface InboxState {
   readonly scope: string;
@@ -27,7 +26,7 @@ type Without<A, K extends string> = A extends unknown ? Omit<A, K> : never;
 
 type Action = { readonly scope: string } & (
   | { readonly type: 'reset' }
-  | { readonly type: 'snapshot'; readonly conversations: readonly DMConversationV1[]; readonly enabled: boolean }
+  | { readonly type: 'rows'; readonly conversations: readonly DMConversationV1[]; readonly enabled: boolean }
   | { readonly type: 'status'; readonly status: InboxStatus }
   | { readonly type: 'upsert'; readonly conversation: DMConversationV1 }
   | { readonly type: 'read'; readonly state: DMReadStateV1 }
@@ -35,9 +34,8 @@ type Action = { readonly scope: string } & (
   | { readonly type: 'drop'; readonly id: number }
 );
 
-// Most recent activity first; a conversation with no message sorts by its
-// creation, last.
-const recent = (c: DMConversationV1): number => Date.parse(c.last_message_at ?? c.created_at ?? '') || 0;
+// Most recent message first. Empty opens come after conversations with messages.
+const recent = (c: DMConversationV1): number => Date.parse(c.last_message_at ?? '') || 0;
 const byRecent = (a: DMConversationV1, b: DMConversationV1): number => recent(b) - recent(a) || b.id - a.id;
 
 // A copy of a conversation with a lower revision never replaces a higher one.
@@ -51,10 +49,10 @@ export function reduceInbox(state: InboxState, action: Action): InboxState {
   if (action.type === 'reset') return state.scope === action.scope ? state : start(action.scope);
   if (action.scope !== state.scope) return state;
   switch (action.type) {
-    case 'snapshot':
+    case 'rows':
       return { ...state, status: 'ready', conversations: [...action.conversations].sort(byRecent), enabled: action.enabled };
     case 'status':
-      return { ...state, status: action.status };
+      return { ...(action.status === 'failed' ? state : start(state.scope)), status: action.status };
     case 'upsert':
       return { ...state, conversations: put(state.conversations, action.conversation) };
     case 'read':
@@ -72,9 +70,9 @@ export function reduceInbox(state: InboxState, action: Action): InboxState {
 export interface Inbox {
   readonly state: InboxState;
   readonly unread: number;
-  readonly open: (peer: number) => Promise<DmResult<DMConversationV1>>;
+  readonly open: (peer: number, show?: () => boolean) => Promise<DmResult<DMConversationV1>>;
   readonly select: (id: number | null) => void;
-  readonly refresh: () => void;
+  readonly refresh: () => Promise<void>;
   readonly setState: (conversation: DMConversationV1, state: DMState) => Promise<DmFailure | null>;
   readonly read: (state: DMReadStateV1) => void;
 }
@@ -88,19 +86,33 @@ export function useDmInbox(api: DmApi, scope: string): Inbox {
   const held = useRef(state);
   held.current = state;
 
-  const requests = useMemo(() => ({ snapshot: 0, open: 0, running: null as number | null }), [api, scope]);
+  const requests = useMemo(() => ({ revision: 0, open: 0, running: null as number | null, active: false }), [api, scope]);
 
-  const applySnapshot = useCallback(async (snapshot: DMSnapshotV1, isCurrent: () => boolean) => {
-    const rows = new Map(snapshot.conversations.map((c) => [c.id, c]));
-    if (snapshot.more) {
+  const fail = useCallback((failure: DmFailure) => {
+    if (failure === 'unauthorized' || failure === 'own_sign_in_required' || failure === 'unsupported' || failure === 'not_found') {
+      requests.open++;
+      const status = failure === 'unauthorized' ? 'revoked' : failure === 'own_sign_in_required' ? failure : 'unsupported';
+      act({ type: 'status', status });
+    } else if (held.current.status !== 'ready') {
+      act({ type: 'status', status: 'failed' });
+    }
+  }, [act, requests]);
+
+  const applyRows = useCallback(async (snapshot: DMSnapshotV1 | null, isCurrent: () => boolean) => {
+    const rows = new Map(snapshot?.conversations.map((c) => [c.id, c]));
+    if (snapshot === null || snapshot.more) {
       for (const state of ['open', 'archived'] as const) {
         const seen = new Set<string>();
         let cursor: string | undefined;
         for (;;) {
           const page = await api.list(state, cursor);
           if (!isCurrent()) return;
-          if (!page.ok || (page.value.next_cursor && seen.has(page.value.next_cursor))) {
-            if (held.current.status !== 'ready') act({ type: 'status', status: 'failed' });
+          if (!page.ok) {
+            fail(page.failure);
+            return;
+          }
+          if (page.value.next_cursor && seen.has(page.value.next_cursor)) {
+            fail('network');
             return;
           }
           for (const c of page.value.conversations) {
@@ -112,63 +124,69 @@ export function useDmInbox(api: DmApi, scope: string): Inbox {
         }
       }
     }
-    if (isCurrent()) act({ type: 'snapshot', conversations: [...rows.values()], enabled: snapshot.dms_enabled });
-  }, [api, act]);
+    if (isCurrent()) act({ type: 'rows', conversations: [...rows.values()], enabled: snapshot?.dms_enabled ?? true });
+  }, [api, act, fail]);
 
-  const refresh = useCallback(() => {
-    if (requests.running !== null) return;
-    const version = ++requests.snapshot;
+  const refresh = useCallback(async () => {
+    if (requests.running !== null || !requests.active) return;
+    const version = ++requests.revision;
     requests.running = version;
-    const isCurrent = () => version === requests.snapshot;
-    void api.snapshot().then(async (result) => {
+    const isCurrent = () => version === requests.revision;
+    try {
+      if (api.snapshot === undefined) {
+        await applyRows(null, isCurrent);
+        return;
+      }
+      const result = await api.snapshot();
       if (!isCurrent()) return;
-      if (result.ok) await applySnapshot(result.value, isCurrent);
-      else if (result.failure === 'own_sign_in_required') act({ type: 'status', status: 'own_sign_in_required' });
-      // A server that has no DM routes answers not found: nothing to offer.
-      else if (result.failure === 'not_found' || result.failure === 'refused') act({ type: 'status', status: 'unsupported' });
-      else if (result.failure !== 'unauthorized' && held.current.status !== 'ready') act({ type: 'status', status: 'failed' });
-    }).finally(() => {
+      if (result.ok) await applyRows(result.value, isCurrent);
+      else fail(result.failure);
+    } finally {
       if (requests.running === version) requests.running = null;
-    });
-  }, [api, act, applySnapshot, requests]);
+    }
+  }, [api, applyRows, fail, requests]);
 
   useEffect(() => {
     dispatch({ type: 'reset', scope });
-    refresh();
+    requests.active = true;
+    void refresh();
     const sync = () => {
-      if (held.current.status !== 'unsupported' && held.current.status !== 'own_sign_in_required') refresh();
+      if (held.current.status === 'ready' || held.current.status === 'loading' || held.current.status === 'failed') void refresh();
     };
     const stop = api.live((frame: DmFrame) => {
       if (frame.type === 'snapshot') {
-        const version = ++requests.snapshot;
-        void applySnapshot(frame.snapshot, () => version === requests.snapshot);
+        const version = ++requests.revision;
+        void applyRows(frame.snapshot, () => version === requests.revision);
       } else sync();
     });
     const onFocus = () => {
       if (document.visibilityState === 'visible') sync();
     };
     document.addEventListener('visibilitychange', onFocus);
+    window.addEventListener('focus', onFocus);
     return () => {
+      requests.active = false;
       requests.open++;
-      requests.snapshot++;
+      requests.revision++;
       requests.running = null;
       stop();
       document.removeEventListener('visibilitychange', onFocus);
+      window.removeEventListener('focus', onFocus);
     };
-  }, [api, scope, refresh, applySnapshot, requests]);
+  }, [api, scope, refresh, applyRows, requests]);
 
   const select = useCallback((id: number | null) => {
     requests.open++;
     act({ type: 'select', id });
   }, [requests, act]);
 
-  const open = useCallback(async (peer: number): Promise<DmResult<DMConversationV1>> => {
+  const open = useCallback(async (peer: number, show?: () => boolean): Promise<DmResult<DMConversationV1>> => {
     const attempt = ++requests.open;
     const result = await api.open(peer);
     if (result.ok && attempt === requests.open) {
-      requests.snapshot++;
+      requests.revision++;
       act({ type: 'upsert', conversation: result.value });
-      act({ type: 'select', id: result.value.id });
+      if (show?.() !== false) act({ type: 'select', id: result.value.id });
     }
     return result;
   }, [api, act, requests]);
@@ -182,11 +200,15 @@ export function useDmInbox(api: DmApi, scope: string): Inbox {
     setState: useCallback(async (conversation: DMConversationV1, next: DMState): Promise<DmFailure | null> => {
       const result = await api.setState(conversation.id, next);
       if (!result.ok) return result.failure;
-      requests.snapshot++;
+      if (!requests.active) return null;
+      requests.revision++;
       if (next === 'hidden') act({ type: 'drop', id: conversation.id });
       else act({ type: 'upsert', conversation: result.value });
       return null;
     }, [api, act, requests]),
-    read: useCallback((read: DMReadStateV1) => { act({ type: 'read', state: read }); }, [act]),
+    read: useCallback((read: DMReadStateV1) => {
+      requests.revision++;
+      act({ type: 'read', state: read });
+    }, [act, requests]),
   };
 }

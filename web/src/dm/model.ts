@@ -7,10 +7,12 @@
 // replaced by one that is not (the tombstone is final, and it is what a
 // reconnect shows). Messages of one conversation are ordered by id, oldest
 // first. Ids are only comparable inside one conversation.
-import type { DMMessageV1 } from '../schema/generated';
+import type { DMConversationV1, DMMessageV1 } from '../schema/generated';
 import type { DmFailure } from './api';
 
 export const removedBody = 'This message was removed by its author.';
+
+export const peerName = (conversation: DMConversationV1): string => conversation.peer_name?.trim() ? conversation.peer_name : 'Former member';
 
 export type Held = ReadonlyMap<number, DMMessageV1>;
 

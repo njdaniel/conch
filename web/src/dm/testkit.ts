@@ -3,7 +3,7 @@
 // method answers from them unless a test says otherwise. Imported by tests
 // only; it needs no network, no browser and no running conchd.
 import { vi } from 'vitest';
-import type { DMAcceptPolicy, DMConversationV1, DMFileV1, DMMessageV1, DMPreferencesV1, DMReadStateV1, DMSnapshotV1, DMState, SearchDMMessagesResponseV1 } from '../schema/generated';
+import type { DMAcceptPolicy, DMConversationV1, DMFileV1, DMMessageV1, DMPreferencesV1, DMReadStateV1, DMSnapshotV1, DMState, ListDMMessagesResponseV1, SearchDMMessagesResponseV1 } from '../schema/generated';
 import type { DmApi, DmFrame } from './api';
 
 const files = import.meta.glob<unknown>('../../../pkg/schema/testdata/*.json', { eager: true, import: 'default' });
@@ -43,7 +43,7 @@ export function later<T>(): { readonly promise: Promise<T>; readonly resolve: (v
 
 export function fake(over: Partial<DmApi> = {}): Fake {
   const listeners = new Set<(frame: DmFrame) => void>();
-  const history = fixture<{ order: 'desc'; messages: DMMessageV1[]; next_before?: number }>('list-dm-messages-response-v1');
+  const history = fixture<ListDMMessagesResponseV1>('list-dm-messages-response-v1');
   const api: DmApi = {
     snapshot: vi.fn(() => Promise.resolve({ ok: true as const, value: snapshot() })),
     list: vi.fn(() => Promise.resolve({ ok: true as const, value: { conversations: [] } })),

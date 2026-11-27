@@ -9,14 +9,14 @@
 // server's copy, so it is the same after a reconnect), read marks, and the
 // access the viewer has now. No reactions, threads, mentions or typed
 // payloads: a DM has none.
-import { useEffect, useRef, useState, type SyntheticEvent } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type SyntheticEvent } from 'react';
 import { Avatar } from '../Icons';
 import { formatSize } from '../fileSize';
 import type { DMConversationV1, DMFileV1, DMMessageV1, DMReadStateV1 } from '../schema/generated';
 import { dateTimeOf, timeOf } from '../time';
 import type { DmApi, DmFailure } from './api';
 import { DmComposer } from './DmComposer';
-import { cannotMessage, noAccess, type Pending, type PendingSends } from './model';
+import { cannotMessage, noAccess, peerName, type Pending, type PendingSends } from './model';
 import { useDmTranscript } from './useDmTranscript';
 
 export interface DmConversationViewProps {
@@ -30,6 +30,8 @@ export interface DmConversationViewProps {
   readonly onDraft: (conversation: number, text: string) => void;
   readonly pendingSends?: PendingSends;
   readonly onRead?: (state: DMReadStateV1) => void;
+  readonly enabled?: boolean;
+  readonly viewing?: boolean;
 }
 
 const failureLine = (failure: DmFailure): string => (failure === 'unavailable' ? cannotMessage : failure === 'rate_limited' ? 'You are sending too fast. Wait a moment.' : 'The server refused that. Try again.');
@@ -52,9 +54,10 @@ function FileChip({ api, conversation, id }: { readonly api: DmApi; readonly con
   const held = file;
   // The bytes are saved as the server sent them: nothing is previewed,
   // re-encoded or interpreted here.
-  async function save() {
+  async function save(button: HTMLButtonElement) {
     setProblem('');
     const result = await api.fileBytes(conversation, id);
+    if (!button.isConnected) return;
     if (!result.ok) {
       setProblem('Could not download the file.');
       return;
@@ -68,7 +71,7 @@ function FileChip({ api, conversation, id }: { readonly api: DmApi; readonly con
   }
   return (
     <span className="dm-file">
-      <button type="button" aria-label={`Download ${held.filename}`} onClick={() => void save()}>
+      <button type="button" aria-label={`Download ${held.filename}`} onClick={(event) => void save(event.currentTarget)}>
         {held.filename}
       </button>{' '}
       <span className="hint">{formatSize(held.size)}</span>
@@ -93,64 +96,91 @@ function MessageRow({ message, mine, author, api, conversation, canWrite, onEdit
   const [busy, setBusy] = useState(false);
   const removed = message.removed === true;
   const when = timeOf(message.created_at);
+  const row = useRef<HTMLLIElement>(null);
+  const editButton = useRef<HTMLButtonElement>(null);
+  const removeButton = useRef<HTMLButtonElement>(null);
+  const editor = useRef<HTMLTextAreaElement>(null);
+  const keepButton = useRef<HTMLButtonElement>(null);
+  const restore = useRef<'edit' | 'remove' | null>(null);
+  const shownMode = removed || (mode === 'edit' && !canWrite) ? 'view' : mode;
+
+  useLayoutEffect(() => {
+    if (row.current?.closest('[inert]') !== null) return;
+    if (shownMode === 'edit') editor.current?.focus();
+    else if (shownMode === 'remove') keepButton.current?.focus();
+    else if (restore.current !== null) {
+      const target = restore.current === 'edit' ? editButton : removeButton;
+      (target.current ?? row.current).focus();
+      restore.current = null;
+    }
+  }, [shownMode]);
+
+  function end() {
+    const active = document.activeElement;
+    if (active === document.body || row.current?.contains(active) === true) {
+      if (mode !== 'view') restore.current = mode;
+    }
+    setMode('view');
+    setProblem('');
+  }
+
+  function cancelOnEscape(event: KeyboardEvent) {
+    if (event.key !== 'Escape' || event.nativeEvent.isComposing) return;
+    event.preventDefault();
+    end();
+  }
 
   async function save(event: SyntheticEvent) {
     event.preventDefault();
-    if (text.trim() === '' || text === message.body) return;
+    if (busy || text.trim() === '' || text === message.body) return;
     setBusy(true);
     const failure = await onEdit(message.id, text);
     setBusy(false);
-    if (failure === null) {
-      setMode('view');
-      setProblem('');
-    } else setProblem(failureLine(failure));
+    if (failure === null) end();
+    else setProblem(failureLine(failure));
   }
   async function confirm() {
     setBusy(true);
     const failure = await onRemove(message.id);
     setBusy(false);
-    if (failure === null) setMode('view');
+    if (failure === null) end();
     else setProblem(failureLine(failure));
   }
 
   return (
-    <li className={`message dm-message${removed ? ' removed' : ''}${mine ? ' mine' : ''}`} data-message={`dm:${String(conversation)}:${String(message.id)}`}>
+    <li ref={row} tabIndex={-1} className={`message dm-message${removed ? ' removed' : ''}${mine ? ' mine' : ''}`} data-message={`dm:${String(conversation)}:${String(message.id)}`}>
       <span className="dm-author">{author}</span> <time dateTime={message.created_at} title={dateTimeOf(message.created_at)}>{when}</time>
       {message.edited_at === undefined || removed ? null : <span className="hint"> (edited)</span>}
-      {mode === 'edit' ? (
-        <form onSubmit={(event) => void save(event)}>
+      {shownMode === 'edit' ? (
+        <form onSubmit={(event) => void save(event)} onKeyDown={cancelOnEscape}>
           <label>
             Edit message
             <textarea
+              ref={editor}
               rows={2}
+              readOnly={busy}
               value={text}
               onChange={(event) => { setText(event.target.value); }}
-              onKeyDown={(event) => {
-                if (event.key === 'Escape') {
-                  setMode('view');
-                  setText(message.body);
-                }
-              }}
             />
           </label>
           <button type="submit" disabled={busy || text.trim() === '' || text === message.body}>Save</button>
-          <button type="button" onClick={() => { setMode('view'); setText(message.body); setProblem(''); }}>Cancel</button>
+          <button type="button" onClick={end}>Cancel</button>
         </form>
       ) : (
         <p className="dm-body">{removed ? <em>{message.body}</em> : message.body}</p>
       )}
       {removed ? null : (message.file_ids ?? []).map((id) => <FileChip key={id} api={api} conversation={conversation} id={id} />)}
-      {mine && !removed && mode === 'view' ? (
+      {mine && !removed && shownMode === 'view' ? (
         <span className="dm-actions">
-          {canWrite ? <button type="button" aria-label={`Edit your message from ${when}`} onClick={() => { setText(message.body); setMode('edit'); }}>Edit</button> : null}
-          <button type="button" aria-label={`Remove your message from ${when}`} onClick={() => { setMode('remove'); }}>Remove</button>
+          {canWrite ? <button ref={editButton} type="button" aria-label={`Edit your message from ${when}`} onClick={() => { setText(message.body); setMode('edit'); }}>Edit</button> : null}
+          <button ref={removeButton} type="button" aria-label={`Remove your message from ${when}`} onClick={() => { setMode('remove'); }}>Remove</button>
         </span>
       ) : null}
-      {mode === 'remove' ? (
-        <span role="group" aria-label="Remove this message?">
+      {shownMode === 'remove' ? (
+        <span role="group" aria-label="Remove this message?" onKeyDown={cancelOnEscape}>
           Remove this message?{' '}
           <button type="button" disabled={busy} onClick={() => void confirm()}>Yes, remove</button>
-          <button type="button" onClick={() => { setMode('view'); setProblem(''); }}>Keep</button>
+          <button ref={keepButton} type="button" onClick={end}>Keep</button>
         </span>
       ) : null}
       {problem === '' ? null : <p role="alert" className="hint">{problem}</p>}
@@ -187,13 +217,11 @@ function Search({ api, conversation, viewer, name, onClose }: {
   const [found, setFound] = useState<{ readonly query: string; readonly messages: readonly DMMessageV1[]; readonly next: number | null } | null>(null);
   const [problem, setProblem] = useState('');
   const turn = useRef(0);
-  // Another conversation, or a new search, makes every answer still out stale.
-  useEffect(() => {
-    turn.current++;
-    setFound(null);
-    setProblem('');
-    setWords('');
-  }, [conversation]);
+  const input = useRef<HTMLInputElement>(null);
+  useLayoutEffect(() => {
+    if (input.current?.closest('[inert]') === null) input.current.focus();
+  }, []);
+  useEffect(() => () => { turn.current++; }, []);
 
   async function run(query: string, before?: number) {
     const mine = ++turn.current;
@@ -213,7 +241,11 @@ function Search({ api, conversation, viewer, name, onClose }: {
   }
 
   return (
-    <section aria-label="Search this conversation" className="dm-search">
+    <section aria-label="Search this conversation" className="dm-search" onKeyDown={(event) => {
+      if (event.key !== 'Escape' || event.nativeEvent.isComposing) return;
+      event.preventDefault();
+      onClose();
+    }}>
       <form
         role="search"
         onSubmit={(event) => {
@@ -223,7 +255,7 @@ function Search({ api, conversation, viewer, name, onClose }: {
       >
         <label>
           Search this conversation
-          <input type="search" value={words} onChange={(event) => { setWords(event.target.value); }} />
+          <input ref={input} type="search" value={words} onChange={(event) => { setWords(event.target.value); }} />
         </label>
         <button type="submit" disabled={words.trim() === ''}>Search</button>
         <button type="button" onClick={onClose}>Close search</button>
@@ -246,33 +278,34 @@ function Search({ api, conversation, viewer, name, onClose }: {
   );
 }
 
-export function DmTranscript({ conversationId, api, scope, viewer, draft, onDraft, onRead, pendingSends }: DmConversationViewProps) {
-  const t = useDmTranscript(api, scope, conversationId, onRead, pendingSends);
+export function DmTranscript(props: DmConversationViewProps) {
+  return <TranscriptView key={`${props.scope}/${String(props.viewer)}/${String(props.conversationId)}`} {...props} />;
+}
+
+function TranscriptView({ conversationId, api, scope, viewer, draft, onDraft, onRead, pendingSends, enabled = true, viewing = true }: DmConversationViewProps) {
+  const t = useDmTranscript(api, scope, conversationId, viewing, onRead, pendingSends);
   const { state } = t;
   const [searching, setSearching] = useState(false);
   // The text being written is state here (the provider's drafts only keep it
   // across a switch), so typing re-renders.
   const [text, setText] = useState(draft);
   const log = useRef<HTMLDivElement>(null);
+  const searchButton = useRef<HTMLButtonElement>(null);
   const conversation: DMConversationV1 | null = state.conversation;
-  const peer = conversation === null ? '' : conversation.peer_name === undefined || conversation.peer_name.trim() === '' ? 'Former member' : conversation.peer_name;
-  const lastKey = t.messages.length + t.pending.length;
+  const peer = conversation === null ? '' : peerName(conversation);
+  const newest = t.messages.at(-1)?.id;
+  const newestPending = t.pending.at(-1)?.nonce;
 
-  useEffect(() => {
-    setSearching(false);
-    setText(draft);
-    // draft is read when the conversation or scope changes, not as it is typed.
-  }, [conversationId, scope]);
   // A new message at the bottom is brought into view; reading older history is not.
   useEffect(() => {
     const el = log.current;
     if (el !== null && typeof el.scrollTo === 'function') el.scrollTo({ top: el.scrollHeight });
-  }, [lastKey, conversationId]);
+  }, [newest, newestPending, state.status]);
 
-  if (state.status === 'gone') {
+  if (state.status === 'gone' || state.status === 'own_sign_in_required') {
     return (
       <section aria-label="Conversation" className="dm-transcript">
-        <p role="alert" className="banner">{noAccess}</p>
+        <p role="alert" className="banner">{state.status === 'gone' ? noAccess : 'Direct messages need your own sign-in.'}</p>
       </section>
     );
   }
@@ -294,19 +327,23 @@ export function DmTranscript({ conversationId, api, scope, viewer, draft, onDraf
     );
   }
 
-  const canWrite = state.access === 'ok';
+  const historyAvailable = state.status === 'ready';
+  const canWrite = enabled && state.access === 'ok';
   return (
     <section aria-label={`Conversation with ${peer}`} className="dm-transcript">
       <header className="dm-header">
         <Avatar id={conversation.peer_id} name={peer} />
         <h2>{peer}</h2>
-        <button type="button" aria-pressed={searching} onClick={() => { setSearching((on) => !on); }}>Search</button>
+        {historyAvailable ? <button ref={searchButton} type="button" aria-expanded={searching} onClick={() => { setSearching((on) => !on); }}>Search</button> : null}
         {conversation.state === 'archived' ? <span className="hint">Archived</span> : null}
       </header>
       {state.access === 'unavailable' ? <p role="status" className="banner">{cannotMessage}</p> : null}
-      {state.access === 'off' ? <p role="status" className="banner">Direct messages are off.</p> : null}
-      {state.access === 'own_sign_in_required' ? <p role="status" className="banner">Direct messages need your own sign-in.</p> : null}
-      {searching ? <Search api={api} conversation={conversationId} viewer={viewer} name={peer} onClose={() => { setSearching(false); }} /> : null}
+      {(!enabled || state.access === 'off') ? <p role="status" className="banner">Direct messages are off.</p> : null}
+      {searching && historyAvailable ? <Search api={api} conversation={conversationId} viewer={viewer} name={peer} onClose={() => {
+        setSearching(false);
+        searchButton.current?.focus();
+      }} /> : null}
+      {historyAvailable ? (
       <div ref={log} role="log" aria-label="Messages" aria-live="polite" tabIndex={0} className="dm-log">
         {state.older === null ? null : (
           <button type="button" className="dm-older" disabled={state.loadingOlder} onClick={() => void t.loadOlder()}>
@@ -334,7 +371,8 @@ export function DmTranscript({ conversationId, api, scope, viewer, draft, onDraf
           ))}
         </ol>
       </div>
-      {canWrite ? (
+      ) : <p className="empty" role="status">Message history is unavailable on this server.</p>}
+      {historyAvailable && canWrite ? (
         <DmComposer
           api={api}
           conversation={conversationId}
