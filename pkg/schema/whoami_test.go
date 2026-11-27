@@ -26,6 +26,7 @@ func TestWhoAmIGoldenFixtures(t *testing.T) {
 		// A server in temporary mode says so (ADR-011, issue #865); every
 		// fixture above is a normal-mode answer and omits the field.
 		{"whoami-response-v1-temporary.json", func() any { return new(WhoAmIResponseV1) }},
+		{"whoami-response-v1-dm-capability.json", func() any { return new(WhoAmIResponseV1) }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.file, func(t *testing.T) {

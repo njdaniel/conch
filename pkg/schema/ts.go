@@ -159,6 +159,7 @@ var TSConstants = []TSConstant{
 var TSTypes = []TSType{
 	// The caller, and the channels it can see.
 	{Value: WhoAmIResponseV1{}, Family: "whoami-response-v1"},
+	{Value: WhoAmICapabilitiesV1{}},
 	{Value: ChannelV0{}, Family: "channel-v0"},
 	{Value: ListChannelsResponse{}, Family: "list-channels-response"},
 	// An operator creates a channel from the browser (issue #695).

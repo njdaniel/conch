@@ -1,0 +1,9 @@
+{
+  "id": 2,
+  "kind": "human",
+  "name": "member-2",
+  "role": "member",
+  "capabilities": {
+    "dm": true
+  }
+}

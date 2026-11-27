@@ -153,7 +153,7 @@ test.describe('a sign-in an older build saved with the built-in key (issue #2217
     // A server that does not answer gets the compatibility page, with no strip:
     // the notice is in its server list, on that profile's entry.
     await expect(run.page.getByRole('region', { name: 'Servers' })).toContainText(
-      `A sign-in saved by an older Conch for ${host} may still be active. Sign in to that server with the same account and open Settings → Your sign-ins.`,
+      `A saved sign-in for ${host} may still be active. Sign in to that server with the same account and open Settings → Your sign-ins.`,
       { timeout: 30_000 },
     );
     const out = run.app.output();
