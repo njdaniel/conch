@@ -8,7 +8,7 @@
 // disk (a unit test greps for that). It never sees a plaintext secret and
 // logs nothing.
 import { randomBytes } from 'node:crypto';
-import { constants as fsConstants } from 'node:fs';
+import { constants as fsConstants, type Stats } from 'node:fs';
 import { chmod, lstat, mkdir, open, opendir, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
@@ -75,6 +75,14 @@ async function checkRoot(root: string): Promise<boolean> {
 // Thrown for a root that is not private to this user; the vault turns it into
 // the session-only reason 'unsafe-root'.
 export class UnsafeRoot extends Error {}
+
+// prepareRoot checks the data root's ancestors at startup. Inside the
+// private vault root, neither profiles/ nor the profile directory may be
+// substituted by another user before a Linux read or cleanup.
+function safeDirectory(st: Stats): boolean {
+  const uid = process.getuid?.();
+  return st.isDirectory() && (uid === undefined || ((st.uid === uid || st.uid === 0) && (st.mode & 0o022) === 0));
+}
 
 // privateDir makes dir (and its missing parents) and leaves it 0700 whatever
 // the umask was, refusing a symlink or a non-directory in its place.
@@ -148,14 +156,14 @@ export type ReadResult =
   | { readonly kind: 'absent' }
   | { readonly kind: 'bytes'; readonly data: Buffer }
   | { readonly kind: 'corrupt' }
-  // A regular file of ours, of a sane size, but open to group or others
-  // (issue #2217's review, R1): not read, since it cannot be trusted. A get
-  // treats it as corrupt; the start sweep deletes it unopened.
+  // A regular file of ours, of a sane size, with group or other mode bits.
+  // Its contents are refused. Linux vault cleanup deletes it unread.
   | { readonly kind: 'loose-mode' }
-  // The root exists but is not ours, private and plain: nothing is read from it.
+  // The vault path failed its ownership, directory or permission checks.
   | { readonly kind: 'unsafe-root' };
 
-export interface ReadHooks {
+interface ReadOptions {
+  readonly checkAncestors?: boolean;
   // Test seam: runs after the path checks and before the file is opened, so a
   // test can swap the file for a symlink in between.
   readonly beforeOpen?: (() => Promise<void>) | undefined;
@@ -172,9 +180,9 @@ const NO_FOLLOW = 'O_NOFOLLOW' in fsConstants ? fsConstants.O_NOFOLLOW : 0;
 // symlink, and the open handle is checked again with fstat (a regular file of a
 // sane size and, where there are uids, owned by this user and closed to group
 // and others) and read through that handle, at most MAX_FILE_BYTES (issue
-// #2217's review): a file swapped for a symlink or another file between the
-// check and the read is not read.
-export async function readCredential(root: string, id: string, hooks: ReadHooks = {}): Promise<ReadResult> {
+// #2217's review). Linux cleanup also checks the directories inside the
+// vault root and requires the opened inode to match the lstat.
+export async function readCredential(root: string, id: string, options: ReadOptions = {}): Promise<ReadResult> {
   const dir = profileDir(root, id);
   const file = join(dir, FILE_NAME);
   let st;
@@ -182,10 +190,12 @@ export async function readCredential(root: string, id: string, hooks: ReadHooks 
     if (!(await checkRoot(root))) {
       return { kind: 'absent' };
     }
+    if (options.checkAncestors === true && !safeDirectory(await lstat(join(root, 'profiles')))) return { kind: 'unsafe-root' };
     const dirStat = await lstat(dir);
     if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
       return { kind: 'corrupt' };
     }
+    if (options.checkAncestors === true && !safeDirectory(dirStat)) return { kind: 'unsafe-root' };
     st = await lstat(file);
   } catch (err) {
     if (isCode(err, 'ENOENT') || isCode(err, 'ENOTDIR')) {
@@ -199,7 +209,7 @@ export async function readCredential(root: string, id: string, hooks: ReadHooks 
   if (!st.isFile() || st.size === 0 || st.size > MAX_FILE_BYTES) {
     return { kind: 'corrupt' };
   }
-  await hooks.beforeOpen?.();
+  await options.beforeOpen?.();
   let fh;
   try {
     fh = await open(file, fsConstants.O_RDONLY | NO_FOLLOW);
@@ -207,14 +217,19 @@ export async function readCredential(root: string, id: string, hooks: ReadHooks 
     if (isCode(err, 'ENOENT') || isCode(err, 'ENOTDIR')) return { kind: 'absent' };
     // ELOOP (EMLINK on some BSDs): it became a symlink after the check.
     if (isCode(err, 'ELOOP') || isCode(err, 'EMLINK')) return { kind: 'corrupt' };
+    // A file can deny its owner read access and still expose it to others.
+    if (options.checkAncestors === true && isCode(err, 'EACCES') && process.getuid?.() === st.uid && (st.mode & 0o077) !== 0) {
+      return { kind: 'loose-mode' };
+    }
     throw err;
   }
   try {
     const held = await fh.stat();
     if (!held.isFile() || held.size === 0 || held.size > MAX_FILE_BYTES) return { kind: 'corrupt' };
+    if (options.checkAncestors === true && (held.dev !== st.dev || held.ino !== st.ino)) return { kind: 'corrupt' };
     if (typeof process.getuid === 'function') {
       if (held.uid !== process.getuid()) return { kind: 'corrupt' };
-      if ((held.mode & 0o077) !== 0) return { kind: 'loose-mode' };
+      if (((st.mode | held.mode) & 0o077) !== 0) return { kind: 'loose-mode' };
     }
     // One byte more than the limit, to see a file that grew after the fstat.
     const buf = Buffer.alloc(MAX_FILE_BYTES + 1);
@@ -240,8 +255,8 @@ const MAX_LISTED = 256;
 // profileIds lists the names under <root>/profiles that are profile ids and
 // are directories, at most MAX_LISTED entries looked at, sorted. It follows
 // nothing: a symlink, a file or a name that is not an id is skipped, and each
-// id's file is then read by readCredential with its own lstat checks. A root
-// that is missing, or that is not ours, plain and private, lists none.
+// id's file is then checked by readCredential. A missing or unsafe vault
+// path lists none.
 export async function profileIds(root: string): Promise<readonly string[]> {
   try {
     if (!(await checkRoot(root))) return [];
@@ -257,7 +272,7 @@ export async function profileIds(root: string): Promise<readonly string[]> {
     if (isCode(err, 'ENOENT') || isCode(err, 'ENOTDIR')) return [];
     throw err;
   }
-  if (st.isSymbolicLink() || !st.isDirectory()) return [];
+  if (!safeDirectory(st)) return [];
   const ids: string[] = [];
   let seen = 0;
   // Leaving the loop early closes the directory.

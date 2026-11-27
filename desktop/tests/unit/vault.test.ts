@@ -294,8 +294,8 @@ describe('unusable credentials', () => {
     ['empty', Buffer.alloc(0)],
     ['oversized', Buffer.alloc(70 * 1024, 1)],
   ])('%s file is unusable', async (_n, bytes) => {
-    await mkdir(join(root, 'profiles', 'alpha'), { recursive: true });
-    await writeFile(credFile('alpha'), bytes);
+    await mkdir(join(root, 'profiles', 'alpha'), { recursive: true, mode: 0o700 });
+    await writeFile(credFile('alpha'), bytes, { mode: 0o600 });
     expect(await vault.get('alpha')).toEqual({ kind: 'unusable' });
     expect(storage.calls).toEqual([]);
   });
@@ -653,7 +653,8 @@ describe('the start sweep of entries sealed with the built-in key', () => {
     try {
       await plant('alpha', legacyFile(SECRET));
       expect(await vault.findLegacy()).toEqual(['alpha']);
-      await writeFile(join(outside, 'target.bin'), legacyFile('other-secret'), { mode: 0o600 });
+      await writeFile(join(outside, 'target.bin'), legacyFile('other-secret'), { mode: 0o644 });
+      await chmod(join(outside, 'target.bin'), 0o644);
       await rm(credFile('alpha'));
       await symlink(join(outside, 'target.bin'), credFile('alpha'));
       let called = false;
@@ -706,9 +707,8 @@ describe('the start sweep of entries sealed with the built-in key', () => {
     await expect(stat(join(root, 'profiles', 'alpha'))).rejects.toThrow();
   });
 
-  // Issue #2217's review, R1: a file open to group or others is listed and
-  // deleted unopened, whatever its seal, and decide is never asked.
-  it.each(['v10', 'v11'] as const)('a %s file at 0644 is listed, then deleted without being opened or decided on', async (mark) => {
+  // Exposed ciphertext cannot establish which origin owns the bearer.
+  it.each(['v10', 'v11'] as const)('a %s file at 0644 is listed, then deleted without being read or decided on', async (mark) => {
     await plant('alpha', mark === 'v10' ? legacyFile(SECRET) : `v11${BODY}1:${Buffer.from(SECRET).toString('base64')}`, 0o644);
     await chmod(credFile('alpha'), 0o644);
     expect(await vault.findLegacy()).toEqual(['alpha']);
@@ -724,11 +724,12 @@ describe('the start sweep of entries sealed with the built-in key', () => {
     expect(logs).toEqual([]);
   });
 
-  it('a 0644 file is not read by a get either', async () => {
+  it('a get removes a 0644 file unread and reports the exposure', async () => {
     await plant('alpha', legacyFile(SECRET), 0o644);
     await chmod(credFile('alpha'), 0o644);
-    expect(await vault.get('alpha')).toEqual({ kind: 'unusable' });
+    expect(await vault.get('alpha')).toEqual({ kind: 'exposed', removed: true });
     expect(storage.calls).toEqual([]);
+    await expect(stat(credFile('alpha'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('a root that is not private to this user is not searched or touched', async () => {

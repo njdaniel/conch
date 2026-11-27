@@ -56,7 +56,7 @@ afterEach(async () => {
 
 const entry = (id: string): string => join(root, 'profiles', id, 'credential.bin');
 
-async function plantV10(id: string, token: string, mark = 'v10', mode = 0o600): Promise<void> {
+async function plantCredential(id: string, token: string, mark = 'v10', mode = 0o600): Promise<void> {
   await mkdir(join(root, 'profiles', id), { recursive: true, mode: 0o700 });
   await writeFile(entry(id), `${mark}FAKE:${Buffer.from(token).toString('base64')}`, { mode });
   await chmod(entry(id), mode);
@@ -73,12 +73,20 @@ function gate(): { readonly wait: Promise<HealthResult>; readonly open: (h: Heal
 
 const tick = (ms = 20): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-async function setup(health: Promise<HealthResult>, options: { readonly healthBoundMs?: number; readonly plant?: { readonly mark: string; readonly mode: number } } = {}) {
+async function setup(
+  health: Promise<HealthResult>,
+  options: {
+    readonly healthBoundMs?: number;
+    readonly plant?: { readonly mark: string; readonly mode: number; readonly profileMode?: number };
+    readonly listingFails?: boolean;
+  } = {},
+) {
   const log: string[] = [];
   let askedB = 0;
   const ask = (origin: string): Promise<HealthResult> => (origin === ORIGIN_B && askedB++ === 0 ? health : Promise.resolve({ kind: 'answered', version: 'v1.0.0' }));
   const storage = new Storage();
   const vault: Vault = createVault({ storage, root, platform: 'linux', isReady: () => true, log: (l) => log.push(l) });
+  if (options.listingFails === true) vault.findLegacy = () => Promise.reject(new Error('listing unavailable'));
   const files = memoryFiles(
     JSON.stringify({
       version: 1,
@@ -115,7 +123,8 @@ async function setup(health: Promise<HealthResult>, options: { readonly healthBo
     },
     ...(options.healthBoundMs === undefined ? {} : { healthBoundMs: options.healthBoundMs }),
   });
-  await plantV10(B, LEGACY, options.plant?.mark, options.plant?.mode);
+  await plantCredential(B, LEGACY, options.plant?.mark, options.plant?.mode);
+  if (options.plant?.profileMode !== undefined) await chmod(join(root, 'profiles', B), options.plant.profileMode);
   await service.start();
   if (options.plant === undefined) {
     // Once the sweep has asked B (and waits on the gate), B becomes active:
@@ -123,7 +132,7 @@ async function setup(health: Promise<HealthResult>, options: { readonly healthBo
     for (let i = 0; askedB === 0 && i < 200; i++) await tick(5);
     expect(askedB).toBe(1);
   } else {
-    // A file open to others is ended without asking the server.
+    // Let the sweep finish before the exposed profile becomes active.
     await service.swept;
   }
   await service.switchTo(B);
@@ -225,22 +234,31 @@ describe('an operation asked while the sweep waits on the server (issue #2217, N
   });
 });
 
-// Issue #2217's review, R1: a credential file open to group or others is not
-// trusted, whatever its seal: the sweep deletes it unopened, asks no server,
-// and the profile shows the notice.
-describe('a credential file open to group or others (issue #2217, R1)', () => {
+describe('a credential file open to group or others (issue #2227)', () => {
+  const healthy = Promise.resolve({ kind: 'answered', version: 'v1.0.0' } as const);
+
   it.each([
-    ['sealed with the built-in key (v10)', 'v10'],
-    ['sealed with the keyring (v11)', 'v11'],
-  ] as const)('%s at 0644: deleted unopened, with the notice and no decrypt', async (_name, mark) => {
-    // The server would answer; the sweep does not ask it.
-    const s = await setup(Promise.resolve({ kind: 'answered', version: 'v1.0.0' }), { plant: { mark, mode: 0o644 } });
+    { mark: 'v10', phase: 'during startup', listingFails: false },
+    { mark: 'v11', phase: 'during startup', listingFails: false },
+    { mark: 'v10', phase: 'after a failed listing', listingFails: true },
+    { mark: 'v11', phase: 'after a failed listing', listingFails: true },
+  ])('$mark at 0644: deleted unread with the notice $phase', async ({ mark, listingFails }) => {
+    const s = await setup(healthy, { plant: { mark, mode: 0o644 }, listingFails });
     expect(s.storage.decrypts).toBe(0);
     expect(s.revoked).toEqual([]);
-    await expect(stat(join(root, 'profiles', B))).rejects.toThrow();
     expect(s.active().spec.token).toBeNull();
     expect(s.service.view().notice).toBe('legacy-not-ended');
-    expect(s.log).toContain('log: conch-desktop: a sign-in saved by an older build (v10): deleted-loose-mode');
+    await expect(stat(entry(B))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(s.log).toContain('log: conch-desktop: a saved sign-in open to group or others: deleted-loose-mode');
     expect(s.log.join('\n')).not.toContain(LEGACY);
+  });
+
+  it('refuses an exposed credential under a directory writable by others', async () => {
+    const s = await setup(healthy, { plant: { mark: 'v11', mode: 0o644, profileMode: 0o777 } });
+    expect((await stat(entry(B))).isFile()).toBe(true);
+    expect(s.storage.decrypts).toBe(0);
+    expect(s.revoked).toEqual([]);
+    expect(s.active().spec.token).toBeNull();
+    expect(s.service.view().storage).toEqual({ kind: 'session-only', reason: 'unsafe-root' });
   });
 });

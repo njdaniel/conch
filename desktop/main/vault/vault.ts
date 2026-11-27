@@ -15,8 +15,10 @@
 // and touches no other profile's file. A provider that cannot answer is a
 // retryable state, never an erase. A Linux file sealed with the built-in key
 // (written before #2077) protects nothing: it is deleted unread, and the
-// person signs in again. Plain-text mode is never switched on, and nothing
-// here logs a secret, ciphertext or a path.
+// person signs in again. A file exposed to group or others is also deleted
+// unread: neither Linux seal binds the bearer to the profile's server.
+// Plain-text mode is never switched on. The vault logs no secret, ciphertext
+// or path.
 //
 // The sweep of issue #2217 also finds such files at start (findLegacy) and
 // ends each one (endLegacy) in that profile's own turn, so that nothing asked
@@ -54,7 +56,7 @@ export interface VaultDeps {
   // Test seam for the directory fsync (see files.ts).
   readonly syncDir?: (dir: string) => Promise<void>;
   // How long endLegacy waits for a decrypt before it deletes the entry
-  // unopened (issue #2217): a keyring that never answers must not hold the
+  // (issue #2217): a provider that never answers must not hold the
   // profile's turn.
   readonly legacyDecryptBoundMs?: number;
 }
@@ -79,6 +81,8 @@ export type GetResult =
   // was deleted unread, so it was not ended at the server (issue #2217). The
   // user signs in again.
   | { readonly kind: 'legacyRemoved' }
+  // It had group or other mode bits. Cleanup never reads the contents.
+  | { readonly kind: 'exposed'; readonly removed: boolean }
   | NotProtected;
 
 export type RemoveResult = { readonly kind: 'removed' } | { readonly kind: 'failed' };
@@ -101,8 +105,7 @@ export type LegacyEnd<T> =
   | { readonly kind: 'ended'; readonly opened: false; readonly removed: boolean }
   | { readonly kind: 'ended'; readonly opened: true; readonly used: T; readonly removed: boolean }
   // The file was open to group or others (issue #2217's review, R1), so it
-  // was not read, whatever seal it had, and decide was not asked: it was
-  // deleted unopened, if removed says so.
+  // was deleted unread if removed says so. No revocation was requested.
   | { readonly kind: 'loose-mode'; readonly removed: boolean };
 
 export interface Vault {
@@ -110,14 +113,13 @@ export interface Vault {
   put(profileId: string, secret: string): Promise<PutResult>;
   get(profileId: string): Promise<GetResult>;
   remove(profileId: string): Promise<RemoveResult>;
-  // The profile ids whose entry is sealed with Chromium's built-in key, on
-  // Linux (issue #2217); none elsewhere, and none from a root that is missing
-  // or not private.
+  // Linux profile ids whose entry uses Chromium's built-in key or has group
+  // or other mode bits. Unsafe paths are refused.
   findLegacy(): Promise<readonly string[]>;
   // Ends one such entry in the profile's turn: decide is asked for a use; with
   // one, the entry is decrypted only to be handed to it, once; with null it is
-  // not decrypted. Either way it is then deleted. An entry not sealed with the
-  // built-in key is left alone, and decide is not asked.
+  // not decrypted. Either way it is then deleted. An exposed entry is always
+  // deleted unread, regardless of its seal. Other entries are left alone.
   endLegacy<T>(profileId: string, decide: LegacyDecide<T>): Promise<LegacyEnd<T>>;
 }
 
@@ -191,7 +193,7 @@ export function createVault(deps: VaultDeps): Vault {
   async function doGet(profileId: string): Promise<GetResult> {
     let read;
     try {
-      read = await readCredential(deps.root, profileId);
+      read = await readCredential(deps.root, profileId, { checkAncestors: deps.platform === 'linux' });
     } catch {
       event('read-failed', profileId);
       return { kind: 'unusable' };
@@ -200,12 +202,16 @@ export function createVault(deps: VaultDeps): Vault {
       return read;
     }
     if (read.kind === 'unsafe-root') {
-      // Never decrypt from a directory others may have written to.
+      // Never decrypt from an unsafe vault path.
       event('unsafe-root', profileId);
       return { kind: 'sessionOnly', reason: 'unsafe-root' };
     }
+    if (read.kind === 'loose-mode' && deps.platform === 'linux') {
+      // The startup listing can miss an entry. Keep the same cleanup and
+      // notice when a later get finds it.
+      return { kind: 'exposed', removed: await removeLegacy(profileId) };
+    }
     if (read.kind === 'corrupt' || read.kind === 'loose-mode') {
-      // A file open to others is not read either (the start sweep deletes it).
       event('corrupt', profileId);
       return { kind: 'unusable' };
     }
@@ -214,9 +220,7 @@ export function createVault(deps: VaultDeps): Vault {
       // desktop with no keyring that answered): anyone who can read the file
       // can open it. It is never decrypted or used; it is deleted, and the
       // person signs in again.
-      try {
-        await removeProfile(deps.root, profileId);
-      } catch {
+      if (!(await removeLegacy(profileId))) {
         event('remove-failed', profileId);
         return { kind: 'unusable' };
       }
@@ -263,6 +267,16 @@ export function createVault(deps: VaultDeps): Vault {
     return { kind: 'removed' };
   }
 
+  // Legacy cleanup reports removal to the caller without an fs error or path.
+  async function removeLegacy(profileId: string): Promise<boolean> {
+    try {
+      await removeProfile(deps.root, profileId);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   // decrypt within the bound: null when it fails or does not answer in time.
   async function boundedDecrypt(data: Buffer): Promise<string | null> {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -283,24 +297,16 @@ export function createVault(deps: VaultDeps): Vault {
 
   async function doEndLegacy<T>(profileId: string, decide: LegacyDecide<T>): Promise<LegacyEnd<T>> {
     if (deps.platform !== 'linux') return { kind: 'not-legacy' };
-    // The same read as a get: readCredential's lstat checks (a plain, private
-    // root; a plain directory; a regular file of a sane size), then the mark.
     let read;
     try {
-      read = await readCredential(deps.root, profileId);
+      read = await readCredential(deps.root, profileId, { checkAncestors: true });
     } catch {
       return { kind: 'not-legacy' };
     }
     if (read.kind === 'loose-mode') {
-      // Anyone else may have read or written it: never opened or trusted,
-      // and the server is not asked; it is deleted.
-      let removed = true;
-      try {
-        await removeProfile(deps.root, profileId);
-      } catch {
-        removed = false;
-      }
-      return { kind: 'loose-mode', removed };
+      // Present permissions cannot establish the origin of an exposed file's
+      // bearer. Delete the entry without reading it or asking a server.
+      return { kind: 'loose-mode', removed: await removeLegacy(profileId) };
     }
     if (read.kind !== 'bytes' || linuxSeal(read.data) !== 'built-in') return { kind: 'not-legacy' };
     // Asked only now, in the turn: whatever else is asked of this profile
@@ -327,12 +333,7 @@ export function createVault(deps: VaultDeps): Vault {
         }
       }
     }
-    let removed = true;
-    try {
-      await removeProfile(deps.root, profileId);
-    } catch {
-      removed = false;
-    }
+    const removed = await removeLegacy(profileId);
     return used === null ? { kind: 'ended', opened: false, removed } : { kind: 'ended', opened: true, used: used.value, removed };
   }
 
@@ -357,9 +358,8 @@ export function createVault(deps: VaultDeps): Vault {
         // Read in its own turn, as a get would be, so that it sees what an
         // operation already asked of that profile has left.
         const legacy = await serial(id, async () => {
-          const read = await readCredential(deps.root, id).catch(() => null);
-          // A credential file open to group or others is ended too, whatever
-          // its seal (issue #2217's review, R1): it is deleted unopened.
+          const read = await readCredential(deps.root, id, { checkAncestors: true }).catch(() => null);
+          // Loose-mode entries are found without reading their contents.
           return read !== null && (read.kind === 'loose-mode' || (read.kind === 'bytes' && linuxSeal(read.data) === 'built-in'));
         });
         if (legacy) found.push(id);
