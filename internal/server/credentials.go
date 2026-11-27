@@ -314,6 +314,7 @@ func writeGuestCredentialRefused(w http.ResponseWriter) {
 func (s *Server) credentialRevoked(ctx context.Context, id int64) {
 	s.hub.DropCredential(id)
 	s.events.dropCredential(id)
+	s.person.dropCredential(id)
 	s.voiceCredentialRevoked(ctx, id)
 	s.events.notifyRosters()
 }

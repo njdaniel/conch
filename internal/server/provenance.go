@@ -35,20 +35,45 @@ import (
 //   - MCP tools bypass guard: /mcp has its own bearer authentication and
 //     never passes through this check. No MCP tool may read or write a
 //     person's DMs or calls.
-//   - An agent can never pass: an agent's credential is made by the
-//     principal who issued it, never by the agent, so it is refused here, and
-//     ADR-017 confirms agents reach no DM or call.
+//   - An agent can never pass: ADR-017 confirms agents reach no DM or call,
+//     and selfMadeCredential refuses a non-human caller first, with 403
+//     forbidden audited agents_use_mcp, as every human-only route does and
+//     as the DM schema's refusal order says (pkg/schema/dm.go; ADR-017
+//     Decision 14). An own_sign_in_required audit row can come from an
+//     act-as credential or a member's pre-migration credential.
 //
-// It is empty until the routes exist: #2019, #2021, #2030 and #2040
-// register the DM and call routes and the per-person stream, and each adds
-// its routes here in the same change. Every route that reads or writes a
-// person's DMs or calls belongs here, sockets included.
+// The per-person stream (#2040), conversation routes (#2019) and private
+// call routes (#2030) are registered here. Every route that reads or writes
+// a person's DMs or calls belongs here, sockets included.
 //
 // A route that serves both a person's own data and anything else (one
 // socket for channels and DMs, say) cannot be listed whole without
 // refusing the rest: it calls selfMadeCredential itself before it sends the
 // person's own data.
-var selfMadeCredentialRoutes = map[string]bool{}
+var selfMadeCredentialRoutes = map[string]bool{
+	// The per-person events stream (#2040): DM frames and rings for the
+	// caller alone. A ticket-opened socket is judged by its credential's
+	// stored provenance (requestCredentialSelfMade).
+	"GET /v1/events/person/ws": true,
+	// Open, resume, list, read one and set the caller's own state of a
+	// conversation (#2019). Reads are refused too.
+	"POST /v1/dms":                     true,
+	"GET /v1/dms":                      true,
+	"GET /v1/dms/{conversation}":       true,
+	"PUT /v1/dms/{conversation}/state": true,
+	// The seven private call routes (#2030, ADR-017 Decision 7): an invite,
+	// the history of a pair, the reconnect snapshot and the four actions.
+	// Their handlers (private_call.go) carry no provenance check of their
+	// own; this guard is the only one. The media-join route (#2032) joins
+	// this list in its own change.
+	"POST /v1/dms/{conversation}/calls": true,
+	"GET /v1/dms/{conversation}/calls":  true,
+	"GET /v1/calls/current":             true,
+	"POST /v1/calls/{call}/accept":      true,
+	"POST /v1/calls/{call}/decline":     true,
+	"POST /v1/calls/{call}/cancel":      true,
+	"POST /v1/calls/{call}/hangup":      true,
+}
 
 // requireSelfMadeCredential wraps next so it runs only for a request whose
 // credential is self-made (selfMadeCredential); any other gets the answer
@@ -65,8 +90,11 @@ func (s *Server) requireSelfMadeCredential(next http.Handler) http.Handler {
 // selfMadeCredential reports whether the request's credential was made by
 // its own principal (store.RequestCredential.SelfMade, provenance.go in the
 // store). When it was not, it has written the answer and the caller writes
-// nothing more: 403 own_sign_in_required, audited as a denial, for a
-// credential made by another; 401 when the request has no credential at
+// nothing more. The order of refusals: a non-human caller first, 403
+// forbidden audited as agents_use_mcp (the agent is told nothing about
+// signing in, which is wording for people); then 403
+// own_sign_in_required, audited as a denial, for a person's credential made
+// by another; 401 when the request has no credential at
 // all, which under AuthRequired is a wiring bug and denies; 500 when the
 // store cannot say. A ticket-authenticated socket has its credential's id
 // but not the rest, so the provenance is read from the store by that id.
@@ -84,6 +112,15 @@ func (s *Server) selfMadeCredential(w http.ResponseWriter, r *http.Request) bool
 	caller, ok := callerFrom(ctx)
 	if !ok {
 		writeUnauthenticated(w)
+		return false
+	}
+	if caller.Kind != store.PrincipalHuman {
+		subject := r.Pattern
+		if subject == "" {
+			subject = "<unmatched>"
+		}
+		s.auditAgentDenial(ctx, caller.ID, subject, "", 0, denyAgentOnHumanRoute)
+		writeError(w, http.StatusForbidden, errForbidden.Code, "agents cannot use a person's direct messages or calls")
 		return false
 	}
 	if _, previewed := previewFrom(ctx); previewed {

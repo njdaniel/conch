@@ -143,7 +143,7 @@ use crate::session::{
     Settings, Timings,
 };
 use crate::share_audio::{ShareRequest, ShareView};
-use crate::share_capture::ShareSource;
+use crate::share_capture::{ShareSource, StreamDecision};
 
 /// How long a press's final `stopped` report is given while leaving (§8.2).
 pub const REPORT_LIMIT: Duration = Duration::from_secs(1);
@@ -402,6 +402,8 @@ pub struct Snapshot {
     pub share_audio_problem: Option<VoiceControlShareAudioProblem>,
     /// How many streams are mixed into it: said in v3 only.
     pub share_audio_sources: i64,
+    /// The live Linux share's local display labels and decisions.
+    share_audio_streams: Option<Arc<[StreamDecision]>>,
 }
 
 impl Snapshot {
@@ -446,6 +448,7 @@ impl Snapshot {
             share_audio_muted: false,
             share_audio_problem: None,
             share_audio_sources: 0,
+            share_audio_streams: None,
         }
     }
 
@@ -461,6 +464,16 @@ impl Snapshot {
         self.share_audio_problem = view.problem;
         self.share_audio_sources = view.sources;
         self.share_audio_muted = muted;
+        if view.share_audio != VoiceControlShareAudio::On {
+            self.share_audio_streams = None;
+        }
+        self
+    }
+
+    pub(crate) fn with_share_streams(mut self, streams: Option<Arc<[StreamDecision]>>) -> Self {
+        if self.share_audio == VoiceControlShareAudio::On {
+            self.share_audio_streams = streams.filter(|streams| !streams.is_empty());
+        }
         self
     }
 
@@ -510,6 +523,7 @@ impl Snapshot {
             seen.share_audio_muted = false;
             seen.share_audio_problem = None;
             seen.share_audio_sources = 0;
+            seen.share_audio_streams = None;
         }
         seen
     }
@@ -583,6 +597,22 @@ impl Snapshot {
             share_audio_muted: self.share_audio_muted,
             share_audio_problem: self.share_audio_problem,
             share_audio_sources: self.share_audio_sources,
+            share_audio_streams: self
+                .share_audio_streams
+                .as_deref()
+                .unwrap_or_default()
+                .to_vec(),
+        }
+    }
+
+    fn line_v3(&self, seq: i64) -> Result<String, ApiError> {
+        let mut state = self.event_v3(seq);
+        // Keep as many decisions as fit within the ordinary state line limit.
+        loop {
+            let line = to_line(&state);
+            if line.is_ok() || state.share_audio_streams.pop().is_none() {
+                return line;
+            }
         }
     }
 }
@@ -737,7 +767,7 @@ impl Events {
         match self.version {
             Version::V1 => self.write(keep, |seq| to_line(&snapshot.event(seq))),
             Version::V2 => self.write(keep, |seq| to_line(&snapshot.event_v2(seq))),
-            Version::V3 => self.write(keep, |seq| to_line(&snapshot.event_v3(seq))),
+            Version::V3 => self.write(keep, |seq| snapshot.line_v3(seq)),
         }
     }
 
@@ -2719,7 +2749,8 @@ mod tests {
     const START_V3: &str = r#"{"schema":"conch.voice_control.v3","kind":"start","id":1,"server":"https://conch.example.org","channel":"general","principal_id":7,"credential":"stored","muted":false,"deafened":true}"#;
 
     /// A start in v3 makes a v3 session (#1586), whose later lines are read as v3: the two
-    /// share commands, the application name never shown, and a v2 line `unknown_schema`.
+    /// share commands, the request's name redacted in debug output, and a v2 line
+    /// `unknown_schema`.
     #[test]
     fn a_start_in_v3_makes_a_v3_session_whose_lines_are_read_as_v3() {
         let start = first_line(line(START_V3)).unwrap();

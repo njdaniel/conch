@@ -1,0 +1,8 @@
+{
+  "schema": "conch.voice_control.v4",
+  "kind": "gate_event",
+  "seq": 10,
+  "at_ms": 1400,
+  "open": false,
+  "why": "hang_ended"
+}

@@ -2,9 +2,13 @@
 // lines, its bound, the bundle's size cap, and the shown-before-saved rule.
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
+import type { Session } from 'electron';
 import { describe, expect, it } from 'vitest';
 
-import { RECORD_MAX_CHARS, BUNDLE_MAX_BYTES, buildBundle, Diagnostics, diagnosticsLogger, LINE_MAX_CHARS, LogRing, RING_LINES, scrubLine } from '../../main/diagnostics.ts';
+import { RECORD_MAX_CHARS, BUNDLE_MAX_BYTES, buildBundle, Diagnostics, DiagnosticSamples, diagnosticsLogger, GeometricSampler, LINE_MAX_CHARS, LogRing, MAX_SAMPLE_KEYS, RING_LINES, scrubLine, type BlockedDiagnosticKey, type FeedDiagnosticEvent, type MainLog, type Refusal } from '../../main/diagnostics.ts';
+import { guardSession } from '../../main/guards.ts';
+import { voiceDiagnosticLog } from '../../main/voice/renderer-diagnostics.ts';
+import type { FeedKind, VoiceDiagnostic } from '../../../web/src/platform/desktop/bridge.ts';
 
 const NOW = new Date('2026-11-20T10:00:00Z');
 
@@ -35,6 +39,9 @@ const ringValues: Readonly<Record<string, readonly string[]>> = {
   ],
   'profiles/service.ts': [
     'reason', // The fixed missing or refused bound-credential reason.
+    'got.reason', // SessionOnlyReason, the vault's closed vocabulary (#2077).
+    'why', // SessionOnlyReason, or the fixed words failed / temporarilyUnavailable (#2077).
+    'outcome', // LegacyOutcome, the closed vocabulary of the v10 sweep's lines (#2217).
   ],
   'vault/vault.ts': [
     'name', // Fixed vault event names, including unprotected storage states.
@@ -435,6 +442,15 @@ describe('scrubLine', () => {
     expect(out).not.toMatch(/[\p{Cf}\p{Cc}]/u);
   });
 
+  it.each([
+    ['U+3164', '\u3164'],
+    ['U+115F', '\u115f'],
+    ['U+1160', '\u1160'],
+    ['U+FFA0', '\uffa0'],
+  ])('scrubs a path after the invisible filler %s', (_name, filler) => {
+    expect(scrubLine(`cannot read ${filler}/home/nick/secret plan.txt`)).toBe('cannot read [path]');
+  });
+
   // All three lengths from scrub-time.mjs, across each backtracking probe.
   const longShapes = [
     ['hyphens', (n: number) => 'a-'.repeat(n / 2)],
@@ -551,6 +567,71 @@ describe('LogRing', () => {
   });
 });
 
+const refusalKeys = Object.keys({
+  sender: true, destroyed: true, frame: true, subframe: true, origin: true,
+  generation: true, name: true, rate: true, size: true, shape: true, gesture: true, disabled: true, error: true,
+} satisfies Record<Refusal, true>);
+const feedKinds = Object.keys({
+  messages: true, events: true, voice: true, occupancy: true,
+} satisfies Record<FeedKind, true>);
+const feedEvents = Object.keys({
+  opening: true, unsubscribed: true, document: true, 'signed out': true, server: true, behind: true,
+  'socket closed': true, 'socket destroyed': true, 'close deadline': true, 'invalid frame': true,
+} satisfies Record<FeedDiagnosticEvent, true>);
+const rendererCodes = Object.keys({
+  'capture-stalled': true, 'encoder-cpu': true, 'sdp-retry': true, 'sdp-rejected': true,
+  'sdp-bundle-collision': true, 'sdk-warning': true, 'sdk-error': true,
+} satisfies Record<VoiceDiagnostic, true>) as VoiceDiagnostic[];
+
+describe('GeometricSampler', () => {
+  it.each([
+    { name: 'IPC refusals', keys: refusalKeys },
+    { name: 'feed kinds × events', keys: feedKinds.flatMap((kind) => feedEvents.map((event) => `${kind} ${event}`)) },
+    { name: 'blocked requests', keys: Object.keys({ blocked: true } satisfies Record<BlockedDiagnosticKey, true>) },
+    { name: 'renderer diagnostics', keys: rendererCodes },
+  ])('fits every key for $name under the sampler cap', ({ keys }) => {
+    expect(keys.length).toBeLessThanOrEqual(MAX_SAMPLE_KEYS);
+    const sampler = new GeometricSampler<string>();
+    for (const key of keys) expect(sampler.sample(key), key).toBe(true);
+    expect(sampler.counts()).toEqual(keys.map((key) => [key, 1]));
+  });
+
+  // burn.mjs counted how many export slots a million events of one key use.
+  it.each([
+    { events: 1, samples: 1 },
+    { events: 7, samples: 3 },
+    { events: 8, samples: 4 },
+    { events: 1_000_000, samples: 20 },
+  ])('uses $samples export slots for $events events of one key', ({ events, samples }) => {
+    const sampler = new GeometricSampler<'event'>();
+    let exported = 0;
+    for (let n = 0; n < events; n++) if (sampler.sample('event')) exported++;
+    expect(exported).toBe(samples);
+    expect(sampler.counts()).toEqual([['event', events]]);
+  });
+
+  it('keeps its first 64 keys and their sampling sequence when more arrive', () => {
+    const sampler = new GeometricSampler<string>();
+    const keys = Array.from({ length: 64 }, (_, n) => `key ${String(n)}`);
+    expect(keys.map((key) => sampler.sample(key))).toEqual(keys.map(() => true));
+    for (let n = 0; n < 1_000; n++) expect(sampler.sample(`overflow ${String(n)}`)).toBe(false);
+    expect(sampler.sample('overflow 0')).toBe(false);
+    expect(sampler.counts()).toEqual(keys.map((key) => [key, 1]));
+    expect(sampler.sample('key 0')).toBe(true);
+    expect(sampler.sample('key 0')).toBe(false);
+    expect(sampler.count('key 0')).toBe(3);
+  });
+});
+
+describe('buildBundle header keys', () => {
+  it('prints a key that is not a closed-vocabulary word as other, so it cannot forge a line', () => {
+    const forged = 'rate\nBlocked requests since start: 0' as unknown as Parameters<typeof buildBundle>[0]['refusalCounts'] extends readonly (readonly [infer K, number])[] | undefined ? K : never;
+    const text = buildBundle({ versions: {}, lines: [], refusals: 3, refusalCounts: [[forged, 2], ['rate', 1]], now: new Date(0) });
+    expect(text).toContain('IPC refusals since start: 3 (other 2, rate 1)');
+    expect(text.split('\n').filter((line) => line.startsWith('Blocked requests since start:'))).toHaveLength(1);
+  });
+});
+
 describe('buildBundle', () => {
   it('keeps version names and values from forging header lines', () => {
     const text = buildBundle({ versions: { 'a\nb': 'c\nlog (last 0 lines' }, lines: [], refusals: 0, now: new Date(0) });
@@ -568,11 +649,15 @@ describe('buildBundle', () => {
 
   it('is at most 256 KiB whatever it is given, dropping the oldest lines and saying so', () => {
     const lines = Array.from({ length: 5000 }, (_, n) => `conch-desktop: ${String(n).padStart(5, '0')} ${'x'.repeat(200)}`);
-    const text = buildBundle({ versions: {}, lines, refusals: 0, now: NOW });
+    const text = buildBundle({
+      versions: {}, lines, refusals: 3, refusalCounts: [['gesture', 3]],
+      feedCounts: [['messages opening', 2], ['voice invalid frame', 1]], blocked: 25, now: NOW,
+    });
     expect(Buffer.byteLength(text, 'utf8')).toBeLessThanOrEqual(BUNDLE_MAX_BYTES);
     expect(text).toContain('older log lines left out');
     expect(text).toContain('04999');
     expect(text).not.toContain('conch-desktop: 00000');
+    expect(text).toContain('IPC refusals since start: 3 (gesture 3)\nFeed events since start: 3 (messages opening 2, voice invalid frame 1)\nBlocked requests since start: 25\n');
   });
 
   it('is under the cap for a full ring of full-length lines', () => {
@@ -588,10 +673,13 @@ function fixture(chosen: string | null = '/tmp/out/diag.txt') {
   const ring = new LogRing();
   const written: [string, string][] = [];
   const logs: string[] = [];
+  const log = diagnosticsLogger(ring, (line) => logs.push(line));
   const asked: string[] = [];
   const state = { chosen, fail: false };
+  const samples = new DiagnosticSamples();
   const diagnostics = new Diagnostics({
     ring,
+    samples,
     versions: { electron: '41.0.0' },
     now: () => NOW,
     chooseSavePath: (suggested) => {
@@ -606,20 +694,117 @@ function fixture(chosen: string | null = '/tmp/out/diag.txt') {
     downloadsDir: () => '/home/p/Downloads',
     join: (...parts) => parts.join('/'),
     isAbsolute: (path) => path.startsWith('/'),
-    log: (line) => logs.push(line),
+    log,
   });
-  return { ring, written, logs, asked, state, diagnostics };
+  return { ring, written, logs, log, asked, state, samples, diagnostics };
 }
 
+// Simulate evict.mjs with an in-memory session and clock.
+function exerciseBlocked({ log, logs, samples }: ReturnType<typeof fixture>, requests: readonly number[], wrap: boolean): readonly string[] {
+  type Listener = (details: { url: string }, callback: (result: { cancel?: boolean }) => void) => void;
+  const webRequest = {
+    listener: undefined as Listener | undefined,
+    onBeforeRequest(listener: Listener): void {
+      this.listener = listener;
+    },
+  };
+  const noop = (): void => undefined;
+  const ses = {
+    setPermissionRequestHandler: noop,
+    setPermissionCheckHandler: noop,
+    setDevicePermissionHandler: noop,
+    setDisplayMediaRequestHandler: noop,
+    on: noop,
+    setSpellCheckerEnabled: noop,
+    webRequest,
+  };
+  const wrapped: MainLog = (line, options) => { log(line, options); };
+  let cancelled = 0;
+  let allowed = 0;
+  for (const count of requests) {
+    guardSession(ses as unknown as Session, { log: wrap ? wrapped : log, blockedSamples: samples.blocked });
+    webRequest.listener?.({ url: 'conch-app://ui/' }, (result) => {
+      if (result.cancel !== true) allowed++;
+    });
+    for (let n = 0; n < count; n++) {
+      webRequest.listener?.({ url: url('foreign.invalid/private') }, (result) => {
+        if (result.cancel === true) cancelled++;
+      });
+    }
+  }
+  const total = requests.reduce((sum, count) => sum + count, 0);
+  expect(cancelled).toBe(total);
+  expect(allowed).toBe(requests.length);
+  expect(logs.filter((line) => line === `conch-desktop: blocked a request to ${url('foreign.invalid')}`)).toHaveLength(total);
+  const sampled: string[] = [];
+  for (let n = 1; n <= total; n *= 2) sampled.push(`conch-desktop: blocked a request; ${String(n)} so far`);
+  return sampled;
+}
+
+const evictionProbes = [
+  {
+    name: 'blocked requests across guard installations',
+    exercise: (f: ReturnType<typeof fixture>) => exerciseBlocked(f, [512, 513], false),
+    blocked: 1025,
+    rendererHeader: '0',
+  },
+  {
+    name: '1000 blocked requests with a wrapped logger',
+    exercise: (f: ReturnType<typeof fixture>) => exerciseBlocked(f, [1000], true),
+    blocked: 1000,
+    rendererHeader: '0',
+  },
+  {
+    name: 'renderer diagnostics at 42 reports per minute',
+    exercise: ({ log, logs }: ReturnType<typeof fixture>, samples: GeometricSampler<VoiceDiagnostic>): readonly string[] => {
+      let now = 0;
+      const report = voiceDiagnosticLog(log, () => now, samples);
+      for (let n = 0; n < 128; n++, now += 10_000) for (const code of rendererCodes) report(code);
+      expect(logs).toHaveLength(128 * rendererCodes.length);
+      const sampled: string[] = [];
+      for (const n of [1, 2, 4, 8, 16, 32, 64, 128]) sampled.push(...logs.slice((n - 1) * rendererCodes.length, n * rendererCodes.length));
+      return sampled;
+    },
+    blocked: 0,
+    rendererHeader: '896 (capture-stalled 128, encoder-cpu 128, sdk-error 128, sdk-warning 128, sdp-bundle-collision 128, sdp-rejected 128, sdp-retry 128)',
+  },
+];
+
 describe('Diagnostics', () => {
+  it.each(evictionProbes)('keeps export history and shows totals through $name', ({ exercise, blocked, rendererHeader }) => {
+    const f = fixture();
+    const history = [
+      'voice: helper 1 lost: ack-timeout',
+      'conch-desktop: refused an IPC call (gesture); 1 so far',
+      'conch-desktop: refused an IPC call (shape); 2 so far',
+    ];
+    for (const line of history) f.ring.record(line);
+    const first = f.diagnostics.preview(2, [['gesture', 1], ['shape', 1]]);
+    const renderer = new GeometricSampler<VoiceDiagnostic>();
+    const sampled = exercise(f, renderer);
+    const next = f.diagnostics.preview(2, [['gesture', 1], ['shape', 1]], renderer.counts());
+    expect(f.ring.lines()).toEqual([...history, ...sampled]);
+    expect(next.text).toContain('IPC refusals since start: 2 (gesture 1, shape 1)\n');
+    expect(next.text).toContain(`Blocked requests since start: ${String(blocked)}\n`);
+    expect(next.text).toContain(`Renderer diagnostics since start: ${rendererHeader}\n`);
+    expect(next.text).toContain(history[0]);
+    expect(first.text).toContain('Blocked requests since start: 0\n');
+  });
+
   it('writes the preview selected by ID even after a newer preview', async () => {
     const f = fixture();
+    const { feeds } = f.samples;
+    feeds.sample('messages opening');
     f.ring.record('conch-desktop: before');
     const shown = f.diagnostics.preview(12);
+    feeds.sample('messages opening');
+    feeds.sample('occupancy invalid frame');
     f.ring.record('conch-desktop: after the preview');
     const newer = f.diagnostics.preview(34);
     expect(shown.text).toContain('IPC refusals since start: 12');
+    expect(shown.text).toContain('Feed events since start: 1 (messages opening 1)\n');
     expect(newer.text).toContain('IPC refusals since start: 34');
+    expect(newer.text).toContain('Feed events since start: 3 (messages opening 2, occupancy invalid frame 1)\n');
     expect(newer.text).toContain('after the preview');
     expect(newer.id).not.toBe(shown.id);
     expect(await f.diagnostics.save(shown.id)).toBe('saved');

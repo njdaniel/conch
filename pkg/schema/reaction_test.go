@@ -238,6 +238,8 @@ func TestReactionConstants(t *testing.T) {
 		"VOICE_CONTROL_MAX_SERVER_BYTES":         VoiceControlMaxServerBytes,
 		"VOICE_CONTROL_MAX_CHANNEL_BYTES":        VoiceControlMaxChannelBytes,
 		"VOICE_CONTROL_MAX_RETRY_IN_MS":          VoiceControlMaxRetryInMS,
+		"VOICE_CONTROL_V4_MIN_LEVEL_DB":          VoiceControlV4MinLevelDB,
+		"VOICE_CONTROL_V4_MAX_LOSS_BASIS_POINTS": VoiceControlV4MaxLossBasisPoints,
 		"VOICE_CONTROL_HELLO_TIMEOUT_MS":         VoiceControlHelloTimeoutMS,
 		"VOICE_CONTROL_ACK_TIMEOUT_MS":           VoiceControlAckTimeoutMS,
 		"VOICE_CONTROL_GATE_SHUT_MS":             VoiceControlGateShutMS,
@@ -253,6 +255,9 @@ func TestReactionConstants(t *testing.T) {
 		"VOICE_CONTROL_PIPE_NONCE_ENV":           VoiceControlPipeNonceEnv,
 		"VOICE_CONTROL_PIPE_NONCE_BYTES":         VoiceControlPipeNonceBytes,
 		"VOICE_CONTROL_PIPE_NONCE_CHARS":         VoiceControlPipeNonceChars,
+		// Optional share-audio diagnostics (issue #2083).
+		"VOICE_CONTROL_MAX_SHARE_AUDIO_LABEL_BYTES": VoiceControlMaxShareAudioLabelBytes,
+		"VOICE_CONTROL_MAX_SHARE_AUDIO_STREAMS":     VoiceControlMaxShareAudioStreams,
 		// A spoiler attachment (issue #1500).
 		"SPOILER_FILE_PREFIX": SpoilerFilePrefix,
 		"MAX_FILE_NAME_BYTES": MaxFileNameBytes,
@@ -279,6 +284,15 @@ func TestReactionConstants(t *testing.T) {
 		"MAX_DM_CLIENT_NONCE_BYTES":      MaxDMClientNonceBytes,
 		"DM_CLIENT_NONCE_WINDOW_SECONDS": DMClientNonceWindowSeconds,
 		"MAX_DM_CURSOR_BYTES":            MaxDMCursorBytes,
+		// Private calls (issue #2029).
+		"PRIVATE_CALL_RING_SECONDS":            PrivateCallRingSeconds,
+		"PRIVATE_CALL_JOIN_SECONDS":            PrivateCallJoinSeconds,
+		"PRIVATE_CALL_RECONNECT_GRACE_SECONDS": PrivateCallReconnectGraceSeconds,
+		"PRIVATE_CALL_ACTION_WINDOW_SECONDS":   PrivateCallActionWindowSeconds,
+		"MIN_PRIVATE_CALL_ID_BYTES":            MinPrivateCallIDBytes,
+		"MAX_PRIVATE_CALL_ID_BYTES":            MaxPrivateCallIDBytes,
+		"MAX_PRIVATE_CALL_ACTION_ID_BYTES":     MaxPrivateCallActionIDBytes,
+		"MAX_PRIVATE_CALL_HISTORY_PAGE":        MaxPrivateCallHistoryPage,
 	}
 	if len(TSConstants) != len(want) {
 		t.Errorf("TSConstants has %d entries, want %d", len(TSConstants), len(want))

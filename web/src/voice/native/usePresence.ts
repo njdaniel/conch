@@ -6,10 +6,14 @@
 import { useEffect, useRef, useState } from 'react';
 import * as api from '../../api';
 import { soundAudience, sounds, voiceSounds } from '../../sounds';
-import type { VoicePresenceV2 } from '../../schema/voice';
+import type { VoicePresence } from '../../schema/voice';
 import { Feed, type FeedStatus } from '../../state/feed';
 import { parsePresence } from '../presence';
 import type { Snapshot } from '../useVoice';
+
+type NativeSnapshot =
+  | Exclude<Snapshot, { kind: 'presence' }>
+  | (Extract<Snapshot, { kind: 'presence' }> & { readonly socketSchema: VoicePresence['schema'] | null });
 
 const realClock = {
   setTimeout: (run: () => void, ms: number) => window.setTimeout(run, ms),
@@ -36,8 +40,8 @@ export function usePresence({
   readonly joined: string | null;
   readonly voiceAllowed: boolean;
   readonly onUnauthorized: () => void;
-}): Snapshot {
-  const [snapshot, setSnapshot] = useState<Snapshot>({ kind: 'loading' });
+}): NativeSnapshot {
+  const [snapshot, setSnapshot] = useState<NativeSnapshot>({ kind: 'loading' });
   const unauthorized = useRef(onUnauthorized);
   unauthorized.current = onUnauthorized;
   const joinedRef = useRef(joined);
@@ -55,14 +59,16 @@ export function usePresence({
     let live = true;
     let first = true;
     let closeReason = '';
-    let previous: VoicePresenceV2 | null = null;
-    const show = (presence: VoicePresenceV2) => {
+    let previous: VoicePresence | null = null;
+    // A follow-up read can replace the roster before React delivers the frame.
+    let socketSchema: VoicePresence['schema'] | null = null;
+    const show = (presence: VoicePresence) => {
       const audience = soundAudience;
       if (joinedRef.current === channel && audience?.allows(presence.channel_id)) {
         voiceSounds(previous, presence, audience.me, (sound) => { sounds.play(sound); });
       }
       previous = presence;
-      setSnapshot({ kind: 'presence', presence });
+      setSnapshot({ kind: 'presence', presence, socketSchema });
     };
     setSnapshot({ kind: 'loading' });
     const feed = new Feed({
@@ -80,8 +86,9 @@ export function usePresence({
           },
         }),
       onFrame: (data) => {
-        const presence: VoicePresenceV2 | null = parsePresence(data);
+        const presence: VoicePresence | null = parsePresence(data);
         if (presence === null || !live) return;
+        socketSchema = presence.schema;
         show(presence);
       },
       onStatus: (status: FeedStatus) => {
@@ -97,6 +104,7 @@ export function usePresence({
       },
     });
     // A 1008 close says only that the server meant it; one read says why.
+    // A roster or a transient failure sends the feed back through its backoff.
     const settle = () => {
       previous = null;
       if (closeReason === noLongerMember) {
@@ -106,9 +114,12 @@ export function usePresence({
       void api.getVoicePresence(channel).then((result) => {
         if (!live) return;
         if (result.ok) {
-          show(result.value);
+          // retryLater reports waiting synchronously. Show the read after it
+          // so the roster stays visible during the backoff.
           feed.retryLater();
+          show(result.value);
         } else if (result.failure === 'unauthorized') unauthorized.current();
+        else if (result.failure === 'network' || result.status === 429 || (result.status ?? 0) >= 500) feed.retryLater();
         else setSnapshot({ kind: result.code === voiceNotAllowed ? 'not_allowed' : 'gone' });
       });
     };

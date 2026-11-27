@@ -94,7 +94,7 @@ type voiceShare struct {
 	// design §3): a label repeated in v2 presence, nil when none was
 	// declared. Changed only under p.mu, by a claim holding the room's
 	// claims.
-	quality *schema.VoiceShareQuality
+	quality *schema.VoiceShareQualityV3
 	// pending is set from the moment the claim is recorded until its
 	// voice_share_started row is written. Nothing ends a pending share: a
 	// share that never started has nothing to stop. Presence does not show
@@ -200,7 +200,10 @@ func (r *voiceRoomState) owe(principalID int64) {
 func voiceRoomPublishes(room store.VoiceRoom) bool { return room.NetID == 0 }
 
 // handleVoiceShareStart serves POST /v1/channels/{channel}/voice/share: the
-// caller claims the room's screen share.
+// caller claims a screen share in the room. With
+// ?schema=conch.voice_presence.v3 the body may name a 480p or 1440p quality
+// in addition to the legacy resolutions. Invalid or repeated schema names
+// are refused after the caller and session checks.
 //
 // The caller is checked exactly as for a session, by the same code and so in
 // the same order (voiceSessionCaller): a non-member gets the unknown-channel
@@ -208,7 +211,8 @@ func voiceRoomPublishes(room store.VoiceRoom) bool { return room.NetID == 0 }
 // then is a member told that voice is not configured. Then, as for a transmit
 // report, the credential the request came with must hold a session for the
 // channel's current room (409 voice_no_session). Only then is the room's share
-// looked at: a room that holds voiceShareCap shares is 409 voice_share_full to a caller who holds none.
+// looked at: a room that holds voiceShareCap shares is 409 voice_share_full
+// to a caller who holds none.
 func (s *Server) handleVoiceShareStart(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	channel, caller, ok := s.voiceClaimCaller(w, r)
@@ -249,7 +253,26 @@ func (s *Server) handleVoiceShareStart(w http.ResponseWriter, r *http.Request) {
 	// malformed one is 400, and says nothing to a caller who was refused
 	// above. No body declares nothing.
 	r.Body = http.MaxBytesReader(w, r.Body, voiceCompanionMaxBytes)
-	req, err := schema.DecodeVoiceShareRequestV1(r.Body)
+	version, validVersion := voicePresenceVersion(r.URL.Query())
+	if !validVersion {
+		writeError(w, http.StatusBadRequest, "invalid_request", "unsupported voice share schema")
+		return
+	}
+	var quality *schema.VoiceShareQualityV3
+	if version == schema.VoicePresenceSchemaV3 {
+		var req schema.VoiceShareRequestV2
+		req, err = schema.DecodeVoiceShareRequestV2(r.Body)
+		quality = req.Quality
+	} else {
+		var req schema.VoiceShareRequestV1
+		req, err = schema.DecodeVoiceShareRequestV1(r.Body)
+		if req.Quality != nil {
+			quality = &schema.VoiceShareQualityV3{
+				Resolution: schema.VoiceShareResolutionV3(req.Quality.Resolution),
+				FrameRate:  req.Quality.FrameRate,
+			}
+		}
+	}
 	if err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
@@ -260,7 +283,7 @@ func (s *Server) handleVoiceShareStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "request body must be empty or a voice share request with an optional quality")
 		return
 	}
-	share, err := s.voice.claimShare(ctx, room, caller.ID, req.Quality)
+	share, err := s.voice.claimShare(ctx, room, caller.ID, quality)
 	var limited *rateLimitedError
 	switch {
 	case errors.Is(err, errVoiceShareFull):
@@ -294,12 +317,17 @@ func (s *Server) handleVoiceShareStart(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w)
 		return
 	}
-	// A claim that declared a quality is answered with it (VoiceShareV2); one
-	// that did not gets VoiceShareV1, exactly as before, so a client from
-	// before the quality never sees a field it does not know.
+	// A claim that declared a quality is answered with it (VoiceShareV3 when
+	// requested, VoiceShareV2 otherwise). A claim without a quality gets
+	// VoiceShareV1, exactly as before, so a client from before the quality
+	// never sees a field it does not know.
 	var answer interface{ Validate() error } = share
-	if req.Quality != nil {
-		answer = schema.VoiceShareV2{PrincipalID: share.PrincipalID, StartedAt: share.StartedAt, Audio: share.Audio, Quality: *req.Quality}
+	if quality != nil {
+		if version == schema.VoicePresenceSchemaV3 {
+			answer = schema.VoiceShareV3{PrincipalID: share.PrincipalID, StartedAt: share.StartedAt, Audio: share.Audio, Quality: *quality}
+		} else {
+			answer = schema.VoiceShareV2{PrincipalID: share.PrincipalID, StartedAt: share.StartedAt, Audio: share.Audio, Quality: quality.Legacy()}
+		}
 	}
 	if err := answer.Validate(); err != nil {
 		slog.ErrorContext(ctx, "voice: built an invalid share", "channel", channel.ID, "error", err)
@@ -567,7 +595,7 @@ func (p *voicePoller) claimRunning(ctx context.Context, r *voiceRoomState, princ
 // The row is written before the claim is answered, and a claim whose row
 // cannot be written is undone and its sources withdrawn: a share conchd
 // cannot account for does not start.
-func (p *voicePoller) claimShare(ctx context.Context, room store.VoiceRoom, principalID int64, quality *schema.VoiceShareQuality) (schema.VoiceShareV1, error) {
+func (p *voicePoller) claimShare(ctx context.Context, room store.VoiceRoom, principalID int64, quality *schema.VoiceShareQualityV3) (schema.VoiceShareV1, error) {
 	// The grant below lets the connection publish a microphone as well as
 	// the share, which is right only where every member may.
 	if !voiceRoomPublishes(room) {
@@ -758,7 +786,7 @@ func (p *voicePoller) claimShare(ctx context.Context, room store.VoiceRoom, prin
 // shareStartedDetail is the detail of a voice_share_started row: the channel,
 // the sound the grant allows, and the quality the sharer declared, when they
 // did (design §5.6).
-func shareStartedDetail(channelID int64, quality *schema.VoiceShareQuality) string {
+func shareStartedDetail(channelID int64, quality *schema.VoiceShareQualityV3) string {
 	detail := fmt.Sprintf("channel=%d audio=true", channelID)
 	if quality != nil {
 		detail += fmt.Sprintf(" quality=%s/%d", quality.Resolution, quality.FrameRate)

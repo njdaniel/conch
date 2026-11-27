@@ -830,12 +830,32 @@ var voiceControlDoc = filepath.Join("..", "..", "docs", "design", "tui-voice.md"
 // TestVoiceControlDoc keeps the design note and this package together: every
 // relative link in it leads to a file, every fixture is named in it, and
 // every number of the contract is written in its table as the code has it.
+// It also checks the Windows binding capture instructions.
 func TestVoiceControlDoc(t *testing.T) {
 	data, err := os.ReadFile(voiceControlDoc) // #nosec G304 -- this repository's own design note, by a fixed path
 	if err != nil {
 		t.Fatal(err)
 	}
 	doc := string(data)
+
+	t.Run("Windows binding capture", func(t *testing.T) {
+		_, capture, found := strings.Cut(doc, "The desktop renderer captures ")
+		if !found {
+			t.Fatal("the design note has no desktop binding capture paragraph")
+		}
+		capture, _, _ = strings.Cut(capture, "\n\n")
+		capture = strings.Join(strings.Fields(capture), " ")
+		for _, phrase := range []string{
+			"talk and mute bindings",
+			"`voice.toml` or `conch-voice config set keys.deafen <value>`",
+			"leave and rejoin",
+			"next join",
+		} {
+			if !strings.Contains(capture, phrase) {
+				t.Errorf("the desktop binding capture paragraph does not say %q", phrase)
+			}
+		}
+	})
 
 	link := regexp.MustCompile(`\]\(([^)#\s]+)(#[^)]*)?\)`)
 	for _, m := range link.FindAllStringSubmatch(doc, -1) {

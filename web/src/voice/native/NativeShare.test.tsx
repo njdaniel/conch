@@ -104,7 +104,8 @@ describe('Share is offered only in the joined channel while the helper is connec
     expect(t.calls).toEqual([]);
     // Nothing is promised about sound or quality while it is off.
     expect(screen.queryByText(silentShareBefore)).toBeNull();
-    expect(screen.queryByLabelText('Share quality')).toBeNull();
+    expect(screen.queryByLabelText('Resolution')).toBeNull();
+    expect(screen.queryByLabelText('Frame rate')).toBeNull();
   });
 
   it.each([
@@ -155,6 +156,15 @@ describe('the indicator and Stop', () => {
     expect(screen.queryByRole('button', { name: 'Share screen' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Stop sharing' }));
     expect(t.calls).toEqual(['stop']);
+  });
+
+  // The desktop's capture is the helper's, with no browser track to play (#2197):
+  // the sharer's stage has no preview and no control for one.
+  it('shows no preview of the screen while sharing', () => {
+    const t = fake({ phase: 'connected', channel: 'general', companion: true, share: { kind: 'sharing', audio: false } });
+    const { container } = strip(t.companion);
+    expect(container.querySelector('video')).toBeNull();
+    expect(screen.queryByRole('button', { name: /preview of your screen/i })).toBeNull();
   });
 
   it.each<[ShareState, string]>([
@@ -233,41 +243,40 @@ describe('the refusals, each in its own words', () => {
   });
 });
 
-describe('the quality choices (Q-D4-3, #1772)', () => {
-  it('are 720p30 (the default), 1080p30, 1080p60, Source 30 and Source 60, and never Auto', () => {
+describe('the desktop quality choices', () => {
+  it('defaults to 720p at 30 fps and offers separate controls', () => {
     const t = fake();
     strip(t.companion);
-    const select = screen.getByLabelText<HTMLSelectElement>('Share quality');
-    expect(Array.from(select.options).map((o) => o.value)).toEqual(['720p30', '1080p30', '1080p60', 'source30', 'source60']);
-    expect(Array.from(select.options).map((o) => o.textContent)).not.toContain('Auto');
-    expect(select.value).toBe('720p30');
+    const resolution = screen.getByLabelText<HTMLSelectElement>('Resolution');
+    const frameRate = screen.getByLabelText<HTMLSelectElement>('Frame rate');
+    expect(Array.from(resolution.options).map((o) => o.value)).toEqual(['720p', '1080p', 'source']);
+    expect(Array.from(frameRate.options).map((o) => o.value)).toEqual(['15', '30']);
+    expect(resolution.value).toBe('720p');
+    expect(frameRate.value).toBe('30');
     expect(companionDefaultQuality).toEqual({ resolution: '720p', frameRate: 30 });
   });
 
   it.each([
-    { value: '720p30', label: '720p, 30 fps' },
-    { value: '1080p30', label: '1080p, 30 fps' },
-    { value: '1080p60', label: '1080p, 60 fps' },
-    { value: 'source30', label: 'Source (up to 4K), 30 fps' },
-    { value: 'source60', label: 'Source (up to 4K), 60 fps' },
-  ])('names $value and gives the browser’s estimate beside it', ({ value, label }) => {
+    { resolution: '720p', label: '720p' },
+    { resolution: '1080p', label: '1080p' },
+    { resolution: 'source', label: 'Source (up to 4K)' },
+  ] as const)('names $resolution and gives the browser’s estimate beside it', ({ resolution, label }) => {
     strip(fake().companion);
-    const option = Array.from(screen.getByLabelText<HTMLSelectElement>('Share quality').options).find((o) => o.value === value);
-    const quality = companionQualities.find((q) => `${q.resolution}${String(q.frameRate)}` === value);
-    expect(quality).toBeDefined();
-    expect(option?.textContent).toBe(`${label} · ${estimateWords(quality ?? companionDefaultQuality)}`);
+    const option = Array.from(screen.getByLabelText<HTMLSelectElement>('Resolution').options).find((o) => o.value === resolution);
+    expect(option?.textContent).toBe(`${label} · ${estimateWords({ resolution, frameRate: 30 })}`);
   });
 
   it.each([{ kind: 'sharing' }])('is offered while the share is $kind, and a choice is sent to the client', ({ kind }) => {
     const t = fake({ phase: 'connected', channel: 'general', companion: true, share: { kind, audio: false } as unknown as ShareState });
     strip(t.companion);
-    fireEvent.change(screen.getByLabelText('Share quality'), { target: { value: '1080p60' } });
-    expect(t.calls).toEqual(['quality 1080p60']);
+    fireEvent.change(screen.getByLabelText('Frame rate'), { target: { value: '15' } });
+    expect(t.calls).toEqual(['quality 720p15']);
   });
 
   it.each([{ kind: 'claiming' }, { kind: 'picking' }, { kind: 'publishing' }, { kind: 'resuming' }, { kind: 'stopping' }])('is not offered while the share is $kind', (share) => {
     strip(fake({ phase: 'connected', channel: 'general', companion: true, share: share as unknown as ShareState }).companion);
-    expect(screen.queryByLabelText('Share quality')).toBeNull();
+    expect(screen.queryByLabelText('Resolution')).toBeNull();
+    expect(screen.queryByLabelText('Frame rate')).toBeNull();
   });
 
   it.each([shareQualityRefusedNote, qualityLaterNote])('says why while sharing when the choice did not apply: %s', (why) => {
@@ -280,11 +289,34 @@ describe('the quality choices (Q-D4-3, #1772)', () => {
     expect(screen.queryByText('Something else went wrong earlier.')).toBeNull();
   });
 
-  it.each(['1080p30', '1080p60', 'source30', 'source60'])('chooses %s', (value) => {
-    const t = fake();
+  it.each(['720p', '1080p', 'source'] as const)('chooses 15 fps at %s without changing resolution', (resolution) => {
+    const t = fake({ shareQuality: { resolution, frameRate: 30 } });
     strip(t.companion);
-    fireEvent.change(screen.getByLabelText('Share quality'), { target: { value } });
-    expect(t.calls).toEqual([`quality ${value}`]);
+    fireEvent.change(screen.getByLabelText('Frame rate'), { target: { value: '15' } });
+    expect(t.calls).toEqual([`quality ${resolution}15`]);
+  });
+
+  it.each([
+    { from: { resolution: '720p', frameRate: 15 }, to: '1080p', expected: '1080p15' },
+    { from: { resolution: 'source', frameRate: 60 }, to: '1080p', expected: '1080p60' },
+    { from: { resolution: 'source', frameRate: 60 }, to: '720p', expected: '720p30' },
+  ] as const)('chooses $expected when changing resolution', ({ from, to, expected }) => {
+    const t = fake({ shareQuality: from });
+    strip(t.companion);
+    fireEvent.change(screen.getByLabelText('Resolution'), { target: { value: to } });
+    expect(t.calls).toEqual([`quality ${expected}`]);
+  });
+
+  it.each([false, true])('offers the new resolutions only with v3 support (%s)', (shareQualityV3) => {
+    const t = fake({ shareQualityV3, shareQuality: { resolution: '1080p', frameRate: 15 } });
+    strip(t.companion);
+    const resolution = screen.getByLabelText<HTMLSelectElement>('Resolution');
+    const newOptions = within(resolution).queryAllByRole('option', { name: /^(480p|1440p)/ });
+    expect(newOptions).toHaveLength(shareQualityV3 ? 2 : 0);
+    if (shareQualityV3) {
+      fireEvent.change(resolution, { target: { value: '1440p' } });
+      expect(t.calls).toEqual(['quality 1440p15']);
+    }
   });
 
   it('shows the 4K60 caution for Source at 60 fps and for no other choice', () => {
@@ -293,7 +325,8 @@ describe('the quality choices (Q-D4-3, #1772)', () => {
       const caution = screen.queryByRole('note');
       if (q.resolution === 'source' && q.frameRate === 60) {
         expect(caution?.textContent).toBe(sourceSixtyNote);
-        expect(screen.getByLabelText('Share quality').getAttribute('aria-describedby')).toBe(caution?.id);
+        expect(screen.getByLabelText('Resolution').getAttribute('aria-describedby')).toBe(caution?.id);
+        expect(screen.getByLabelText('Frame rate').getAttribute('aria-describedby')).toBe(caution?.id);
       } else {
         expect(caution).toBeNull();
       }
@@ -306,15 +339,17 @@ describe('the quality choices (Q-D4-3, #1772)', () => {
     { what: 'a stored Auto (issue #1659)', quality: { resolution: 'auto', frameRate: 30 } },
   ] as const)('shows $what as the default, and never offers Auto', ({ quality }) => {
     strip(fake({ shareQuality: quality }).companion);
-    const select = screen.getByLabelText<HTMLSelectElement>('Share quality');
-    expect(select.value).toBe('720p30');
+    const select = screen.getByLabelText<HTMLSelectElement>('Resolution');
+    expect(select.value).toBe('720p');
+    expect(screen.getByLabelText<HTMLSelectElement>('Frame rate').value).toBe('30');
     expect(Array.from(select.options).map((o) => o.textContent)).not.toContain('Auto');
     expect(screen.queryByRole('menu', { hidden: true })).toBeNull();
   });
 
   it('is offered while sharing, showing the choice in force', () => {
     strip(fake({ share: { kind: 'sharing', audio: false }, shareQuality: { resolution: '1080p', frameRate: 60 } }).companion);
-    expect(screen.getByLabelText<HTMLSelectElement>('Share quality').value).toBe('1080p60');
+    expect(screen.getByLabelText<HTMLSelectElement>('Resolution').value).toBe('1080p');
+    expect(screen.getByLabelText<HTMLSelectElement>('Frame rate').value).toBe('60');
   });
 });
 
@@ -503,6 +538,28 @@ describe('with main’s switch off (no share sound in the view)', () => {
     expect(screen.getByText(silentShareWhile)).toBeTruthy();
     expect(screen.queryByText(/its sound/)).toBeNull();
   });
+});
+
+it('shows stream names and decisions only while the share has sound', () => {
+  const view = { choice: 'system_excluding_call' as const };
+  const { sound } = soundUi({
+    view,
+    live: true,
+    audio: {
+      state: 'on', muted: false, sources: 1,
+      streams: [
+        { application: 'Firefox', media: 'Music', reason: 'captured' },
+        { application: 'Conch', media: 'Remote voice', reason: 'call_playback' },
+      ],
+    },
+  });
+  const live = sharingState();
+  const { rerender } = withSound(live, sound);
+  fireEvent.click(screen.getByText('What’s being shared'));
+  expect(screen.getByText(/Firefox.*Music/).textContent).toContain('Captured');
+  expect(screen.getByText(/Conch.*Remote voice/).textContent).toContain('Excluded · Call playback');
+  rerender(<ShareNotes companion={live} joined="general" reason={null} sound={{ ...sound, view: { ...view, choice: 'none' } }} />);
+  expect(screen.queryByText('What’s being shared')).toBeNull();
 });
 
 describe('the toggle, before the picker', () => {

@@ -20,6 +20,8 @@ Roughly 13 GB for the SDK, system image, Gradle cache and AVD, plus about 3 GB o
 
 The installer puts the JDK and SDK under `CONCH_CACHE` (default `~/.cache/conch`) and uses `$CONCH_CACHE/android-user-home` for the Android CLI download, bundle and state. It passes `--no-metrics` on every CLI invocation. The JDK and command-line tools archives have pinned digests. The launcher downloads the CLI from Google's rolling latest URL, and the CLI manages SDK archives without an option for Conch's own digest pins. The installed Platform-Tools revision must be 37.0.3. The optional emulator and system image use the current stable revisions.
 
+The launcher and its Java process use a temporary scratch directory under `CONCH_CACHE`. CI bootstraps the rolling CLI in a fresh Android user home and uses its reported version in the SDK cache key.
+
 Set `CONCH_ACCEPT_ANDROID_LICENCES=1` once you accept the [Android SDK License Agreement](https://developer.android.com/studio/terms) for this installation. The Android CLI displays the agreement link on first use and records package licences in `android-sdk/licenses` without prompting.
 
 ## Standalone APK for the device run (#1920)

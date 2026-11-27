@@ -583,12 +583,20 @@ var reauthDecisions = map[string]reauthDecision{
 
 	// Every write anyone authenticated may make: in the class only where an
 	// operator's use creates a principal or a link (rule: reauthOperators).
-	"POST /v1/invites":                                                {reauthNone, "retired for everyone: answers 409 invite_kind_retired and makes nothing (issue #1134)"},
-	"POST /v2/invites":                                                {reauthOperators, "an operator's member link makes principals, with no allowance, and may never expire"},
-	"DELETE /v1/invites/{id}":                                         {reauthNone, "closes an invite"},
-	"POST /v1/ws-tickets":                                             {reauthNone, "a one-use socket ticket for the caller's own credential, no principal or link"},
-	"POST /v0/channels/{channel}/messages":                            {reauthNone, "a message"},
-	"POST /v1/channels/{channel}/messages":                            {reauthNone, "a message"},
+	"POST /v1/invites":                     {reauthNone, "retired for everyone: answers 409 invite_kind_retired and makes nothing (issue #1134)"},
+	"POST /v2/invites":                     {reauthOperators, "an operator's member link makes principals, with no allowance, and may never expire"},
+	"DELETE /v1/invites/{id}":              {reauthNone, "closes an invite"},
+	"POST /v1/ws-tickets":                  {reauthNone, "a one-use socket ticket for the caller's own credential, no principal or link"},
+	"POST /v0/channels/{channel}/messages": {reauthNone, "a message"},
+	"POST /v1/channels/{channel}/messages": {reauthNone, "a message"},
+	// #2030: a member's own private call actions. None makes a principal,
+	// credential, link, permit or hook; the media grant is #2032's and is
+	// issued only to the accepting credential.
+	"POST /v1/dms/{conversation}/calls":                               {reauthNone, "a member's own call invitation: no principal, credential, link, permit or hook, no grant"},
+	"POST /v1/calls/{call}/accept":                                    {reauthNone, "the callee's own answer: no principal, credential, link, permit or hook"},
+	"POST /v1/calls/{call}/decline":                                   {reauthNone, "the callee's own refusal"},
+	"POST /v1/calls/{call}/cancel":                                    {reauthNone, "the caller's own cancel"},
+	"POST /v1/calls/{call}/hangup":                                    {reauthNone, "either side ends its own call"},
 	"POST /v2/channels/{channel}/messages":                            {reauthNone, "a message"},
 	"POST /v2/channels/{channel}/files":                               {reauthNone, "a file"},
 	"POST /v1/channels/{channel}/voice/session":                       {reauthNone, "joins voice"},
@@ -645,6 +653,8 @@ var reauthDecisions = map[string]reauthDecision{
 	"PUT /v1/push/registrations/{id}":                                                      {reauthNone, "a person replaces the target of their own sign-in's registration (issue #1714): no grant"},
 	"DELETE /v1/push/registrations/{id}":                                                   {reauthNone, "a person ends their own sign-in's registration (issue #1714): no grant"},
 	"POST /v1/channels/{channel}/leave":                                                    {reauthNone, "a member ends their own membership"},
+	"POST /v1/dms":                                                                         {reauthNone, "a person opens or resumes a conversation with someone (issue #2019): no grant, and a person's own DMs refuse an operator-made credential outright (selfMadeCredentialRoutes), so there is no proof to ask for"},
+	"PUT /v1/dms/{conversation}/state":                                                     {reauthNone, "a person archives, hides or reopens their own view of a conversation (issue #2019): no grant, and nothing the peer can see"},
 	"POST /v1/approvals":                                                                   {reauthNone, "an approval request (approval-path, unchanged)"},
 	"POST /v1/approvals/{id}/decisions":                                                    {reauthNone, "a decision (approval-path, unchanged)"},
 }

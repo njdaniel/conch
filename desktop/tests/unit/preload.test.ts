@@ -79,6 +79,7 @@ const named: Record<
   profileRemove: true,
   profileSwitch: true,
   storageRetry: true,
+  profileKeep: true,
   profilesRecover: true,
   uploadFile: true,
   downloadFile: true,
@@ -158,7 +159,9 @@ describe('the preload', () => {
     expect(invoke).toHaveBeenLastCalledWith('conch:notifyClose', { tag: 't' });
     await bridge.settingsSet({ launchAtLogin: true });
     expect(invoke).toHaveBeenLastCalledWith('conch:settingsSet', { launchAtLogin: true });
-    expect(INVOKED_FUNCTIONS).toHaveLength(70);
+    await bridge.profileKeep(false);
+    expect(invoke).toHaveBeenLastCalledWith('conch:profileKeep', false);
+    expect(INVOKED_FUNCTIONS).toHaveLength(71);
   });
 
   it('rejects with a bare "refused" when main refuses, or answers anything but an envelope', async () => {
@@ -575,6 +578,32 @@ describe('the preload’s share sound (issue #1854)', () => {
     sendVoice(withSound);
     sendVoice(failed);
     expect(seen).toEqual([withSound, failed]);
+  });
+
+  it('delivers live share-audio status with bounded stream decisions and drops only a bad list', () => {
+    const { bridge, sendVoice } = wired();
+    const seen: unknown[] = [];
+    bridge.onVoiceState((v) => seen.push(v));
+    const stream = { application: 'Firefox', media: 'Music 🎵', reason: 'captured' };
+    const good = { ...running, helper: { ...helper, shareAudio: audio }, shareSound: { choice: 'system_excluding_call' } };
+    const withStreams = (streams: unknown, shareAudio = audio) => ({ ...good, helper: { ...helper, shareAudio: { ...shareAudio, streams } } });
+
+    sendVoice(withStreams([stream]));
+    const badLists = [
+      [], null, {}, Array(51).fill(stream),
+      [{ ...stream, reason: 'invented' }],
+      [{ ...stream, media: '/private/file' }],
+      [{ ...stream, media: 'é'.repeat(13) }],
+      [{ ...stream, pid: 42 }],
+    ];
+    for (const streams of badLists) sendVoice(withStreams(streams));
+    const off = { state: 'off', muted: false, sources: 0 };
+    sendVoice(withStreams([stream], off));
+
+    expect(seen).toEqual([
+      withStreams([stream]), ...badLists.map(() => good),
+      { ...good, helper: { ...helper, shareAudio: off } },
+    ]);
   });
 
   it('drops a view whose share sound is not exactly that', () => {

@@ -12,15 +12,21 @@ import { useEffect, useRef, useState, type KeyboardEvent as KeyEvent } from 'rea
 import { shareEstimateMbps } from './sdk';
 import { autoFrameRate, type ShareFrameRate, type ShareQuality, type ShareResolution } from './share';
 
-export const shareResolutions: readonly ShareResolution[] = ['auto', '720p', '1080p', 'source'];
+const shareResolutions: readonly ShareResolution[] = ['auto', '720p', '1080p', 'source'];
+const extendedShareResolutions: readonly ShareResolution[] = ['auto', '480p', '720p', '1080p', '1440p', 'source'];
+export function shareResolutionChoices(v3: boolean): readonly ShareResolution[] {
+  return v3 ? extendedShareResolutions : shareResolutions;
+}
 export const shareFrameRates: readonly ShareFrameRate[] = [15, 30, 60];
 
 // What each resolution is called. Source is the capture's own size, and
 // shareAsk asks for up to 3840 by 2160 of it.
 export const resolutionWords: Readonly<Record<ShareResolution, string>> = {
   auto: 'Auto',
+  '480p': '480p',
   '720p': '720p',
   '1080p': '1080p',
+  '1440p': '1440p (2K)',
   source: 'Source (up to 4K)',
 };
 
@@ -58,10 +64,11 @@ function describedBy(...ids: (string | undefined)[]): string | undefined {
   return named.length === 0 ? undefined : named.join(' ');
 }
 
-export function ShareQualityMenu({ quality, onChoose, disabled }: {
+export function ShareQualityMenu({ quality, onChoose, disabled, v3 = false }: {
   readonly quality: ShareQuality;
   readonly onChoose: (next: ShareQuality) => void;
   readonly disabled?: boolean;
+  readonly v3?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const button = useRef<HTMLButtonElement>(null);
@@ -151,7 +158,7 @@ export function ShareQualityMenu({ quality, onChoose, disabled }: {
       </button>
       <div id="share-chooser-menu" ref={menu} className="share-chooser-menu" role="menu" aria-label="Share quality" hidden={!open} onKeyDown={onMenuKey}>
         <div role="group" aria-label="Resolution">
-          {shareResolutions.map((resolution) => (
+          {shareResolutionChoices(v3).map((resolution) => (
             <button
               key={resolution}
               type="button"
@@ -182,8 +189,16 @@ export function ShareQualityMenu({ quality, onChoose, disabled }: {
             </button>
           ))}
         </div>
-        {auto ? <p id={autoNoteId} className="hint">{autoNote}</p> : null}
-        {caution === null ? null : <p id={cautionId} className="hint" role="note">{caution}</p>}
+        {/* One note slot, always laid out (#2194): the Auto note and the caution
+            share a grid cell, so the slot is as tall as the longer of the two and
+            choosing an option never changes the menu's size, which would move the
+            options under the pointer. The inactive text stays in the cell, hidden
+            and aria-hidden, for its height only; the slot is a polite live region
+            and the active text is the one it exposes. */}
+        <div className="share-chooser-notes" role="status">
+          <p id={autoNoteId} className="hint" aria-hidden={auto ? undefined : true}>{autoNote}</p>
+          <p id={cautionId} className="hint" role="note" aria-hidden={caution === null ? true : undefined}>{caution ?? sourceSixtyNote}</p>
+        </div>
       </div>
     </div>
   );

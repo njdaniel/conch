@@ -31,6 +31,7 @@ func coreAgentRows() []row {
 		return row{route: route, what: what, pick: pick, probe: p, want: want}
 	}
 	sessionNotFound := answer{http.StatusNotFound, "session_not_found"}
+	const personStream = "GET /v1/events/person/ws"
 	// Agents keep no voice (ADR-004): occupancy is refused them, as presence
 	// is, and the refusal is audited.
 	noVoice := func(route, what string, p probe) row {
@@ -138,6 +139,44 @@ func coreAgentRows() []row {
 		noVoice("GET /v1/voice/occupancy", "reads voice occupancy", get("/v1/voice/occupancy")),
 		noVoice("GET /v1/voice/occupancy/ws", "opens the voice occupancy socket", occupancySock(false)),
 		noVoice("GET /v1/voice/occupancy/ws", "opens the voice occupancy socket with a ticket", occupancySock(true)),
+		// Authentication validates the bearer or redeems the ticket. The
+		// provenance guard then refuses the agent with 403 forbidden before
+		// checking credential provenance or upgrading the socket (issue #2098).
+		{route: personStream, what: "opens a person stream as an agent", want: answer{http.StatusForbidden, "forbidden"}, after: checkAgentPersonStreamDenied(personStream),
+			probe: func(*world, subject) probe { return personSock(false) }},
+		{route: personStream, what: "opens a person stream as an agent with a ticket", want: answer{http.StatusForbidden, "forbidden"}, after: checkAgentPersonStreamDenied(personStream),
+			probe: func(*world, subject) probe { return personSock(true) }},
+		// The DM routes (issue #2019) refuse an agent the same way, first,
+		// with the same audited reason (#2098): an agent has no direct
+		// messages. No id it names is looked up.
+		{route: "POST /v1/dms", what: "opens a conversation as an agent", want: answer{http.StatusForbidden, "forbidden"}, after: checkAgentPersonStreamDenied("POST /v1/dms"),
+			probe: func(w *world, _ subject) probe { return post("/v1/dms", schema.OpenDMRequestV1{PeerID: bobOf(w)}) }},
+		{route: "GET /v1/dms", what: "lists an inbox as an agent", want: answer{http.StatusForbidden, "forbidden"}, after: checkAgentPersonStreamDenied("GET /v1/dms"),
+			probe: func(*world, subject) probe { return get("/v1/dms") }},
+		{route: "GET /v1/dms/{conversation}", what: "reads A's conversation as an agent", pick: aConversation, want: answer{http.StatusForbidden, "forbidden"}, after: checkAgentPersonStreamDenied("GET /v1/dms/{conversation}"),
+			probe: func(_ *world, s subject) probe { return get("/v1/dms/" + id(s.id)) }},
+		{route: "PUT /v1/dms/{conversation}/state", what: "hides A's conversation as an agent", pick: aConversation, want: answer{http.StatusForbidden, "forbidden"}, after: checkAgentPersonStreamDenied("PUT /v1/dms/{conversation}/state"),
+			probe: func(_ *world, s subject) probe {
+				return put("/v1/dms/"+id(s.id)+"/state", schema.SetDMStateRequestV1{State: schema.DMStateHidden})
+			}},
+	}
+}
+
+// checkAgentPersonStreamDenied checks the audited reason for the refusal (the
+// person stream's and the DM routes').
+func checkAgentPersonStreamDenied(route string) func(w *world, a api) error {
+	return func(w *world, _ api) error {
+		events, err := w.auditRows("access_denied")
+		if err != nil {
+			return err
+		}
+		actor := fmt.Sprintf("principal:%d", w.prober.id)
+		for _, e := range events {
+			if e.Actor == actor && e.Subject == route && slices.Contains(strings.Fields(e.Detail), "reason=agents_use_mcp") {
+				return nil
+			}
+		}
+		return fmt.Errorf("no access_denied of %s for %s with reason=agents_use_mcp in the audit log", actor, route)
 	}
 }
 

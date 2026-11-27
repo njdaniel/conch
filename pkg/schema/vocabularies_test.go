@@ -221,10 +221,14 @@ var validators = map[string]func(string) bool{
 	"VoiceCameraEndReason":     validOf[VoiceCameraEndReason](),
 	"VoiceTransmitState":       validOf[VoiceTransmitState](),
 
-	// Version 3 of the voice-helper control protocol (issue #1851).
-	"VoiceControlCommandKindV3":     validOf[VoiceControlCommandKindV3](),
-	"VoiceControlShareAudio":        validOf[VoiceControlShareAudio](),
-	"VoiceControlShareAudioProblem": validOf[VoiceControlShareAudioProblem](),
+	// The versioned share-audio and diagnostics vocabularies.
+	"VoiceControlCommandKindV3":          validOf[VoiceControlCommandKindV3](),
+	"VoiceControlCommandKindV4":          validOf[VoiceControlCommandKindV4](),
+	"VoiceControlEventKindV4":            validOf[VoiceControlEventKindV4](),
+	"VoiceControlGateWhyV4":              validOf[VoiceControlGateWhyV4](),
+	"VoiceControlShareAudio":             validOf[VoiceControlShareAudio](),
+	"VoiceControlShareAudioProblem":      validOf[VoiceControlShareAudioProblem](),
+	"VoiceControlShareAudioStreamReason": validOf[VoiceControlShareAudioStreamReason](),
 
 	// Roles and permissions (ADR-014, issue #1012).
 	"Permission":         validOf[Permission](),
@@ -261,6 +265,11 @@ var validators = map[string]func(string) bool{
 	"DMChangeKind":       validOf[DMChangeKind](),
 	"DMOrder":            validOf[DMOrder](),
 	"MessageContextKind": validOf[MessageContextKind](),
+
+	// Private calls (issue #2029).
+	"PrivateCallState":  validOf[PrivateCallState](),
+	"PrivateCallReason": validOf[PrivateCallReason](),
+	"PrivateCallRole":   validOf[PrivateCallRole](),
 }
 
 // namers is every …Names() func, by the type it names. TestVocabularies fails

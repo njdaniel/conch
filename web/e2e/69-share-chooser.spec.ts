@@ -70,7 +70,7 @@ test.describe('the share quality chooser', () => {
         const bodies: string[] = [];
         claims.set(page, bodies);
         page.on('request', (request) => {
-          if (request.method() === 'POST' && /\/voice\/share$/.test(request.url())) bodies.push(request.postData() ?? '');
+          if (request.method() === 'POST' && new URL(request.url()).pathname.endsWith('/voice/share')) bodies.push(request.postData() ?? '');
         });
       },
     });
@@ -92,14 +92,15 @@ test.describe('the share quality chooser', () => {
       await joinVoice(a, 'Join voice');
       const button = opener(a.page);
       await expect(button).toHaveAttribute('aria-haspopup', 'menu');
-      // By keyboard: Enter opens it at the checked resolution (1080p, the
-      // default), Down moves to Source, Enter chooses it, Escape closes it and
-      // returns focus to the button.
+      // Enter opens at the checked resolution, 1080p. The expanded resolutions
+      // are in size order before Source. Escape returns focus to the button.
       await button.focus();
       await a.page.keyboard.press('Enter');
       await expect(button).toHaveAttribute('aria-expanded', 'true');
       const menu = voice(a.page).getByRole('menu', { name: 'Share quality' });
       await expect(menu.getByRole('menuitemradio', { name: /^1080p/ })).toBeFocused();
+      await a.page.keyboard.press('ArrowDown');
+      await expect(menu.getByRole('menuitemradio', { name: /^1440p/ })).toBeFocused();
       await a.page.keyboard.press('ArrowDown');
       await expect(menu.getByRole('menuitemradio', { name: /^Source/ })).toBeFocused();
       await a.page.keyboard.press('Space');
@@ -146,6 +147,37 @@ test.describe('the share quality chooser', () => {
       await stopAndWait(a);
     } finally {
       await a.close();
+    }
+  });
+
+  test('declares 480p at 15 fps on the negotiated endpoint and shows it to viewers', async ({ browser }) => {
+    const a = await person(browser, 'alice');
+    const b = await person(browser, 'bob');
+    try {
+      await joinVoice(a, 'Join voice');
+      await joinVoice(b, 'Watch only');
+      await voice(a.page).getByRole('button', { name: 'Voice options' }).click();
+      await voice(a.page).getByLabel('Share frame rate').selectOption('15');
+      await voice(a.page).getByLabel('Share resolution').selectOption('1440p');
+      await expect(voice(a.page).getByLabel('Share frame rate')).toHaveValue('15');
+      await voice(a.page).getByLabel('Share resolution').selectOption('480p');
+      await a.page.reload();
+      await openChannel(a.page, vw.channel);
+      await joinVoice(a, 'Join voice');
+      await voice(a.page).getByRole('button', { name: 'Voice options' }).click();
+      await expect(voice(a.page).getByLabel('Share resolution')).toHaveValue('480p');
+      await expect(voice(a.page).getByLabel('Share frame rate')).toHaveValue('15');
+      const claim = a.page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return url.pathname.endsWith('/voice/share') && url.searchParams.get('schema') === 'conch.voice_presence.v3' && response.request().method() === 'POST';
+      });
+      await voice(a.page).getByRole('button', { name: 'Share screen' }).click();
+      expect((await claim).ok()).toBe(true);
+      expect(bodiesOf(a.page)[0]).toBe(qualityBody('480p', 15));
+      await expect(tile(b.page, 'alice')).toContainText('480p · 15 fps', { timeout: 15_000 });
+      await stopAndWait(a);
+    } finally {
+      for (const p of [a, b]) await p.close();
     }
   });
 

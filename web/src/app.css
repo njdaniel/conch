@@ -775,6 +775,9 @@ label {
 }
 
 .channels {
+  /* Keep the directory's private labels and the channel list's live
+     announcement inside this scroller's clip (issue #2168). */
+  position: relative;
   padding: var(--s4) var(--s3);
   border-right: 1px solid var(--border);
 }
@@ -981,6 +984,9 @@ label {
 }
 
 .centre {
+  /* On a phone with the stage open, the conversation heading is visually
+     hidden and must scroll with the column. */
+  position: relative;
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -1015,6 +1021,8 @@ label {
 }
 
 .dock {
+  /* The voice strip and roster have absolutely positioned hidden labels. */
+  position: relative;
   max-height: 50vh;
   overflow-y: auto;
   padding: var(--s2) var(--s4);
@@ -1602,11 +1610,27 @@ label {
 }
 
 .log {
+  /* The containing block of whatever its rows position absolutely: each
+     row's visually hidden ".vh" text, a continuation row's hidden header.
+     Without it those take .log-wrap as their containing block, escape this
+     scroller's clip at their unscrolled place, and give .centre thousands of
+     pixels of empty overflow: a second scrollbar, and a wheel over the
+     composer slides it away from the dock (issue #2133). A row with menu
+     actions is positioned itself; a pending row, or a message its author
+     removed (a tombstone has no menu), is not. */
+  position: relative;
   flex: 1;
   /* Its messages never make the column taller: it scrolls instead. */
   contain: size;
   overflow-y: auto;
   padding: var(--s2) var(--s2) var(--s3);
+}
+
+/* In a short desktop window the page can scroll to fit the dock. Keep a
+   wheel over the transcript there when it reaches either end, so a reader
+   can scroll messages without moving the composer or the rest of the page. */
+.lobby:not(.phone) .log {
+  overscroll-behavior-y: contain;
 }
 
 .log > .hint,
@@ -1624,6 +1648,23 @@ label {
   list-style: none;
   margin: 0;
   padding: 0;
+}
+
+.message-day {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s3) var(--s2);
+  color: var(--muted);
+  font-size: var(--small);
+  font-weight: 600;
+}
+
+.message-day::before,
+.message-day::after {
+  content: '';
+  flex: 1;
+  border-top: 1px solid var(--border);
 }
 
 .message {
@@ -2902,6 +2943,35 @@ label {
   font-weight: 600;
 }
 
+/* The send phrase ("Muted: not sending") is one line, whatever the width: it
+   never breaks mid-phrase (issue #2198, UI-talk-5). The sentences before it
+   are long and wrap as text, so a narrow phone clips neither. */
+.voice-tx-phrase {
+  white-space: nowrap;
+}
+
+/* About talking and sharing: a small round "i", a disclosure for the talk key
+   and sharing notes. */
+.voice-controls button.voice-help-button {
+  flex: 0 0 auto;
+  width: 2.75rem;
+  min-width: 2.75rem;
+  padding: 0;
+  border-radius: 50%;
+  font-style: italic;
+  font-weight: 600;
+}
+
+/* "<name> stopped sharing." where the stage was, for a few seconds. */
+.stage-notice {
+  margin: 0 0 var(--s2);
+  padding: var(--s2) var(--s3);
+  background: var(--raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-weight: 600;
+}
+
 .chip {
   background: var(--raised);
   border: 1px solid var(--warn);
@@ -2947,6 +3017,14 @@ label {
   align-items: center;
   gap: var(--s2);
   min-width: 0;
+}
+
+/* In voice, before presence lists this page: its own chip, unseen, alone in
+   an empty row or in the slot the real one will take, so the chip arriving a
+   moment after the join wraps the row the same way and moves nothing (#2202). */
+.voice-who.reserved,
+.voice-roster li.reserved {
+  visibility: hidden;
 }
 
 .voice-count {
@@ -3008,6 +3086,32 @@ label {
   color: var(--accent);
 }
 
+/* A chip's sending or speaking mark: a dot on the corner of its avatar's own box, out of
+   the chip's flow, so the chip is the same size with it and without it (#2211).
+   Open for sending, filled for speaking; the word is its visually hidden text. */
+.voice-roster .face {
+  position: relative;
+  display: inline-grid;
+  flex: none;
+}
+
+.voice-roster .state {
+  position: absolute;
+  right: -0.15rem;
+  bottom: -0.05rem;
+  pointer-events: none;
+  box-sizing: border-box;
+  width: 0.55rem;
+  height: 0.55rem;
+  background: var(--surface);
+  border: 2px solid var(--accent);
+  border-radius: 50%;
+}
+
+.voice-roster .state.speaking {
+  background: var(--accent);
+}
+
 .voice-controls {
   display: flex;
   flex: none;
@@ -3031,7 +3135,6 @@ label {
 }
 
 .share-chooser {
-  position: relative;
   display: inline-flex;
 }
 
@@ -3043,26 +3146,56 @@ label {
 }
 
 .share-chooser-menu:not([hidden]) {
-  position: absolute;
-  top: 100%;
-  right: 0;
-  z-index: 20;
+  /* Keep the menu usable with or without anchor positioning. Fixed positioning
+     lets it extend outside the dock, which has its own scrollbar. */
+  position: fixed;
+  inset: 0;
+  /* Above the phone's sticky tab bar and the Voice options panel (both 20),
+     which come later in the page and would otherwise paint over it. */
+  z-index: 21;
   display: grid;
+  align-content: start;
   gap: var(--s2);
+  box-sizing: border-box;
   width: max-content;
-  max-width: min(22rem, 90vw);
-  margin-top: var(--s1);
+  height: max-content;
+  max-width: min(26rem, calc(100% - 2 * var(--s2)));
+  max-height: calc(100% - 2 * var(--s2));
+  margin: auto;
   padding: var(--s2);
+  overflow: auto;
+  overscroll-behavior: contain;
   background: var(--bg);
   border: 1px solid var(--border-strong);
   border-radius: 0.5rem;
 }
 
-.voice.strip .share-chooser-menu:not([hidden]) {
-  top: auto;
-  bottom: 100%;
-  margin-top: 0;
-  margin-bottom: var(--s1);
+@supports (position-area: block-end span-all) and (position-try: most-height flip-block) {
+  .share-chooser-button {
+    anchor-name: --share-chooser-button;
+  }
+
+  /* Try the menu at its natural height on the roomier side of the button,
+     then let it fill that space and scroll if it is too tall. */
+  .share-chooser-menu:not([hidden]) {
+    inset: auto;
+    height: auto;
+    max-height: none;
+    margin: var(--s1);
+    position-anchor: --share-chooser-button;
+    position-area: block-end span-all;
+    justify-self: anchor-center;
+    position-try: most-height --share-chooser-scroll-below, flip-block, --share-chooser-scroll-above;
+  }
+
+  @position-try --share-chooser-scroll-below {
+    align-self: stretch;
+  }
+
+  @position-try --share-chooser-scroll-above {
+    position-area: block-start span-all;
+    align-self: stretch;
+  }
 }
 
 .share-chooser-menu [role='group'] {
@@ -3078,10 +3211,52 @@ label {
   text-align: left;
 }
 
+.share-chooser .share-chooser-menu button[role^='menuitem'] {
+  /* Every row reserves the leading slot the checkmark fills, so choosing an
+     option changes no row's width or height (#2194). The extra class outweighs
+     the phone's .voice-controls button:not(.talk) padding. */
+  position: relative;
+  padding-inline-start: 1.75rem;
+}
+
 .share-chooser-menu button[aria-checked='true'] {
   border-color: var(--accent);
   color: var(--accent);
-  font-weight: 600;
+}
+
+/* The checkmark is the cue that survives forced colors, where the accent
+   becomes a system colour and the rows differ by colour alone. The empty alt
+   text keeps the glyph out of the accessible name; aria-checked is the
+   semantics. */
+.share-chooser-menu button[aria-checked='true']::before {
+  content: '✓' / '';
+  position: absolute;
+  inset-inline-start: 0.625rem;
+  inset-block: 0;
+  display: flex;
+  align-items: center;
+  line-height: 1;
+}
+
+@media (forced-colors: active) {
+  .share-chooser-menu button[aria-checked='true']::before {
+    color: ButtonText;
+  }
+}
+
+.share-chooser-menu .share-chooser-notes {
+  display: grid;
+}
+
+/* The Auto note and the caution share one cell, so the slot keeps the height of
+   the longer text whichever applies (#2194). */
+.share-chooser-menu .share-chooser-notes > p {
+  grid-area: 1 / 1;
+  margin: 0;
+}
+
+.share-chooser-menu .share-chooser-notes > p[aria-hidden='true'] {
+  visibility: hidden;
 }
 
 .share-chooser-menu .item-hint {
@@ -3172,6 +3347,80 @@ label {
   font-weight: 600;
 }
 
+/* Voice options is a panel over the page, above the voice section (issue
+   #2189), so opening it moves nothing under it. Fixed, so the dock's own
+   scroll does not clip it; VoicePanel sets --vo-left, --vo-width and
+   --vo-bottom from the section's box. Taller than the room above the section,
+   it scrolls inside itself. The desktop uses the same panel and places it
+   against its toggle's controls row (issue #2195). */
+.voice-options.popover:not([hidden]) {
+  position: fixed;
+  left: var(--vo-left, 0);
+  bottom: calc(var(--vo-bottom, 0px) + var(--s1));
+  z-index: 20;
+  box-sizing: border-box;
+  width: var(--vo-width, 100%);
+  max-height: calc(100vh - var(--vo-bottom, 0px) - var(--s2));
+  max-height: calc(100dvh - var(--vo-bottom, 0px) - var(--s2));
+  overflow-y: auto;
+  /* At either end of its scroll, a wheel or touch does not move the page,
+     which would move the open panel. */
+  overscroll-behavior: contain;
+  padding: var(--s3);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 0.5rem;
+  box-shadow: 0 -4px 16px rgb(0 0 0 / 0.25);
+}
+
+.voice-options-close {
+  display: none;
+}
+
+.voice-options:is(.sheet, .native) .voice-options-close {
+  display: block;
+  flex-basis: auto;
+  margin-left: auto;
+}
+
+.voice-options.sheet:not([hidden]) {
+  /* A bottom sheet over the window, for where the section has too little room
+     above it (a phone's Voice view, a dock scrolled past its top). It rests on
+     the phone's navigation, which stays in reach. */
+  left: 0;
+  bottom: var(--vo-sheet-bottom, 0px);
+  width: 100%;
+  /* At most 80% of the window, and never more than the room above the nav. */
+  max-height: min(80vh, calc(100vh - var(--vo-sheet-bottom, 0px) - var(--s2)));
+  max-height: min(80dvh, calc(100dvh - var(--vo-sheet-bottom, 0px) - var(--s2)));
+  border-radius: 0.5rem 0.5rem 0 0;
+}
+
+/* In the desktop Voice view the row can be high in the viewport. Use the room
+   on the chosen side of it, even for a modal sheet, so the dock controls and
+   phone navigation stay uncovered as the helper's device list changes. */
+.voice-options.native:not([hidden]) {
+  left: var(--vo-left, 0);
+  bottom: calc(var(--vo-bottom, 0px) + var(--s1));
+  width: min(var(--vo-width, 100%), 100% - var(--vo-left, 0px));
+  max-height: calc(var(--vo-room, 0px) - var(--s2));
+  overflow-wrap: anywhere;
+}
+
+.voice-options.native.below:not([hidden]) {
+  top: calc(var(--vo-top, 0px) + var(--s1));
+  bottom: auto;
+}
+
+.voice-options.native .voice-device {
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.voice-options.native .voice-device select {
+  max-width: 100%;
+}
+
 .voice-options:not([hidden]),
 .voice-diagnostics:not([hidden]) {
   display: flex;
@@ -3181,6 +3430,11 @@ label {
   margin-top: var(--s2);
   padding-top: var(--s2);
   border-top: 1px solid var(--border);
+}
+
+.voice-options.popover:not([hidden]) {
+  margin-top: 0;
+  border-top: 1px solid var(--border-strong);
 }
 
 .voice-options > .hint {
@@ -3275,6 +3529,8 @@ label {
 }
 
 .stage {
+  /* The closed call view uses display: contents around its live announcement. */
+  position: relative;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -3285,7 +3541,8 @@ label {
 }
 
 /* Its title and controls keep their height; the picture's row gives way,
-   down to 4rem. */
+   down to 3rem. (A single share in the open call view has a 6rem floor and
+   its controls over the picture: see call-single-share.) */
 .share-view {
   display: grid;
   flex: 0 1 auto;
@@ -3333,6 +3590,126 @@ label {
   object-fit: contain;
 }
 
+/* The sharer's preview (#2197) is a confirmation thumbnail, not a stage: a
+   fixed 16:9 box beside the title and the controls, so the tile is no taller
+   than the title and a row of buttons it had without a picture, at every
+   window height (a watched share's 40vh pushed the page and the voice bar
+   under the fold at 720 px tall). The picture is contained in its box, never
+   cropped. */
+.share-view.self {
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  align-content: center;
+  align-items: center;
+  column-gap: var(--s2);
+}
+
+.share-view.self .share-frame {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  width: 6rem;
+  height: 3.4rem;
+  max-height: none;
+}
+
+.share-view.self .share-frame video {
+  width: 100%;
+  height: 100%;
+  max-height: none;
+}
+
+.share-view.self .share-title {
+  grid-column: 2;
+  grid-row: 1;
+  padding-bottom: 0;
+}
+
+.share-view.self .share-controls {
+  grid-column: 2;
+  grid-row: 2;
+  gap: var(--s1);
+  padding-top: var(--s1);
+}
+
+/* The toggle is words on a wide window and an icon on a narrow one and in the
+   compact strip, where two words would wrap the row (its name stays). */
+.preview-toggle svg {
+  display: none;
+}
+
+.preview-toggle.icon svg {
+  display: inline;
+}
+
+.preview-toggle.icon .words {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* The sharer's tile is its own container: a narrow tile (a grid cell, the
+   strip) shows the toggle as an icon alone, so the row never wraps and the
+   tile is no taller than it was without the toggle. */
+.share-view.own {
+  container-type: inline-size;
+}
+
+@container (max-width: 23rem) {
+  .preview-toggle svg {
+    display: inline;
+  }
+
+  .preview-toggle .words {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}
+
+.share-view.own .share-title {
+  min-width: 0;
+}
+
+/* One line: the words are cut with an ellipsis (the whole text is the
+   title's), so naming the surface never makes the tile taller. */
+.share-view.own .share-words {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.share-view.own .share-controls button {
+  white-space: nowrap;
+}
+
+/* Compact with no picture: the row is the tile's, not the narrow first column's. */
+.compact .share-view.own:not(.self) .share-controls {
+  grid-column: 1 / -1;
+}
+
+/* In the compact strip the tile's own row rules (below) hold. */
+.compact .share-view.self .share-frame,
+.compact .share-view.self .share-controls {
+  grid-column: auto;
+  grid-row: auto;
+  width: auto;
+}
+
+.compact .share-view.self .share-controls {
+  padding-top: 0;
+}
+
+.compact .share-view.self .share-frame {
+  height: 2.75rem;
+}
+
 .share-frame .hint {
   position: absolute;
   inset: auto 0 0;
@@ -3375,6 +3752,49 @@ label {
   color: var(--on-accent);
 }
 
+.share-controls .stop .label {
+  /* "Stop watching" keeps its words wherever the row is below the picture
+     and the other labels are hidden (phone widths); the overlay's own rule,
+     more specific, hides it with the others. */
+  position: static;
+  width: auto;
+  height: auto;
+  overflow: visible;
+  clip-path: none;
+  /* Wraps as the row's words did (the hidden labels are nowrap). */
+  white-space: normal;
+}
+
+/* Words without the icon below the picture, as the row had them: with both it
+   is wider than the phone's row and wraps (a 360 px Chat stage). The overlay
+   and a strip tile, which have no words, show the icon alone. */
+.share-controls .stop svg {
+  display: none;
+}
+
+.call-share.in-strip .share-controls .stop svg {
+  display: inline;
+}
+
+/* The tap that starts the sound (ShareView): centred on the picture and above
+   the focus button, in every layout but the compact row. A frame too short
+   for it shrinks to the frame (a smaller pill) and clips its words rather
+   than the button. */
+.share-frame .share-tap {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 3;
+  box-sizing: border-box;
+  max-width: calc(100% - 0.5rem);
+  max-height: calc(100% - 0.25rem);
+  min-height: min(2.75rem, calc(100% - 0.25rem));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  translate: -50% -50%;
+  white-space: nowrap;
+}
+
 .share-controls {
   display: flex;
   flex-wrap: wrap;
@@ -3390,6 +3810,8 @@ label {
    picture is contained, never cropped. The grid's columns and rows are
    gridOf's, as classes. */
 .call-view {
+  /* Keep the live announcement inside the open call's own scroller. */
+  position: relative;
   display: flex;
   flex: 0 1 auto;
   flex-direction: column;
@@ -3611,6 +4033,221 @@ label {
   border: 0;
 }
 
+/* A single watched share in the open call view fits inside the stage it is
+   given (issue #2187), like a video player: the controls are icon buttons on
+   the picture's bottom edge, on a dark gradient, in the grid cell the picture
+   is in, so the picture takes the view's height less only the title. The
+   stage's own size is not changed here. The chain from the view down to the
+   share is flexed so that the share is as tall as the view leaves it; the
+   frame takes what is left under the title, down to 6rem, and the video is
+   contained in it, never cropped. The controls fade out after a few seconds
+   without a pointer on the share (ShareView adds .idle) and return on a move,
+   a tap or focus; their names are still read out. A closed call (call-stage),
+   the other layouts and a window 560 px tall and under keep the controls in a
+   row below the picture. */
+.call-view.call-single-share > .call-grid,
+.call-view.call-single-share > .call-grid > .call-share {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.call-view.call-single-share .share-view {
+  flex: 1 1 auto;
+  grid-template-rows: auto minmax(6rem, 1fr);
+  min-height: 0;
+}
+
+/* The frame is its grid row, and its video takes the frame's height (its caps
+   above and below still apply), centred. A flex item, so no percentage needs
+   a definite height above it. */
+.call-view.call-single-share .share-frame {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  /* The frame and the controls share one cell, so both are placed. */
+  grid-row: 2;
+  grid-column: 1;
+  min-height: 0;
+}
+
+.call-view.call-single-share .share-title {
+  grid-row: 1;
+}
+
+/* The title's readout is one line in the open call view, cut with an ellipsis
+   (the whole text is still read out): its length, and so its wrapping, depends
+   on the font, and a three-line title took the picture's floor from a phone
+   on wider fonts (the stage then scrolled). It takes only what the title's
+   own text leaves, so that text stays on one line. */
+.call-view.call-single-share .share-title .share-readout {
+  flex: 1 1 0%;
+  min-width: 4rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.call-view.call-single-share .share-frame video {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+}
+
+/* The controls are the frame's bottom edge: the same cell, above the focus
+   button and the pop-out. One row of icon buttons (the names are visually
+   hidden, not removed) and the volume slider, which gives way first and is
+   dropped on a very narrow window. White on the gradient's end (85% black) is
+   above AA for text on any picture, and every icon, the slider's track and
+   its thumb are at least 3:1 against it (WCAG 1.4.11), in both themes: the
+   gradient is not themed. At 560 px tall and under, the page scrolls as a
+   document and the controls stay in a row below the picture. */
+@media (min-height: 561px) {
+  .call-view.call-single-share .share-controls {
+    grid-row: 2;
+    grid-column: 1;
+    align-self: end;
+    z-index: 2;
+    flex-wrap: nowrap;
+    padding: var(--s1) var(--s2);
+    color: #ffffff;
+    background: linear-gradient(to top, rgb(0 0 0 / 85%) 60%, rgb(0 0 0 / 0%));
+    border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+    transition: opacity 0.2s;
+  }
+
+  .call-view.call-single-share .share-controls .label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .call-view.call-single-share .share-controls .stop svg {
+    display: inline;
+  }
+
+  .call-view.call-single-share .share-controls button {
+    flex: 0 0 auto;
+    padding: 0;
+    color: #ffffff;
+    background: transparent;
+    border: 0;
+  }
+
+  .call-view.call-single-share .share-controls button:hover:not(:disabled) {
+    background: rgb(255 255 255 / 20%);
+  }
+
+  .call-view.call-single-share .share-controls button[aria-pressed='true'] {
+    background: rgb(255 255 255 / 30%);
+  }
+
+  .call-view.call-single-share .share-controls button:focus-visible,
+  .call-view.call-single-share .share-controls input:focus-visible {
+    /* A dark ring outside a white one: over a white picture the row's top
+       edge, where the gradient is clear, still has contrast. */
+    outline: 3px solid #000000;
+    outline-offset: -3px;
+    box-shadow: inset 0 0 0 6px #ffffff;
+  }
+
+  .call-view.call-single-share .share-controls .volume {
+    flex: 1 1 3rem;
+    min-width: 0;
+  }
+
+  /* A slider drawn for the gradient: the page's accent is dark in its light
+     theme and fell to about 2.4:1 against it. */
+  .call-view.call-single-share .share-controls input[type='range'] {
+    width: 100%;
+    min-width: 0;
+    background: transparent;
+    appearance: none;
+  }
+
+  .call-view.call-single-share .share-controls input[type='range']::-webkit-slider-runnable-track {
+    height: 4px;
+    background: rgb(255 255 255 / 75%);
+    border-radius: 2px;
+  }
+
+  .call-view.call-single-share .share-controls input[type='range']::-moz-range-track {
+    height: 4px;
+    background: rgb(255 255 255 / 75%);
+    border-radius: 2px;
+  }
+
+  .call-view.call-single-share .share-controls input[type='range']::-webkit-slider-thumb {
+    width: 16px;
+    height: 16px;
+    margin-top: -6px;
+    background: #ffffff;
+    border: 2px solid #000000;
+    border-radius: 50%;
+    appearance: none;
+  }
+
+  .call-view.call-single-share .share-controls input[type='range']::-moz-range-thumb {
+    width: 12px;
+    height: 12px;
+    background: #ffffff;
+    border: 2px solid #000000;
+    border-radius: 50%;
+  }
+
+  /* Faded: shown again by a pointer move, a tap, or keyboard focus inside (a
+     hidden control is still tabbable, so reaching one shows the row; one
+     pressed by a pointer keeps focus but not the row). Opacity, not
+     display, so the row is in the tab order; no pointer events, so a tap on
+     the picture under it is the picture's. */
+  .call-view.call-single-share .share-view.idle .share-controls:not(:has(:focus-visible)) {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  /* The press that woke the row (ShareView adds .waking until it ends) is the
+     picture's: the row is back in view but takes nothing until that press
+     is over, so a tap on a faded control does not press it. */
+  .call-view.call-single-share .share-view.waking .share-controls {
+    pointer-events: none;
+  }
+
+  /* The sound's tap is the picture's own, centred in what the controls' row
+     leaves of it (the row is 56 px: 3.5rem), and never above the 44 px
+     target's own half. */
+  .call-view.call-single-share .share-frame .share-tap {
+    top: max(calc(50% - 1.75rem), 1.375rem);
+  }
+
+  /* The status hint is in the middle of what the controls' row leaves of the
+     frame, never under the row; the tap sits lower when both show. */
+  .call-view.call-single-share .share-frame .hint {
+    inset: calc(50% - 1.75rem) 0 auto;
+    translate: 0 -50%;
+    text-align: center;
+  }
+
+  .call-view.call-single-share .share-frame .hint ~ .share-tap {
+    top: max(calc(50% + 0.125rem), 1.375rem);
+  }
+}
+
+@media (min-height: 561px) and (max-width: 300px) {
+  .call-view.call-single-share .share-controls .volume {
+    display: none;
+  }
+}
+
+@media (min-height: 561px) and (prefers-reduced-motion: reduce) {
+  .call-view.call-single-share .share-controls {
+    transition: none;
+  }
+}
+
 /* A compact call is one fixed-height, docked strip. Its tiles share that row
    and scroll sideways rather than taking another row from the conversation;
    the same players and list items stay in place (issue #1498). Supplemental
@@ -3711,6 +4348,8 @@ body:has(.call-view.compact, .call-stage.compact) .dock {
 }
 
 .compact .share-controls {
+  /* Keep the row's hidden labels inside its horizontal scroller. */
+  position: relative;
   flex-wrap: nowrap;
   overflow-x: auto;
   padding-top: 0;
@@ -4266,7 +4905,8 @@ button.link {
     padding: var(--s2) var(--s2) 0;
   }
 
-  /* Voice options open scroll inside the strip rather than take the screen. */
+  /* Voice options is a panel over the page (issue #2189), so it takes no
+     room here; the dock itself is held to a short share of the screen. */
   .dock {
     max-height: 40vh;
     padding: var(--s2);
@@ -4481,8 +5121,8 @@ button.link {
     height: calc(var(--app-height, 100dvh) - var(--notice-h, 0px));
     grid-template-rows: auto minmax(0, 1fr) auto auto;
     box-sizing: border-box;
-    /* The hidden conversation is laid out behind the Voice view at the
-       lobby's size; whatever its parts measure, it must not widen the page. */
+    /* The hidden conversation is parked against the viewport with its last
+       Chat height. Clip horizontal overflow from the lobby's contents. */
     overflow-x: clip;
   }
 
@@ -4723,11 +5363,11 @@ button.link {
     inset: 0;
   }
 
-  /* At the height it had under Chat (the lobby measures it while a view that
-     shows it is current), so that hiding it resizes nothing and the log keeps
-     its place, even a few pixels from its end. */
+  /* Keep the height measured under Chat so the log keeps its place, even a
+     few pixels from its end. Park it against the viewport so that height
+     cannot add document scroll, even if the window shrinks (issue #2171). */
   .lobby.phone.view-voice .conversation {
-    position: absolute;
+    position: fixed;
     top: 0;
     left: env(safe-area-inset-left);
     right: env(safe-area-inset-right);
@@ -4735,6 +5375,9 @@ button.link {
   }
 
   .lobby.phone.view-voice .centre {
+    /* Voice scrolls in the dock or the page. The centre's hidden conversation
+       uses the viewport as its containing block (issues #2168 and #2171). */
+    position: static;
     display: block;
     overflow: visible;
   }
@@ -4766,6 +5409,7 @@ button.link {
   .lobby.phone.view-voice .voice-who:has(> .voice-roster.capped),
   .lobby.phone.view-voice .voice-roster.capped {
     flex-wrap: wrap;
+    gap: var(--s2);
     overflow: visible;
   }
 
@@ -4796,6 +5440,13 @@ button.link {
   .lobby.phone.view-voice .voice-controls button {
     flex: 1 1 calc(50% - var(--s2));
     min-width: 0;
+  }
+
+  /* The round "i" stays a small button beside the others, not a half-width
+     cell of its own. */
+  .lobby.phone.view-voice .voice-controls button.voice-help-button {
+    flex: 0 0 2.75rem;
+    min-width: 2.75rem;
   }
 
   .lobby.phone.view-voice .voice-controls .talk {
@@ -4907,8 +5558,8 @@ button.link {
     min-height: 12rem;
   }
 
-  /* The dock keeps its half of the window (Voice options open can be taller
-     than the window), scrolling inside itself, except on a phone. */
+  /* The dock keeps its half of the window, scrolling inside itself, except on
+     a phone. Voice options is a panel over the page, not part of the dock. */
   .lobby.phone .dock {
     max-height: none;
   }
@@ -5123,6 +5774,11 @@ button.link {
 
 .draft-attachment-size {
   white-space: nowrap;
+}
+
+/* Wraps what the desktop strip opens below it, to be inert in one place. */
+.page-scope {
+  display: contents;
 }
 
 /* The desktop app's server list and the strip over the client (issue #945). */
@@ -6029,12 +6685,11 @@ button.link {
   overflow-wrap: anywhere;
 }
 
-/* Add shares the existing message action row, even with no reactions. The
-   wrapper contributes no grid row; only chips or an open panel get a bar. */
+/* The wrapper contributes no grid row. Thread controls and the reaction bar
+   each get a row only when they have content. */
 .reaction-controls { display: contents; }
 .message-reaction-actions { grid-column: 2 / -1; display: flex; flex-wrap: wrap; align-items: center; column-gap: .75rem; min-width: 0; }
 .message-reaction-actions > button { min-width: 2.75rem; }
-.reaction-add { min-height: 2.75rem; padding: .35rem 0; border: 0; background: transparent; color: var(--accent); font-size: var(--small); white-space: nowrap; }
 /* Reactions stay visible for touch and keyboard; all layout obeys the CSP. */
 .reactions { grid-column: 2 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; margin-block: var(--message-reaction-space); min-width: 0; }
 .reaction-pair { display: inline-flex; gap: .15rem; }
@@ -6178,6 +6833,8 @@ button.link {
 }
 
 .switcher-list {
+  /* A private result's hidden label scrolls with its row. */
+  position: relative;
   overflow-y: auto;
   min-height: 0;
 }
@@ -6324,6 +6981,21 @@ button.link {
   display: inline-flex;
   align-items: center;
   gap: var(--s2);
+}
+
+.share-stream-diagnostics[open] {
+  flex-basis: 100%;
+}
+
+.share-stream-diagnostics summary {
+  cursor: pointer;
+}
+
+.share-stream-diagnostics ul {
+  max-block-size: 12rem;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  margin-block: var(--s1);
 }
 
 /* Full screen leaves the stage's phone, focused and compact size limits

@@ -81,6 +81,7 @@ func TestDMGoldenFixtures(t *testing.T) {
 		{"dm-changed-v1.json", func() dmValidator { return new(DMChangedV1) }},
 		{"dm-snapshot-v1.json", func() dmValidator { return new(DMSnapshotV1) }},
 		{"dm-snapshot-v1-empty.json", func() dmValidator { return new(DMSnapshotV1) }},
+		{"person-stream-hello-v1.json", func() dmValidator { return new(PersonStreamHelloV1) }},
 		{"notification-summary-v2-direct.json", func() dmValidator { return new(NotificationSummaryV2) }},
 		{"notification-summary-v2-channel.json", func() dmValidator { return new(NotificationSummaryV2) }},
 		{"list-pending-notifications-response-v2.json", func() dmValidator { return new(ListPendingNotificationsResponseV2) }},
@@ -639,7 +640,8 @@ func TestDMAndChannelIdentitiesStayApart(t *testing.T) {
 		if err := json.Unmarshal(raw, &doc); err != nil {
 			continue // a fixture that is not one JSON document is another test's
 		}
-		isDM := strings.Contains(base, "dm-")
+		// Private calls name a conversation, never a channel, as DMs do.
+		isDM := strings.Contains(base, "dm-") || strings.Contains(base, "private-call")
 		switch {
 		case isDM:
 			dm++
@@ -702,5 +704,31 @@ func TestChannelFixturesUnchangedByDMs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.file, func(t *testing.T) { assertValidGoldenFixture(t, tt.file, tt.new) })
+	}
+}
+
+// TestPersonStreamHelloValidate pins the hello frame's instance id: 128 bits
+// as lowercase hex, nothing else.
+func TestPersonStreamHelloValidate(t *testing.T) {
+	good := "0f1e2d3c4b5a69788796a5b4c3d2e1f0"
+	tests := []struct {
+		name string
+		in   PersonStreamHelloV1
+		ok   bool
+	}{
+		{"good", PersonStreamHelloV1{Schema: PersonStreamHelloSchemaV1, InstanceID: good}, true},
+		{"wrong schema", PersonStreamHelloV1{Schema: DMChangedSchemaV1, InstanceID: good}, false},
+		{"no id", PersonStreamHelloV1{Schema: PersonStreamHelloSchemaV1}, false},
+		{"short id", PersonStreamHelloV1{Schema: PersonStreamHelloSchemaV1, InstanceID: good[:31]}, false},
+		{"long id", PersonStreamHelloV1{Schema: PersonStreamHelloSchemaV1, InstanceID: good + "0"}, false},
+		{"upper case", PersonStreamHelloV1{Schema: PersonStreamHelloSchemaV1, InstanceID: "0F1E2D3C4B5A69788796A5B4C3D2E1F0"}, false},
+		{"not hex", PersonStreamHelloV1{Schema: PersonStreamHelloSchemaV1, InstanceID: "zf1e2d3c4b5a69788796a5b4c3d2e1f0"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.in.Validate(); (err == nil) != tt.ok {
+				t.Errorf("Validate() = %v, want ok=%v", err, tt.ok)
+			}
+		})
 	}
 }

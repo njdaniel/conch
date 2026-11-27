@@ -156,6 +156,20 @@ type VoiceShareV2 struct {
 
 A new resolution or frame rate is a new value of a closed vocabulary, which for presence means a new version, as a new share-end reason does; the picker's three-by-three is what Discord has offered for years, and `source` already covers anything larger. Audit: `voice_share_started`'s detail gains `quality=<resolution>/<fps>` when declared; a change writes no row (it is a publish setting, not a security event; the audit says what was shared and by whom, not how sharp).
 
+### 3.3. 480p and 1440p
+
+Browser and Electron clients check for a valid `conch.voice_presence.v3` snapshot
+at `GET /v1/channels/{channel}/voice?schema=conch.voice_presence.v3`. They request
+the same schema on `/v1/voice/ws` when the check succeeds. A validated v3 frame
+enables the 480p (854 × 480) and 1440p (2560 × 1440) choices at 15, 30 and 60 fps.
+
+Claims using either new resolution send `VoiceShareRequestV2` to
+`POST /v1/channels/{channel}/voice/share?schema=conch.voice_presence.v3` and
+receive `VoiceShareV3`. V2 viewers see either new resolution as `source` at its
+declared frame rate. V1 keeps its existing single-share view. Claims using the
+original resolutions continue to use the original request and reply.
+[#1661](https://github.com/njdaniel/conch/issues/1661)
+
 ## 4. The cap
 
 **Recommendation: `voiceShareCap = 6` streams per room, a constant in code, not a setting and not a schema check. A seventh claim is 409 `voice_share_full`, naming nobody. The browser says "This call already has 6 streams live."**

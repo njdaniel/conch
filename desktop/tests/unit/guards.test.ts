@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 import type { App, Session, WebContents } from 'electron';
 import { describe, expect, it, vi } from 'vitest';
 
+import { GeometricSampler } from '../../main/diagnostics.ts';
 import { foreign, guardContents, guardSession, installGuards } from '../../main/guards.ts';
 
 class FakeSession extends EventEmitter {
@@ -57,7 +58,7 @@ function navigation(url: string): { url: string; prevented: boolean; preventDefa
 describe('guardSession', () => {
   const logs: string[] = [];
   const ses = new FakeSession();
-  guardSession(asSession(ses), { log: (l) => logs.push(l) });
+  guardSession(asSession(ses), { log: (l) => logs.push(l), blockedSamples: new GeometricSampler() });
 
   it('denies every permission request and check', () => {
     for (const permission of ['media', 'geolocation', 'notifications', 'clipboard-read', 'display-capture', 'hid']) {
@@ -172,7 +173,7 @@ describe('guardContents', () => {
 describe('installGuards', () => {
   it('guards every web contents the app creates', () => {
     const app = new EventEmitter();
-    installGuards(app as unknown as App, { log: () => undefined });
+    installGuards(app as unknown as App, { log: () => undefined, blockedSamples: new GeometricSampler() });
     const contents = new FakeContents();
     const ses = new FakeSession();
     app.emit('web-contents-created', {}, Object.assign(contents, { session: ses }));
@@ -189,7 +190,7 @@ describe('the request filter and the live companion grant', () => {
   function filtered(grant: { origin: string | null }) {
     const logs: string[] = [];
     const ses = new FakeSession();
-    guardSession(asSession(ses), { log: (l) => logs.push(l), liveOrigin: () => grant.origin });
+    guardSession(asSession(ses), { log: (l) => logs.push(l), blockedSamples: new GeometricSampler(), liveOrigin: () => grant.origin });
     const verdict = (url: string): 'passed' | 'cancelled' => {
       const cb = vi.fn();
       ses.beforeRequest?.({ url }, cb);
@@ -290,7 +291,7 @@ describe('the request filter and the live companion grant', () => {
 
   it('without a liveOrigin dependency nothing leaves the app’s scheme', () => {
     const ses = new FakeSession();
-    guardSession(asSession(ses), { log: () => undefined });
+    guardSession(asSession(ses), { log: () => undefined, blockedSamples: new GeometricSampler() });
     const cb = vi.fn();
     ses.beforeRequest?.({ url: 'wss://lk.example.test/rtc' }, cb);
     expect(cb).toHaveBeenCalledExactlyOnceWith({ cancel: true });

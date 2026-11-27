@@ -51,7 +51,8 @@
 //!   can say so without holding the session back until a key is tapped, so it is documented
 //!   (design section 4.4, the manual). After a removal or a gap the keys are reported lost
 //!   (`ptt: lost`) and are reported ready again by the first release of the talk binding (the
-//!   first binding bound, if there is no talk key), so the state says what is true.
+//!   first binding bound, if there is no talk key). Presses during the loss are ignored and
+//!   disarm their binding, so a repeat of one of those presses cannot count after recovery.
 //! - **`max_transmit_secs`.** The push-to-talk machine shuts the gate on a held key and keeps
 //!   holding it; the repeats that go on arriving change nothing here, so only a release and a
 //!   press open it again (tested with the machine itself).
@@ -208,20 +209,21 @@ impl Binder {
 
     /// The keys are not being read, for `problem`: whatever is down is released, nothing is
     /// armed, and they stay lost until the talk key (the first binding, without one) has been
-    /// released once. Returns the releases, and the loss if it was not already one.
+    /// released once. Reports a new loss before the releases so the session forces the gate
+    /// shut immediately instead of starting a release tail.
     pub(crate) fn mark_lost(&mut self, problem: Problem) -> Vec<Out> {
-        let mut out = self.forget();
+        let mut out = Vec::new();
         if !self.lost {
             self.lost = true;
             out.push(Out::Lost(problem));
         }
+        self.forget(&mut out);
         out
     }
 
     /// Releases whatever is down and forgets which keys were armed: the state of every key is
-    /// unknown, as it is at the start. Returns the releases.
-    pub(crate) fn forget(&mut self) -> Vec<Out> {
-        let mut out = Vec::new();
+    /// unknown, as it is at the start. Appends the releases.
+    fn forget(&mut self, out: &mut Vec<Out>) {
         for slot in &mut self.slots {
             if slot.down {
                 out.push(Out::Key(KeyEvent {
@@ -232,7 +234,6 @@ impl Binder {
             slot.down = false;
             slot.armed = false;
         }
-        out
     }
 
     /// Takes one event and returns what leaves the module because of it, in order.
@@ -262,6 +263,10 @@ impl Binder {
             return out;
         };
         if down {
+            if self.lost {
+                slot.armed = false;
+                return out;
+            }
             // A press is a press only of a key known to have been up, and only once: a
             // repeat, or a key held since before anything was read, is nothing.
             if slot.armed && !slot.down {
@@ -491,6 +496,12 @@ impl Pump {
             outs.extend(self.binder.mark_lost(stalled_problem()));
         }
         outs.extend(self.binder.on_event(event));
+        let held = self.binder.any_down();
+        // Arm the watchdog before the session can see a press. Keep it armed until
+        // any release or loss that clears the held state has been sent.
+        if held {
+            self.beat.set_held(true);
+        }
         for out in outs {
             alive &= match out {
                 Out::Key(key) => self.reporter.key(key),
@@ -498,7 +509,9 @@ impl Pump {
                 Out::Lost(problem) => self.reporter.not_ready(problem),
             };
         }
-        self.beat.set_held(self.binder.any_down());
+        if !held {
+            self.beat.set_held(false);
+        }
         // A tick or an unbound key still ends the thread once the session has gone: nothing
         // else would, and winit allows one event loop in the process.
         if alive && !self.reporter.closed() {
@@ -961,6 +974,8 @@ mod raw_input {
 
 #[cfg(test)]
 mod tests {
+    use std::task::{Context, Wake, Waker};
+
     use conch_voice_control::{GateCommand, Ptt, PttInput, PttOutput, ShutReason};
 
     use super::*;
@@ -1124,7 +1139,7 @@ mod tests {
         assert!(binder.any_down());
         assert_eq!(
             binder.on_event(RawEvent::DeviceRemoved),
-            vec![release(Key::Talk), Out::Lost(Problem::Ended)]
+            vec![Out::Lost(Problem::Ended), release(Key::Talk)]
         );
         assert!(!binder.any_down());
         // Said once.
@@ -1137,11 +1152,17 @@ mod tests {
         // Neither does an arrival, nor the release of a binding that is not the talk key.
         assert_eq!(binder.on_event(RawEvent::DeviceAdded), vec![]);
         assert_eq!(binder.on_event(key(MUTE, false)), vec![]);
+        // Mute was released but the source is still lost. A press now must neither toggle
+        // mute nor turn a repeat into a fresh press after the talk key makes it ready.
+        assert_eq!(binder.on_event(key(MUTE, true)), vec![]);
         assert!(binder.lost);
         // The talk key's release arms it and says the keys are read again; then a press is one.
         assert_eq!(binder.on_event(key(TALK, false)), vec![Out::Ready]);
         assert!(!binder.lost);
         assert_eq!(binder.on_event(key(TALK, true)), vec![press(Key::Talk)]);
+        assert_eq!(binder.on_event(key(MUTE, true)), vec![]);
+        assert_eq!(binder.on_event(key(MUTE, false)), vec![]);
+        assert_eq!(binder.on_event(key(MUTE, true)), vec![press(Key::Mute)]);
     }
 
     #[test]
@@ -1351,6 +1372,67 @@ mod tests {
     }
 
     #[test]
+    fn the_watchdog_shuts_the_gate_if_the_pump_stalls_while_sending_a_press() {
+        struct CheckStall {
+            beat: Arc<Heartbeat>,
+            reporter: Arc<Reporter>,
+            limit: Duration,
+        }
+
+        impl Wake for CheckStall {
+            fn wake(self: Arc<Self>) {
+                self.reporter
+                    .not_ready_if(stalled_problem(), || self.beat.stalled(at(400), self.limit));
+            }
+        }
+
+        let limit = at(250);
+        let (mut pump, beat, reporter, mut received) = pump_with(limit);
+        Sink::started(&mut pump);
+        assert_eq!(
+            drain(&mut received),
+            vec![Input::KeyDevice(DeviceState::Ready)]
+        );
+        pump.handle(at(0), key(TALK, false));
+
+        // The send wakes the receiver after queuing the press, before returning to the
+        // pump. Check the watchdog at a synthetic later time while the pump is still there.
+        let waker = Waker::from(Arc::new(CheckStall {
+            beat,
+            reporter,
+            limit,
+        }));
+        assert!(
+            received
+                .poll_recv(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+        pump.handle(at(10), key(TALK, true));
+
+        let got = drain(&mut received);
+        let [
+            Input::Key(press),
+            Input::KeyDevice(state @ DeviceState::Lost(_)),
+        ] = got.as_slice()
+        else {
+            panic!("expected a press followed by watchdog loss, got {got:?}");
+        };
+        assert_eq!(
+            state.problem().map(|problem| problem.code()),
+            Some("read_failed")
+        );
+        let mut ptt = live_machine();
+        assert!(opens(&ptt.handle(at(10), PttInput::Key(*press))));
+        let shut = ptt.handle(at(400), PttInput::KeyDevice(state.is_ready()));
+        assert!(
+            shut.contains(&PttOutput::Gate(GateCommand::ForceShut(
+                ShutReason::KeyDeviceLost
+            ))),
+            "{shut:?}"
+        );
+    }
+
+    #[test]
     fn a_stalled_thread_with_a_key_down_is_read_failed_and_presses_are_refused_until_it_reports() {
         let limit = at(250);
         let (mut pump, beat, reporter, mut received) = pump_with(limit);
@@ -1453,12 +1535,16 @@ mod tests {
         pump.handle(at(5_000), RawEvent::Tick);
         pump.handle(at(5_010), key(TALK, false));
         assert_eq!(
-            drain(&mut received)
-                .iter()
-                .filter(|input| matches!(input, Input::KeyDevice(_)))
-                .count(),
-            2,
-            "lost, then ready"
+            drain(&mut received),
+            vec![
+                Input::KeyDevice(DeviceState::Lost(stalled_problem())),
+                Input::Key(KeyEvent {
+                    key: Key::Talk,
+                    action: KeyAction::Release,
+                }),
+                Input::KeyDevice(DeviceState::Ready),
+            ],
+            "force the gate shut before sending the synthesized release"
         );
 
         // The monitor now reports what it decided, with the question put again under the lock.
@@ -1731,7 +1817,7 @@ mod tests {
                 }),
             ]
         );
-        // Press and leave it down, and unplug: released, lost.
+        // Press and leave it down, and unplug: lost, then released.
         first_in.send(down.to_vec()).unwrap();
         let seen = wait_for(&mut received, 1);
         assert_eq!(seen.len(), 1);
@@ -1740,11 +1826,11 @@ mod tests {
         assert_eq!(
             seen,
             vec![
+                Input::KeyDevice(DeviceState::Lost(Problem::Ended)),
                 Input::Key(KeyEvent {
                     key: Key::Talk,
                     action: KeyAction::Release
                 }),
-                Input::KeyDevice(DeviceState::Lost(Problem::Ended)),
             ]
         );
         // Plugged in again: nothing until the talk key is released, and then ready.

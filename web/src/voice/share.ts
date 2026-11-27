@@ -37,14 +37,14 @@
 // taken down when it completes; sdk.ts), and is published on the next. One wait (resumeLimit) covers the whole of it,
 // however many times the room is renewed before the share is back.
 import type { ShareClaimResult } from '../api';
-import type { VoiceShareEnded, VoiceShareEndReason, VoiceShareResolution } from '../schema/voice';
+import type { VoiceShareEnded, VoiceShareEndReason, VoiceShareResolutionV3 } from '../schema/voice';
 import type { Clock } from '../state/feed';
 
 // The sharer's choice of capture and top layer. It is a local preference,
 // never part of presence or another wire document. 'auto' is local only
 // (issue #1659): the wire vocabulary (VoiceShareResolution) is closed, so what
 // a claim declares and what viewers see is always a SettledQuality.
-export type SettledResolution = VoiceShareResolution;
+export type SettledResolution = VoiceShareResolutionV3;
 export type ShareResolution = SettledResolution | 'auto';
 export type ShareFrameRate = 15 | 30 | 60;
 export interface ShareQuality {
@@ -57,6 +57,10 @@ export interface SettledQuality {
   readonly frameRate: ShareFrameRate;
 }
 export const defaultShareQuality: ShareQuality = { resolution: '1080p', frameRate: 30 };
+
+export function extendedResolution(resolution: ShareResolution): boolean {
+  return resolution === '480p' || resolution === '1440p';
+}
 
 // Auto's rule (Q10 on #1614): a capture whose longest side is 1920 px or less
 // is shared as it is (Source); a larger one at 1080p. Always 30 fps. A capture

@@ -9,15 +9,18 @@
 // Share and watch (issue #1582, D4-05 of #772) are the screen companion's, not
 // the helper's: NativeShare draws the control, the indicator, the notes and
 // the others' streams from the companion's state, and leaves voice alone.
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { isArchived } from '../../archived';
 import { Glyph } from '../../Icons';
+import { VoiceStrip } from '../../phone';
 import type { NativeVoiceView } from '../../platform/desktop/bridge';
 import type { NativeVoice, NativeVoiceError } from '../../platform/types';
 import type { ChannelV0 } from '../../schema/channel';
+import type { VoicePresence } from '../../schema/voice';
 import type { Person } from '../../useLiveChannel';
+import { useChannelJoin } from '../channelJoin';
 import { occupants, sharers } from '../presence';
-import { nameOf, Roster } from '../VoicePanel';
+import { nameOf, Options, Roster, useOptionsDisclosure } from '../VoicePanel';
 import { VoiceDiagnostics } from '../VoiceDiagnostics';
 import { useVoiceNames } from '../useVoiceNames';
 import { usePresence } from './usePresence';
@@ -27,7 +30,8 @@ import { VoiceOptions } from './VoiceOptions';
 import { NativeStreams, ShareButton, ShareNotes, ShareSoundMute, shareDisabledReason } from './NativeShare';
 import type { Companion } from './useCompanion';
 import { useShareSound } from './useShareSound';
-import { TalkKeySetup } from './TalkKeySetup';
+import { savedBindingWords, TalkKeySetup } from './TalkKeySetup';
+import { focusMayMove } from './setupFocus';
 
 // How long the duplicate-identity warning waits for a second Join.
 export const confirmWithin = 10_000;
@@ -90,15 +94,6 @@ function hasSession(view: NativeVoiceView): boolean {
   return view.channel !== null && view.status !== 'idle' && view.status !== 'unavailable' && view.status !== 'ended';
 }
 
-function OptionsButton({ open, onToggle }: { readonly open: boolean; readonly onToggle: () => void }) {
-  return (
-    <button type="button" className="quiet" aria-expanded={open} aria-controls="voice-options" onClick={onToggle}>
-      <Glyph name="options" />
-      <span className="label">Voice options</span>
-    </button>
-  );
-}
-
 export function NativeVoicePanel({
   source,
   binding,
@@ -108,6 +103,7 @@ export function NativeVoicePanel({
   viewerName = '',
   people,
   voiceAllowed,
+  reachable = true,
   channels,
   onUnauthorized,
   onOpen,
@@ -125,6 +121,7 @@ export function NativeVoicePanel({
   readonly viewerName?: string;
   readonly people: ReadonlyMap<number, Person>;
   readonly voiceAllowed: boolean;
+  readonly reachable?: boolean;
   readonly channels: readonly ChannelV0[];
   readonly onUnauthorized: () => void;
   readonly onOpen: (name: string) => void;
@@ -148,19 +145,30 @@ export function NativeVoicePanel({
   // page owes it; undefined unless main's switch is on.
   const sound = useShareSound(source, companion, view);
   const session = hasSession(view);
-  const [setup, setSetup] = useState<'talk' | 'mute' | null>(null);
+  const [setup, setSetup] = useState<{ readonly binding: 'talk' | 'mute' } | null>(null);
+  const [setupRequest, setSetupRequest] = useState(0);
+  const openSetup = (binding: 'talk' | 'mute') => {
+    // Keep the current selection and any save when reactivating its launcher.
+    setSetup((current) => current?.binding === binding ? current : { binding });
+    setSetupRequest((count) => count + 1);
+  };
+  const closeSetup = useCallback(() => { setSetup(null); }, []);
+  const talkSetupButton = useRef<HTMLButtonElement>(null);
+  const setupOpener = useRef<HTMLButtonElement | 'shortcut' | 'options' | null>(null);
   const joined = session ? view.channel : null;
   const shown = joined ?? (signedIn ? channel : null);
   const snapshot = usePresence({ channel: shown, joined, voiceAllowed, onUnauthorized });
   const presence = snapshot.kind === 'presence' ? snapshot.presence : null;
+  const socketSchema = snapshot.kind === 'presence' ? snapshot.socketSchema : null;
   const named = useVoiceNames({ joined, viewed: channel, presence, people });
 
   // The companion reads the joined channel's presence for the others' streams
-  // and for why its own share ended.
+  // and for why its own share ended. Only the socket supplies the schema for
+  // its next share.
   const companionClient = companion?.client;
   useEffect(() => {
-    if (companionClient !== undefined && joined !== null && presence !== null) companionClient.presence(presence);
-  }, [companionClient, joined, presence]);
+    if (companionClient !== undefined && joined !== null && presence !== null) companionClient.presence(presence, socketSchema);
+  }, [companionClient, joined, presence, socketSchema]);
   // Out of voice, a companion that ended before the leave says nothing more
   // (issue #1992): its notice was about the voice just left.
   useEffect(() => {
@@ -180,7 +188,9 @@ export function NativeVoicePanel({
   const room = occupants(presence);
   const mine = room.find((o) => o.principal === viewer);
   if (session && joined !== null && mine !== undefined && presence !== null) own.current = { channel: joined, joinedAt: mine.joinedAt };
-  const duplicate = !session && mine !== undefined && !(own.current !== null && own.current.channel === shown && own.current.joinedAt === mine.joinedAt);
+  const otherDevice = (occupant: typeof mine) =>
+    occupant !== undefined && !(own.current !== null && own.current.channel === shown && own.current.joinedAt === occupant.joinedAt);
+  const duplicate = !session && otherDevice(mine);
 
   const [warned, setWarned] = useState<string | null>(null);
   useEffect(() => {
@@ -199,7 +209,24 @@ export function NativeVoicePanel({
   // A command waits for its answer: shown as "muting…" until then.
   const [pending, setPending] = useState<'mute' | 'deafen' | null>(null);
   const [note, setNote] = useState<string | null>(null);
-  const [options, setOptions] = useState(false);
+  const outsideVoiceView = useContext(VoiceStrip) !== null;
+  const hideOptions = outsideVoiceView || view.status === 'unavailable' || view.status === 'stopping' || actions === undefined;
+  const { options, setOptions, covered, button: optionButton, panel, onClose, onShrink, sheet, onSheet } = useOptionsDisclosure({ hidden: hideOptions, native: true });
+  // The setup root has unmounted. Restore to the visible launcher or toggle
+  // only if closing left focus stranded.
+  useLayoutEffect(() => {
+    if (setup !== null || setupOpener.current === null) return;
+    const from = setupOpener.current;
+    setupOpener.current = null;
+    const opener = from === 'shortcut' ? talkSetupButton.current : from === 'options' ? null : from;
+    if (opener?.isConnected && opener.closest('[hidden], [inert]') === null && focusMayMove(null)) opener.focus();
+    if (focusMayMove(null)) optionButton.ref.current?.focus();
+  }, [setup, optionButton.ref]);
+  // The idle dock also offers device choices for the next join. Ending a
+  // session closes the current disclosure before those choices can be opened.
+  useEffect(() => {
+    if (!session) setOptions(false);
+  }, [session, setOptions]);
   const [details, setDetails] = useState(false);
   const run = async (what: 'mute' | 'deafen', go: () => Promise<{ readonly ok: boolean; readonly error?: NativeVoiceError }>) => {
     setPending(what);
@@ -217,18 +244,26 @@ export function NativeVoicePanel({
     if (!out.ok) setNote(out.error === undefined ? errorWords.lost : errorWords[out.error]);
   };
 
-  const join = () => {
-    if (actions === undefined || channel === null) return;
-    if (duplicate && warned !== channel) {
+  const viewed = channels.find((c) => c.name === channel);
+  const archived = isArchived(viewed);
+  const canStart = signedIn && voiceAllowed && reachable && !session && !archived && view.status !== 'unavailable' && view.status !== 'stopping';
+  const joining = useRef(false);
+  const join = (current: VoicePresence) => {
+    if (!canStart || actions === undefined || channel === null || joining.current) return;
+    if (!current.available || !current.configured || (viewed !== undefined && current.channel_id !== viewed.id)) return;
+    if (otherDevice(occupants(current).find((o) => o.principal === viewer)) && warned !== channel) {
       setWarned(channel);
       return;
     }
     setWarned(null);
-    void outcome(() => actions.join({ channel, muted: last.current.muted, deafened: last.current.deafened }));
+    joining.current = true;
+    void outcome(() => actions.join({ channel, muted: last.current.muted, deafened: last.current.deafened })).finally(() => {
+      joining.current = false;
+    });
   };
+  useChannelJoin(viewed, canStart && actions !== undefined, snapshot, join);
 
   const available = presence !== null && presence.available && presence.configured;
-  const archived = isArchived(channels.find((c) => c.name === channel));
   const cutOff = presence !== null && !presence.available;
   const roster = cutOff ? [] : room.sort((a, b) => a.principal - b.principal);
   const noSpeaking: ReadonlySet<number> = new Set();
@@ -266,11 +301,17 @@ export function NativeVoicePanel({
   }
   const shareReason = companion === null ? null : shareDisabledReason({ joined, shown: channel, live });
   const share = companion === null ? null : <ShareButton companion={companion} joined={joined} reason={shareReason} />;
-  const canJoin = !unavailable && channel !== null && !archived && available && view.status !== 'stopping';
+  const canJoin = canStart && channel !== null && available && (viewed === undefined || presence.channel_id === viewed.id);
+  const optionsButton = (
+    <button type="button" className="quiet" {...optionButton}>
+      <Glyph name="options" />
+      <span className="label">Voice options</span>
+    </button>
+  );
 
   return (
     <section aria-label="Voice" className={`voice ${phaseClass(view)}${helper?.transmitting === true ? ' sending' : ''}`}>
-      <div className="voice-bar">
+      <div className="voice-bar" inert={covered}>
         {roster.length === 0 ? null : <Roster roster={roster} people={named} viewer={viewer} viewerName={viewerName} elsewhere={duplicate} speaking={noSpeaking} volumes={noVolumes} />}
         <div className="voice-row">
           <div className="voice-state">
@@ -314,32 +355,47 @@ export function NativeVoicePanel({
                 ) : null}
                 {share}
                 {sound === undefined ? null : <ShareSoundMute sound={sound} />}
-                <OptionsButton open={options} onToggle={() => { setOptions(!options); }} />
-                <button type="button" className="danger" disabled={view.status === 'stopping' || actions === undefined} onClick={() => { if (actions !== undefined) void outcome(() => actions.leave()); }}>
+                {optionsButton}
+                <button type="button" className="danger" disabled={view.status === 'stopping' || actions === undefined} onClick={() => {
+                  setOptions(false);
+                  if (actions !== undefined) void outcome(() => actions.leave());
+                }}>
                   <Glyph name="leave" />
                   <span className="label">Leave voice</span>
                 </button>
               </>
             ) : unavailable ? null : (
               <>
-              {share}
-              <OptionsButton open={options} onToggle={() => { setOptions(!options); }} />
-              <button type="button" className="primary" onClick={join} disabled={!canJoin || actions === undefined}>
-                <Glyph name="headphones" />
-                <span className="btn-text">Join voice {dest}</span>
-              </button>
+                {share}
+                {optionsButton}
+                <button type="button" className="primary" onClick={() => { if (presence !== null) join(presence); }} disabled={!canJoin || actions === undefined}>
+                  <Glyph name="headphones" />
+                  <span className="btn-text">Join voice {dest}</span>
+                </button>
               </>
             )}
           </div>
         </div>
       </div>
-      {unavailable || actions === undefined ? null : <VoiceOptions
-        source={source}
-        view={view}
-        open={options}
-        {...(source.keyDevices === undefined ? {} : { onKeySetup: setSetup })}
-      />}
-      <div className="voice-notes">
+      {unavailable || actions === undefined ? null : (
+        <Options panel={panel} anchor={optionButton.ref} onClose={onClose} onShrink={onShrink} sheet={sheet} onSheet={onSheet} open={options && !hideOptions}>
+          <VoiceOptions
+            source={source}
+            view={view}
+            open={options && !hideOptions}
+            panel={panel}
+            {...(source.keyDevices === undefined ? {} : {
+              onKeySetup: (binding: 'talk' | 'mute') => {
+                const focused = document.activeElement;
+                setupOpener.current = focused instanceof HTMLButtonElement && panel.current?.contains(focused) ? focused : 'options';
+                setOptions(false);
+                openSetup(binding);
+              },
+            })}
+          />
+        </Options>
+      )}
+      <div className="voice-notes" inert={covered}>
         {why === null ? null : <p role="status" className="hint">{why}</p>}
         {view.detail === undefined ? null : (
           <>
@@ -356,7 +412,10 @@ export function NativeVoicePanel({
         {!session && warned !== null && warned === channel ? <p role="status" className="hint">{duplicateWarning}</p> : null}
         {!session && !unavailable && channel !== null && presence === null && idle === null ? <p className="hint">Checking whether voice is available.</p> : null}
         {unavailable || source.keyDevices === undefined || setup ? null : (
-          <button type="button" className="more" onClick={() => { setSetup('talk'); }}>
+          <button ref={talkSetupButton} type="button" className="more" onClick={() => {
+            setupOpener.current = 'shortcut';
+            openSetup('talk');
+          }}>
             {needsTalkSetup ? 'Set up the talk key' : 'Talk key'}
           </button>
         )}
@@ -372,21 +431,32 @@ export function NativeVoicePanel({
           />
         ) : null}
       </div>
-      {companion === null || unavailable ? null : <NativeStreams companion={companion} presence={presence} viewer={viewer} people={named} joined={joined} live={live} />}
-      {setup !== null ? (
-        <TalkKeySetup
-          key={setup}
-          binding={setup}
-          source={source}
-          joined={session}
-          onSaved={(label, nextJoinOnly) => {
-            if (setup !== 'talk') return;
-            if (nextJoinOnly === true) setPreviousBinding((old) => old ?? { generation: view.generation, label: binding });
-            onBound?.(label);
-          }}
-          onClose={() => { setSetup(null); }}
-        />
-      ) : null}
+      <div inert={covered}>
+        {companion === null || unavailable ? null : <NativeStreams companion={companion} presence={presence} viewer={viewer} people={named} joined={joined} live={live} />}
+        {setup !== null ? (
+          <TalkKeySetup
+            key={setup.binding}
+            binding={setup.binding}
+            openRequest={setupRequest}
+            source={source}
+            joined={session}
+            onSaved={(label, nextJoinOnly) => {
+              const currentView = source.snapshot();
+              if (setup.binding === 'talk') {
+                if (nextJoinOnly === true && currentView.generation === view.generation && hasSession(currentView)) {
+                  setPreviousBinding((old) => old?.generation === view.generation ? old : { generation: view.generation, label: binding });
+                }
+                onBound?.(label);
+              }
+              setNote(savedBindingWords(setup.binding, label, hasSession(currentView)));
+              // An earlier setup can finish after another binding was opened.
+              setSetup((current) => current === setup ? null : current);
+            }}
+            onDetachedSaveError={setNote}
+            onClose={closeSetup}
+          />
+        ) : null}
+      </div>
     </section>
   );
 }

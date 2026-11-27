@@ -25,7 +25,7 @@
 //     the screen is locked, setMute(false) is refused (`locked`) and every
 //     start is muted, so nothing transmits again until a deliberate unmute
 //     after unlock (issue #1588).
-import type { MainLog } from '../diagnostics.ts';
+import { GeometricSampler, type MainLog } from '../diagnostics.ts';
 import { VOICE_CONTROL_STOP_KILL_AFTER_MS, type VoiceControlTalkMode } from '../../../web/src/schema/generated.ts';
 import type {
   NativeVoiceDevicesResult,
@@ -98,6 +98,7 @@ export interface VoiceSupervisor {
 // that is leaving takes no command).
 export interface ShareSoundSource {
   view(): ShareSoundView | undefined;
+  allowsStreams(): boolean;
   leaving(): Promise<void>;
 }
 
@@ -196,6 +197,7 @@ const NOT_SIGNED_IN = 'not-signed-in';
 export const UPDATE_PENDING = 'update-pending';
 
 function helperOf(h: HelperView): NativeVoiceHelper {
+  const audio = h.shareAudio;
   return {
     version: h.version,
     phase: h.phase,
@@ -210,11 +212,17 @@ function helperOf(h: HelperView): NativeVoiceHelper {
     ...(h.talkMode === undefined ? {} : { talkMode: h.talkMode }),
     ptt: h.ptt,
     ...(h.pttProblem === undefined ? {} : { pttProblem: h.pttProblem }),
-    ...(h.shareAudio === undefined ? {} : { shareAudio: { ...h.shareAudio } }),
+    ...(audio === undefined ? {} : { shareAudio: {
+      state: audio.state,
+      muted: audio.muted,
+      sources: audio.sources,
+      ...(audio.problem === undefined ? {} : { problem: audio.problem }),
+    } }),
   };
 }
 
 export class VoiceService {
+  private readonly oneShotRefusals = new GeometricSampler<typeof UPDATE_PENDING>();
   private channel: string | null = null;
   private last: JoinRequest | null = null;
   private lastGeneration = 0;
@@ -305,10 +313,17 @@ export class VoiceService {
     return this.deps.supervisor.setShareAudioMute?.(muted) ?? Promise.resolve({ ok: false, error: 'unsupported' });
   }
 
-  // Main's share sound rides on the view, when it is attached.
-  private withSound(view: NativeVoiceView): NativeVoiceView {
-    const sound = this.sound?.view();
-    return sound === undefined ? view : { ...view, shareSound: sound };
+  // Add the saved choice and, for the current pick, the helper's diagnostics.
+  private withSound(view: NativeVoiceView, state = this.deps.supervisor.state): NativeVoiceView {
+    const sound = this.sound;
+    if (sound === null) return view;
+    const shareSound = sound.view();
+    const result = shareSound === undefined ? view : { ...view, shareSound };
+    const { helper } = view;
+    if (view.status !== 'running' || state.status !== 'running' || helper?.shareAudio?.state !== 'on' || !sound.allowsStreams()) return result;
+    const streams = state.helper.shareAudio?.streams;
+    if (!streams?.length) return result;
+    return { ...result, helper: { ...helper, shareAudio: { ...helper.shareAudio, streams } } };
   }
 
   // setLockMuted records (or clears) that main muted the person at a lock,
@@ -358,7 +373,7 @@ export class VoiceService {
     this.override = null;
     // The note ends with the mute or the session.
     if (this.lockMuted && (s.status !== 'running' || !s.helper.muted)) this.lockMuted = false;
-    this.emit(this.withSound(this.withLockNote(this.view(s))));
+    this.emit(this.withSound(this.withLockNote(this.view(s)), s));
   }
 
   private emit(view: NativeVoiceView): void {
@@ -563,7 +578,11 @@ export class VoiceService {
   // too, so after a replacement it is refused with the join's reason.
   private async oneShotRefused(): Promise<boolean> {
     if (!(await this.replaced())) return false;
-    this.deps.log('voice: one-shot run refused: the installed files were replaced; restart to finish the update', { ring: true });
+    if (this.oneShotRefusals.sample(UPDATE_PENDING)) {
+      this.deps.log('voice: one-shot run refused: the installed files were replaced; restart to finish the update', { ring: true });
+    } else {
+      this.deps.log('voice: one-shot run refused: the installed files were replaced; restart to finish the update');
+    }
     return true;
   }
 

@@ -39,7 +39,7 @@ function UnreadBadge({ id, count }: { readonly id: number; readonly count: numbe
 // How many are in a channel's voice (issue #596): a speaker and the number,
 // named "3 in voice", beside the button and describing it, as the unread count
 // does. It says where people are talking and nothing more: the button opens
-// the channel, and only the voice strip joins.
+// the channel. Voice joins still go through the voice strip.
 function VoiceMark({ id, count }: { readonly id: number; readonly count: number }) {
   if (count <= 0) return null;
   return (
@@ -65,7 +65,7 @@ export function voiceName(id: number, viewer: number, names: ReadonlyMap<number,
 // Who is in a channel's voice (issue #1103), nested under its row: a list
 // named for the channel, one row a person, up to shownInVoice of them and
 // then "+M more". Each row opens the channel, as the channel's own button
-// does, and nothing more: nothing in the list joins voice. The rows are
+// does on a single click. The rows are
 // outside the tab order, since the channel's button, which is in it, does
 // what they do; they are read as text under the channel. No speaking,
 // muted or deafened state: that is the voice bar's, for the room joined.
@@ -150,6 +150,7 @@ function ChannelRow({
   register,
   onMove,
   onOpen,
+  onJoinVoice,
   arrange,
 }: {
   readonly channel: ChannelV0;
@@ -172,10 +173,12 @@ function ChannelRow({
   readonly register: (name: string, el: HTMLButtonElement | null) => void;
   readonly onMove: (event: KeyboardEvent, from: number) => void;
   readonly onOpen: (name: string) => void;
+  readonly onJoinVoice: ((channel: ChannelV0) => void) | undefined;
   // The person's own arrangement (issue #1493); absent, the row offers none.
   readonly arrange: RowArrange | undefined;
 }) {
   const [moving, setMoving] = useState(false);
+  const pointer = useRef('');
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [settingTopic, setSettingTopic] = useState(false);
@@ -417,6 +420,14 @@ function ChannelRow({
         onClick={() => {
           onOpen(channel.name);
         }}
+        onPointerDown={(event) => {
+          pointer.current = event.isTrusted && event.button === 0 ? event.pointerType : '';
+        }}
+        onDoubleClick={(event) => {
+          const source = pointer.current;
+          pointer.current = '';
+          if (event.isTrusted && event.button === 0 && (source === 'mouse' || source === 'pen') && !archived) onJoinVoice?.(channel);
+        }}
         onKeyDown={(event) => {
           onMove(event, index);
         }}
@@ -545,6 +556,7 @@ export function ChannelList({
   onLeft,
   onUnauthorized,
   onOpen,
+  onJoinVoice,
   arrangement,
 }: {
   readonly channels: readonly ChannelV0[];
@@ -587,6 +599,7 @@ export function ChannelList({
   readonly onLeft?: (name: string) => void;
   readonly onUnauthorized?: () => void;
   readonly onOpen: (name: string) => void;
+  readonly onJoinVoice?: (channel: ChannelV0) => void;
   // The person's favorites, groups and order (issue #1493), kept in this
   // browser. Absent, the list is drawn as the server gave it.
   readonly arrangement?: ArrangementControls;
@@ -744,6 +757,7 @@ export function ChannelList({
       register={register}
       onMove={move}
       onOpen={onOpen}
+      onJoinVoice={onJoinVoice}
       arrange={rowArrange(channel)}
     />
   );

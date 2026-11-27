@@ -54,6 +54,10 @@ export interface Scenario {
   // Replaces the reason of the transcript's failed or reconnecting state (a
   // transcript that fails for one reason, told as another).
   readonly failReason?: string;
+  // A pkg/schema/testdata/voice-devices fixture, by path: what `devices --json`
+  // writes to standard output before the helper exits 0 (otherwise it is the
+  // managed session's replay, which has no device list to give).
+  readonly devices?: string;
 }
 
 const scenarioPath = process.argv[2] ?? '';
@@ -66,6 +70,11 @@ function report(entry: Record<string, unknown>): void {
 
 report({ t: 'argv', argv: args });
 report({ t: 'env', env: { ...process.env } });
+
+if (args[0] === 'devices' && scenario.devices !== undefined) {
+  report({ t: 'devices' });
+  process.stdout.write(readFileSync(scenario.devices, 'utf8'), () => process.exit(0));
+}
 
 const hang = scenario.then === 'hang';
 process.on('SIGTERM', () => {
@@ -238,7 +247,9 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err: unknown) => {
-  report({ t: 'error', message: err instanceof Error ? err.message : 'unknown' });
-  process.exit(9);
-});
+if (scenario.devices === undefined || args[0] !== 'devices') {
+  main().catch((err: unknown) => {
+    report({ t: 'error', message: err instanceof Error ? err.message : 'unknown' });
+    process.exit(9);
+  });
+}

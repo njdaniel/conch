@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { CompanionEndReason, CompanionGrantResult, CompanionPageEnd } from '../platform/desktop/bridge';
 import type { ShareClaimResult, TransmitAnswer, VoiceSessionResult, VoiceViewerResult } from '../api';
-import type { VoicePresenceV2 } from '../schema/voice';
+import { voicePresenceV2Schema, voicePresenceV3Schema, type VoicePresenceV2 } from '../schema/voice';
 import type { CameraClaimResult } from '../api';
 import type { Camera, CameraProfile, KeptCamera } from './camera';
 import { VoiceClient, openAudio, chosenGone, companionDefaultQuality, companionInsecure, companionQualities, companionEnds, companionQuality, companionLeftWatching, companionLost, companionRefusals, shareQualityRefusedNote, type CompanionEnv, earlierGone, levelEvery, meterEvery, outputMoved, outputRefused, endingLimit, reconnectLimit, reportWait, type CameraTrack, type Microphone, type ModeStore, type Output, type Phase, type Processing, type ProcessingStore, type Room, type RoomEvents, type ShareSink } from './connection';
@@ -353,6 +353,11 @@ class StubRoom implements Room {
     return Promise.reject(this.switchError);
   };
   attachSelf = (): void => undefined;
+  shareSurface = (): null => null;
+  shareSelves: (HTMLVideoElement | null)[] = [];
+  attachShareSelf = (el: HTMLVideoElement | null): void => {
+    this.shareSelves.push(el);
+  };
   setViewing = (on: boolean): void => {
     this.viewings.push(on);
   };
@@ -854,8 +859,112 @@ describe('talking', () => {
 
   it('shows who is speaking', async () => {
     const t = await joined();
-    t.rooms[0]?.events?.onSpeakers([3, 9]);
+    t.rooms[0]?.events?.onSpeakers([3, 9], false);
     expect([...t.client.snapshot().speaking]).toEqual([3, 9]);
+  });
+
+  it('never lists you as speaking unless you are sending (UI-talk-1)', async () => {
+    const t = await joined();
+    // Not transmitting: LiveKit's local level says you speak; others stay.
+    t.rooms[0]?.events?.onSpeakers([3], true);
+    expect([...t.client.snapshot().speaking]).toEqual([3]);
+    t.client.press();
+    await settle();
+    expect(t.client.snapshot().transmitting).toBe(true);
+    t.rooms[0]?.events?.onSpeakers([3], true);
+    expect([...t.client.snapshot().speaking]).toEqual([3, 7]);
+    // Mute while still in the set: gone at once, and a late update stays clean.
+    t.client.setMuted(true);
+    expect([...t.client.snapshot().speaking]).toEqual([3]);
+    t.rooms[0]?.events?.onSpeakers([3], true);
+    expect([...t.client.snapshot().speaking]).toEqual([3]);
+    t.client.setMuted(false);
+    expect([...t.client.snapshot().speaking]).toEqual([3]);
+    // Deafen and release clear it too.
+    t.client.press();
+    await settle();
+    t.rooms[0]?.events?.onSpeakers([3], true);
+    expect([...t.client.snapshot().speaking]).toEqual([3, 7]);
+    t.client.setDeafened(true);
+    expect([...t.client.snapshot().speaking]).toEqual([3]);
+    t.client.setDeafened(false);
+    t.client.release();
+    t.clock.advance(5000);
+    await settle();
+    t.client.press();
+    await settle();
+    t.rooms[0]?.events?.onSpeakers([], true);
+    t.client.release();
+    t.clock.advance(5000);
+    await settle();
+    expect([...t.client.snapshot().speaking]).toEqual([]);
+  });
+
+  it('counts another client of the same person as speaking (a remote p7.view or companion)', async () => {
+    const t = await joined();
+    // Remote participants mapping to p7 arrive as 7 with the local one silent.
+    t.rooms[0]?.events?.onSpeakers([7], false);
+    expect([...t.client.snapshot().speaking]).toEqual([7]);
+    // Not transmitting and the local participant also reported: still the remote 7.
+    t.rooms[0]?.events?.onSpeakers([3, 7], true);
+    expect([...t.client.snapshot().speaking]).toEqual([3, 7]);
+    // Muting clears only the local participant: the remote 7 stays.
+    t.client.setMuted(true);
+    expect([...t.client.snapshot().speaking]).toEqual([3, 7]);
+    t.client.setDeafened(true);
+    expect([...t.client.snapshot().speaking]).toEqual([3, 7]);
+  });
+
+  it('keeps a speaker update that came just before the unmute landed', async () => {
+    const t = await joined();
+    t.rooms[0]?.events?.onSpeakers([], true);
+    expect([...t.client.snapshot().speaking]).toEqual([]);
+    t.client.press();
+    await settle();
+    // No further update: transmitting began and the earlier flag is applied.
+    expect(t.client.snapshot().transmitting).toBe(true);
+    expect([...t.client.snapshot().speaking]).toEqual([7]);
+  });
+
+  it('a reconnect forgets the speakers the room reported before it', async () => {
+    const t = await joined();
+    // Your own level while the gate is shut, and someone else, before the drop.
+    t.rooms[0]?.events?.onSpeakers([3], true);
+    expect([...t.client.snapshot().speaking]).toEqual([3]);
+    t.rooms[0]?.events?.onReconnecting();
+    expect([...t.client.snapshot().speaking]).toEqual([]);
+    t.rooms[0]?.events?.onReconnected();
+    await settle();
+    t.client.press();
+    await settle();
+    expect(t.client.snapshot().transmitting).toBe(true);
+    // No fresh update yet: nobody is shown speaking from the old room.
+    expect([...t.client.snapshot().speaking]).toEqual([]);
+  });
+
+  it('a room that failed to connect does not lend its speakers to the retry', async () => {
+    const t = setup([okSession(), okSession()], [], 0, false, (room, index) => {
+      if (index !== 0) return;
+      room.connect = (_u, _t, _n, _p, events) => {
+        room.events = events;
+        events.onSpeakers([3], true);
+        return Promise.reject(new Error('unreachable'));
+      };
+    });
+    t.client.join('general');
+    await settle();
+    // Cleared as soon as the join fails, through the backoff,
+    expect([...t.client.snapshot().speaking]).toEqual([]);
+    t.clock.advance(5000);
+    await settle();
+    expect(t.client.snapshot().phase).toBe('connected');
+    // after the retry connects,
+    expect([...t.client.snapshot().speaking]).toEqual([]);
+    // and on the first press.
+    t.client.press();
+    await settle();
+    expect(t.client.snapshot().transmitting).toBe(true);
+    expect([...t.client.snapshot().speaking]).toEqual([]);
   });
 
   it('audio does not depend on a report that never answers: the track is open throughout', async () => {
@@ -1494,6 +1603,63 @@ const presenceWith = (sharing: number | null): VoicePresenceV2 => ({
   ],
 });
 
+it.each((['browser', 'desktop'] as const).flatMap((platform) => ([
+  { platform, resolution: '480p', fallback: '720p' },
+  { platform, resolution: '1440p', fallback: '1080p' },
+] as const)))('keeps a saved $resolution choice across v2 and v3 on $platform', async ({ platform, resolution, fallback }) => {
+  const quality: ShareQuality = { resolution, frameRate: 60 };
+  // An older server's nearest at the same rate; the desktop then takes its
+  // own choices, which have no 720p60, so its 480p60 is the desktop default.
+  const legacyQuality: ShareQuality = platform === 'desktop' && fallback === '720p' ? companionDefaultQuality : { resolution: fallback, frameRate: 60 };
+  const claimShare = vi.fn(() => Promise.resolve(claim));
+  const keepShareQuality = vi.fn<(quality: ShareQuality) => void>();
+  const client = new VoiceClient({
+    clock: new FakeClock(),
+    random: () => 0.5,
+    createSession: () => Promise.resolve(okSession()),
+    report: () => Promise.resolve('ok'),
+    newRoom: () => new StubRoom(),
+    claimShare,
+    stopShare: () => Promise.resolve(),
+    shareQuality: quality,
+    keepShareQuality,
+    ...(platform === 'desktop' ? { companion: nativeCompanion([], []).env } : {}),
+  });
+  const v2 = presenceWith(null);
+  const v3 = { ...v2, schema: 'conch.voice_presence.v3' as const };
+  expect(client.snapshot().shareQuality).toEqual(legacyQuality);
+  client.presence(v3, v3.schema);
+  expect(client.snapshot().shareQuality).toEqual(quality);
+  client.presence(v2, v2.schema);
+  expect(client.snapshot().shareQuality).toEqual(legacyQuality);
+  client.presence(v3, v3.schema);
+  expect(client.snapshot().shareQuality).toEqual(quality);
+  client.presence(v2, v2.schema);
+
+  if (platform === 'desktop') client.startCompanionShare('general');
+  else {
+    client.join('general');
+    await settle();
+    client.startShare();
+  }
+  await settle();
+  expect(claimShare).toHaveBeenCalledTimes(2);
+  expect(claimShare).toHaveBeenNthCalledWith(1, 'general', legacyQuality);
+  expect(claimShare).toHaveBeenNthCalledWith(2, 'general', legacyQuality);
+  client.presence({ ...presenceWith(7), schema: voicePresenceV3Schema }, voicePresenceV3Schema);
+  expect(client.snapshot()).toMatchObject({ share: { kind: 'sharing' }, shareQualityV3: true, shareQuality: legacyQuality });
+  client.stopShare();
+  await settle();
+  expect(client.snapshot()).toMatchObject({ share: { kind: 'idle' }, shareQualityV3: true, shareQuality: quality });
+  expect(keepShareQuality).not.toHaveBeenCalled();
+
+  const chosen = { resolution: '480p', frameRate: 15 } as const;
+  await client.setShareQuality(chosen);
+  expect(keepShareQuality).toHaveBeenCalledExactlyOnceWith(chosen);
+  await client.leave();
+  client.dispose();
+});
+
 describe('watch only', () => {
   it('connects without publishing the microphone, takes no press, and publishes it when asked', async () => {
     const t = setup();
@@ -1524,6 +1690,77 @@ describe('watch only', () => {
 });
 
 describe('sharing through the client', () => {
+  it.each(['claiming', 'picking', 'resuming'] as const)('claims v2 quality next after a v2 socket frame arrives while %s', async (phase) => {
+    const t = await joined();
+    const quality = { resolution: '1440p', frameRate: 60 } as const;
+    const v2 = presenceWith(null);
+    t.client.presence({ ...v2, schema: voicePresenceV3Schema }, voicePresenceV3Schema);
+    await t.client.setShareQuality(quality);
+
+    let closePicker: (() => void) | undefined;
+    if (phase === 'claiming') {
+      t.shareAnswers.push({ ok: false, failure: 'invalid', status: 409, code: 'voice_share_full' });
+    } else if (phase === 'picking') {
+      const room = t.rooms[0];
+      if (room === undefined) throw new Error('no room');
+      vi.spyOn(room, 'pickScreen').mockImplementationOnce(() => new Promise((_resolve, reject) => {
+        closePicker = () => { reject(new Error('picker closed')); };
+      }));
+    }
+    t.client.startShare();
+    if (phase !== 'claiming') await settle();
+    if (phase === 'resuming') {
+      t.client.presence({ ...renewedPresence(true), schema: voicePresenceV3Schema }, voicePresenceV3Schema);
+    }
+    expect(t.client.snapshot().share.kind).toBe(phase);
+    t.client.presence(v2, v2.schema);
+    expect(t.client.snapshot()).toMatchObject({ share: { kind: phase }, shareQualityV3: false, shareQuality: quality });
+
+    closePicker?.();
+    if (phase === 'resuming') t.client.stopShare();
+    await settle();
+    expect(t.client.snapshot().share.kind).toBe('idle');
+
+    t.client.startShare();
+    await settle();
+    const fallback = { resolution: '1080p', frameRate: 60 };
+    const earlier = phase === 'resuming' ? [quality, quality] : [quality];
+    expect(t.shareQualities).toEqual([...earlier, fallback, fallback]);
+    await t.client.leave();
+  });
+
+  it('keeps v3 and the claimed quality through 1008 follow-up reads', async () => {
+    const t = await joined();
+    const quality = { resolution: '1440p', frameRate: 60 } as const;
+    const v2 = presenceWith(7);
+    const v3 = { ...v2, schema: 'conch.voice_presence.v3' as const };
+    t.client.presence(v3, v3.schema);
+    await t.client.setShareQuality(quality);
+    t.client.startShare();
+    await settle();
+    t.client.presence(v3, v3.schema);
+    expect(t.client.snapshot()).toMatchObject({ share: { kind: 'sharing' }, shareQualityV3: true, shareQuality: quality });
+
+    // The one-off read after a 1008 close uses v2, which labels 1440p "source".
+    const v2Read = {
+      ...v2,
+      rooms: v2.rooms.map((room) => ({
+        ...room,
+        participants: room.participants.map((p) => p.sharing === true
+          ? { ...p, share_quality: { resolution: 'source' as const, frame_rate: 60 } }
+          : p),
+      })),
+    };
+    t.client.presence(v2Read, null);
+    expect(t.client.snapshot()).toMatchObject({ share: { kind: 'sharing' }, shareQualityV3: true, shareQuality: quality });
+
+    t.client.presence(presenceWith(null), null);
+    expect(t.client.snapshot()).toMatchObject({ share: { kind: 'stopping' }, shareQualityV3: true, shareQuality: quality });
+    await settle();
+    expect(t.client.snapshot()).toMatchObject({ share: { kind: 'idle', ended: 'server' }, shareQualityV3: true, shareQuality: quality });
+    await t.client.leave();
+  });
+
   it('claims, picks, claims again and publishes on the connected room; leaving stops it and tells conchd', async () => {
     const t = await joined();
     t.client.startShare();
@@ -1598,8 +1835,8 @@ describe('sharing through the client', () => {
     const t = await joined();
     t.client.startShare();
     await settle();
-    t.client.presence(presenceWith(7));
-    t.client.presence(presenceWith(null));
+    t.client.presence(presenceWith(7), voicePresenceV2Schema);
+    t.client.presence(presenceWith(null), voicePresenceV2Schema);
     await settle();
     expect(t.client.snapshot().share).toEqual({ kind: 'idle', ended: 'server' });
     // Not asked to stop: by now the room's share may be someone else's.
@@ -1620,9 +1857,9 @@ describe('sharing through the client', () => {
     const t = await joined();
     t.client.startShare();
     await settle();
-    t.client.presence(presenceWith(7));
+    t.client.presence(presenceWith(7), voicePresenceV2Schema);
     // The server ended this share and principal 8 claimed the room's.
-    t.client.presence(presenceWith(8));
+    t.client.presence(presenceWith(8), voicePresenceV2Schema);
     await settle();
     await t.client.leave();
     expect(t.shares).toEqual(['claim general', 'claim general']);
@@ -1650,8 +1887,8 @@ describe('a share across a renewed room', () => {
     await joined(t);
     t.client.startShare();
     await settle();
-    t.client.presence(presenceWith(7));
-    t.client.presence(renewedPresence(true));
+    t.client.presence(presenceWith(7), voicePresenceV2Schema);
+    t.client.presence(renewedPresence(true), voicePresenceV2Schema);
     expect(t.client.snapshot().share).toEqual({ kind: 'resuming' });
     t.rooms[0]?.events?.onDisconnected('room_deleted');
     await settle();
@@ -1667,8 +1904,8 @@ describe('a share across a renewed room', () => {
     await joined(t);
     t.client.startShare();
     await settle();
-    t.client.presence(presenceWith(7));
-    t.client.presence(renewedPresence(true));
+    t.client.presence(presenceWith(7), voicePresenceV2Schema);
+    t.client.presence(renewedPresence(true), voicePresenceV2Schema);
     t.rooms[0]?.events?.onDisconnected('room_deleted');
     await settle();
     expect(t.client.snapshot().phase).toBe('stopped');
@@ -1681,31 +1918,31 @@ describe('a share across a renewed room', () => {
   it("a page watching it keeps watching while the same person's share comes back", async () => {
     const t = setup([okSession(), okSession()]);
     await joined(t);
-    t.client.presence(presenceWith(8));
+    t.client.presence(presenceWith(8), voicePresenceV2Schema);
     t.client.watchStream(8, true);
-    t.client.presence(renewedPresence());
+    t.client.presence(renewedPresence(), voicePresenceV2Schema);
     expect(t.client.snapshot().watched.has(8)).toBe(true);
     t.rooms[0]?.events?.onDisconnected('room_deleted');
     await settle();
     // In the new room, before the share is back.
-    t.client.presence(presenceWith(null));
+    t.client.presence(presenceWith(null), voicePresenceV2Schema);
     expect(t.client.snapshot().watched.has(8)).toBe(true);
     expect(t.rooms[1]?.watching).toEqual([true]);
-    t.client.presence(presenceWith(8));
+    t.client.presence(presenceWith(8), voicePresenceV2Schema);
     expect(t.client.snapshot().watched.has(8)).toBe(true);
     // Back for good: a share that ends now has ended.
     t.clock.advance(resumeLimit);
     expect(t.client.snapshot().watched.has(8)).toBe(true);
-    t.client.presence(presenceWith(null));
+    t.client.presence(presenceWith(null), voicePresenceV2Schema);
     expect(t.client.snapshot().watched.has(8)).toBe(false);
   });
 
   it('lets go if the share does not come back in time, but not when someone else starts beside it', async () => {
     const late = setup([okSession(), okSession()]);
     await joined(late);
-    late.client.presence(presenceWith(8));
+    late.client.presence(presenceWith(8), voicePresenceV2Schema);
     late.client.watchStream(8, true);
-    late.client.presence(renewedPresence());
+    late.client.presence(renewedPresence(), voicePresenceV2Schema);
     late.clock.advance(resumeLimit - 1);
     expect(late.client.snapshot().watched.has(8)).toBe(true);
     late.clock.advance(1);
@@ -1713,7 +1950,7 @@ describe('a share across a renewed room', () => {
 
     const other = setup([okSession(), okSession()]);
     await joined(other);
-    other.client.presence(presenceWith(8));
+    other.client.presence(presenceWith(8), voicePresenceV2Schema);
     other.client.watchStream(8, true);
     // The room deleted before presence said anything.
     other.rooms[0]?.events?.onDisconnected('room_deleted');
@@ -1721,7 +1958,7 @@ describe('a share across a renewed room', () => {
     other.client.presence({
       ...presenceWith(null),
       rooms: [{ participants: [{ principal_id: 9, can_publish: true, transmitting: false, joined_at: '2026-10-16T00:00:00.000Z', sharing: true, share_started_at: '2026-10-16T00:00:00.000Z' }] }],
-    });
+    }, voicePresenceV2Schema);
     expect([...other.client.snapshot().watched]).toEqual([8]);
   });
 });
@@ -1733,7 +1970,7 @@ describe('watching', () => {
     expect(t.rooms[0]?.watching).toEqual([false]);
     const sink = { video: document.createElement('video'), audio: document.createElement('audio') };
     t.client.attachStream(8, sink);
-    t.client.presence(presenceWith(8));
+    t.client.presence(presenceWith(8), voicePresenceV2Schema);
     t.client.watchStream(8, true);
     expect(t.rooms[0]?.watching).toEqual([false, true]);
     expect(t.rooms[0]?.sinks.at(-1)).toBe(sink);
@@ -1746,11 +1983,24 @@ describe('watching', () => {
     expect(t.rooms[1]?.sinks).toEqual([sink]);
     // Nothing has arrived on it yet.
     expect(t.client.snapshot().streamTracks.get(8)).toBeUndefined();
-    t.client.presence(presenceWith(8));
+    t.client.presence(presenceWith(8), voicePresenceV2Schema);
     expect(t.client.snapshot().watched.has(8)).toBe(true);
-    t.client.presence(presenceWith(null));
+    t.client.presence(presenceWith(null), voicePresenceV2Schema);
     expect(t.client.snapshot().watched.has(8)).toBe(false);
     expect(t.rooms[1]?.watching).toEqual([true, false]);
+  });
+
+  it('keeps the sharer\'s preview element for the next connection, told before it connects', async () => {
+    const t = setup([okSession(), okSession()]);
+    await joined(t);
+    const el = document.createElement('video');
+    t.client.attachShareSelf(el);
+    expect(t.rooms[0]?.shareSelves.at(-1)).toBe(el);
+    t.rooms[0]?.events?.onDisconnected('room_deleted');
+    await settle();
+    expect(t.rooms[1]?.shareSelves).toEqual([el]);
+    t.client.attachShareSelf(null);
+    expect(t.rooms[1]?.shareSelves.at(-1)).toBeNull();
   });
 
   it('the phone switcher stops the previous stream before watching and focusing the next, picture and sound together', async () => {
@@ -1763,7 +2013,7 @@ describe('watching', () => {
         ...room,
         participants: [...room.participants, { principal_id: 9, can_publish: true, transmitting: false, joined_at: '2026-10-16T00:00:00.000Z', sharing: true, share_started_at: '2026-10-16T00:01:00.000Z' }],
       })),
-    });
+    }, voicePresenceV2Schema);
     t.client.switchStream(8);
     t.client.switchStream(9);
     // One step each: the previous stream goes in the same change that
@@ -1798,7 +2048,7 @@ describe('watching several streams', () => {
   it("each stream's tracks are its own: watching bob beside alice and stopping him leaves alice's picture as it was", async () => {
     const t = setup();
     await joined(t);
-    t.client.presence(twoStreams());
+    t.client.presence(twoStreams(), voicePresenceV2Schema);
     t.client.watchStream(8, true);
     t.rooms[0]?.events?.onStreamTracks(8, { video: true, audio: true });
     t.client.watchStream(9, true);
@@ -1815,16 +2065,16 @@ describe('watching several streams', () => {
   it('a sharer who leaves while this person stays is let go at once, not waited for', async () => {
     const t = setup();
     await joined(t);
-    t.client.presence(twoStreams());
+    t.client.presence(twoStreams(), voicePresenceV2Schema);
     t.client.watchStream(8, true);
     t.client.watchStream(9, true);
     t.client.focusShare(8);
     // 8 left voice altogether; 7 and 9 are still here.
-    t.client.presence(twoStreams([7, 9], [9]));
+    t.client.presence(twoStreams([7, 9], [9]), voicePresenceV2Schema);
     expect([...t.client.snapshot().watched]).toEqual([9]);
     expect(t.client.snapshot().focusedShare).toBeNull();
     // Nothing waits for 8: back with a new share, it is not watched unasked.
-    t.client.presence(twoStreams());
+    t.client.presence(twoStreams(), voicePresenceV2Schema);
     expect([...t.client.snapshot().watched]).toEqual([9]);
     t.clock.advance(resumeLimit);
     expect([...t.client.snapshot().watched]).toEqual([9]);
@@ -1833,20 +2083,20 @@ describe('watching several streams', () => {
   it('a renewed room keeps every watch while this person is out of it, and a stream that is back is watched as before', async () => {
     const t = setup([okSession(), okSession()]);
     await joined(t);
-    t.client.presence(twoStreams());
+    t.client.presence(twoStreams(), voicePresenceV2Schema);
     t.client.watchStream(8, true);
     t.client.watchStream(9, true);
     // Everyone left the old room: this person is not listed either.
-    t.client.presence(twoStreams([], []));
+    t.client.presence(twoStreams([], []), voicePresenceV2Schema);
     expect([...t.client.snapshot().watched]).toEqual([8, 9]);
     t.rooms[0]?.events?.onDisconnected('room_deleted');
     await settle();
     // In the new room before either stream is back: 8 is here, not yet
     // sharing, and still waited for.
-    t.client.presence(twoStreams([7, 8], []));
+    t.client.presence(twoStreams([7, 8], []), voicePresenceV2Schema);
     expect([...t.client.snapshot().watched]).toEqual([8, 9]);
     expect(t.rooms[1]?.streamWatches.at(-1)).toEqual({ watched: [8, 9], focused: null });
-    t.client.presence(twoStreams([7, 8, 9], [8]));
+    t.client.presence(twoStreams([7, 8, 9], [8]), voicePresenceV2Schema);
     expect([...t.client.snapshot().watched]).toEqual([8, 9]);
     // 9 never comes back: that watch alone ends with the wait.
     t.clock.advance(resumeLimit);
@@ -1864,15 +2114,15 @@ describe('watching several streams', () => {
     const t = setup();
     await joined(t);
     // 8 shares; this person (7) is connected but not listed yet.
-    t.client.presence(twoStreams([8], [8]));
+    t.client.presence(twoStreams([8], [8]), voicePresenceV2Schema);
     t.client.watchStream(8, true);
     // 8 stops, and still no pass has listed 7.
-    t.client.presence(twoStreams([8], []));
+    t.client.presence(twoStreams([8], []), voicePresenceV2Schema);
     t.clock.advance(endingLimit);
     expect([...t.client.snapshot().watched]).toEqual([]);
-    t.client.presence(twoStreams([7, 8], []));
+    t.client.presence(twoStreams([7, 8], []), voicePresenceV2Schema);
     // 8 shares again: Watch is offered, not pressed.
-    t.client.presence(twoStreams([7, 8], [8]));
+    t.client.presence(twoStreams([7, 8], [8]), voicePresenceV2Schema);
     expect([...t.client.snapshot().watched]).toEqual([]);
     t.clock.advance(resumeLimit);
     expect([...t.client.snapshot().watched]).toEqual([]);
@@ -1885,16 +2135,16 @@ describe('watching several streams', () => {
   it('a stream unpublished before presence lists this person, and shared again, is not watched unasked', async () => {
     const t = setup();
     await joined(t);
-    t.client.presence(twoStreams([8], [8]));
+    t.client.presence(twoStreams([8], [8]), voicePresenceV2Schema);
     t.client.watchStream(8, true);
     t.rooms[0]?.events?.onStreamTracks(8, { video: true, audio: true });
     // LiveKit: 8's share is unpublished; this room stays connected.
     t.rooms[0]?.events?.onStreamTracks(8, { video: false, audio: false });
-    t.client.presence(twoStreams([8], []));
+    t.client.presence(twoStreams([8], []), voicePresenceV2Schema);
     // 8 shares again at once, and 7 is still not listed.
-    t.client.presence(twoStreams([8], [8]));
+    t.client.presence(twoStreams([8], [8]), voicePresenceV2Schema);
     expect([...t.client.snapshot().watched]).toEqual([]);
-    t.client.presence(twoStreams([7, 8], [8]));
+    t.client.presence(twoStreams([7, 8], [8]), voicePresenceV2Schema);
     t.clock.advance(endingLimit + resumeLimit);
     expect([...t.client.snapshot().watched]).toEqual([]);
     expect(t.rooms).toHaveLength(1);
@@ -1907,10 +2157,10 @@ describe('watching several streams', () => {
   it('a renewal before presence lists this person keeps the watch even when the empty presence comes first', async () => {
     const t = setup([okSession(), okSession()]);
     await joined(t);
-    t.client.presence(twoStreams([8], [8]));
+    t.client.presence(twoStreams([8], [8]), voicePresenceV2Schema);
     t.client.watchStream(8, true);
     // The old room is empty in presence; LiveKit has not said so yet.
-    t.client.presence(twoStreams([], []));
+    t.client.presence(twoStreams([], []), voicePresenceV2Schema);
     expect([...t.client.snapshot().watched]).toEqual([8]);
     t.clock.advance(endingLimit / 2);
     t.rooms[0]?.events?.onDisconnected('room_deleted');
@@ -1920,8 +2170,8 @@ describe('watching several streams', () => {
     expect([...t.client.snapshot().watched]).toEqual([8]);
     expect(t.rooms[1]?.streamWatches.at(-1)).toEqual({ watched: [8], focused: null });
     // The new room, 8's share resumed in it.
-    t.client.presence(twoStreams([8], []));
-    t.client.presence(twoStreams([7, 8], [8]));
+    t.client.presence(twoStreams([8], []), voicePresenceV2Schema);
+    t.client.presence(twoStreams([7, 8], [8]), voicePresenceV2Schema);
     expect([...t.client.snapshot().watched]).toEqual([8]);
     t.clock.advance(resumeLimit);
     expect([...t.client.snapshot().watched]).toEqual([8]);
@@ -2867,7 +3117,7 @@ describe('the camera through the client', () => {
     const t = await joined();
     // Presence says this person holds a camera claim (another device's, or one
     // displaced): this page sends nothing, and says so.
-    t.client.presence(cameraPresence([7, 8]));
+    t.client.presence(cameraPresence([7, 8]), voicePresenceV2Schema);
     expect(t.client.snapshot().cameraTrack).toBe('none');
     const room = t.rooms[0];
     if (room === undefined) throw new Error('no room');
@@ -2876,21 +3126,21 @@ describe('the camera through the client', () => {
     expect(t.client.snapshot().cameraTrack).toBe('captured');
     room.camState = 'none';
     room.events?.onCameraChanged();
-    t.client.presence(cameraPresence([7]));
+    t.client.presence(cameraPresence([7]), voicePresenceV2Schema);
     expect(t.client.snapshot().cameraTrack).toBe('none');
   });
 
   it('receives only the cameras of others presence shows holding a claim', async () => {
     const t = await joined();
-    t.client.presence(cameraPresence([7, 8]));
+    t.client.presence(cameraPresence([7, 8]), voicePresenceV2Schema);
     expect(t.rooms[0]?.claimedSets.at(-1)).toEqual([8]);
-    t.client.presence(cameraPresence([]));
+    t.client.presence(cameraPresence([]), voicePresenceV2Schema);
     expect(t.rooms[0]?.claimedSets.at(-1)).toEqual([]);
   });
 
   it('Show video and Hide video subscribe and let go; nothing opens the view by itself (O8)', async () => {
     const t = await joined();
-    t.client.presence(cameraPresence([8]));
+    t.client.presence(cameraPresence([8]), voicePresenceV2Schema);
     expect(t.client.snapshot().viewing).toBe(false);
     t.client.viewVideo(true);
     t.client.viewVideo(false);
@@ -2973,7 +3223,7 @@ describe('the camera through the client', () => {
     const t = setup([okSession(), okSession()], [], 0, false, undefined, undefined, undefined, undefined, { answers: [cameraGranted, adopted] });
     await cameraOn(t);
     t.camLog.length = 0;
-    t.client.presence(cameraPresence([], { reason: 'rotated', started_at: cameraStarted, ended_at: '2026-10-16T00:00:30.000Z' }));
+    t.client.presence(cameraPresence([], { reason: 'rotated', started_at: cameraStarted, ended_at: '2026-10-16T00:00:30.000Z' }), voicePresenceV2Schema);
     t.rooms[0]?.events?.onDisconnected('room_deleted');
     await settle();
     expect(t.camLog).toEqual(['keep camera', 'close', 'session general', `POST general ${named}`, 'adopt camera', 'grant', 'publish camera']);
@@ -2997,7 +3247,7 @@ describe('the camera through the client', () => {
     const t = setup([okSession(), { ok: false, failure: 'invalid', status: 404, code: 'channel_not_found' }]);
     await cameraOn(t);
     t.rooms[0]?.events?.onDisconnected('room_deleted');
-    t.client.presence(cameraPresence([], { reason: 'rotated', started_at: cameraStarted, ended_at: '2026-10-16T00:00:30.000Z' }));
+    t.client.presence(cameraPresence([], { reason: 'rotated', started_at: cameraStarted, ended_at: '2026-10-16T00:00:30.000Z' }), voicePresenceV2Schema);
     await settle();
     expect(t.camLog).toContain('stop kept camera');
     expect(t.camLog.filter((l) => l.startsWith('POST'))).toEqual(['POST general']);
@@ -3028,7 +3278,7 @@ describe('the camera through the client', () => {
   it('camera_ended for any reason but rotated stops the capture and claims nothing again', async () => {
     const t = setup([okSession(), okSession()]);
     await cameraOn(t);
-    t.client.presence(cameraPresence([], { reason: 'operator', started_at: cameraStarted, ended_at: '2026-10-16T00:00:30.000Z' }));
+    t.client.presence(cameraPresence([], { reason: 'operator', started_at: cameraStarted, ended_at: '2026-10-16T00:00:30.000Z' }), voicePresenceV2Schema);
     await settle();
     t.rooms[0]?.events?.onDisconnected('room_deleted');
     await settle();
@@ -3044,7 +3294,7 @@ describe('the camera through the client', () => {
     t.client.subscribe(() => {
       seen.push(t.client.snapshot().cameraTrack);
     });
-    t.client.presence(cameraPresence([], { reason: 'rotated', started_at: cameraStarted, ended_at: '2026-10-16T00:00:30.000Z' }));
+    t.client.presence(cameraPresence([], { reason: 'rotated', started_at: cameraStarted, ended_at: '2026-10-16T00:00:30.000Z' }), voicePresenceV2Schema);
     expect(t.client.snapshot()).toMatchObject({ camera: { kind: 'resuming' }, cameraTrack: 'captured' });
     t.rooms[0]?.events?.onDisconnected('room_deleted');
     expect(t.client.snapshot().cameraTrack).toBe('captured');
@@ -3133,7 +3383,7 @@ describe('the camera chosen (N7)', () => {
   it('leaving forgets who holds a camera claim: the next connection receives nobody until presence says', async () => {
     const t = setup([okSession(), okSession()]);
     await joined(t);
-    t.client.presence(cameraPresence([8]));
+    t.client.presence(cameraPresence([8]), voicePresenceV2Schema);
     await t.client.leave();
     t.client.join('general');
     await settle();
@@ -4026,7 +4276,7 @@ describe('the screen companion', () => {
     await settle();
     t.rooms[0]?.events?.onDisconnected('room_deleted');
     await settle();
-    t.client.presence({ ...presenceWith(null) });
+    t.client.presence({ ...presenceWith(null) }, voicePresenceV2Schema);
     t.clock.advance(120_000);
     await settle();
     expect(t.rooms).toHaveLength(1);
@@ -4179,12 +4429,15 @@ describe('the screen companion', () => {
     expect(t.client.snapshot().deafened).toBe(true);
   });
 
-  it('lists 720p30 (the default), 1080p30, 1080p60 and Source at 30 and 60, and never Auto (#1772)', () => {
+  it('offers 15 fps for each desktop resolution and keeps the existing choices', () => {
     expect(companionDefaultQuality).toEqual({ resolution: '720p', frameRate: 30 });
     expect(companionQualities).toEqual([
+      { resolution: '720p', frameRate: 15 },
       { resolution: '720p', frameRate: 30 },
+      { resolution: '1080p', frameRate: 15 },
       { resolution: '1080p', frameRate: 30 },
       { resolution: '1080p', frameRate: 60 },
+      { resolution: 'source', frameRate: 15 },
       { resolution: 'source', frameRate: 30 },
       { resolution: 'source', frameRate: 60 },
     ]);
@@ -4197,15 +4450,10 @@ describe('the screen companion', () => {
     expect(t.client.snapshot().shareQuality).toEqual(q);
   });
 
-  it.each([
-    { what: '720p at 15 fps', quality: { resolution: '720p', frameRate: 15 } },
-    { what: '720p at 60 fps', quality: { resolution: '720p', frameRate: 60 } },
-    { what: '1080p at 15 fps', quality: { resolution: '1080p', frameRate: 15 } },
-    { what: 'source at 15 fps', quality: { resolution: 'source', frameRate: 15 } },
-  ] as const)('the desktop takes a choice not offered ($what) as the default', async ({ quality }) => {
+  it('the desktop takes 720p at 60 fps as the default', async () => {
     const t = companionSetup();
     await t.client.setShareQuality({ resolution: '1080p', frameRate: 60 });
-    await t.client.setShareQuality(quality);
+    await t.client.setShareQuality({ resolution: '720p', frameRate: 60 });
     expect(t.client.snapshot().shareQuality).toEqual(companionDefaultQuality);
   });
 
@@ -4227,7 +4475,7 @@ describe('the screen companion', () => {
     { asked: { resolution: '1080p', frameRate: 30 }, want: { resolution: '1080p', frameRate: 30 } },
     { asked: { resolution: '1080p', frameRate: 60 }, want: { resolution: '1080p', frameRate: 60 } },
     { asked: { resolution: 'source', frameRate: 60 }, want: { resolution: 'source', frameRate: 60 } },
-    { asked: { resolution: 'source', frameRate: 15 }, want: { resolution: '720p', frameRate: 30 } },
+    { asked: { resolution: 'source', frameRate: 15 }, want: { resolution: 'source', frameRate: 15 } },
     { asked: { resolution: '720p', frameRate: 60 }, want: { resolution: '720p', frameRate: 30 } },
   ] as const)('the companion takes $asked.resolution at $asked.frameRate fps as $want.resolution', ({ asked, want }) => {
     expect(companionQuality(asked)).toEqual(want);

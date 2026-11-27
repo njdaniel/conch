@@ -1,4 +1,5 @@
 import { createPortal } from 'react-dom';
+import { usePageModal, useReportOverlay } from './pageModal';
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
 import * as api from './api';
 import { isArchived } from './archived';
@@ -90,6 +91,8 @@ export function ChannelNav({
   const seq = useRef(0);
   const timer = useRef<number | null>(null);
   const id = useId();
+  // The switcher is a modal drawn into the body: the lobby is told (pageModal).
+  useReportOverlay(open);
   const canBrowse = onBrowse !== undefined;
   const latest = useRef({ channels, unread, selected, onOpen, open });
   latest.current = { channels, unread, selected, onOpen, open };
@@ -173,10 +176,16 @@ export function ChannelNav({
     };
   }, [open, canBrowse, refresh, channels]);
 
+  // The shortcuts do nothing while a modal of the lobby is up (Settings,
+  // re-authentication, the voice options sheet, the Members drawer): the page
+  // behind it is inert, and so are they. Read through a ref, as the listener
+  // is added once.
+  const modal = useRef(false);
+  modal.current = usePageModal();
   // The shortcuts.
   useEffect(() => {
     function onKey(event: globalThis.KeyboardEvent) {
-      if (composing(event) || (isTyping(event.target) && !inComposer(event.target)) || dialogOpen()) return;
+      if (composing(event) || (isTyping(event.target) && !inComposer(event.target)) || dialogOpen() || modal.current) return;
       const now = latest.current;
       if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'k') {
         event.preventDefault();

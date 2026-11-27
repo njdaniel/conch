@@ -137,18 +137,20 @@ test('F15 with 30 messages held the log is one tab stop, and no control is named
       return (el?.closest('[data-message-id]')?.getAttribute('data-message-id') ?? '-') + ':' + (el?.getAttribute('aria-label') ?? el?.textContent ?? '');
     }));
   }
-  // Search, the newest message, its name (issue #1544), its copy menu and Reply, the
-  // composer's Whisper and Attach, then its box: eight presses, not one per
-  // message. The log costs four, whatever history is held.
-  expect(presses, seen.join(' | ')).toBe(8);
+  // Search, the newest message, its name (issue #1544), its actions menu, the
+  // composer's Whisper and Attach, then its box. The log costs three stops
+  // regardless of how much history it holds.
+  expect(presses, seen.join(' | ')).toBe(7);
   const inLog = seen.map((where) => where.split(':')[0]).filter((id) => id !== '-');
-  expect(inLog, seen.join(' | ')).toHaveLength(4);
+  expect(inLog, seen.join(' | ')).toHaveLength(3);
   expect(new Set(inLog).size, seen.join(' | ')).toBe(1);
 
   const names = await messages(page).evaluate((log) => [...log.querySelectorAll('[aria-label]')].map((el) => el.getAttribute('aria-label') ?? ''));
   expect(names.length).toBeGreaterThan(0);
   for (const name of names) expect(name).not.toMatch(/message \d/);
-  await expect(messages(page).getByRole('button', { name: /^Reply to owner-.+'s message, \d\d:\d\d$/ }).first()).toBeAttached();
+  const newest = messages(page).getByRole('listitem').filter({ hasText: 'f15 newest' });
+  await expect(newest.getByRole('button', { name: /^More actions for owner-.+'s message, \d\d:\d\d$/ })).toBeAttached();
+  await expect(newest.getByRole('button', { name: /^(Reply|Add reaction)/ })).toHaveCount(0);
 });
 
 test('@cross F15 arrow keys move between messages, and a keyboard alone edits and replies', async ({ meet, secrets, world }) => {
@@ -191,7 +193,7 @@ test('@cross F15 arrow keys move between messages, and a keyboard alone edits an
   await expect(items.nth(1)).toContainText('f15 mine, edited');
   await expect(items.nth(1).getByRole('button', { name: /^More actions for / })).toBeFocused();
 
-  // Reply, by keyboard alone: up to the owner's message, Tab to Reply, Enter.
+  // Reply by keyboard from the owner's message through its More actions menu.
   await page.keyboard.press('Shift+Tab');
   await page.keyboard.press('Shift+Tab');
   await page.keyboard.press('Shift+Tab');
@@ -202,8 +204,15 @@ test('@cross F15 arrow keys move between messages, and a keyboard alone edits an
   await expect(items.nth(0).locator('.profile-card-name')).toBeFocused();
   await page.keyboard.press('Tab');
   await expect(items.nth(0).getByRole('button', { name: /^More actions for / })).toBeFocused();
-  await page.keyboard.press('Tab');
-  await expect(items.nth(0).getByRole('button', { name: /^Reply to owner-.+'s message, \d\d:\d\d$/ })).toBeFocused();
+  await page.keyboard.press('Enter');
+  const menu = items.nth(0).getByRole('menu');
+  const replyAction = menu.getByRole('menuitem', { name: 'Reply', exact: true });
+  await expect(replyAction).toBeVisible();
+  const menuItems = await menu.getByRole('menuitem').count();
+  for (let i = 0; i < menuItems && !(await replyAction.evaluate((item) => item === document.activeElement)); i++) {
+    await page.keyboard.press('ArrowDown');
+  }
+  await expect(replyAction).toBeFocused();
   await page.keyboard.press('Enter');
   const thread = page.getByRole('region', { name: /^Thread around owner-.+'s message, \d\d:\d\d$/ });
   const reply = thread.getByRole('textbox', { name: /^Reply to owner-/ });

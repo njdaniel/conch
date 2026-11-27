@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
+import { windowOf } from './fakewindow';
 import { SPOILER_FILE_PREFIX } from './schema/file';
 import { attachmentNames, forgetFileNames, rememberFileName } from './spoilerFiles';
 
@@ -18,7 +19,7 @@ const channels = {
   ],
 };
 
-type Handler = (auth: string | null) => Response | Promise<Response>;
+type Handler = (auth: string | null, init?: RequestInit) => Response | Promise<Response>;
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 
 // server stands in for conchd: whoami and channels, each answering by token.
@@ -27,7 +28,7 @@ function serve(routes: Record<string, Handler>) {
     const path = typeof input === 'string' ? input : input instanceof URL ? input.pathname : input.url;
     const headers = new Headers(init?.headers);
     const handler = routes[path];
-    return Promise.resolve(handler ? handler(headers.get('Authorization')) : json({}, 404));
+    return Promise.resolve(handler ? handler(headers.get('Authorization'), init) : json({}, 404));
   });
   vi.stubGlobal('fetch', fetchMock);
   return fetchMock;
@@ -166,9 +167,12 @@ describe('sign-in', () => {
     serve(asMember);
     render(<App origin={origin} />);
     expect(screen.getByLabelText('Name').getAttribute('autocomplete')).toBe('username');
+    expect(screen.getByLabelText('Name').getAttribute('name')).toBe('username');
     const password = screen.getByLabelText('Password');
     expect(password.getAttribute('type')).toBe('password');
     expect(password.getAttribute('autocomplete')).toBe('current-password');
+    expect(password.getAttribute('name')).toBe('password');
+    expect(password.closest('form')?.method).toBe('post');
     const field = screen.getByLabelText('Credential');
     expect(field.getAttribute('type')).toBe('password');
     expect(field.getAttribute('autocomplete')).toBe('off');
@@ -176,6 +180,42 @@ describe('sign-in', () => {
     // The one text field is the name: nothing else asks for a username.
     expect(screen.queryAllByRole('textbox')).toHaveLength(1);
     expect(screen.getByRole('button', { name: 'Sign in' }).closest('section')?.getAttribute('aria-labelledby')).toBe('password-heading');
+  });
+
+  it.each([false, true])('clears the submitted password after a refusal or bounded wait (stalled: %s)', async (stalled) => {
+    let answer: (response: Response) => void = () => {
+      throw new Error('sign-in request did not start');
+    };
+    const login = new Promise<Response>((resolve) => {
+      answer = resolve;
+    });
+    const fetchMock = serve({ ...asMember, '/v1/login': () => login });
+    render(<App origin={origin} />);
+    const name = screen.getByLabelText<HTMLInputElement>('Name');
+    const password = screen.getByLabelText<HTMLInputElement>('Password');
+    fireEvent.change(name, { target: { value: member.name } });
+    fireEvent.change(password, { target: { value: 'password-canary' } });
+    const form = password.form;
+    if (form === null) throw new Error('password input has no form');
+    try {
+      if (stalled) vi.useFakeTimers();
+      fireEvent.submit(form);
+      fireEvent.submit(form);
+      expect(new FormData(form).get('password')).toBe('password-canary');
+      expect(fetchMock.mock.calls.filter(([path]) => path === '/v1/login')).toHaveLength(1);
+      if (stalled) {
+        vi.advanceTimersByTime(15_000);
+        expect(password.value).toBe('');
+        expect(within(form).getByRole('button', { name: 'Checking…' })).toBeTruthy();
+      }
+    } finally {
+      if (stalled) vi.useRealTimers();
+    }
+    answer(json({ code: 'auth_failed', message: 'refused' }, 401));
+    expect(await screen.findByText('The name or password is not right.')).toBeTruthy();
+    expect(password.value).toBe('');
+    expect(name.value).toBe(member.name);
+    expect(document.activeElement).toBe(password);
   });
 
   it('signs a member in to the lobby, stores the token to last (issue #439) and keeps it out of the DOM', async () => {
@@ -472,7 +512,13 @@ describe('lobby', () => {
   it('says voice is not set up when the server has no LiveKit, and offers no join', async () => {
     const presence = { schema: 'conch.voice_presence.v2', channel_id: 1, configured: false, available: false, rooms: [] };
     const sockets = socketsOf();
-    serve({ ...asMember, '/v1/ws-tickets': () => json({ ticket: ticketValue, expires_at: created_at }, 201) });
+    serve({
+      ...asMember,
+      '/v1/ws-tickets': () => json({ ticket: ticketValue, expires_at: created_at }, 201),
+      // A server older than presence v3 refuses the probe, so the page opens v2.
+      '/v1/channels/general/voice?schema=conch.voice_presence.v3': () =>
+        json({ code: 'invalid_request', message: 'schema must name a presence document this server serves, given once' }, 400),
+    });
     render(<App origin={origin} />);
     signIn();
     const voice = await screen.findByRole('region', { name: 'Voice' });
@@ -867,6 +913,86 @@ describe('lobby', () => {
     const account = screen.getByRole('region', { name: 'Account' });
     expect(within(account).getByRole('heading', { name: 'Who can administer' })).toBeDefined();
     expect(within(account).getByText(line)).toBeDefined();
+  });
+});
+
+describe('inviting from a channel', () => {
+  const rows = [
+    { id: 1, name: 'general', created_at, visibility: 'public', default: true },
+    { id: 2, name: 'ops', created_at, visibility: 'public' },
+    { id: 3, name: 'dev', created_at, visibility: 'private', manages: true },
+    { id: 4, name: 'design', created_at, visibility: 'private' },
+  ];
+  const memberInvite = {
+    id: 7,
+    kind: 'member',
+    created_by: member.id,
+    created_by_name: member.name,
+    created_at,
+    uses: 0,
+    joiners: 0,
+    credential_lifetime_seconds: 7776000,
+  };
+  const scope = "This is a server member invite. New members start in the server's default channels.";
+
+  async function openFrom(name: string) {
+    const fetchMock = serve({
+      ...asMember,
+      '/v1/whoami': () => json({ ...member, may_invite: true }),
+      '/v1/channels': () => json({ channels: rows }),
+      '/v2/invites': (_auth, init) => init?.method === 'POST'
+        ? json({ invite: memberInvite, code: `conch_inv_${'N'.repeat(43)}` }, 201)
+        : json({ invites: [] }),
+    });
+    render(<App origin={origin} />);
+    signIn();
+    fireEvent.click(await screen.findByRole('button', { name: `Actions for ${name}` }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Invite people' }));
+    return { panel: within(screen.getByRole('region', { name: 'Invites' })), fetchMock };
+  }
+
+  it.each([
+    ['general', '#general is currently a default channel.'],
+    ['ops', 'After they join the server, they can find #ops under Browse channels and join it there.'],
+    ['dev', 'After they join the server, open #dev and use Add by name in the Members panel.'],
+    ['design', 'After they join the server, ask a channel manager or operator to add them to #design.'],
+  ])('explains access from #%s and creates a server member link', async (name, step) => {
+    const { panel, fetchMock } = await openFrom(name);
+    expect(panel.getByText(scope)).toBeDefined();
+    expect(panel.getByText(step)).toBeDefined();
+
+    fireEvent.click(panel.getByRole('button', { name: 'Make link' }));
+    await panel.findByRole('button', { name: 'Copy link' });
+    expect(panel.getByText(step)).toBeDefined();
+    const posts = fetchMock.mock.calls.filter(([path, init]) => path === '/v2/invites' && init?.method === 'POST');
+    expect(posts.map(([, init]) => init?.body)).toEqual([JSON.stringify({ kind: 'member' })]);
+  });
+
+  // The invite panel is painted over the page, as the Members drawer is below
+  // the wide breakpoint: it is hidden while the drawer is up, not closed, so
+  // the link just made, which is shown only once, is there when the drawer goes.
+  it('keeps the link it just made while the Members drawer is over the page', async () => {
+    windowOf(false);
+    const { panel } = await openFrom('dev');
+    fireEvent.click(panel.getByRole('button', { name: 'Make link' }));
+    const link = await panel.findByLabelText<HTMLInputElement>('Invite link');
+    const url = link.value;
+    expect(url).toContain('conch_inv_');
+    fireEvent.click(screen.getByRole('button', { name: 'Members' }));
+    const members = screen.getByRole('region', { name: 'Members list' });
+    expect(document.getElementById('invites-body')?.hasAttribute('hidden')).toBe(true);
+    fireEvent.keyDown(members, { key: 'Escape' });
+    expect(document.getElementById('invites-body')?.hasAttribute('hidden')).toBe(false);
+    expect(panel.getByLabelText<HTMLInputElement>('Invite link').value).toBe(url);
+  });
+
+  it('opens the generic panel after closing a channel invite', async () => {
+    const { panel } = await openFrom('dev');
+    expect(panel.getByText(scope)).toBeDefined();
+    fireEvent.keyDown(panel.getByRole('button', { name: 'Make link' }), { key: 'Escape' });
+    fireEvent.click(panel.getByRole('button', { name: 'Invite someone' }));
+    expect(panel.queryByText(scope)).toBeNull();
+    expect(panel.getByRole('button', { name: 'Make link' })).toBeDefined();
   });
 });
 

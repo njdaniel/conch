@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import type { Feeds } from '../../main/api/feeds.ts';
 import type { Files } from '../../main/files.ts';
 import type { Service } from '../../main/api/service.ts';
-import { Diagnostics, diagnosticsLogger, LogRing } from '../../main/diagnostics.ts';
+import { Diagnostics, DiagnosticSamples, diagnosticsLogger, LogRing, RING_LINES, type MainLog } from '../../main/diagnostics.ts';
 import { DocumentGate } from '../../main/document.ts';
 import { Gestures, LINK_GESTURE_MS } from '../../main/gestures.ts';
 import { checkCaller, Ipc, parseRequest, plain, type CompanionApi, type DiagnosticsApi, type InstalledApi, type IntegrationsApi, type InvitesApi, type NotificationsApi, type ProfilesApi, type VoiceApi, type SettingsApi, type ContentsLike, type FrameLike, type InvokeEvent } from '../../main/ipc.ts';
@@ -37,7 +37,7 @@ interface Fixture {
   replaceWindow(): InvokeEvent;
 }
 
-function fixture(realGestures?: Gestures, diagnostics?: DiagnosticsApi): Fixture {
+function fixture(realGestures?: Gestures, makeDiagnostics?: (ring: LogRing, log: MainLog) => DiagnosticsApi): Fixture {
   const main = frame();
   const contents = Object.assign(new EventEmitter(), { destroyed: false, mainFrame: main, isDestroyed() { return this.destroyed; } });
   const gate = new DocumentGate();
@@ -58,6 +58,7 @@ function fixture(realGestures?: Gestures, diagnostics?: DiagnosticsApi): Fixture
   } });
   const logs: string[] = [];
   const ring = new LogRing();
+  const log = diagnosticsLogger(ring, (line) => logs.push(line));
   const clock = { now: 1_000_000 };
   const input = { recent: false };
   const files = new Proxy({} as Files, { get: (_t, name: string) => record(`files.${name}`) });
@@ -75,7 +76,8 @@ function fixture(realGestures?: Gestures, diagnostics?: DiagnosticsApi): Fixture
   const installed = new Proxy({} as InstalledApi, { get: (_t, name: string) => record(`installed.${name}`) });
   const share = new ShareAllowance({ now: () => clock.now, generation: () => gate.generation });
   let owned: ContentsLike = contents;
-  const ipc = new Ipc({ owned: () => owned, gate, service, feeds, files, gestures, profiles, voice, invites, notifications, settings, integrations, companion, share, installed, ...(diagnostics === undefined ? {} : { diagnostics }), now: () => clock.now, log: diagnosticsLogger(ring, (line) => logs.push(line)) });
+  const diagnostics = makeDiagnostics?.(ring, log);
+  const ipc = new Ipc({ owned: () => owned, gate, service, feeds, files, gestures, profiles, voice, invites, notifications, settings, integrations, companion, share, installed, ...(diagnostics === undefined ? {} : { diagnostics }), now: () => clock.now, log });
   return {
     ipc, gate, contents, main, calls, logs, ring, clock, permit, input, share, activation,
     event: (over = {}) => ({ sender: owned, senderFrame: owned.mainFrame, ...over }),
@@ -249,6 +251,33 @@ describe('every invocation is checked before anything else', () => {
     const event = f.event({ senderFrame: null });
     await f.ipc.invoke(event, 'no-such-function', [() => 1]);
     expect(f.logs[0]).toContain('(frame)');
+  });
+});
+
+// The "Keep me signed in on this computer" choice (issue #2077): one boolean,
+// handed to the profiles as it is, and nothing else accepted.
+describe('profileKeep', () => {
+  it.each([true, false])('hands the choice %s to the profiles after the person’s act', async (keep) => {
+    const f = fixture();
+    f.input.recent = true;
+    expect((await f.ipc.invoke(f.event(), 'profileKeep', [keep])).ok).toBe(true);
+    expect(f.calls).toEqual([['profiles.setKeep', [keep]]]);
+  });
+
+  // Off keeps less, so a script may say it; on keeps more, so only a click may.
+  it('turns keeping off without an act, and refuses to turn it on without one', async () => {
+    const f = fixture();
+    f.input.recent = false;
+    expect((await f.ipc.invoke(f.event(), 'profileKeep', [false])).ok).toBe(true);
+    expect(await f.ipc.invoke(f.event(), 'profileKeep', [true])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toEqual([['profiles.setKeep', [false]]]);
+    expect(f.logs.join('\n')).toContain('(gesture)');
+  });
+
+  it.each([[[]], [['true']], [[1]], [[{ keep: true }]], [[true, false]], [[null]]])('refuses %j', async (args) => {
+    const f = fixture();
+    expect(await f.ipc.invoke(f.event(), 'profileKeep', args)).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toEqual([]);
   });
 });
 
@@ -1475,25 +1504,56 @@ describe('the settings family (issue #1587)', () => {
   });
 });
 
+function diagnosticsFor(ring: LogRing, log: MainLog, written?: [string, string][]): Diagnostics {
+  return new Diagnostics({
+    ring,
+    samples: new DiagnosticSamples(),
+    versions: {},
+    now: () => new Date(0),
+    chooseSavePath: () => Promise.resolve('/tmp/chosen.txt'),
+    writeFile: (path, bytes) => {
+      written?.push([path, new TextDecoder().decode(bytes)]);
+      return Promise.resolve();
+    },
+    downloadsDir: () => '/tmp',
+    join: (...parts) => parts.join('/'),
+    isAbsolute: (path) => path.startsWith('/'),
+    log,
+  });
+}
+
 describe('the diagnostics bundle (issue #2084)', () => {
+  // burn.mjs exhausted two sampling sequences, then churn removed their
+  // earlier samples. The preview still needs the count for each reason.
+  it.each([
+    { laterRate: 60_000, total: 130_060, rate: 130_000, rateLines: [] },
+    { laterRate: 62_000, total: 132_060, rate: 132_000, rateLines: ['conch-desktop: refused an IPC call (rate); 131132 so far'] },
+  ])('shows refusal totals after eviction and $laterRate more rate refusals', async ({ laterRate, total, rate, rateLines }) => {
+    const f = fixture(undefined, diagnosticsFor);
+    const event = f.event();
+    const preview = () => f.ipc.invoke(event, 'diagnosticsPreview', []);
+    const refusalLines = () => f.ring.lines().filter((line) => line.includes('refused an IPC call'));
+
+    for (let n = 0; n < 30 + 70_000; n++) await preview();
+    expect(refusalLines()).toHaveLength(22);
+    for (let n = 0; n < RING_LINES; n++) f.ring.record('conch-desktop: intervening log line');
+    expect(refusalLines()).toEqual([]);
+
+    f.clock.now += 61_000;
+    for (let n = 0; n < 30 + laterRate; n++) await preview();
+    f.clock.now += 61_000;
+    f.input.recent = true;
+    const result = await preview();
+    if (!result.ok) throw new Error('preview refused');
+    const shown = result.value as ReturnType<Diagnostics['preview']>;
+    expect(refusalLines()).toEqual(['conch-desktop: refused an IPC call (gesture); 70032 so far', ...rateLines]);
+    expect(shown.text).toContain(`IPC refusals since start: ${String(total)} (rate ${String(rate)}, gesture 60)\n`);
+  });
+
   it('saves the preview selected by ID only after the person’s own input', async () => {
-    const ring = new LogRing();
     const written: [string, string][] = [];
-    const diagnostics = new Diagnostics({
-      ring,
-      versions: {},
-      now: () => new Date(0),
-      chooseSavePath: () => Promise.resolve('/tmp/chosen.txt'),
-      writeFile: (path, bytes) => {
-        written.push([path, new TextDecoder().decode(bytes)]);
-        return Promise.resolve();
-      },
-      downloadsDir: () => '/tmp',
-      join: (...parts) => parts.join('/'),
-      isAbsolute: (path) => path.startsWith('/'),
-      log: () => undefined,
-    });
-    const f = fixture(new Gestures(() => 0), diagnostics);
+    const f = fixture(new Gestures(() => 0), (ring, log) => diagnosticsFor(ring, log, written));
+    const { ring } = f;
     ring.record('first preview');
     const refusedPreview = { ok: false, kind: 'refused' };
     // The preview is main's log: no page script reads it without the person's input.
@@ -1503,7 +1563,8 @@ describe('the diagnostics bundle (issue #2084)', () => {
     if (!first.ok) throw new Error('preview refused');
     const shown = first.value as ReturnType<Diagnostics['preview']>;
     expect(shown.text).toContain('first preview');
-    expect(shown.text).toContain('IPC refusals since start: 1\n');
+    expect(shown.text).toContain('IPC refusals since start: 1 (gesture 1)\n');
+    expect(shown.text).toContain('Renderer diagnostics since start: 0\n');
     ring.record('second preview');
     // Even a silent rate refusal contributes to the live header.
     for (let i = 0; i < 60; i++) expect((await f.ipc.invoke(f.event(), 'reportVoiceDiagnostic', ['sdk-warning'])).ok).toBe(true);
@@ -1514,7 +1575,9 @@ describe('the diagnostics bundle (issue #2084)', () => {
     const newer = second.value as ReturnType<Diagnostics['preview']>;
     expect(newer.id).not.toBe(shown.id);
     expect(newer.text).toContain('second preview');
-    expect(newer.text).toContain('IPC refusals since start: 2\n');
+    expect(newer.text).toContain('IPC refusals since start: 2 (gesture 1, rate 1)\n');
+    expect(newer.text).toContain('Renderer diagnostics since start: 60 (sdk-warning 60)\n');
+    expect(ring.lines().filter((line) => line.includes('voice renderer'))).toHaveLength(1);
 
     const refused = { ok: false, kind: 'refused' };
     expect(await f.ipc.invoke(f.event(), 'diagnosticsPreview', ['x'])).toEqual(refused);

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -95,7 +96,9 @@ func (f *provenanceFixture) guardedStandIn(t *testing.T) http.Handler {
 	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	})
-	return f.srv.authMiddleware(f.srv.guard(route{pattern: selfMadeStandIn, access: accessAuthenticated, handler: ok}))
+	mux := http.NewServeMux()
+	mux.Handle(selfMadeStandIn, f.srv.guard(route{pattern: selfMadeStandIn, access: accessAuthenticated, handler: ok}))
+	return f.srv.authMiddleware(mux)
 }
 
 var pathParam = regexp.MustCompile(`\{[^}]+\}`)
@@ -112,7 +115,9 @@ func requestFor(pattern, token string) *http.Request {
 func answerCode(t *testing.T, rec *httptest.ResponseRecorder) string {
 	t.Helper()
 	var e schema.Error
-	if rec.Code < 400 {
+	// 426 is a socket route asked for a plain GET by a credential that
+	// passed: its answer is text, and it is not a refusal.
+	if rec.Code < 400 || rec.Code == http.StatusUpgradeRequired {
 		return ""
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &e); err != nil {
@@ -127,9 +132,12 @@ func answerCode(t *testing.T, rec *httptest.ResponseRecorder) string {
 // operator's act-as credential, the redemption of a sign-in link an
 // operator made, and a credential from before the provenance migration
 // (issue #2042). A self-made credential is never refused on that ground;
-// what the route then answers is the route's own.
+// what the route then answers is the route's own. An agent is refused first,
+// with 403 forbidden audited agents_use_mcp, never own_sign_in_required
+// (issue #2098); a guest is a person and gets the person's answers.
 func TestSelfMadeCredentialRoutesRefuseOthers(t *testing.T) {
 	f := newProvenanceFixture(t)
+	guest := f.seedGuest(t, "Pat")
 	standIn := f.guardedStandIn(t)
 	patterns := []string{selfMadeStandIn}
 	for p := range selfMadeCredentialRoutes {
@@ -146,17 +154,38 @@ func TestSelfMadeCredentialRoutesRefuseOthers(t *testing.T) {
 			name  string
 			token string
 			self  bool
+			agent bool // refused first, 403 forbidden
 		}{
-			{"own sign-in", f.joinerTok, true},
-			{"owner's own bootstrap", f.rootTok, true},
-			{"act-as credential", f.actAsTok, false},
-			{"someone else's sign-in link", f.linkTok, false},
-			{"migrated credential", f.migratedTok, false},
+			{"own sign-in", f.joinerTok, true, false},
+			{"owner's own bootstrap", f.rootTok, true, false},
+			{"act-as credential", f.actAsTok, false, false},
+			{"someone else's sign-in link", f.linkTok, false, false},
+			{"migrated credential", f.migratedTok, false, false},
+			{"agent (credential made by another)", f.botTok, false, true},
+			{"guest's own visit", guest.Token, true, false},
 		} {
 			t.Run(pattern+"/"+tt.name, func(t *testing.T) {
+				var auditBefore int64
+				if tt.agent {
+					var err error
+					auditBefore, err = f.srv.store.LastAuditID(t.Context())
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
 				rec := httptest.NewRecorder()
 				serve(rec, requestFor(pattern, tt.token))
 				code := answerCode(t, rec)
+				if tt.agent {
+					if rec.Code != http.StatusForbidden || code != errForbidden.Code {
+						t.Fatalf("agent got %d %s (%s); want 403 forbidden", rec.Code, code, rec.Body.String())
+					}
+					if strings.Contains(rec.Body.String(), "sign in") {
+						t.Errorf("the agent was told to sign in: %s", rec.Body.String())
+					}
+					f.wantAgentDenial(t, auditBefore, f.bot.ID, pattern, denyAgentOnHumanRoute)
+					return
+				}
 				refused := rec.Code == http.StatusForbidden && code == schema.ErrorCodeOwnSignInRequired
 				if refused == tt.self {
 					t.Fatalf("answer %d %s (%s); want refused %v", rec.Code, code, rec.Body.String(), !tt.self)
@@ -165,6 +194,33 @@ func TestSelfMadeCredentialRoutesRefuseOthers(t *testing.T) {
 					t.Errorf("the stand-in answered %d %q to a self-made credential", rec.Code, rec.Body.String())
 				}
 			})
+		}
+	}
+}
+
+// The routes that must be in selfMadeCredentialRoutes, each added by the
+// issue that registers it (#2047's comment: "each adds its routes here in
+// the same change"). A route dropped from the list silently opens a person's
+// DMs to an operator's credential, so each is named here and
+// TestSelfMadeCredentialRoutesRefuseOthers drives it with every token kind.
+func TestSelfMadeCredentialRoutesIncludeRequired(t *testing.T) {
+	for _, pattern := range []string{
+		"GET /v1/events/person/ws",         // the per-person stream (#2040)
+		"POST /v1/dms",                     // open or resume (#2019)
+		"GET /v1/dms",                      // the inbox
+		"GET /v1/dms/{conversation}",       // one conversation
+		"PUT /v1/dms/{conversation}/state", // per-viewer archive, hide, reopen
+		// The private call routes (#2030).
+		"POST /v1/dms/{conversation}/calls",
+		"GET /v1/dms/{conversation}/calls",
+		"GET /v1/calls/current",
+		"POST /v1/calls/{call}/accept",
+		"POST /v1/calls/{call}/decline",
+		"POST /v1/calls/{call}/cancel",
+		"POST /v1/calls/{call}/hangup",
+	} {
+		if !selfMadeCredentialRoutes[pattern] {
+			t.Errorf("%s is not in selfMadeCredentialRoutes", pattern)
 		}
 	}
 }
@@ -217,6 +273,8 @@ func TestSelfMadeCredentialCheck(t *testing.T) {
 			withPreview(withRequestCredential(withCaller(ctx, f.joiner), store.RequestCredential{ID: idOf(f.rootTok), SelfMade: true}),
 				previewContext{Actor: f.root, Target: f.joiner}),
 			http.StatusForbidden, schema.ErrorCodeOwnSignInRequired},
+		{"agent, on a ticket", f.srv, withCredentialID(withCaller(ctx, f.bot), idOf(f.botTok)), http.StatusForbidden, errForbidden.Code},
+		{"agent, no credential", f.srv, withCaller(ctx, f.bot), http.StatusForbidden, errForbidden.Code},
 		{"caller and no credential", f.srv, withCaller(ctx, f.joiner), http.StatusUnauthorized, ""},
 		{"no caller", f.srv, ctx, http.StatusUnauthorized, ""},
 		{"authentication off", newTestServer(t), ctx, http.StatusOK, ""},
@@ -244,9 +302,22 @@ func TestSelfMadeCredentialCheck(t *testing.T) {
 // Every route in selfMadeCredentialRoutes is registered, authenticated
 // (an exempt route has no credential to judge), not previewable (a preview
 // reads as the member, which these routes exist to prevent) and out of the
-// setup scope.
+// setup scope. Every registered DM and call route is covered unless exempted.
 func TestSelfMadeCredentialRoutes(t *testing.T) {
 	srv := newTestServerWithConfig(t, Config{AuthMode: AuthRequired})
+	// Future operator switch routes may be exempted by their full pattern,
+	// with a comment explaining the operator permission that gates each one.
+	dmAndCallCredentialExemptions := map[string]bool{}
+	for pattern := range srv.routeByPattern {
+		path := pattern
+		if _, rest, ok := strings.Cut(pattern, " "); ok {
+			path = rest
+		}
+		if (strings.HasPrefix(path, "/v1/dms") || strings.HasPrefix(path, "/v1/calls")) &&
+			!dmAndCallCredentialExemptions[pattern] && !selfMadeCredentialRoutes[pattern] {
+			t.Errorf("registered DM or call route %s is missing from selfMadeCredentialRoutes", pattern)
+		}
+	}
 	for pattern := range selfMadeCredentialRoutes {
 		rt, ok := srv.routeByPattern[pattern]
 		switch {
@@ -259,5 +330,24 @@ func TestSelfMadeCredentialRoutes(t *testing.T) {
 		case setupScopeRoutes[pattern]:
 			t.Errorf("%s is in the setup scope", pattern)
 		}
+	}
+}
+
+// wantAgentDenial checks the request wrote exactly one access_denied row,
+// naming the agent, route and reason.
+func (f *provenanceFixture) wantAgentDenial(t *testing.T, afterID, agentID int64, subject, reason string) {
+	t.Helper()
+	events, err := f.srv.store.ListAuditEvents(t.Context(), afterID, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	denials := slices.DeleteFunc(events, func(e store.AuditEvent) bool { return e.Action != "access_denied" })
+	if len(denials) != 1 {
+		t.Fatalf("got %d new access_denied rows for %s, want 1: %+v", len(denials), subject, denials)
+	}
+	actor := "principal:" + strconv.FormatInt(agentID, 10)
+	e := denials[0]
+	if e.Actor != actor || e.Subject != subject || !slices.Contains(strings.Fields(e.Detail), "reason="+reason) {
+		t.Errorf("access_denied actor=%q subject=%q detail=%q, want actor=%q subject=%q reason=%q", e.Actor, e.Subject, e.Detail, actor, subject, reason)
 	}
 }

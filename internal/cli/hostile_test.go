@@ -165,6 +165,13 @@ func walkCases(t *testing.T) []walkCase {
 	t.Helper()
 	return []walkCase{
 		{key: "send", quietWhenOK: true, whoamiOK: true, args: func(u, _ string) []string { return []string{"send", "--server", u, "general", "hello"} }},
+		{key: "dm list", ownWords: true, args: func(u, _ string) []string { return []string{"dm", "list", "--server", u} }},
+		{key: "dm open", ownWords: true, args: func(u, _ string) []string { return []string{"dm", "open", "--server", u, "9"} }},
+		{key: "dm send", ownWords: true, quietWhenOK: true, args: func(u, _ string) []string { return []string{"dm", "send", "--server", u, "7", "hello"} }},
+		{key: "dm history", ownWords: true, args: func(u, _ string) []string { return []string{"dm", "history", "--server", u, "7"} }},
+		{key: "dm mark-read", ownWords: true, quietWhenOK: true, args: func(u, _ string) []string { return []string{"dm", "mark-read", "--server", u, "7", "9"} }},
+		{key: "dm edit", ownWords: true, quietWhenOK: true, args: func(u, _ string) []string { return []string{"dm", "edit", "--server", u, "7", "9", "new text"} }},
+		{key: "dm remove", ownWords: true, quietWhenOK: true, args: func(u, _ string) []string { return []string{"dm", "remove", "--server", u, "7", "9"} }},
 		{key: "tail", args: func(u, _ string) []string { return []string{"tail", "--server", u, "general"} }},
 		{key: "search", args: func(u, _ string) []string { return []string{"search", "--server", u, "general", "hello"} }},
 		{key: "thread", args: func(u, _ string) []string { return []string{"thread", "--server", u, "general", "3"} }},
@@ -384,7 +391,7 @@ func usageCommands(t *testing.T) []string {
 		fields := strings.Fields(rest)
 		key := fields[0]
 		switch key {
-		case "nets", "voice", "audit", "approvals", "join", "account", "password", "device-link", "channels":
+		case "nets", "voice", "audit", "approvals", "join", "account", "password", "device-link", "channels", "dm":
 			key += " " + fields[1]
 		case "admin":
 			key += " " + fields[1]
@@ -415,7 +422,35 @@ func hostileServer(t *testing.T, ok, whoamiOK bool) *httptest.Server {
 			write(w, http.StatusForbidden, schema.Error{Code: "bad" + esc + "[31m" + rlo, Message: hostile, Permission: schema.Permission(hostile)})
 			return
 		}
+		dm := schema.DMConversationV1{
+			Schema: schema.DMConversationSchemaV1, ID: 7, ParticipantIDs: []int64{9, 42}, PeerID: 9,
+			PeerName: hostile, State: schema.DMStateOpen, CreatedAt: &ts, LastMessageAt: &ts,
+			LastMessageID: 9, Revision: 1,
+		}
+		dmMessage := schema.DMMessageV1{
+			Schema: schema.DMMessageSchemaV1, ID: 9, ConversationID: 7,
+			AuthorID: 42, CreatedAt: ts, Revision: 1, Body: hostile,
+		}
 		switch key {
+		case "GET /v1/dms":
+			write(w, http.StatusOK, schema.ListDMConversationsResponseV1{Conversations: []schema.DMConversationV1{dm}})
+		case "POST /v1/dms":
+			write(w, http.StatusOK, schema.OpenDMResponseV1{Conversation: dm})
+		case "GET /v1/dms/7":
+			write(w, http.StatusOK, dm)
+		case "GET /v1/dms/7/messages":
+			write(w, http.StatusOK, schema.ListDMMessagesResponseV1{Order: schema.DMOrderDesc, Messages: []schema.DMMessageV1{dmMessage}})
+		case "POST /v1/dms/7/messages":
+			// A send's answer carries the author's client nonce (#2046's contract).
+			sent := dmMessage
+			sent.ClientNonce = "hostile-test-nonce"
+			write(w, http.StatusCreated, schema.PostDMMessageResponseV1{Message: sent})
+		case "PUT /v1/dms/7/read-state":
+			write(w, http.StatusOK, schema.DMReadStateV1{Schema: schema.DMReadStateSchemaV1, ConversationID: 7, LastReadID: 9})
+		case "PATCH /v1/dms/7/messages/9":
+			write(w, http.StatusOK, schema.EditDMMessageResponseV1{Message: dmMessage})
+		case "DELETE /v1/dms/7/messages/9":
+			w.WriteHeader(http.StatusNoContent)
 		case "GET /v1/whoami":
 			write(w, http.StatusOK, schema.WhoAmIResponseV1{ID: 42, Kind: schema.PrincipalKind(hostile), Name: hostile, Role: schema.PrincipalRole(hostile), Permissions: []schema.Permission{schema.Permission(hostile), schema.PermUseVoice}, PermissionsRevision: 1})
 		case "POST /v2/channels/general/messages":

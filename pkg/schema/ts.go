@@ -88,7 +88,11 @@ var TSConstants = []TSConstant{
 	{Name: "VOICE_CONTROL_MAX_HELPER_VERSION_BYTES", Value: VoiceControlMaxHelperVersionBytes},
 	{Name: "VOICE_CONTROL_MAX_SERVER_BYTES", Value: VoiceControlMaxServerBytes},
 	{Name: "VOICE_CONTROL_MAX_CHANNEL_BYTES", Value: VoiceControlMaxChannelBytes},
+	{Name: "VOICE_CONTROL_MAX_SHARE_AUDIO_STREAMS", Value: VoiceControlMaxShareAudioStreams},
+	{Name: "VOICE_CONTROL_MAX_SHARE_AUDIO_LABEL_BYTES", Value: VoiceControlMaxShareAudioLabelBytes},
 	{Name: "VOICE_CONTROL_MAX_RETRY_IN_MS", Value: VoiceControlMaxRetryInMS},
+	{Name: "VOICE_CONTROL_V4_MIN_LEVEL_DB", Value: VoiceControlV4MinLevelDB},
+	{Name: "VOICE_CONTROL_V4_MAX_LOSS_BASIS_POINTS", Value: VoiceControlV4MaxLossBasisPoints},
 	{Name: "VOICE_CONTROL_HELLO_TIMEOUT_MS", Value: VoiceControlHelloTimeoutMS},
 	{Name: "VOICE_CONTROL_ACK_TIMEOUT_MS", Value: VoiceControlAckTimeoutMS},
 	{Name: "VOICE_CONTROL_GATE_SHUT_MS", Value: VoiceControlGateShutMS},
@@ -136,6 +140,17 @@ var TSConstants = []TSConstant{
 	{Name: "MAX_DM_CLIENT_NONCE_BYTES", Value: MaxDMClientNonceBytes},
 	{Name: "DM_CLIENT_NONCE_WINDOW_SECONDS", Value: DMClientNonceWindowSeconds},
 	{Name: "MAX_DM_CURSOR_BYTES", Value: MaxDMCursorBytes},
+
+	// Private calls (issue #2029, DRAFT pending ADR-017): the timings a call
+	// screen may show, and the bounds a client must not exceed.
+	{Name: "PRIVATE_CALL_RING_SECONDS", Value: PrivateCallRingSeconds},
+	{Name: "PRIVATE_CALL_JOIN_SECONDS", Value: PrivateCallJoinSeconds},
+	{Name: "PRIVATE_CALL_RECONNECT_GRACE_SECONDS", Value: PrivateCallReconnectGraceSeconds},
+	{Name: "PRIVATE_CALL_ACTION_WINDOW_SECONDS", Value: PrivateCallActionWindowSeconds},
+	{Name: "MIN_PRIVATE_CALL_ID_BYTES", Value: MinPrivateCallIDBytes},
+	{Name: "MAX_PRIVATE_CALL_ID_BYTES", Value: MaxPrivateCallIDBytes},
+	{Name: "MAX_PRIVATE_CALL_ACTION_ID_BYTES", Value: MaxPrivateCallActionIDBytes},
+	{Name: "MAX_PRIVATE_CALL_HISTORY_PAGE", Value: MaxPrivateCallHistoryPage},
 }
 
 // TSTypes is every struct the web client reads or sends, and the refusal
@@ -244,6 +259,10 @@ var TSTypes = []TSType{
 	{Value: VoiceParticipantV2{}},
 	{Value: VoicePresenceRoomV2{}},
 	{Value: VoicePresenceV2{}, Family: "voice-presence-v2", Schema: VoicePresenceSchemaV2},
+	{Value: VoiceShareQualityV3{}},
+	{Value: VoiceParticipantV3{}},
+	{Value: VoicePresenceRoomV3{}},
+	{Value: VoicePresenceV3{}, Family: "voice-presence-v3", Schema: VoicePresenceSchemaV3},
 	{Value: VoiceTransmitReportV1{}, Family: "voice-transmit-report-v1"},
 	// Companion and viewer participants (issue #933).
 	{Value: VoiceCompanionRequestV1{}, Family: "voice-companion-request-v1"},
@@ -259,6 +278,8 @@ var TSTypes = []TSType{
 	{Value: VoiceShareRequestV1{}, Family: "voice-share-request-v1"},
 	{Value: VoiceShareV1{}, Family: "voice-share-v1"},
 	{Value: VoiceShareV2{}, Family: "voice-share-v2"},
+	{Value: VoiceShareRequestV2{}, Family: "voice-share-request-v2"},
+	{Value: VoiceShareV3{}, Family: "voice-share-v3"},
 	// The camera claim (ADR-015, issue #1238): the page may publish a camera
 	// while conchd holds it. Presence says who has one (VoiceParticipant).
 	{Value: VoiceCameraV1{}, Family: "voice-camera-v1"},
@@ -303,8 +324,30 @@ var TSTypes = []TSType{
 	{Value: VoiceControlSetShareAudioV3{}, Schema: VoiceControlSchemaV3},
 	{Value: VoiceControlSetShareAudioMuteV3{}, Schema: VoiceControlSchemaV3},
 	{Value: VoiceControlAckV3{}, Schema: VoiceControlSchemaV3},
+	{Value: VoiceControlShareAudioStreamV3{}},
 	{Value: VoiceControlStateV3{}, Schema: VoiceControlSchemaV3},
 	{Value: VoiceControlProtocolErrorV3{}, Schema: VoiceControlSchemaV3},
+	// v4 (issues #2039 and #2085): a start that names a channel or a private
+	// call, microphone diagnostics and call quality. Its fixtures are in
+	// testdata/voice-control-v4/.
+	{Value: VoiceControlStartV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlSetMuteV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlSetDeafenV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlGetStateV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlLeaveV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlSetDevicesV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlSetTalkModeV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlSetShareAudioV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlSetShareAudioMuteV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlSetDiagnosticsV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlGetCallQualityV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlAckV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlProcessingV4{}},
+	{Value: VoiceControlStateV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlProtocolErrorV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlLevelsV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlGateEventV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlCallQualityV4{}, Schema: VoiceControlSchemaV4},
 	{Value: VoiceControlPipeAttachedV1{}, Schema: VoiceControlPipeSchemaV1},
 	// The device list `conch-voice devices --json` writes (issue #1378, D3-7
 	// of #771): the desktop owner reads it from a one-shot run. Its fixtures
@@ -574,6 +617,7 @@ var TSTypes = []TSType{
 	{Value: DMFileV1{}, Family: "dm-file-v1", Schema: DMFileSchemaV1},
 	{Value: DMChangedV1{}, Family: "dm-changed-v1", Schema: DMChangedSchemaV1},
 	{Value: DMSnapshotV1{}, Family: "dm-snapshot-v1", Schema: DMSnapshotSchemaV1},
+	{Value: PersonStreamHelloV1{}, Family: "person-stream-hello-v1", Schema: PersonStreamHelloSchemaV1},
 	{Value: NotificationSummaryV2{}, Family: "notification-summary-v2", Schema: NotificationSummarySchemaV2},
 	{Value: ListPendingNotificationsResponseV2{}, Family: "list-pending-notifications-response-v2"},
 	// Personal blocks (issue #1832, docs/design/blocks.md): one entry, the
@@ -581,6 +625,22 @@ var TSTypes = []TSType{
 	{Value: BlockV1{}, Family: "block-v1"},
 	{Value: ListBlocksResponseV1{}, Family: "list-blocks-response-v1"},
 	{Value: BlocksChangedV1{}, Family: "blocks-changed-v1", Schema: BlocksChangedSchemaV1},
+
+	// Private calls (issue #2029, DRAFT pending ADR-017): the attempt, the
+	// invite and action bodies, the answers, the stream's frames and
+	// snapshot, the history page and the media-join grant, the one shape that
+	// carries a room and a token.
+	{Value: PrivateCallV1{}, Family: "private-call-v1", Schema: PrivateCallSchemaV1},
+	{Value: InvitePrivateCallRequestV1{}, Family: "invite-private-call-request-v1"},
+	{Value: PrivateCallActionRequestV1{}, Family: "private-call-action-request-v1"},
+	{Value: PrivateCallResponseV1{}, Family: "private-call-response-v1"},
+	{Value: PrivateCallConflictV1{}, Family: "private-call-conflict-v1"},
+	{Value: PrivateCallSessionV1{}, Family: "private-call-session-v1", Schema: PrivateCallSessionSchemaV1},
+	{Value: PrivateCallRingingV1{}, Family: "private-call-ringing-v1", Schema: PrivateCallRingingSchemaV1},
+	{Value: PrivateCallStopRingingV1{}, Family: "private-call-stop-ringing-v1", Schema: PrivateCallStopRingingSchemaV1},
+	{Value: PrivateCallStateV1{}, Family: "private-call-state-v1", Schema: PrivateCallStateSchemaV1},
+	{Value: PrivateCallSnapshotV1{}, Family: "private-call-snapshot-v1", Schema: PrivateCallSnapshotSchemaV1},
+	{Value: ListPrivateCallsResponseV1{}, Family: "list-private-calls-response-v1"},
 
 	// The body of every refusal.
 	{Value: Error{}, Name: "ErrorV0", Family: "error"},
@@ -717,12 +777,18 @@ var TSVocabularyModes = map[string]TSVocabularyMode{
 	// act on, so the document is refused and the page says so, rather than
 	// read as some known value. PrincipalRole in particular: ADR-010 refused
 	// a third value because every client switches on it.
-	"ActivityKind":          TSStrict,
-	"ApprovalState":         TSStrict,
-	"ChannelVisibility":     TSStrict,
-	"DMAcceptPolicy":        TSStrict,
-	"DMState":               TSStrict,
-	"DMOrder":               TSStrict,
+	"ActivityKind":      TSStrict,
+	"ApprovalState":     TSStrict,
+	"ChannelVisibility": TSStrict,
+	"DMAcceptPolicy":    TSStrict,
+	"DMState":           TSStrict,
+	"DMOrder":           TSStrict,
+	// Private calls (issue #2029): the state and role are closed, so a client
+	// never reads a state it does not know as live; a reason it does not know
+	// is shown by its name.
+	"PrivateCallState":      TSStrict,
+	"PrivateCallRole":       TSStrict,
+	"PrivateCallReason":     TSTolerant,
 	"CredentialScope":       TSStrict,
 	"GuestEndReason":        TSStrict,
 	"GuestOrigin":           TSStrict,
@@ -762,8 +828,9 @@ var TSVocabularyModes = map[string]TSVocabularyMode{
 	// the picker's closed vocabulary; a new value is a new version of
 	// presence, as a new end reason is, and the page sends only what its
 	// picker offers.
-	"VoiceShareResolution": TSStrict,
-	"VoiceTransmitState":   TSStrict,
+	"VoiceShareResolution":   TSStrict,
+	"VoiceShareResolutionV3": TSStrict,
+	"VoiceTransmitState":     TSStrict,
 
 	// Strict: written by the page itself in a problem report (issue #446);
 	// the server validates what it is sent, and the page sends only what it
@@ -792,11 +859,15 @@ var TSVocabularyModes = map[string]TSVocabularyMode{
 	"VoiceDevicesConfig":      TSStrict,
 	"VoiceDevicesPipeWire":    TSStrict,
 
-	// Strict, for the same reason: version 3 of that protocol (issue #1851),
-	// its command kinds and the state of a share's sound.
-	"VoiceControlCommandKindV3":     TSStrict,
-	"VoiceControlShareAudio":        TSStrict,
-	"VoiceControlShareAudioProblem": TSStrict,
+	// Strict, for the same reason: the v3 share-audio and v4 diagnostics
+	// vocabularies and their versioned command and event kinds.
+	"VoiceControlCommandKindV3":          TSStrict,
+	"VoiceControlCommandKindV4":          TSStrict,
+	"VoiceControlEventKindV4":            TSStrict,
+	"VoiceControlGateWhyV4":              TSStrict,
+	"VoiceControlShareAudio":             TSStrict,
+	"VoiceControlShareAudioProblem":      TSStrict,
+	"VoiceControlShareAudioStreamReason": TSStrict,
 
 	// Phone push and notification preferences (issue #1712). Strict: the
 	// policy and the platform, which a client writes itself, and the end

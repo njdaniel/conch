@@ -2,11 +2,11 @@ import { describe, expect, it } from 'vitest';
 
 import { TeardownHooks } from '../../main/profiles/hooks.ts';
 import type { HealthResult } from '../../main/compat.ts';
-import { ProfilesService, type ProbeResult, type StoredCheck } from '../../main/profiles/service.ts';
+import { keepHelpFor, ProfilesService, type ProbeResult, type StoredCheck } from '../../main/profiles/service.ts';
 import { ProfileStore } from '../../main/profiles/store.ts';
 import { fakeFactory, fakeVault, memoryFiles, ORIGIN_A, ORIGIN_B, type FakeActivation, type FakeVault } from './profiles-support.ts';
 
-async function setup(options: { vault?: FakeVault; probe?: ProbeResult; stepBoundMs?: number; files?: string; vaultBoundMs?: number; verify?: (origin: string, token: string) => StoredCheck; servers?: string[]; override?: boolean; health?: () => Promise<HealthResult>; healthBoundMs?: number } = {}) {
+async function setup(options: { vault?: FakeVault; probe?: ProbeResult; stepBoundMs?: number; files?: string; vaultBoundMs?: number; verify?: (origin: string, token: string) => StoredCheck; servers?: string[]; override?: boolean; health?: (origin: string) => Promise<HealthResult>; sweepHealth?: (origin: string) => Promise<HealthResult>; healthBoundMs?: number; revoke?: (origin: string, token: string) => Promise<'ended' | 'unconfirmed' | 'unsent'>; revokeBoundMs?: number; background?: boolean } = {}) {
   const log: string[] = [];
   const files = memoryFiles(options.files);
   const store = new ProfileStore(files);
@@ -33,7 +33,12 @@ async function setup(options: { vault?: FakeVault; probe?: ProbeResult; stepBoun
     desktopVersion: '0.0.0',
     readHealth: (origin) => {
       asked.push(origin);
-      return (options.health ?? (() => Promise.resolve<HealthResult>({ kind: 'answered', version: 'v1.0.0' })))();
+      return (options.health ?? (() => Promise.resolve<HealthResult>({ kind: 'answered', version: 'v1.0.0' })))(origin);
+    },
+    // The sweep's strict question (#2217): by default what health says.
+    readSweepHealth: (origin) => {
+      asked.push(origin);
+      return (options.sweepHealth ?? options.health ?? (() => Promise.resolve<HealthResult>({ kind: 'answered', version: 'v1.0.0' })))(origin);
     },
     verifyStored: (origin, token) => {
       verified.push([origin, token]);
@@ -43,13 +48,16 @@ async function setup(options: { vault?: FakeVault; probe?: ProbeResult; stepBoun
     },
     revokeStored: (origin, token) => {
       revoked.push([origin, token]);
-      return Promise.resolve('ended');
+      return options.revoke === undefined ? Promise.resolve('ended') : options.revoke(origin, token);
     },
     ...(options.stepBoundMs === undefined ? {} : { stepBoundMs: options.stepBoundMs }),
     ...(options.vaultBoundMs === undefined ? {} : { vaultBoundMs: options.vaultBoundMs }),
     ...(options.healthBoundMs === undefined ? {} : { healthBoundMs: options.healthBoundMs }),
+    ...(options.revokeBoundMs === undefined ? {} : { revokeBoundMs: options.revokeBoundMs }),
   });
   await service.start();
+  // The sweep of #2217 runs in the background; most tests start after it.
+  if (options.background !== true) await service.swept;
   const active = (): FakeActivation => {
     const last = factory.made.at(-1);
     if (last === undefined) throw new Error('no activation');
@@ -465,7 +473,8 @@ describe('a stored credential is checked before a window holds it', () => {
     const { s, id } = await stored(() => ({ kind: 'rejected' }));
     await s.service.switchTo(id);
     expect(s.active().spec.token).toBeNull();
-    expect(s.service.view().notice).toBe('sign-in-again');
+    // The server's refusal is said as what it is (#2077): the saved sign-in ended.
+    expect(s.service.view().notice).toBe('sign-in-ended');
     await new Promise((r) => setTimeout(r, 10));
     expect(s.vault.secrets.has(id)).toBe(false);
   });
@@ -779,5 +788,688 @@ describe('server compatibility (issue #946)', () => {
     await s.service.switchTo(null);
     onInvalid('whoami');
     expect(s.service.view().compat.invalid).toBeNull();
+  });
+});
+
+// "Keep me signed in on this computer" (issue #2077), and what a restart finds.
+describe('keeping a sign-in across restarts', () => {
+  // A second service over the same profiles.json and vault: the app started again.
+  async function restart(s: Awaited<ReturnType<typeof setup>>, options: { verify?: (o: string, t: string) => StoredCheck } = {}) {
+    return setup({ vault: s.vault, files: s.files.text ?? undefined, ...options });
+  }
+  const noToken = (lines: readonly string[], token: string): void => {
+    for (const line of lines) expect(line).not.toContain(token);
+  };
+
+  it('is on by default: a member’s sign-in goes to the vault, and a restart opens signed in without a password', async () => {
+    const s = await setup();
+    const id = await addAndSwitch(s, ORIGIN_A);
+    expect(s.service.view().keep).toBe(true);
+    // The sign-in form links the Linux guide's section; main names it.
+    expect(s.service.view().keepHelp).toBe('https://github.com/njdaniel/conch/blob/main/docs/desktop/linux.md#staying-signed-in');
+    s.active().held = 'tok-ada';
+    expect(await s.service.signedIn(ADA)).toBe(true);
+    expect(s.vault.secrets.get(id)).toBe('tok-ada');
+    expect(s.log).toContain('log: conch-desktop: a sign-in was kept in the keyring');
+
+    const again = await restart(s);
+    expect(again.active().spec.profile?.id).toBe(id);
+    expect(again.active().spec.token).toBe('tok-ada');
+    expect(again.verified).toEqual([[ORIGIN_A, 'tok-ada']]);
+    expect(again.log).toContain('log: conch-desktop: a saved sign-in was restored');
+    noToken([...s.log, ...again.log], 'tok-ada');
+  });
+
+  it('unchecked: nothing is written, the sign-in lasts this run only, an older entry is deleted, and a restart asks again', async () => {
+    const s = await setup();
+    const id = await addAndSwitch(s, ORIGIN_A);
+    s.vault.secrets.set(id, 'tok-older');
+    expect((await s.service.setKeep(false)).keep).toBe(false);
+    s.active().held = 'tok-ada';
+    expect(await s.service.signedIn(ADA)).toBe(true);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(s.vault.secrets.has(id)).toBe(false);
+    expect(s.vault.calls).not.toContain(`put ${id}`);
+    // This run keeps it in memory: a switch away and back is still signed in.
+    await s.service.switchTo(null);
+    await s.service.switchTo(id);
+    expect(s.active().spec.token).toBe('tok-ada');
+    // "Don't keep" holds for the profile for this run: its later window
+    // shows it, and a sign-out ends it.
+    expect(s.service.view().keep).toBe(false);
+
+    const again = await restart(s);
+    expect(again.active().spec.token).toBeNull();
+    expect(again.log).toContain('log: conch-desktop: no saved sign-in for this server');
+  });
+
+  it('names help only where the platform’s guide covers staying signed in', () => {
+    expect(keepHelpFor('linux')).toMatch(/^https:\/\/github\.com\/njdaniel\/conch\/blob\/main\/docs\/desktop\/linux\.md#staying-signed-in$/);
+    expect(keepHelpFor('win32')).toBeNull();
+    expect(keepHelpFor('darwin')).toBeNull();
+  });
+
+  it('"don\u2019t keep" survives a switch away and back: a password change there (a rotated credential) is not put either', async () => {
+    const s = await setup();
+    const id = await addAndSwitch(s, ORIGIN_A);
+    await s.service.setKeep(false);
+    s.active().held = 'tok-ada';
+    await s.service.signedIn(ADA);
+    await s.service.switchTo(null);
+    await s.service.switchTo(id);
+    expect(s.active().spec.token).toBe('tok-ada');
+    // The new window shows no box; its password change rotates the credential
+    // and comes back through signedIn, as replaceCredential does.
+    s.active().held = 'tok-ada-rotated';
+    expect(await s.service.signedIn(ADA)).toBe(true);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(s.vault.calls).not.toContain(`put ${id}`);
+    expect(s.vault.secrets.has(id)).toBe(false);
+    expect(s.service.view().keep).toBe(false);
+    // A sign-out ends the choice: the next sign-in form starts kept again.
+    await s.service.signOut();
+    expect(s.service.view().keep).toBe(true);
+  });
+
+  it('turned off while the keep\u2019s write is on its way, what it wrote comes out and the sign-in lasts this run', async () => {
+    const vault = fakeVault();
+    let open: () => void = () => undefined;
+    vault.putGate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const s = await setup({ vault });
+    const id = await addAndSwitch(s, ORIGIN_A);
+    s.active().held = 'tok-ada';
+    const signing = s.service.signedIn(ADA);
+    await new Promise((r) => setTimeout(r, 5));
+    const turningOff = s.service.setKeep(false);
+    open();
+    await signing;
+    await turningOff;
+    await new Promise((r) => setTimeout(r, 10));
+    expect(vault.secrets.has(id)).toBe(false);
+    expect(s.service.view().keep).toBe(false);
+    await s.service.switchTo(null);
+    await s.service.switchTo(id);
+    expect(s.active().spec.token).toBe('tok-ada');
+    expect((await restart(s)).active().spec.token).toBeNull();
+  });
+
+  it('turned off again while turning it back on is writing, nothing stays in the vault', async () => {
+    const vault = fakeVault();
+    const s = await setup({ vault });
+    const id = await addAndSwitch(s, ORIGIN_A);
+    await s.service.setKeep(false);
+    s.active().held = 'tok-ada';
+    await s.service.signedIn(ADA);
+    await new Promise((r) => setTimeout(r, 10));
+    let open: () => void = () => undefined;
+    vault.putGate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const on = s.service.setKeep(true);
+    await new Promise((r) => setTimeout(r, 5));
+    const off = s.service.setKeep(false);
+    open();
+    await on;
+    await off;
+    await new Promise((r) => setTimeout(r, 10));
+    expect(vault.secrets.has(id)).toBe(false);
+    expect(s.service.view().keep).toBe(false);
+    // And Retry does not put it later.
+    await s.service.retry();
+    expect(vault.secrets.has(id)).toBe(false);
+  });
+
+  // A write the bound reported failed may still land (review of 59ce6835):
+  // with the choice off, it never stays in the vault.
+  function lateVault() {
+    const vault = fakeVault();
+    let land: () => void = () => undefined;
+    vault.putGate = new Promise<void>((resolve) => {
+      land = resolve;
+    });
+    return {
+      vault,
+      land: () => {
+        land();
+      },
+    };
+  }
+  const later = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  it('on, then off while the write is pending past the bound: the write that lands late is deleted', async () => {
+    const { vault, land } = lateVault();
+    const s = await setup({ vault, vaultBoundMs: 20 });
+    const id = await addAndSwitch(s, ORIGIN_A);
+    await s.service.setKeep(false);
+    vault.putGate = null;
+    s.active().held = 'tok-ada';
+    await s.service.signedIn(ADA);
+    const late = lateVault();
+    vault.putGate = late.vault.putGate;
+    const on = s.service.setKeep(true);
+    await later(5);
+    const off = s.service.setKeep(false);
+    await on;
+    // The bound has passed: the write was reported failed, and is still on its way.
+    late.land();
+    land();
+    await off;
+    await later(10);
+    expect(vault.secrets.has(id)).toBe(false);
+    expect(s.service.view().keep).toBe(false);
+  });
+
+  it('a sign-in whose write lands after the bound, then off: the late write is deleted', async () => {
+    const { vault, land } = lateVault();
+    const s = await setup({ vault, vaultBoundMs: 20 });
+    const id = await addAndSwitch(s, ORIGIN_A);
+    s.active().held = 'tok-ada';
+    await s.service.signedIn(ADA);
+    expect(s.service.view().notice).toBe('not-kept');
+    const off = s.service.setKeep(false);
+    land();
+    await off;
+    await later(10);
+    expect(vault.secrets.has(id)).toBe(false);
+    expect((await restart(s)).active().spec.token).toBeNull();
+  });
+
+  it('a sign-out while turning it back on is writing leaves no stale "don\u2019t keep": the next form starts kept', async () => {
+    const { vault, land } = lateVault();
+    vault.putGate = null;
+    const s = await setup({ vault });
+    const id = await addAndSwitch(s, ORIGIN_A);
+    await s.service.setKeep(false);
+    s.active().held = 'tok-ada';
+    await s.service.signedIn(ADA);
+    const gate = lateVault();
+    vault.putGate = gate.vault.putGate;
+    const on = s.service.setKeep(true);
+    await later(5);
+    await s.service.signOut();
+    gate.land();
+    land();
+    await on;
+    await later(10);
+    expect(s.service.view().keep).toBe(true);
+    expect(vault.secrets.has(id)).toBe(false);
+  });
+
+  it('keeps only the credential the sign-in put in force: one that replaced it while the binding was written is not kept by this call', async () => {
+    const s = await setup();
+    const id = await addAndSwitch(s, ORIGIN_A);
+    s.active().held = 'tok-first';
+    const first = s.service.signedIn(ADA);
+    // Another credential is put in force before the first call's binding returns.
+    s.active().held = 'tok-second';
+    expect(await first).toBe(true);
+    expect(s.vault.secrets.has(id)).toBe(false);
+    // The later sign-in's own call keeps its own credential.
+    await s.service.signedIn(ADA);
+    expect(s.vault.secrets.get(id)).toBe('tok-second');
+  });
+
+  it('a pasted credential is kept only if it is still the one whoami was asked about', async () => {
+    const s = await setup();
+    const id = await addAndSwitch(s, ORIGIN_A);
+    const active = s.active();
+    active.held = 'tok-pasted';
+    let answer: (a: typeof ADA) => void = () => undefined;
+    active.whoami = () =>
+      new Promise((resolve) => {
+        answer = resolve;
+      });
+    const kept = s.service.keptCredential();
+    active.held = 'tok-other';
+    answer(ADA);
+    expect(await kept).toBe(true);
+    expect(s.vault.secrets.has(id)).toBe(false);
+  });
+
+  it('Retry never puts a sign-in the person chose not to keep', async () => {
+    const vault = fakeVault({ kind: 'sessionOnly', reason: 'no-keyring' });
+    const s = await setup({ vault });
+    const id = await addAndSwitch(s, ORIGIN_A);
+    await s.service.setKeep(false);
+    s.active().held = 'tok-ada';
+    await s.service.signedIn(ADA);
+    vault.classification = { kind: 'protected' };
+    expect((await s.service.retry()).storage).toEqual({ kind: 'protected' });
+    expect(vault.secrets.has(id)).toBe(false);
+  });
+
+  it('turned back on before the sign-in, it keeps; turned on after an unkept sign-in, it puts it then', async () => {
+    const s = await setup();
+    const id = await addAndSwitch(s, ORIGIN_A);
+    await s.service.setKeep(false);
+    expect((await s.service.setKeep(true)).keep).toBe(true);
+    s.active().held = 'tok-ada';
+    await s.service.signedIn(ADA);
+    expect(s.vault.secrets.get(id)).toBe('tok-ada');
+
+    const t = await setup();
+    const other = await addAndSwitch(t, ORIGIN_B);
+    await t.service.setKeep(false);
+    t.active().held = 'tok-grace';
+    await t.service.signedIn(GRACE);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(t.vault.secrets.has(other)).toBe(false);
+    await t.service.setKeep(true);
+    expect(t.vault.secrets.get(other)).toBe('tok-grace');
+  });
+
+  it('turned off after the sign-in was kept (a racing click), the entry comes out and nothing is copied to memory', async () => {
+    const s = await setup();
+    const id = await addAndSwitch(s, ORIGIN_A);
+    s.active().held = 'tok-ada';
+    await s.service.signedIn(ADA);
+    expect(s.vault.secrets.get(id)).toBe('tok-ada');
+    await s.service.setKeep(false);
+    expect(s.vault.secrets.has(id)).toBe(false);
+    // The window keeps its own sign-in; the profile starts signed out next time.
+    expect(s.active().token()).toBe('tok-ada');
+    await s.service.switchTo(null);
+    await s.service.switchTo(id);
+    expect(s.active().spec.token).toBeNull();
+  });
+
+  it('turned off in an operator’s window, the operator’s credential is not copied anywhere and does not outlive the window (ADR-012)', async () => {
+    const s = await setup();
+    const id = await addAndSwitch(s, ORIGIN_A);
+    s.active().held = 'tok-op';
+    await s.service.signedIn({ id: 1, name: 'op', lasting: false, guest: false });
+    await s.service.setKeep(false);
+    await s.service.setKeep(true);
+    expect(s.vault.secrets.size).toBe(0);
+    expect(s.vault.calls).not.toContain(`put ${id}`);
+    await s.service.switchTo(null);
+    await s.service.switchTo(id);
+    expect(s.active().spec.token).toBeNull();
+  });
+
+  it('turned off while a session-only sign-in is held, Retry never puts it later', async () => {
+    const vault = fakeVault({ kind: 'sessionOnly', reason: 'no-keyring' });
+    const s = await setup({ vault });
+    const id = await addAndSwitch(s, ORIGIN_A);
+    s.active().held = 'tok-ada';
+    await s.service.signedIn(ADA);
+    await s.service.setKeep(false);
+    vault.classification = { kind: 'protected' };
+    await s.service.retry();
+    expect(vault.secrets.has(id)).toBe(false);
+  });
+
+  it.each([
+    ['no keyring unlocked', { kind: 'sessionOnly', reason: 'no-keyring' }, { kind: 'session-only', reason: 'no-keyring' }, 'no-keyring'],
+    ['a keyring that protects nothing', { kind: 'sessionOnly', reason: 'insecure-backend' }, { kind: 'session-only', reason: 'insecure-backend' }, 'insecure-backend'],
+    ['a keyring that does not answer', { kind: 'temporarilyUnavailable' }, { kind: 'unavailable' }, 'temporarilyUnavailable'],
+  ] as const)('%s: nothing is written even with the choice on, the view and the log say why', async (_name, classification, storage, why) => {
+    const vault = fakeVault(classification);
+    const s = await setup({ vault });
+    const id = await addAndSwitch(s, ORIGIN_A);
+    s.active().held = 'tok-ada';
+    await s.service.signedIn(ADA);
+    expect(vault.secrets.has(id)).toBe(false);
+    expect(s.service.view().storage).toEqual(storage);
+    expect(s.log).toContain(`log: conch-desktop: a sign-in is kept until the app closes (${why})`);
+    expect((await restart(s)).active().spec.token).toBeNull();
+  });
+
+  it('an operator’s sign-in is never put, whatever the choice, and a restart asks again (ADR-012)', async () => {
+    const s = await setup();
+    const id = await addAndSwitch(s, ORIGIN_A);
+    await s.service.setKeep(true);
+    s.active().held = 'tok-op';
+    expect(await s.service.signedIn({ id: 1, name: 'op', lasting: false, guest: false })).toBe(true);
+    expect(s.vault.calls).not.toContain(`put ${id}`);
+    expect(s.vault.secrets.size).toBe(0);
+    expect(s.service.view().notice).toBe('operator-window-only');
+    expect(s.log).toContain('log: conch-desktop: an operator sign-in is kept for this window only');
+    const again = await restart(s);
+    expect(again.active().spec.token).toBeNull();
+    expect(again.log).toContain('log: conch-desktop: no saved sign-in for this server');
+  });
+
+  it('a keep the keyring did not take in time says so, and the sign-in lasts this run', async () => {
+    const vault = fakeVault();
+    vault.putGate = new Promise(() => undefined);
+    const s = await setup({ vault, vaultBoundMs: 20 });
+    const id = await addAndSwitch(s, ORIGIN_A);
+    s.active().held = 'tok-ada';
+    await s.service.signedIn(ADA);
+    expect(s.service.view().notice).toBe('not-kept');
+    expect(vault.secrets.has(id)).toBe(false);
+    expect(s.log).toContain('log: conch-desktop: a sign-in is kept until the app closes (failed)');
+  });
+
+  it('a saved sign-in the server ended (revoked, expired, signed out elsewhere) opens the sign-in with a plain notice, and is deleted', async () => {
+    const s = await setup();
+    const id = await addAndSwitch(s, ORIGIN_A);
+    s.active().held = 'tok-ada';
+    await s.service.signedIn(ADA);
+    const again = await restart(s, { verify: () => ({ kind: 'rejected' }) });
+    expect(again.active().spec.token).toBeNull();
+    expect(again.service.view().notice).toBe('sign-in-ended');
+    await new Promise((r) => setTimeout(r, 10));
+    expect(again.vault.secrets.has(id)).toBe(false);
+    expect(again.log).toContain('log: conch-desktop: the server ended a saved sign-in; it was deleted');
+    // And the next start does not find it either.
+    expect((await restart(again)).active().spec.token).toBeNull();
+  });
+
+  it('sign-out deletes the kept sign-in, and a restart asks again', async () => {
+    const s = await setup();
+    const id = await addAndSwitch(s, ORIGIN_A);
+    s.active().held = 'tok-ada';
+    await s.service.signedIn(ADA);
+    await s.service.signOut();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(s.vault.secrets.has(id)).toBe(false);
+    const again = await restart(s);
+    expect(again.active().spec.token).toBeNull();
+    expect(again.log).toContain('log: conch-desktop: no saved sign-in for this server');
+  });
+});
+
+// Issue #2217: at start, whatever any server's health, every vault entry an
+// older build sealed with Chromium's built-in key (v10) is ended: revoked at
+// its server when the server answers, else deleted unopened with a notice.
+describe('the start sweep of sign-ins an older build saved with the built-in key', () => {
+  const A = 'a'.repeat(32);
+  const B = 'b'.repeat(32);
+  const ORPHAN = 'c'.repeat(32);
+  const LEGACY = 'tok-legacy-SECRET-canary-2217';
+  const answered = (): Promise<HealthResult> => Promise.resolve({ kind: 'answered', version: 'v1.0.0' });
+  const unreachable = (): Promise<HealthResult> => Promise.resolve({ kind: 'unreachable' });
+
+  // profiles.json with A on ORIGIN_A and B on ORIGIN_B, both bound to ada.
+  function profilesJson(active: string | null): string {
+    return JSON.stringify({
+      version: 1,
+      profiles: [
+        { id: A, label: 'a.example', origin: ORIGIN_A, principal: { id: 7, name: 'ada' } },
+        { id: B, label: 'b.example', origin: ORIGIN_B, principal: { id: 7, name: 'ada' } },
+      ],
+      active,
+    });
+  }
+
+  function legacyVault(entries: Record<string, string>): FakeVault {
+    const vault = fakeVault();
+    for (const [id, secret] of Object.entries(entries)) vault.legacy.set(id, secret);
+    return vault;
+  }
+
+  const sweepLines = (log: readonly string[]): string[] => log.filter((l) => l.includes('older build (v10)'));
+  const LINE = /^log: conch-desktop: a sign-in saved by an older build \(v10\): (ended|ended-not-deleted|deleted-unreachable|deleted-unconfirmed|deleted-unopened|deleted-no-profile|not-deleted|replaced|late|not-listed|skipped)$/;
+
+  it('when the server answers: the entry is opened only to be revoked as sign-out does, then deleted, and it is never a sign-in', async () => {
+    const vault = legacyVault({ [A]: LEGACY });
+    const s = await setup({ vault, files: profilesJson(A) });
+    expect(s.revoked).toEqual([[ORIGIN_A, LEGACY]]);
+    expect(vault.legacy.has(A)).toBe(false);
+    expect(vault.calls).toContain(`decrypt ${A}`);
+    // Not handed to the window, not checked as a sign-in, not read as one.
+    expect(s.active().spec.token).toBeNull();
+    expect(s.verified).toEqual([]);
+    expect(vault.calls).not.toContain(`get ${A}`);
+    expect(sweepLines(s.log)).toEqual(['log: conch-desktop: a sign-in saved by an older build (v10): ended']);
+    // Ended at the server: nothing to tell the person beyond signing in.
+    expect(s.service.view().notice).toBeNull();
+  });
+
+  it('when the server does not answer: deleted without being opened, and the profile says it could not be ended at the server', async () => {
+    const vault = legacyVault({ [A]: LEGACY });
+    const s = await setup({ vault, files: profilesJson(A), health: unreachable });
+    expect(vault.calls).not.toContain(`decrypt ${A}`);
+    expect(s.revoked).toEqual([]);
+    expect(vault.legacy.has(A)).toBe(false);
+    expect(s.service.view().notice).toBe('legacy-not-ended');
+    expect(sweepLines(s.log)).toEqual(['log: conch-desktop: a sign-in saved by an older build (v10): deleted-unreachable']);
+  });
+
+  it('a /healthz that never answers is the same, within the health bound', async () => {
+    const vault = legacyVault({ [A]: LEGACY });
+    const s = await setup({ vault, files: profilesJson(A), health: () => new Promise<HealthResult>(() => undefined), healthBoundMs: 20 });
+    expect(vault.calls).not.toContain(`decrypt ${A}`);
+    expect(s.revoked).toEqual([]);
+    expect(vault.legacy.has(A)).toBe(false);
+    expect(s.service.view().notice).toBe('legacy-not-ended');
+  });
+
+  it('runs for every profile, active or not, and the notice is that profile’s', async () => {
+    const vault = legacyVault({ [A]: 'tok-a', [B]: 'tok-b' });
+    const s = await setup({ vault, files: profilesJson(A), health: (origin) => (origin === ORIGIN_A ? answered() : unreachable()) });
+    expect(s.revoked).toEqual([[ORIGIN_A, 'tok-a']]);
+    expect(vault.calls).not.toContain(`decrypt ${B}`);
+    expect(vault.legacy.size).toBe(0);
+    // A was ended at its server: no notice there.
+    expect(s.service.view().notice).toBeNull();
+    expect(await s.service.switchTo(B)).toBe(true);
+    expect(s.service.view().notice).toBe('legacy-not-ended');
+    expect(await s.service.switchTo(A)).toBe(true);
+    expect(s.service.view().notice).toBeNull();
+    expect(sweepLines(s.log).sort()).toEqual([
+      'log: conch-desktop: a sign-in saved by an older build (v10): deleted-unreachable',
+      'log: conch-desktop: a sign-in saved by an older build (v10): ended',
+    ]);
+  });
+
+  it('runs whatever the active server’s compatibility verdict, and with no profile active', async () => {
+    // The release is not on the list: no automatic sign-in, but the sweep runs.
+    const vault = legacyVault({ [A]: LEGACY, [B]: 'tok-b' });
+    const s = await setup({ vault, files: profilesJson(null), servers: ['v9.9.9'] });
+    expect(s.revoked.sort()).toEqual([[ORIGIN_A, LEGACY], [ORIGIN_B, 'tok-b']]);
+    expect(vault.legacy.size).toBe(0);
+  });
+
+  it('a revocation the server does not confirm, or an entry that cannot be opened, is deleted with the notice', async () => {
+    const vault = legacyVault({ [A]: LEGACY, [B]: 'tok-b' });
+    vault.unopenable.add(B);
+    const s = await setup({ vault, files: profilesJson(A), revoke: () => Promise.resolve('unconfirmed') });
+    expect(s.revoked).toEqual([[ORIGIN_A, LEGACY]]);
+    expect(vault.legacy.size).toBe(0);
+    expect(s.service.view().notice).toBe('legacy-not-ended');
+    await s.service.switchTo(B);
+    expect(s.service.view().notice).toBe('legacy-not-ended');
+    expect(sweepLines(s.log).sort()).toEqual([
+      'log: conch-desktop: a sign-in saved by an older build (v10): deleted-unconfirmed',
+      'log: conch-desktop: a sign-in saved by an older build (v10): deleted-unopened',
+    ]);
+  });
+
+  it('a revocation that never answers is bounded, and counts as unconfirmed', async () => {
+    const vault = legacyVault({ [A]: LEGACY });
+    const s = await setup({ vault, files: profilesJson(A), revoke: () => new Promise(() => undefined), revokeBoundMs: 20 });
+    expect(vault.legacy.has(A)).toBe(false);
+    expect(s.service.view().notice).toBe('legacy-not-ended');
+    expect(sweepLines(s.log)).toEqual(['log: conch-desktop: a sign-in saved by an older build (v10): deleted-unconfirmed']);
+  });
+
+  it('an entry no saved server owns is deleted unopened, and no server is asked', async () => {
+    const vault = legacyVault({ [ORPHAN]: LEGACY });
+    const s = await setup({ vault, files: profilesJson(null) });
+    expect(vault.legacy.size).toBe(0);
+    expect(vault.calls).not.toContain(`decrypt ${ORPHAN}`);
+    expect(s.asked).toEqual([]);
+    expect(s.revoked).toEqual([]);
+    expect(sweepLines(s.log)).toEqual(['log: conch-desktop: a sign-in saved by an older build (v10): deleted-no-profile']);
+  });
+
+  it('keyring-sealed (v11) entries are never touched by the sweep, and restore as before', async () => {
+    const vault = legacyVault({ [B]: 'tok-b' });
+    vault.secrets.set(A, 'tok-a-v11');
+    const s = await setup({ vault, files: profilesJson(A) });
+    expect(vault.calls).not.toContain(`end-legacy ${A}`);
+    expect(vault.secrets.get(A)).toBe('tok-a-v11');
+    expect(s.revoked).toEqual([[ORIGIN_B, 'tok-b']]);
+    // A starts signed in from its v11 entry, as before.
+    expect(s.active().spec.token).toBe('tok-a-v11');
+  });
+
+  it('with nothing to sweep, it searches once and does nothing else', async () => {
+    const s = await setup({ files: profilesJson(A) });
+    expect(s.vault.calls.filter((c) => c === 'find-legacy')).toHaveLength(1);
+    expect(s.vault.calls.filter((c) => c.startsWith('end-legacy'))).toEqual([]);
+    expect(sweepLines(s.log)).toEqual([]);
+    await s.service.switchTo(B);
+    await s.service.switchTo(A);
+    expect(s.vault.calls.filter((c) => c === 'find-legacy')).toHaveLength(1);
+  });
+
+  it('a vault that cannot be searched opens nothing; a read then deletes the entry unread, and the profile says it was not ended at the server', async () => {
+    const failing = legacyVault({ [A]: LEGACY });
+    failing.findFails = true;
+    const s = await setup({ vault: failing, files: profilesJson(A) });
+    expect(s.revoked).toEqual([]);
+    expect(failing.calls).not.toContain(`decrypt ${A}`);
+    expect(sweepLines(s.log)).toEqual(['log: conch-desktop: a sign-in saved by an older build (v10): not-listed']);
+    // A's activation read it: #2214's path deleted it unread (issue #2217's
+    // review, N2: that is not ended at the server either).
+    expect(failing.legacy.has(A)).toBe(false);
+    expect(s.active().spec.token).toBeNull();
+    expect(s.service.view().notice).toBe('legacy-not-ended');
+    expect(s.log).toContain('log: conch-desktop: a sign-in saved by an older build was deleted unread; sign in again');
+
+    const vault = legacyVault({ [A]: LEGACY });
+    const t = await setup({ vault, files: '{ nope' });
+    expect(vault.calls).not.toContain('find-legacy');
+    expect(vault.legacy.has(A)).toBe(true);
+    expect(sweepLines(t.log)).toEqual(['log: conch-desktop: a sign-in saved by an older build (v10): skipped']);
+  });
+
+  // Issue #2217's review, N2: whenever an entry is not confirmed ended at the
+  // server, the profile says so, whatever the delete did.
+  it('an entry that was not ended and cannot be deleted says so, and the profile has the notice', async () => {
+    for (const health of [unreachable, answered]) {
+      const vault = legacyVault({ [A]: LEGACY });
+      vault.legacyRemoveFails = true;
+      const s = await setup({ vault, files: profilesJson(A), health, revoke: () => Promise.resolve('unconfirmed') });
+      expect(s.service.view().notice).toBe('legacy-not-ended');
+      expect(sweepLines(s.log)).toEqual(['log: conch-desktop: a sign-in saved by an older build (v10): not-deleted']);
+    }
+  });
+
+  it('an entry ended at the server but not deleted needs no notice, even when a read deletes it later', async () => {
+    const vault = legacyVault({ [A]: LEGACY });
+    vault.legacyRemoveFails = true;
+    const s = await setup({ vault, files: profilesJson(A) });
+    expect(s.revoked).toEqual([[ORIGIN_A, LEGACY]]);
+    expect(s.service.view().notice).toBeNull();
+    expect(sweepLines(s.log)).toEqual(['log: conch-desktop: a sign-in saved by an older build (v10): ended-not-deleted']);
+    vault.legacyRemoveFails = false;
+    expect(await s.service.switchTo(B)).toBe(true);
+    expect(await s.service.switchTo(A)).toBe(true);
+    expect(vault.legacy.has(A)).toBe(false);
+    expect(s.service.view().notice).toBe('sign-in-again');
+  });
+
+  it('an end that does not finish within its bound puts the notice up', async () => {
+    const vault = legacyVault({ [A]: LEGACY });
+    const endLegacy = vault.endLegacy.bind(vault);
+    // A turn that never comes back.
+    vault.endLegacy = () => new Promise(() => undefined);
+    const s = await setup({ vault, files: profilesJson(A), vaultBoundMs: 5, healthBoundMs: 5, revokeBoundMs: 5 });
+    vault.endLegacy = endLegacy;
+    expect(s.service.view().notice).toBe('legacy-not-ended');
+    expect(sweepLines(s.log)).toEqual(['log: conch-desktop: a sign-in saved by an older build (v10): late']);
+  });
+
+  it('an entry replaced before its turn puts the notice up: the old sign-in was not ended', async () => {
+    const vault = legacyVault({ [A]: LEGACY });
+    const findLegacy = vault.findLegacy.bind(vault);
+    vault.findLegacy = async () => {
+      const ids = await findLegacy();
+      // Something replaced it between the search and its turn.
+      vault.legacy.delete(A);
+      return ids;
+    };
+    const s = await setup({ vault, files: profilesJson(A) });
+    expect(s.revoked).toEqual([]);
+    expect(s.service.view().notice).toBe('legacy-not-ended');
+    expect(sweepLines(s.log)).toEqual(['log: conch-desktop: a sign-in saved by an older build (v10): replaced']);
+  });
+
+  // Issue #2217's review, N3: the sweep opens an entry only for the health
+  // document, not any 200.
+  it('opens nothing for a server whose strict health read is not an answer, even if the lenient one is', async () => {
+    const vault = legacyVault({ [A]: LEGACY });
+    const s = await setup({ vault, files: profilesJson(A), health: answered, sweepHealth: unreachable });
+    expect(vault.calls).not.toContain(`decrypt ${A}`);
+    expect(s.revoked).toEqual([]);
+    expect(vault.legacy.has(A)).toBe(false);
+    expect(s.service.view().notice).toBe('legacy-not-ended');
+    expect(sweepLines(s.log)).toEqual(['log: conch-desktop: a sign-in saved by an older build (v10): deleted-unreachable']);
+  });
+
+  it('logs no secret, and only fixed lines from its closed vocabulary', async () => {
+    const vault = legacyVault({ [A]: LEGACY, [B]: `${LEGACY}-b`, [ORPHAN]: `${LEGACY}-c` });
+    const s = await setup({ vault, files: profilesJson(A), health: (origin) => (origin === ORIGIN_A ? answered() : unreachable()) });
+    const lines = sweepLines(s.log);
+    expect(lines).toHaveLength(3);
+    for (const line of lines) expect(line).toMatch(LINE);
+    for (const line of s.log) {
+      expect(line).not.toContain('SECRET-canary');
+      expect(line).not.toContain(A);
+    }
+    expect(JSON.stringify(s.service.view())).not.toContain('SECRET-canary');
+  });
+
+  it('does not hold up start or the window: a server that is slow to answer is swept in the background', async () => {
+    let answer = (): void => undefined;
+    const slow = new Promise<HealthResult>((resolve) => {
+      answer = () => {
+        resolve({ kind: 'answered', version: 'v1.0.0' });
+      };
+    });
+    const vault = legacyVault({ [B]: 'tok-b' });
+    // The sweep's question to B is the first; B's own window later gets an
+    // answer at once.
+    let askedB = 0;
+    const health = (origin: string): Promise<HealthResult> => (origin === ORIGIN_B && askedB++ === 0 ? slow : answered());
+    const s = await setup({ vault, files: profilesJson(A), health, background: true });
+    let swept = false;
+    void s.service.swept.then(() => {
+      swept = true;
+    });
+    // Start is over and A's window is open, while B's sweep waits.
+    expect(s.factory.made).toHaveLength(1);
+    expect(s.active().spec.profile?.id).toBe(A);
+    await Promise.resolve();
+    expect(swept).toBe(false);
+    expect(vault.legacy.has(B)).toBe(true);
+    // While it waits, B's old entry is not a sign-in.
+    expect(await s.service.switchTo(B)).toBe(true);
+    expect(s.active().spec.token).toBeNull();
+    expect(vault.calls).not.toContain(`get ${B}`);
+    answer();
+    await s.service.swept;
+    expect(s.revoked).toEqual([[ORIGIN_B, 'tok-b']]);
+    expect(vault.legacy.has(B)).toBe(false);
+  });
+
+  it('a search of the vault that never answers holds the window back no longer than the vault bound', async () => {
+    const vault = legacyVault({ [A]: LEGACY });
+    vault.findHangs = true;
+    const s = await setup({ vault, files: profilesJson(A), vaultBoundMs: 20 });
+    expect(s.factory.made).toHaveLength(1);
+    expect(sweepLines(s.log)).toEqual(['log: conch-desktop: a sign-in saved by an older build (v10): not-listed']);
+  });
+
+  it('the notice ends when the person signs out of that profile or removes it', async () => {
+    const vault = legacyVault({ [A]: LEGACY, [B]: 'tok-b' });
+    const s = await setup({ vault, files: profilesJson(A), health: unreachable });
+    expect(s.service.view().notice).toBe('legacy-not-ended');
+    await s.service.signOut();
+    // signOut's own notice says what it did; then none is left of the sweep.
+    await s.service.switchTo(B);
+    await s.service.switchTo(A);
+    expect(s.service.view().notice).toBeNull();
+    await s.service.switchTo(B);
+    expect(s.service.view().notice).toBe('legacy-not-ended');
+    expect(await s.service.remove(B)).toBe(true);
+    expect(s.service.view().notice).toBeNull();
   });
 });

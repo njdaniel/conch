@@ -57,6 +57,8 @@ func (m Model) helpName() string {
 		return "Channel directory"
 	case modeCommunity:
 		return "Community"
+	case modeDM:
+		return "Direct messages"
 	}
 	return "Chat"
 }
@@ -102,6 +104,7 @@ func (m Model) helpEntries() []helpEntry {
 		entries = append(entries, []helpEntry{
 			{"/channels, ctrl+d", "the channel directory: join, leave and create channels"},
 			{"/people, ctrl+p", "the community: everyone on the server, agents marked"},
+			{"/dm [ID], ctrl+g", "direct messages; with a principal ID, open that conversation"},
 			{"/help", "this help"},
 			{"↑/↓", "focus on channels: open the channel above or below"},
 			{"", "focus on messages: scroll the history a line"},
@@ -168,6 +171,18 @@ func (m Model) helpEntries() []helpEntry {
 			{"r", "read the community again"},
 			{"esc, tab", "back to Chat"},
 		}
+	case modeDM:
+		entries = []helpEntry{
+			{"↑/↓, enter", "choose and open a conversation"},
+			{"n", "start or resume a conversation by principal ID"},
+			{"a", "switch between open and archived conversations"},
+			{"type, enter", "send plain text to the principal ID shown in the composer"},
+			{"enter, ctrl+u", "when a send fails: retry the shown message or discard it; later typing stays in a separate draft"},
+			{"pgup, end", "page back through the history; return to the latest messages"},
+			{"ctrl+r", "mark read through the newest loaded message, from the end of the history"},
+			{"ctrl+l", "refresh from the server"},
+			{"esc", "back to the list or to Chat"},
+		}
 	case modeRun:
 		entries = []helpEntry{
 			{"↑/↓ pgup/pgdn", "move through the timeline"},
@@ -177,7 +192,7 @@ func (m Model) helpEntries() []helpEntry {
 			{"esc", "back to the view the run was opened from"},
 		}
 	}
-	if m.mode != modeDecision && m.mode != modeRun && m.mode != modeDirectory && m.mode != modeCommunity {
+	if m.mode != modeDecision && m.mode != modeRun && m.mode != modeDirectory && m.mode != modeCommunity && m.mode != modeDM {
 		entries = append(entries, helpEntry{"shift+tab", "the view before"}, helpEntry{"esc", "quit"})
 	}
 	ctrlC := helpEntry{"ctrl+c", "quit"}
@@ -334,6 +349,8 @@ func (m Model) opensHelp(key string) bool {
 	switch m.mode {
 	case modeInbox, modeAgents, modeRuns, modeCommunity:
 		return true
+	case modeDM:
+		return m.dm.id == 0 && !m.dm.opening
 	case modeDirectory:
 		return !m.dir.creating
 	case modeRun:

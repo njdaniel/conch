@@ -43,6 +43,7 @@ function NativeStatus({ native, ...props }: Props & { readonly native: NonNullab
         {...(props.viewerName === undefined ? {} : { viewerName: props.viewerName })}
         people={props.people}
         voiceAllowed={props.voiceAllowed}
+        reachable={props.reachable}
         channels={props.channels}
         onUnauthorized={props.onUnauthorized}
         onOpen={props.onOpen}

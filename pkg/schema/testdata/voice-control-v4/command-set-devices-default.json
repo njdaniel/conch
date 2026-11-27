@@ -1,0 +1,6 @@
+{
+  "schema": "conch.voice_control.v4",
+  "kind": "set_devices",
+  "id": 6,
+  "output": "default"
+}

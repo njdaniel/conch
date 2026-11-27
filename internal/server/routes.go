@@ -16,6 +16,8 @@ func (s *Server) routeTable() []route {
 		return route{pattern: pattern, access: a, handler: h}
 	}
 	hf := func(f http.HandlerFunc) http.Handler { return f }
+	callActions := newChannelWriteLimiter(inviteLimit{"private_call_actions", privateCallActionBurst,
+		privateCallActionBurst * privateCallActionRefill})
 	return []route{
 		rt("GET /healthz", accessExempt, hf(s.handleHealth)),
 		rt("GET /v0/ws", accessAuthenticated, hf(s.handleWS)),
@@ -25,8 +27,22 @@ func (s *Server) routeTable() []route {
 		// The events socket (issue #269) takes a ticket too: it is the one a
 		// browser opens.
 		{pattern: "GET /v1/events/ws", access: accessAuthenticated, handler: hf(s.handleEventsWS), acceptsTicket: true},
+		// The per-person events stream (issue #2040): DM frames and, later,
+		// rings, scoped to the caller, with no channel. A credential the person
+		// made for themselves only: the route is in selfMadeCredentialRoutes,
+		// which refuses another's credential and an agent (403
+		// own_sign_in_required), and the handler refuses a guest, all before
+		// the upgrade. It takes a ticket, as the channel socket does.
+		{pattern: "GET /v1/events/person/ws", access: accessAuthenticated, handler: hf(s.handlePersonEventsWS), acceptsTicket: true},
 		rt("POST /v1/ws-tickets", accessAuthenticated, hf(s.handleCreateWSTicket)),
 		rt("GET /v1/whoami", accessAuthenticated, hf(s.handleWhoAmI)),
+		rt("POST /v1/dms/{conversation}/calls", accessAuthenticated, s.privateCallInviteHandler()),
+		rt("GET /v1/dms/{conversation}/calls", accessAuthenticated, hf(s.handleListPrivateCalls)),
+		rt("GET /v1/calls/current", accessAuthenticated, hf(s.handleCurrentPrivateCall)),
+		rt("POST /v1/calls/{call}/accept", accessAuthenticated, s.privateCallAction(schema.PrivateCallEventAccept, callActions)),
+		rt("POST /v1/calls/{call}/decline", accessAuthenticated, s.privateCallAction(schema.PrivateCallEventDecline, callActions)),
+		rt("POST /v1/calls/{call}/cancel", accessAuthenticated, s.privateCallAction(schema.PrivateCallEventCancel, callActions)),
+		rt("POST /v1/calls/{call}/hangup", accessAuthenticated, s.privateCallAction(schema.PrivateCallEventHangup, callActions)),
 		// Preview as member (issue #1515): the entry read of the one request
 		// header, Conch-Preview-As. It is one of the five previewable routes.
 		rt("GET /v1/preview", accessAuthenticated, hf(s.handlePreview)).asPreviewable(),
@@ -203,6 +219,13 @@ func (s *Server) routeTable() []route {
 		rt("GET /v1/notifications/preferences", accessAuthenticated, s.membersOnly(hf(s.handleGetNotificationPreferences))),
 		rt("PUT /v1/notifications/preferences", accessAuthenticated, s.membersOnly(hf(s.handlePutNotificationPreferences))),
 		rt("GET /v1/notifications/pending", accessAuthenticated, s.membersOnly(hf(s.handleListPendingNotifications))),
+		// Local direct messages (issue #2019, ADR-017; see dms.go). Every route
+		// is in selfMadeCredentialRoutes: an operator-made credential gets 403
+		// own_sign_in_required, reads included. Not previewable.
+		rt("POST /v1/dms", accessAuthenticated, hf(s.handleOpenDM)),
+		rt("GET /v1/dms", accessAuthenticated, hf(s.handleListDMs)),
+		rt("GET /v1/dms/{conversation}", accessAuthenticated, hf(s.handleGetDM)),
+		rt("PUT /v1/dms/{conversation}/state", accessAuthenticated, hf(s.handleSetDMState)),
 		// Personal blocks (issue #1832, docs/design/blocks.md): the caller's
 		// own list, for people with a full credential; see blocks.go.
 		rt("GET /v1/blocks", accessAuthenticated, s.membersOnly(hf(s.handleListBlocks))),

@@ -2,6 +2,8 @@
 // see, newest first, from the REST list (a page at a time) and the run frames.
 // Selecting one opens run detail in the centre. Every task, outcome and name is
 // another person's or an agent's text and is rendered as a text node.
+import { useContext } from 'react';
+import { LeaveDrawer } from '../pageModal';
 import type { ChannelMemberV1 } from '../schema/channel';
 import type { RunV1 } from '../schema/run';
 import { runEnded } from '../schema/run';
@@ -39,6 +41,7 @@ function RunRow({ run, name, now, onOpen }: {
 }
 
 export function RunsList({ agents }: { readonly agents: Agents }) {
+  const leaveDrawer = useContext(LeaveDrawer);
   const { state, members } = agents;
   const view = state.runs;
   const shown = visibleRuns(view);
@@ -83,6 +86,7 @@ export function RunsList({ agents }: { readonly agents: Agents }) {
               name={authorName(members, run.principal_id)}
               now={now}
               onOpen={() => {
+                leaveDrawer();
                 agents.openRun(run.id, run.session_id, run);
               }}
             />

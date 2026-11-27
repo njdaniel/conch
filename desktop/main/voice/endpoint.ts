@@ -1,27 +1,31 @@
-// The owner's half of the helper's Linux events endpoint (issue #948;
+// The owner's half of the helper's Unix events endpoint (issue #948;
 // linux-desktop.md §5.2, L-F2's owner rules; the helper's half is #937, the
 // attach line #893): a verified runtime directory, a Unix socket bound under
 // it, and the attach that binds the one connection to the spawn.
+//
+// On macOS (issue #1743; macos-desktop.md §3.3) the owner verifies the
+// system per-user temp directory and binds in its shared conch directory.
+// Each listener owns its random socket path, so the owner leaves every other
+// entry alone.
 //
 // On Windows (issue #1785; windows-desktop.md §3.3–§3.5) the endpoint is a
 // named pipe the owner creates under \\.\pipe\, listenPipe below: no
 // directory, no sweep, a random 128-bit name, and the same attach with the
 // per-connection first-line rules of §3.4.
 //
-// Input: the environment's XDG_RUNTIME_DIR, the profile id, a nonce, and
+// Input: the platform's runtime directory, the profile id, a nonce, and
 // whatever arrives on the socket. Output: a refusal with its reason, or the
 // attached connection (and any bytes that came after the attach line).
-// Owns: the runtime-directory checks, conch/<profile-id> (created 0o700 and
-// checked the same way), the bounded stale sweep of that one directory, the
-// sun_path budget, binding a random name directly (a new name on EADDRINUSE
-// or EACCES), the first-line deadline and cap, the nonce comparison with
-// timingSafeEqual, and closing the listener on attach, on refusal and on
-// timeout.
+// Owns: the runtime-directory checks, the 0o700 directories, Linux's bounded
+// stale sweep of conch/<profile-id>, the sun_path budget, binding a random
+// name directly (a new name on EADDRINUSE or EACCES), the first-line deadline
+// and cap, the nonce comparison with timingSafeEqual, and closing the
+// listener on attach, on refusal and on timeout.
 //
-// What it keeps: it never writes on any connection; it never follows a link
-// (every check is lstat); it never listens on an abstract name (the path is
-// absolute and holds no NUL); nothing it logs or returns holds the nonce. The
-// attach is a spawn-to-pipe binding and defence in depth, not authentication:
+// What it keeps: it never writes on any connection; it uses lstat to reject
+// links at the directory entries it verifies; it listens on an absolute path
+// with no NUL; nothing it logs or returns holds the nonce. The attach is a
+// spawn-to-pipe binding and defence in depth, not authentication:
 // a process of the same user could unlink the socket and bind its own, which
 // is out of scope by design (linux-desktop.md §5.2). Authority arrives only
 // on the helper's standard input.
@@ -29,11 +33,12 @@ import type { MainLog } from '../diagnostics.ts';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { chmod, lstat, mkdir, readdir, unlink } from 'node:fs/promises';
 import { createServer, type Server, type Socket } from 'node:net';
-import { isAbsolute, join } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 
 import { VOICE_CONTROL_MAX_LINE_BYTES } from '../../../web/src/schema/generated.ts';
 import { validProfileId } from '../vault/files.ts';
 import { parseAttached } from './protocol.ts';
+import { runDarwinTempUtility } from './spawn.ts';
 
 // Why voice cannot start here. Each is a fixed word for the UI and the log,
 // never a path or a value.
@@ -59,9 +64,9 @@ export class EndpointError extends Error {
   }
 }
 
-// sun_path is 108 bytes, its last a NUL (unix(7)); libuv refuses a name of
-// 108 bytes or more, and so does Rust's connect.
-export const SUN_PATH_MAX_BYTES = 107;
+// sun_path holds 108 bytes on Linux (unix(7)) and 104 on macOS (xnu's
+// sys/un.h). Reserve one byte for the terminating NUL before libuv binds.
+const SUN_PATH_MAX_BYTES = { linux: 107, darwin: 103 } as const;
 
 // The sweep looks at no more entries than this: the directory is ours and
 // holds a socket or two, so more is something else, and is left alone.
@@ -73,8 +78,12 @@ const BIND_ATTEMPTS = 8;
 const PRIVATE_DIR = 0o700;
 
 export interface EndpointDeps {
+  // The platform whose rules apply; process.platform by default.
+  readonly platform?: NodeJS.Platform;
   // The uid the checks compare against (a test stands in for another user).
   readonly uid?: number;
+  // Runs a macOS system utility and returns its stdout. Test seam for getconf and ls.
+  readonly execFile?: typeof runDarwinTempUtility;
   // A fresh socket name, without its directory. Test seam for squats.
   readonly name?: () => string;
   // A fresh pipe id (the hex after the pipe prefix). Test seam for squats.
@@ -86,7 +95,7 @@ export interface EndpointDeps {
 
 function ownUid(deps: EndpointDeps): number {
   if (deps.uid !== undefined) return deps.uid;
-  if (typeof process.getuid !== 'function') throw new Error('voice: the Linux endpoint needs a POSIX uid');
+  if (typeof process.getuid !== 'function') throw new Error('voice: the Unix endpoint needs a POSIX uid');
   return process.getuid();
 }
 
@@ -94,7 +103,7 @@ function codeOf(err: unknown): string {
   return typeof err === 'object' && err !== null && 'code' in err && typeof err.code === 'string' ? err.code : '';
 }
 
-async function lstatOrNull(path: string): Promise<Awaited<ReturnType<typeof lstat>> | null> {
+async function lstatOrNull(path: string) {
   try {
     return await lstat(path);
   } catch (err) {
@@ -107,28 +116,58 @@ async function lstatOrNull(path: string): Promise<Awaited<ReturnType<typeof lsta
 // passes: a directory (not a link to one), owned by this user, closed to
 // group and others.
 function privateDirRefusal(
-  st: Awaited<ReturnType<typeof lstat>>,
+  st: NonNullable<Awaited<ReturnType<typeof lstatOrNull>>>,
   uid: number,
 ): 'runtime-dir-symlink' | 'runtime-dir-not-directory' | 'runtime-dir-not-owned' | 'runtime-dir-not-private' | null {
   if (st.isSymbolicLink()) return 'runtime-dir-symlink';
   if (!st.isDirectory()) return 'runtime-dir-not-directory';
   if (st.uid !== uid) return 'runtime-dir-not-owned';
-  if ((Number(st.mode) & 0o077) !== 0) return 'runtime-dir-not-private';
+  if ((st.mode & 0o077) !== 0) return 'runtime-dir-not-private';
   return null;
 }
 
-// runtimeDir verifies $XDG_RUNTIME_DIR, never trusting the variable: unset,
-// relative, missing, a link, not a directory, another user's, or open to
-// group or others is a refusal, and nothing is created. There is no fallback
-// to /tmp.
+async function darwinTempDir(deps: EndpointDeps): Promise<string> {
+  try {
+    return (await (deps.execFile ?? runDarwinTempUtility)('/usr/bin/getconf', ['DARWIN_USER_TEMP_DIR'])).trimEnd();
+  } catch {
+    throw new EndpointError('runtime-dir-unset');
+  }
+}
+
+async function requireNoDarwinAcl(dir: string, deps: EndpointDeps, reason: EndpointRefusal): Promise<void> {
+  // Only the owner or root can set or inherit ACLs on the checked socket
+  // directories. Those principals are outside this threat model. Refusing
+  // every ACL is defence in depth.
+  try {
+    const output = await (deps.execFile ?? runDarwinTempUtility)('/bin/ls', ['-lde', dir]);
+    // An ACL can be marked '+' or listed below the mode line when '@' marks
+    // extended attributes. Only a single directory line can pass.
+    const [listing, ...extra] = output.replace(/\n$/, '').split('\n');
+    if (extra.length === 0 && /^d[rwxstST-]{9}@?[ \t]/.test(listing ?? '')) return;
+  } catch {
+    // Failure to inspect the ACL is a refusal too.
+  }
+  throw new EndpointError(reason);
+}
+
+// runtimeDir verifies $XDG_RUNTIME_DIR on Linux and uses the system-provided
+// DARWIN_USER_TEMP_DIR on macOS. A failed check stops startup.
 export async function runtimeDir(env: NodeJS.ProcessEnv, deps: EndpointDeps = {}): Promise<string> {
-  const dir = env['XDG_RUNTIME_DIR'];
-  if (dir === undefined || dir === '') throw new EndpointError('runtime-dir-unset');
-  if (!isAbsolute(dir) || dir.includes('\0')) throw new EndpointError('runtime-dir-not-absolute');
+  const mac = (deps.platform ?? process.platform) === 'darwin';
+  const value = mac ? await darwinTempDir(deps) : env['XDG_RUNTIME_DIR'];
+  if (value === undefined || value === '') throw new EndpointError('runtime-dir-unset');
+  if (!isAbsolute(value) || value.includes('\0')) throw new EndpointError('runtime-dir-not-absolute');
+  // macOS normally includes a trailing slash. Check the same path join will
+  // use for the socket; lstat with a trailing slash can follow a final link.
+  const dir = mac ? resolve(value) : value;
   const st = await lstatOrNull(dir);
   if (st === null) throw new EndpointError('runtime-dir-missing');
   const refusal = privateDirRefusal(st, ownUid(deps));
   if (refusal !== null) throw new EndpointError(refusal);
+  if (mac) {
+    if ((st.mode & 0o7777) !== PRIVATE_DIR) throw new EndpointError('runtime-dir-not-private');
+    await requireNoDarwinAcl(dir, deps, 'runtime-dir-not-private');
+  }
   return dir;
 }
 
@@ -136,7 +175,7 @@ export async function runtimeDir(env: NodeJS.ProcessEnv, deps: EndpointDeps = {}
 // runtime directory is checked; a directory of ours that is private but not
 // exactly 0o700 (the helper wants exactly that of the socket's parent) is set
 // to it.
-async function ensurePrivateDir(dir: string, uid: number): Promise<void> {
+async function ensurePrivateDir(dir: string, uid: number, darwin?: EndpointDeps): Promise<void> {
   try {
     await mkdir(dir, { mode: PRIVATE_DIR });
   } catch (err) {
@@ -144,15 +183,21 @@ async function ensurePrivateDir(dir: string, uid: number): Promise<void> {
   }
   const st = await lstatOrNull(dir);
   if (st === null || privateDirRefusal(st, uid) !== null) throw new EndpointError('profile-dir-unsafe');
-  if ((Number(st.mode) & 0o777) !== PRIVATE_DIR) await chmod(dir, PRIVATE_DIR);
+  if (darwin !== undefined) await requireNoDarwinAcl(dir, darwin, 'profile-dir-unsafe');
+  if ((st.mode & (darwin === undefined ? 0o777 : 0o7777)) !== PRIVATE_DIR) await chmod(dir, PRIVATE_DIR);
 }
 
-// profileDir is <runtime>/conch/<profile-id>, each level created 0o700 and
-// checked.
+// profileDir is <runtime>/conch/<profile-id> on Linux and <runtime>/conch
+// on macOS, where keeping the profile id could exceed the socket path budget.
+// Each level is created 0o700 and checked.
 export async function profileDir(runtime: string, profileId: string, deps: EndpointDeps = {}): Promise<string> {
   if (!validProfileId(profileId)) throw new EndpointError('profile-id-invalid');
   const uid = ownUid(deps);
   const conch = join(runtime, 'conch');
+  if ((deps.platform ?? process.platform) === 'darwin') {
+    await ensurePrivateDir(conch, uid, deps);
+    return conch;
+  }
   await ensurePrivateDir(conch, uid);
   const dir = join(conch, profileId);
   await ensurePrivateDir(dir, uid);
@@ -188,13 +233,13 @@ function randomName(): string {
   return `e-${randomBytes(9).toString('base64url')}.sock`;
 }
 
-function socketPath(dir: string, name: string): string {
+function socketPath(dir: string, name: string, maxBytes: number): string {
   const path = join(dir, name);
   if (!isAbsolute(path) || path.includes('\0') || !path.startsWith('/')) {
     // Never an abstract name: the path is a file in our directory.
     throw new EndpointError('socket-unbindable');
   }
-  if (Buffer.byteLength(path, 'utf8') > SUN_PATH_MAX_BYTES) throw new EndpointError('socket-path-too-long');
+  if (Buffer.byteLength(path, 'utf8') > maxBytes) throw new EndpointError('socket-path-too-long');
   return path;
 }
 
@@ -247,13 +292,27 @@ export interface Attached {
   readonly rest: Buffer;
 }
 
+// listenUnix verifies the socket's directories at each start. Linux sweeps
+// its per-profile directory. On macOS the directory is shared by all the
+// running instances, so Node's listener close handles only its own socket.
+// macOS supplies the temp path under system-controlled ancestors. Only this
+// user can write the checked temp and conch directories, so another account
+// cannot swap a directory or socket between our checks, bind and cleanup.
+export async function listenUnix(env: NodeJS.ProcessEnv, profileId: string, deps: EndpointDeps = {}): Promise<Listening> {
+  const runtime = await runtimeDir(env, deps);
+  const dir = await profileDir(runtime, profileId, deps);
+  if ((deps.platform ?? process.platform) !== 'darwin') await sweep(dir, deps.log);
+  return listen(dir, deps);
+}
+
 // listen binds a fresh random name in dir, checking the sun_path budget
 // before every bind; on EADDRINUSE (a squat) or EACCES it tries a new name.
 export async function listen(dir: string, deps: EndpointDeps = {}): Promise<Listening> {
   const nextName = deps.name ?? randomName;
   const bind = deps.listen ?? defaultListen;
+  const maxBytes = SUN_PATH_MAX_BYTES[(deps.platform ?? process.platform) === 'darwin' ? 'darwin' : 'linux'];
   for (let attempt = 0; attempt < BIND_ATTEMPTS; attempt++) {
-    const path = socketPath(dir, nextName());
+    const path = socketPath(dir, nextName(), maxBytes);
     const server = createServer({ pauseOnConnect: true, allowHalfOpen: false });
     try {
       await bind(server, path);

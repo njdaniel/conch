@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { DESKTOP_UNAVAILABLE, DESKTOP_UPLOAD_MAX_BYTES } from '../../appLimit';
 import { errorV0, loginResponseV1, passwordUpdatedResponseV1, whoAmIResponseV1 } from '../../schema/generated';
 import { call, previewCall } from '../operations';
 import type { BridgeReply, BridgeRequest, ConchDesktopBridge, ReplaceCredentialRequest, SignInOutcome } from './bridge';
@@ -39,6 +40,7 @@ function fakeBridge(overrides: Partial<ConchDesktopBridge>): ConchDesktopBridge 
     profileRemove: unexpected('profileRemove'),
     profileSwitch: unexpected('profileSwitch'),
     storageRetry: unexpected('storageRetry'),
+    profileKeep: unexpected('profileKeep'),
     profilesRecover: unexpected('profilesRecover'),
     uploadFile: unexpected('uploadFile'),
     downloadFile: unexpected('downloadFile'),
@@ -148,6 +150,20 @@ describe('the desktop transport: a call of the table is a call of the bridge', (
     const signal = new AbortController().signal;
     await expect(http.upload(call('postMessage', { channel: 'a' }), STAND_IN, 'x/y', new Blob(), signal)).rejects.toBeInstanceOf(TypeError);
     await expect(http.upload(call('uploadFile', { channel: 'a' }), STAND_IN, 'x/y', new Blob(), signal)).rejects.toBeInstanceOf(TypeError);
+    expect(uploadFile).not.toHaveBeenCalled();
+  });
+
+  it('reports the desktop upload limit before reading a large file or calling main', async () => {
+    const uploadFile = vi.fn((): Promise<BridgeReply> => Promise.resolve({ kind: 'none' }));
+    install(fakeBridge({ uploadFile }));
+    const bytes = new Blob();
+    Object.defineProperty(bytes, 'size', { value: DESKTOP_UPLOAD_MAX_BYTES + 1 });
+    const read = vi.spyOn(bytes, 'arrayBuffer');
+    const signal = new AbortController().signal;
+    const response = await http.upload(call('uploadFile', { channel: 'general' }, 'filename=large.bin'), STAND_IN, 'application/octet-stream', bytes, signal);
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({ code: DESKTOP_UNAVAILABLE, message: 'The desktop app accepts files up to 20 MiB.' });
+    expect(read).not.toHaveBeenCalled();
     expect(uploadFile).not.toHaveBeenCalled();
   });
 

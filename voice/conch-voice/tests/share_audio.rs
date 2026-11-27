@@ -100,24 +100,28 @@ impl ShareWorld {
                 sec_pid: Some(OWN),
                 application_process_id: Some(OWN),
                 application_name: Some("conch-voice".to_owned()),
+                media_name: None,
             },
             StreamFacts {
                 serial: Some(RENDERER_STREAM),
                 sec_pid: Some(900),
                 application_process_id: Some(RENDERER),
                 application_name: Some("Chromium".to_owned()),
+                media_name: None,
             },
             StreamFacts {
                 serial: Some(NAMED_STREAM),
                 sec_pid: Some(900),
                 application_process_id: Some(9999),
                 application_name: Some(NAME.to_owned()),
+                media_name: None,
             },
             StreamFacts {
                 serial: Some(UNKNOWN_CLIENT),
                 sec_pid: None,
                 application_process_id: None,
                 application_name: None,
+                media_name: None,
             },
         ];
         for at in 0..others {
@@ -127,6 +131,7 @@ impl ShareWorld {
                 sec_pid: Some(7000 + at),
                 application_process_id: Some(7000 + at),
                 application_name: Some(format!("player-{at}")),
+                media_name: None,
             });
         }
         let mut state = self.0.streams.lock().unwrap();
@@ -415,12 +420,14 @@ fn helper_values(rig: &ManagedRig, version: Option<Version>) -> Vec<Value> {
         .collect()
 }
 
-/// Whether the helper's event is the transcript's step: every field but seq, exactly.
+/// Whether the helper's event matches the shared contract fields in the transcript.
 fn matches_step(event: &Value, want: &Value) -> bool {
     let strip = |value: &Value| {
         let mut value = value.clone();
         if let Value::Object(fields) = &mut value {
             fields.remove("seq");
+            // This desktop diagnostic has its own fake-graph test.
+            fields.remove("share_audio_streams");
             if fields.get("kind") == Some(&json!("hello")) {
                 // This binary's version is its own.
                 fields.remove("helper_version");
@@ -1519,7 +1526,92 @@ async fn the_count_follows_the_applications_and_none_is_no_sources() {
     assert_eq!(rig.exit_code().await, 0);
 }
 
-/// The application name the owner sends is never repeated, in any line.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_live_share_reports_bounded_stream_names_and_decisions() {
+    let world = ShareWorld::default();
+    world.play(1);
+    {
+        let mut graph = world.0.streams.lock().unwrap();
+        graph.1[0].media_name = Some("/home/private/song.flac".into());
+        graph.1[4].media_name = Some("A song".into());
+        graph.1.extend([
+            StreamFacts {
+                serial: Some(9101),
+                sec_pid: Some(RENDERER),
+                application_name: Some("Desktop renderer".into()),
+                ..StreamFacts::default()
+            },
+            StreamFacts {
+                sec_pid: Some(9102),
+                application_name: Some("/home/private/song.flac".into()),
+                ..StreamFacts::default()
+            },
+        ]);
+    }
+    let mut rig = share_rig(&world, true).await;
+    send_start_v3(&mut rig);
+    connected_v3(&rig).await;
+    rig.send(&share_on(2));
+    ack_v3(&rig, 2).await;
+    let current = || {
+        helper_values(&rig, Some(Version::V3))
+            .into_iter()
+            .rfind(|event| event["kind"] == "state")
+            .unwrap()
+    };
+    assert_eq!(
+        current()["share_audio_streams"],
+        json!([
+            {"application": "conch-voice", "media": "", "reason": "call_playback"},
+            {"application": "Chromium", "media": "", "reason": "conch_application"},
+            {"application": NAME, "media": "", "reason": "conch_name"},
+            {"application": "", "media": "", "reason": "unknown_owner"},
+            {"application": "player-0", "media": "A song", "reason": "captured"},
+            {"application": "Desktop renderer", "media": "", "reason": "conch_client"},
+            {"application": "", "media": "", "reason": "missing_target"}
+        ])
+    );
+    {
+        let mut graph = world.0.streams.lock().unwrap();
+        graph.0 += 1;
+        graph.1[4].media_name = Some("Another song".into());
+    }
+    wait_for("the new media name with the same source count", || {
+        current()["share_audio_streams"][4]
+            == json!({"application": "player-0", "media": "Another song", "reason": "captured"})
+    })
+    .await;
+    world.play(60);
+    until_v3(&rig, "60 sources", |state| share_is(state, "on", None, 60)).await;
+    assert_eq!(
+        current()["share_audio_streams"].as_array().unwrap().len(),
+        50
+    );
+    {
+        let mut graph = world.0.streams.lock().unwrap();
+        graph.0 += 1;
+        graph.1.clear();
+    }
+    until_v3(&rig, "no streams", |state| {
+        share_is(state, "on", Some("no_sources"), 0)
+    })
+    .await;
+    assert!(current().get("share_audio_streams").is_none());
+    rig.send(&share_off(3));
+    ack_v3(&rig, 3).await;
+    assert!(
+        helper_values(&rig, Some(Version::V3))
+            .into_iter()
+            .rfind(|event| event["kind"] == "state")
+            .unwrap()
+            .get("share_audio_streams")
+            .is_none()
+    );
+    rig.send(&v3("leave", 4, json!({})));
+    assert_eq!(rig.exit_code().await, 0);
+}
+
+/// The request's application name is private. Stream labels come from the graph.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_application_name_is_never_repeated() {
     let world = ShareWorld::default();
@@ -1538,7 +1630,10 @@ async fn the_application_name_is_never_repeated() {
     assert_eq!(rig.exit_code().await, 0);
     let text = rig.events.text();
     assert!(!text.contains(secret), "{text}");
-    assert!(!text.contains("player-"), "no application is named: {text}");
+    assert!(
+        text.contains("player-0"),
+        "the graph's application is named: {text}"
+    );
 }
 
 // ------------------------------------------------------------------ the structure

@@ -454,7 +454,7 @@ describe('nothing privileged is run', () => {
   it('no spawn call names sudo, pkexec, setfacl, usermod, udevadm or a shell', () => {
     for (const f of files) {
       const src = readFileSync(f, 'utf8');
-      for (const m of src.matchAll(/\b(?:spawn|execFile|exec|fork)\s*\(([^)]*)\)/gu)) {
+      for (const m of src.matchAll(/\b(?:spawn|nodeSpawn|execFile|exec|fork)\s*\(([^)]*)\)/gu)) {
         expect(m[1], `${f}: ${m[0]}`).not.toMatch(/sudo|pkexec|setfacl|usermod|udevadm|gpasswd|\/bin\/(?:ba)?sh|'sh'|"sh"/u);
       }
     }

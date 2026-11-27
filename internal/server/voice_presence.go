@@ -1864,22 +1864,22 @@ func (p *voicePoller) snapshot(channelID, viewer int64) schema.VoicePresenceV1 {
 }
 
 // snapshotV is snapshot for the version named (schema.VoicePresenceSchemaV1
-// or V2).
+// or a newer version).
 func (p *voicePoller) snapshotV(channelID, viewer int64, version string) (voicePresenceDoc, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.snapshotLocked(channelID, viewer, version)
 }
 
-// voicePresenceDoc is a presence document of either version: what a socket
+// voicePresenceDoc is a negotiated presence document: what a socket
 // or the GET route validates and encodes.
 type voicePresenceDoc interface {
 	Validate() error
 }
 
 // voicePresenceVersion reads the presence version a request asks for
-// (schema.VoicePresenceSchemaParam, issue #1483): absent or v1 is v1, the v2
-// name is v2, and anything else, a repeated value included, is refused. It is
+// (schema.VoicePresenceSchemaParam, issue #1483): absent means v1, an explicit
+// name must be a supported version, and a repeated value is refused. It is
 // read before the channel is looked at, so a refusal says nothing about the
 // channel.
 func voicePresenceVersion(q url.Values) (string, bool) {
@@ -1889,7 +1889,7 @@ func voicePresenceVersion(q url.Values) (string, bool) {
 	}
 	if len(values) == 1 {
 		switch values[0] {
-		case schema.VoicePresenceSchemaV1, schema.VoicePresenceSchemaV2:
+		case schema.VoicePresenceSchemaV1, schema.VoicePresenceSchemaV2, schema.VoicePresenceSchemaV3:
 			return values[0], true
 		}
 	}
@@ -1901,7 +1901,7 @@ type voiceSharerRow struct {
 	principalID int64
 	startedAt   time.Time
 	audio       bool
-	quality     *schema.VoiceShareQuality
+	quality     *schema.VoiceShareQualityV3
 }
 
 // v1Sharer is the one stream a v1 reader is shown (design §2.3): the
@@ -1927,18 +1927,22 @@ func v1Sharer(rows []voiceSharerRow, viewer int64) int64 {
 }
 
 // snapshotLocked builds the presence document of version for channelID as
-// viewer reads it, and validates it: a document that fails is an error, never sent. version is schema.VoicePresenceSchemaV2 for v2 and anything else
-// is v1 (callers have read it with voicePresenceVersion). The caller holds
-// p.mu.
+// viewer reads it, and validates it. The caller holds p.mu.
 func (p *voicePoller) snapshotLocked(channelID, viewer int64, version string) (voicePresenceDoc, error) {
 	v2 := version == schema.VoicePresenceSchemaV2
+	v3 := version == schema.VoicePresenceSchemaV3
 	name := schema.VoicePresenceSchemaV1
-	if v2 {
-		name = schema.VoicePresenceSchemaV2
+	if v2 || v3 {
+		name = version
 	}
 	base := schema.VoicePresenceV1{Schema: name, ChannelID: channelID, Rooms: []schema.VoicePresenceRoom{}}
 	roomV2 := schema.VoicePresenceRoomV2{Participants: []schema.VoiceParticipantV2{}}
+	roomV3 := schema.VoicePresenceRoomV3{Participants: []schema.VoiceParticipantV3{}}
 	build := func() voicePresenceDoc {
+		if v3 {
+			return schema.VoicePresenceV3{Schema: base.Schema, ChannelID: channelID, Configured: base.Configured, Available: base.Available,
+				Rooms: []schema.VoicePresenceRoomV3{}, ShareEnded: base.ShareEnded, CameraEnded: base.CameraEnded}
+		}
 		if v2 {
 			return schema.VoicePresenceV2{Schema: base.Schema, ChannelID: channelID, Configured: base.Configured, Available: base.Available,
 				Rooms: []schema.VoicePresenceRoomV2{}, ShareEnded: base.ShareEnded, CameraEnded: base.CameraEnded}
@@ -1984,8 +1988,8 @@ func (p *voicePoller) snapshotLocked(channelID, viewer int64, version string) (v
 					row = &rows[i]
 				}
 			}
-			if v2 {
-				part := schema.VoiceParticipantV2{
+			if v2 || v3 {
+				part := schema.VoiceParticipantV3{
 					PrincipalID: pid,
 					// Every V3 member may publish into the channel-wide room
 					// (voiceAudiences); a listen-only room arrives with nets.
@@ -2002,7 +2006,11 @@ func (p *voicePoller) snapshotLocked(channelID, viewer int64, version string) (v
 						part.ShareQuality = &q
 					}
 				}
-				roomV2.Participants = append(roomV2.Participants, part)
+				if v3 {
+					roomV3.Participants = append(roomV3.Participants, part)
+				} else {
+					roomV2.Participants = append(roomV2.Participants, part.Legacy())
+				}
 				continue
 			}
 			// v1 lists at most one sharer, with v1's fields and no more
@@ -2021,8 +2029,13 @@ func (p *voicePoller) snapshotLocked(channelID, viewer int64, version string) (v
 	}
 	slices.SortFunc(roomV1.Participants, func(a, b schema.VoiceParticipant) int { return cmp.Compare(a.PrincipalID, b.PrincipalID) })
 	slices.SortFunc(roomV2.Participants, func(a, b schema.VoiceParticipantV2) int { return cmp.Compare(a.PrincipalID, b.PrincipalID) })
+	slices.SortFunc(roomV3.Participants, func(a, b schema.VoiceParticipantV3) int { return cmp.Compare(a.PrincipalID, b.PrincipalID) })
 	var doc voicePresenceDoc
-	if v2 {
+	if v3 {
+		d := build().(schema.VoicePresenceV3)
+		d.Rooms = append(d.Rooms, roomV3)
+		doc = d
+	} else if v2 {
 		d := build().(schema.VoicePresenceV2)
 		d.Rooms = append(d.Rooms, roomV2)
 		doc = d

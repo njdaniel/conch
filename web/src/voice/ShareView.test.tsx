@@ -19,7 +19,7 @@ import type { Person } from '../useLiveChannel';
 import { VoiceClient, type Room, type RoomEvents, type ShareSink } from './connection';
 import { FakeClock, noCamera, settle } from './fakes';
 import { resumeLimit, settleQuality, type Captured, type KeptScreen, type SettledQuality, type ShareFeatures, type ShareQuality, type ShareSample } from './share';
-import { ShareReadout, ShareView } from './ShareView';
+import { controlsIdleMs, ShareReadout, ShareView } from './ShareView';
 import type { Snapshot, VoiceControl } from './useVoice';
 import { VoicePanel } from './VoicePanel';
 import { watchScreenCapture } from './sdk';
@@ -98,6 +98,8 @@ class StubRoom implements Room {
   cameras = this.camera.cameras;
   switchCamera = this.camera.switchCamera;
   attachSelf = this.camera.attachSelf;
+  attachShareSelf = (): void => undefined;
+  shareSurface = (): null => null;
   setViewing = this.camera.setViewing;
   setShown = this.camera.setShown;
   setCameras = this.camera.setCameras;
@@ -196,7 +198,7 @@ function setup(claims: ShareClaimResult[] = [], features: ShareFeatures = chrome
   const seen = (p: VoicePresenceV2) => {
     snapshot = { kind: 'presence', presence: p };
     act(() => {
-      client.presence(p);
+      client.presence(p, p.schema);
     });
     view.rerender(tree());
   };
@@ -613,6 +615,49 @@ describe('watching', () => {
     await act(settle);
     expect(play).toHaveBeenCalledTimes(2);
     expect(screen.queryByRole('button', { name: 'Tap to play sound' })).toBeNull();
+  });
+
+  it('fades its controls after a pause, shows them on a pointer move, and never while the share is not playing (issue #2187)', async () => {
+    const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+    const t = await watching();
+    const view = await screen.findByRole('region', { name: 'Shared screen' });
+    vi.useFakeTimers();
+    try {
+      // Waiting for the picture: shown, however long the pause.
+      act(() => { vi.advanceTimersByTime(controlsIdleMs * 2); });
+      expect(view.classList.contains('idle')).toBe(false);
+      act(() => { t.rooms[0]?.events?.onStreamTracks(8, { video: true, audio: false }); });
+      fireEvent.pointerMove(view);
+      act(() => { vi.advanceTimersByTime(controlsIdleMs - 1); });
+      expect(view.classList.contains('idle')).toBe(false);
+      act(() => { vi.advanceTimersByTime(1); });
+      expect(view.classList.contains('idle')).toBe(true);
+      // The row is in the page still (it is faded, not removed).
+      expect(within(view).getByRole('button', { name: 'Mute share' })).toBeTruthy();
+      fireEvent.pointerMove(view);
+      expect(view.classList.contains('idle')).toBe(false);
+      act(() => { vi.advanceTimersByTime(controlsIdleMs); });
+      expect(view.classList.contains('idle')).toBe(true);
+      fireEvent.pointerDown(view);
+      expect(view.classList.contains('idle')).toBe(false);
+      // The sound needing a tap keeps them too.
+      play.mockRejectedValue(new Error('NotAllowedError'));
+      await act(async () => { t.rooms[0]?.events?.onStreamTracks(8, { video: true, audio: true }); await Promise.resolve(); });
+      expect(within(view).getByRole('button', { name: 'Tap to play sound' })).toBeTruthy();
+      act(() => { vi.advanceTimersByTime(controlsIdleMs * 2); });
+      expect(view.classList.contains('idle')).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('draws the tap to play sound over the picture, not among the controls', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockRejectedValue(new Error('NotAllowedError'));
+    const t = await watching();
+    act(() => { t.rooms[0]?.events?.onStreamTracks(8, { video: true, audio: true }); });
+    const tap = await screen.findByRole('button', { name: 'Tap to play sound' });
+    expect(tap.closest('.share-frame')).not.toBeNull();
+    expect(tap.closest('.share-controls')).toBeNull();
   });
 
   it('goes full screen on the share frame in the phone layout', async () => {

@@ -225,6 +225,16 @@ type Server struct {
 	// events socket writes: a test blocks in it to be a subscriber that is
 	// stuck in a write.
 	eventsBeforeWrite func()
+	// person is the registry of per-person stream sockets (person_stream.go),
+	// kept apart from events: it carries no channel.
+	person *personHub
+	// dmSnapshotSource builds the DM snapshot a person socket opens with.
+	// Nil means emptyDMSnapshot; the DM issues install the real one.
+	dmSnapshotSource dmSnapshotSource
+	// dmFrameAccess decides, per DM frame at write time, whether a person
+	// socket may be sent it (person_stream.go). Nil denies every frame: the socket drops them, so
+	// DMs reach no one until the DM store installs both hooks.
+	dmFrameAccess dmFrameAccess
 	// eventsBeforeEpochWrite, when set by a test, runs before every frame an
 	// events socket writes that is held to a read-state epoch (a read state
 	// or a notification message), with the encoded frame. A test that must
@@ -280,6 +290,9 @@ type Server struct {
 	// channel (channel_write_limit.go), in memory only; its clock is now.
 	// Tests replace it with setChannelWriteLimit before serving.
 	channelWriteLimits *channelWriteLimiter
+	// dmNewLimits bounds how many new conversations one person introduces
+	// (dm_limits.go), in memory only; tests replace it with setDMNewLimit.
+	dmNewLimits *dmNewLimiter
 	// notificationLimits bounds the notification routes
 	// (notification_limits.go), in memory only; its clock is now. Tests
 	// replace it with setNotificationLimits before serving.
@@ -352,7 +365,7 @@ func New(cfg Config, st *store.Store) *Server {
 				"missing", strings.Join(missing, ", "), "not_sent", ntfyNotSent(missing))
 		}
 	}
-	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, sessionSweepInterval: defaultSessionSweepInterval, now: time.Now, renameFile: os.Rename, inviteLimits: newInviteLimiter(inviteLimitsFor(cfg)), reportLimits: newReportLimiter(defaultReportLimit()), reactionLimits: newReactionLimiter(defaultReactionLimit()), channelWriteLimits: newChannelWriteLimiter(defaultChannelWriteLimit()), notificationLimits: newNotificationLimiter(defaultNotificationWriteLimit(), defaultNotificationReadLimit()), agentUploadLimits: newAgentUploadLimiter(cfg.AgentUploadsPerHour), mcpLargeSlots: make(chan struct{}, mcpLargeRequestSlots),
+	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, sessionSweepInterval: defaultSessionSweepInterval, now: time.Now, renameFile: os.Rename, inviteLimits: newInviteLimiter(inviteLimitsFor(cfg)), reportLimits: newReportLimiter(defaultReportLimit()), reactionLimits: newReactionLimiter(defaultReactionLimit()), channelWriteLimits: newChannelWriteLimiter(defaultChannelWriteLimit()), dmNewLimits: newDMNewLimiter(defaultDMNewLimit()), notificationLimits: newNotificationLimiter(defaultNotificationWriteLimit(), defaultNotificationReadLimit()), agentUploadLimits: newAgentUploadLimiter(cfg.AgentUploadsPerHour), mcpLargeSlots: make(chan struct{}, mcpLargeRequestSlots),
 		passwords: newPasswords(), logins: newLoginLimiter(loginLimitsFor(cfg)), addressMAC: newAddressMACKey(),
 		setupLimits: newSetupLimiter(cfg), messageEditLimits: newMessageEditLimiter(defaultMessageEditLimit())}
 	// The server's name is a permanent name nobody may take (issue #760):
@@ -361,6 +374,7 @@ func New(cfg Config, st *store.Store) *Server {
 	s.removeStaleUploads()
 	s.voice = newVoicePoller(s)
 	s.events = newEventsHub()
+	s.person = newPersonHub()
 	s.metrics = newServerMetrics(s)
 	s.pushSender = s.newPushSender()
 	// Runs that end with their session change without SetRunState, so the
@@ -537,6 +551,9 @@ func (s *Server) Serve(ctx context.Context) error {
 	if err := ValidatePushConfig(s.cfg.Push); err != nil {
 		return fmt.Errorf("server: %w", err)
 	}
+	if err := s.store.RestartPrivateCalls(ctx, s.now()); err != nil {
+		return fmt.Errorf("server: reconcile private calls: %w", err)
+	}
 	if err := s.Listen(); err != nil {
 		return err
 	}
@@ -558,6 +575,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	defer s.voice.closeAll()
 	// Events sockets are hijacked too, and are closed the same way.
 	defer s.events.closeAll()
+	defer s.person.closeAll()
 	if s.lk != nil {
 		stop := s.voice.start(ctx)
 		defer stop()
@@ -570,6 +588,9 @@ func (s *Server) Serve(ctx context.Context) error {
 	// Guest visits: the sweeper ends each at its deadline (access is refused
 	// at the deadline already) and stops with ctx, waited for like the rest.
 	defer s.startGuestSweeper(ctx)()
+
+	// Private calls: enforce invitation, join and reconnect deadlines.
+	defer s.startPrivateCallSweeper(ctx)()
 
 	// Metrics, when configured, on their own listener; stopped with the rest.
 	defer s.serveMetrics(ctx)()

@@ -3,17 +3,18 @@
 // voice-multi-share.md §2, issue #1509). The socket is open for the channel
 // shown whether or not the caller has joined; after the server closes it, one
 // snapshot read learns why.
-import { voicePresenceV2, type VoicePresenceV1, type VoicePresenceV2, type VoiceShareQuality } from '../schema/voice';
+import { voicePresenceV2, voicePresenceV3, type VoicePresence, type VoicePresenceV1, type VoicePresenceV2, type VoicePresenceV3, type VoiceShareQualityV3 } from '../schema/voice';
 
-type Presence = VoicePresenceV1 | VoicePresenceV2;
+type Presence = VoicePresenceV1 | VoicePresence;
 import { fromServer } from '../schema/validate';
 
 // parsePresence reads one socket frame; null for anything that is not a
 // presence document of this version.
-export function parsePresence(data: unknown): VoicePresenceV2 | null {
+export function parsePresence(data: unknown): VoicePresence | null {
   if (typeof data !== 'string') return null;
   try {
     const body: unknown = JSON.parse(data);
+    if (fromServer(voicePresenceV3)(body).length === 0) return body as VoicePresenceV3;
     return fromServer(voicePresenceV2)(body).length === 0 ? (body as VoicePresenceV2) : null;
   } catch {
     return null;
@@ -50,12 +51,12 @@ export function occupants(p: Presence | null): Occupant[] {
 // sharer declared, not a measurement (voice-multi-share.md §2.2, §3.2, #1509).
 export interface Sharer extends Occupant {
   readonly startedAt: string;
-  readonly quality: VoiceShareQuality | null;
+  readonly quality: VoiceShareQualityV3 | null;
 }
 
 // qualityLabel formats a declared resolution and frame rate for a stream tile;
 // null means the sharer declared none (voice-multi-share.md §3, #1509).
-export function qualityLabel(quality: VoiceShareQuality | null): string | null {
+export function qualityLabel(quality: VoiceShareQualityV3 | null): string | null {
   if (quality === null) return null;
   const resolution = quality.resolution === 'source' ? 'Source' : quality.resolution;
   return `${resolution} · ${String(quality.frame_rate)} fps`;
@@ -64,7 +65,7 @@ export function qualityLabel(quality: VoiceShareQuality | null): string | null {
 // sharers is everyone sharing a screen in the channel-wide room, replacing the
 // old at-most-one sharer read (voice-multi-share.md §2, issue #1509). Stream
 // order is the claim's start time, oldest first and newest last.
-export function sharers(p: VoicePresenceV2 | null): Sharer[] {
+export function sharers(p: VoicePresence | null): Sharer[] {
   const room = p?.rooms.find((r) => r.audience === undefined);
   return (room?.participants ?? [])
     .filter((x) => x.sharing === true && x.share_started_at !== undefined)

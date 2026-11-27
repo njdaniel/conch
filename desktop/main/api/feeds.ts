@@ -42,11 +42,11 @@
 // frames, and the close of a socket that failed before it opened is told as
 // 1008 when the credential turns out to have ended (one whoami says so), as
 // the browser learns from a ticket refused with 401.
-import { GeometricSampler, type MainLog } from '../diagnostics.ts';
+import type { GeometricSampler, FeedDiagnosticKey, FeedEnding as Ending, MainLog } from '../diagnostics.ts';
 import { parseEventFrame } from '../../../web/src/agents/frames.ts';
 import type { FeedKind, FeedRequest } from '../../../web/src/platform/desktop/bridge.ts';
 import { operations, type OperationId } from '../../../web/src/platform/operations.ts';
-import { heartbeatV1, messageV2, voiceOccupancyV1, voicePresenceV2, voicePresenceV2Schema } from '../../../web/src/schema/generated.ts';
+import { heartbeatV1, messageV2, voiceOccupancyV1, voicePresenceV2, voicePresenceV2Schema, voicePresenceV3, voicePresenceV3Schema } from '../../../web/src/schema/generated.ts';
 import { fromServer } from '../../../web/src/schema/validate.ts';
 import type { FeedEvent } from '../../shared/bridge-names.ts';
 import type { Client } from './client.ts';
@@ -106,9 +106,10 @@ function isFeedKind(value: unknown): value is FeedKind {
 // that is a whole number, a session that is a positive one.
 export function parseFeedRequest(value: unknown): FeedRequest | null {
   if (!isRecord(value)) return null;
-  const { kind, channel, session, after } = value;
+  const { kind, channel, session, after, schema } = value;
   if (!isFeedKind(kind)) return null;
-  const wanted = PARAMETERS[kind];
+  const v3 = kind === 'voice' && schema === voicePresenceV3Schema;
+  const wanted = v3 ? ['channel', 'schema'] : PARAMETERS[kind];
   const keys = Object.keys(value).filter((key) => key !== 'kind');
   if (keys.length !== wanted.length || !keys.every((key) => wanted.includes(key))) return null;
   if (wanted.includes('channel') && (typeof channel !== 'string' || channel.length === 0 || channel.length > 256 || CONTROL.test(channel))) return null;
@@ -119,16 +120,14 @@ export function parseFeedRequest(value: unknown): FeedRequest | null {
     ...(typeof channel === 'string' ? { channel } : {}),
     ...(typeof session === 'number' ? { session } : {}),
     ...(typeof after === 'number' ? { after } : {}),
+    ...(v3 ? { schema: voicePresenceV3Schema } : {}),
   };
 }
 
 // feedUrl is the socket's address: the origin's ws or wss form, the feed's
 // route from the operation table, and its query. The messages feed always
 // asks for the heartbeat, which the renderer's silence watchdog lives on. The
-// voice feed always asks for v2 presence (?schema=conch.voice_presence.v2),
-// every live stream with its start and quality, which the web client reads
-// (voice-multi-share.md §2.2, §7.1, §7.4: the desktop's view is the web
-// client's); without it conchd sends v1, which the renderer refuses.
+// voice feed asks for the negotiated schema, or v2 by default.
 export function feedUrl(origin: string, request: FeedRequest): string {
   const base = origin.replace(/^http/u, 'ws');
   const query = new URLSearchParams();
@@ -137,7 +136,7 @@ export function feedUrl(origin: string, request: FeedRequest): string {
     query.set('after', String(request.after ?? 0));
     query.set('heartbeat', '1');
   }
-  if (request.kind === 'voice') query.set('schema', voicePresenceV2Schema);
+  if (request.kind === 'voice') query.set('schema', request.schema ?? voicePresenceV2Schema);
   if (request.session !== undefined) query.set('session', String(request.session));
   const search = query.toString();
   return `${base}${operations[ROUTES[request.kind]].path}${search === '' ? '' : `?${search}`}`;
@@ -156,9 +155,9 @@ const isHeartbeat = (doc: unknown): boolean => doc !== undefined && fromServer(h
 // validFrame says whether a text frame is one its feed sends: a v2 message or
 // the heartbeat on the messages feed; a document the events feed's own parser
 // accepts, or the heartbeat, on the events feed; a presence document on the
-// voice feed (v2, as feedUrl asks for); an occupancy document on the
+// voice feed (the version feedUrl asks for); an occupancy document on the
 // occupancy feed.
-export function validFrame(kind: FeedKind, data: string): boolean {
+export function validFrame(kind: FeedKind, data: string, schema?: FeedRequest['schema']): boolean {
   switch (kind) {
     case 'messages': {
       const doc = parsed(data);
@@ -168,7 +167,9 @@ export function validFrame(kind: FeedKind, data: string): boolean {
       return parseEventFrame(data) !== null || isHeartbeat(parsed(data));
     case 'voice': {
       const doc = parsed(data);
-      return doc !== undefined && fromServer(voicePresenceV2)(doc).length === 0;
+      return doc !== undefined && (schema === voicePresenceV3Schema
+        ? fromServer(voicePresenceV3)(doc).length === 0
+        : fromServer(voicePresenceV2)(doc).length === 0);
     }
     case 'occupancy': {
       const doc = parsed(data);
@@ -177,14 +178,12 @@ export function validFrame(kind: FeedKind, data: string): boolean {
   }
 }
 
-// Why a socket was closed, for the log line.
-type Ending = 'unsubscribed' | 'document' | 'signed out' | 'server' | 'behind';
-
 interface Subscription {
   readonly key: string;
   readonly id: number;
   readonly document: number;
   readonly kind: FeedKind;
+  readonly schema: FeedRequest['schema'];
   readonly capture: Capture;
   socket: Held | null;
   opened: boolean;
@@ -215,6 +214,9 @@ export interface FeedsDeps {
   readonly deliver: (document: number, event: FeedEvent) => void;
   // One line; never a URL, a channel, a frame or a credential.
   readonly log: MainLog;
+  // Give each kind its own sequence for each event so one busy kind cannot
+  // crowd out another. Every lifecycle line still goes to the local log.
+  readonly samples: GeometricSampler<FeedDiagnosticKey>;
   readonly maxQueuedFrames?: number;
   readonly maxQueuedBytes?: number;
   // The clock of the close deadline; the real one by default.
@@ -246,9 +248,6 @@ export class Feeds {
   readonly #deps: FeedsDeps;
   readonly #subscriptions = new Map<string, Subscription>();
   readonly #held = new Set<Held>();
-  // Keep a sample of each lifecycle event in the export during feed churn.
-  // Every lifecycle line still goes to the local log.
-  readonly #lifecycleSamples = new GeometricSampler<'opening' | Ending | 'closed' | 'destroyed' | 'close deadline'>();
   #invalid = 0;
   #behind = 0;
 
@@ -313,6 +312,7 @@ export class Feeds {
       id,
       document,
       kind: request.kind,
+      schema: request.schema,
       capture,
       socket: null,
       opened: false,
@@ -356,7 +356,7 @@ export class Feeds {
         if (live()) this.#closed(sub, CLOSE_ABNORMAL, '');
       });
     }
-    if (this.#lifecycleSamples.sample('opening')) {
+    if (this.#deps.samples.sample(`${sub.kind} opening`)) {
       this.#deps.log(`conch-desktop: feed ${sub.kind} opening; ${this.#counts()}`, { ring: true });
     } else {
       this.#deps.log(`conch-desktop: feed ${sub.kind} opening; ${this.#counts()}`);
@@ -392,12 +392,14 @@ export class Feeds {
   }
 
   #frame(sub: Subscription, data: unknown): void {
-    if (typeof data !== 'string' || Buffer.byteLength(data, 'utf8') > MAX_FRAME_BYTES || !validFrame(sub.kind, data)) {
+    if (typeof data !== 'string' || Buffer.byteLength(data, 'utf8') > MAX_FRAME_BYTES || !validFrame(sub.kind, data, sub.schema)) {
       this.#invalid++;
-      // The first, then every hundredth: a server that sends nothing else
-      // must not fill the log.
-      if (this.#invalid === 1 || this.#invalid % 100 === 0) {
+      // Export geometrically per kind. Keep the every-hundredth progress
+      // line in the local log so a server sending only invalid frames is visible.
+      if (this.#deps.samples.sample(`${sub.kind} invalid frame`)) {
         this.#deps.log(`conch-desktop: dropped an invalid ${sub.kind} frame; ${String(this.#invalid)} so far`, { ring: true });
+      } else if (this.#invalid % 100 === 0) {
+        this.#deps.log(`conch-desktop: dropped an invalid ${sub.kind} frame; ${String(this.#invalid)} so far`);
       }
       return;
     }
@@ -462,7 +464,7 @@ export class Feeds {
     sub.capture.signal.removeEventListener('abort', sub.onAbort);
     this.#subscriptions.delete(sub.key);
     if (held !== null) this.#release(held);
-    if (this.#lifecycleSamples.sample(why)) {
+    if (this.#deps.samples.sample(`${sub.kind} ${why}`)) {
       this.#deps.log(`conch-desktop: feed ${sub.kind} closed (${why}); ${this.#counts()}`, { ring: true });
     } else {
       this.#deps.log(`conch-desktop: feed ${sub.kind} closed (${why}); ${this.#counts()}`);
@@ -483,7 +485,7 @@ export class Feeds {
         this.#gone(held, 'destroyed');
       } else {
         // Nothing to destroy: it stays counted until its close arrives.
-        if (this.#lifecycleSamples.sample('close deadline')) {
+        if (this.#deps.samples.sample(`${held.kind} close deadline`)) {
           this.#deps.log(`conch-desktop: a ${held.kind} feed socket did not close within ${String(CLOSE_DEADLINE_MS)} ms and cannot be destroyed; ${this.#counts()}`, { ring: true });
         } else {
           this.#deps.log(`conch-desktop: a ${held.kind} feed socket did not close within ${String(CLOSE_DEADLINE_MS)} ms and cannot be destroyed; ${this.#counts()}`);
@@ -499,7 +501,7 @@ export class Feeds {
     held.timer = null;
     if (held.closing || how === 'destroyed') {
       const what = how === 'destroyed' ? `destroyed: no close within ${String(CLOSE_DEADLINE_MS)} ms` : 'closed';
-      if (this.#lifecycleSamples.sample(how)) {
+      if (this.#deps.samples.sample(`${held.kind} socket ${how}`)) {
         this.#deps.log(`conch-desktop: feed ${held.kind} socket ${what}; ${this.#counts()}`, { ring: true });
       } else {
         this.#deps.log(`conch-desktop: feed ${held.kind} socket ${what}; ${this.#counts()}`);

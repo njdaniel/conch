@@ -15,9 +15,11 @@ import (
 )
 
 // handleVoiceWS serves GET /v1/voice/ws?channel=<name>: it upgrades to a
-// WebSocket and sends the channel's voice presence as a
-// conch.voice_presence.v1 document on connect and again whenever it changes,
-// and nothing otherwise. It is a separate route from the message sockets
+// WebSocket and sends the channel's voice presence on connect and again
+// whenever it changes, and nothing otherwise. The default document is
+// conch.voice_presence.v1. The optional ?schema= parameter selects v1, v2 or
+// v3 by its full schema name, as on GET /v1/channels/{channel}/voice.
+// It is a separate route from the message sockets
 // because those carry bare message envelopes (design note §6).
 //
 // It follows ws.go: pre-upgrade failures are plain HTTP responses, the

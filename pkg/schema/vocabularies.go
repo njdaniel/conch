@@ -108,6 +108,14 @@ var Vocabularies = map[string][]string{
 		VoiceControlCommandV3SetDevices, VoiceControlCommandV3SetTalkMode,
 		VoiceControlCommandV3SetShareAudio, VoiceControlCommandV3SetShareAudioMute,
 	),
+	// v4's, likewise (voice_control_v4.go), with diagnostics and call quality.
+	"VoiceControlCommandKindV4": values(
+		VoiceControlCommandV4Start, VoiceControlCommandV4SetMute, VoiceControlCommandV4SetDeafen,
+		VoiceControlCommandV4GetState, VoiceControlCommandV4Leave,
+		VoiceControlCommandV4SetDevices, VoiceControlCommandV4SetTalkMode,
+		VoiceControlCommandV4SetShareAudio, VoiceControlCommandV4SetShareAudioMute,
+		VoiceControlCommandV4SetDiagnostics, VoiceControlCommandV4GetCallQuality,
+	),
 	"VoiceControlCredential": values(VoiceControlCredentialStored, VoiceControlCredentialEnv),
 	"VoiceControlErrorCode": values(
 		VoiceControlErrorTooLong, VoiceControlErrorMalformed, VoiceControlErrorUnknownSchema,
@@ -116,6 +124,14 @@ var Vocabularies = map[string][]string{
 	),
 	"VoiceControlEventKind": values(
 		VoiceControlEventHello, VoiceControlEventAck, VoiceControlEventState, VoiceControlEventProtocolError,
+	),
+	"VoiceControlEventKindV4": values(
+		VoiceControlEventV4Ack, VoiceControlEventV4State, VoiceControlEventV4ProtocolError,
+		VoiceControlEventV4Levels, VoiceControlEventV4GateEvent, VoiceControlEventV4CallQuality,
+	),
+	"VoiceControlGateWhyV4": values(
+		VoiceControlGateWhyV4Sound, VoiceControlGateWhyV4HangEnded, VoiceControlGateWhyV4Mute,
+		VoiceControlGateWhyV4Lock, VoiceControlGateWhyV4Limit,
 	),
 	"VoiceControlPipeKind": values(VoiceControlPipeKindAttached),
 	"VoiceControlPlayback": values(VoiceControlPlaybackOff, VoiceControlPlaybackOn, VoiceControlPlaybackUnavailable),
@@ -154,6 +170,14 @@ var Vocabularies = map[string][]string{
 		VoiceControlShareAudioProblemUnsupported, VoiceControlShareAudioProblemNotConnected,
 		VoiceControlShareAudioProblemNoSources,
 	),
+	"VoiceControlShareAudioStreamReason": values(
+		VoiceControlShareAudioStreamCaptured, VoiceControlShareAudioStreamCallPlayback,
+		VoiceControlShareAudioStreamConchClient, VoiceControlShareAudioStreamConchApplication,
+		VoiceControlShareAudioStreamConchName, VoiceControlShareAudioStreamUnknownOwner,
+		VoiceControlShareAudioStreamMissingTarget, VoiceControlShareAudioStreamAwaitingApplication,
+		VoiceControlShareAudioStreamWrongFormat, VoiceControlShareAudioStreamEnded,
+		VoiceControlShareAudioStreamFormatNotSupported,
+	),
 	"VoiceControlTalkMode": values(VoiceControlTalkModePushToTalk, VoiceControlTalkModeOpen),
 	"VoiceDevicesConfig": values(
 		VoiceDevicesConfigOK, VoiceDevicesConfigMissing, VoiceDevicesConfigRefused, VoiceDevicesConfigNone,
@@ -169,8 +193,9 @@ var Vocabularies = map[string][]string{
 	),
 	// The sharer's declared resolution (issue #1483): the picker's three
 	// (#1488, web/src/voice/share.ts ShareResolution), exactly.
-	"VoiceShareResolution": values(VoiceShareResolution720p, VoiceShareResolution1080p, VoiceShareResolutionSource),
-	"VoiceTransmitState":   values(VoiceTransmitStateStarted, VoiceTransmitStateStopped),
+	"VoiceShareResolution":   values(VoiceShareResolution720p, VoiceShareResolution1080p, VoiceShareResolutionSource),
+	"VoiceShareResolutionV3": values(VoiceShareV3Resolution480p, VoiceShareV3Resolution720p, VoiceShareV3Resolution1080p, VoiceShareV3Resolution1440p, VoiceShareV3ResolutionSource),
+	"VoiceTransmitState":     values(VoiceTransmitStateStarted, VoiceTransmitStateStopped),
 
 	// Roles and permissions (ADR-014, issue #1012). Permission is in catalog
 	// order, the order of Permissions. Row 12, use_camera, is ADR-015's.
@@ -242,6 +267,18 @@ var Vocabularies = map[string][]string{
 	"DMAcceptPolicy":     values(DMAcceptEveryone, DMAcceptSharedChannel, DMAcceptNobody),
 	"DMChangeKind":       values(DMChangeOpened, DMChangeRead, DMChangeState, DMChangeParticipant),
 	"MessageContextKind": values(MessageContextChannel, MessageContextDirect),
+
+	// Private calls (issue #2029, DRAFT pending ADR-017).
+	"PrivateCallState": values(
+		PrivateCallStateUnavailable, PrivateCallStateRinging, PrivateCallStateAccepted,
+		PrivateCallStateActive, PrivateCallStateDeclined, PrivateCallStateCancelled,
+		PrivateCallStateMissed, PrivateCallStateEnded, PrivateCallStateFailed,
+	),
+	"PrivateCallReason": values(
+		PrivateCallReasonHangup, PrivateCallReasonGone,
+		PrivateCallReasonJoinTimeout, PrivateCallReasonServerRestart,
+	),
+	"PrivateCallRole": values(PrivateCallRoleCaller, PrivateCallRoleCallee),
 }
 
 // values lists a vocabulary by its constants, so an entry above cannot hold a

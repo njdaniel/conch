@@ -32,7 +32,7 @@
 // (voice-world.ts): without Docker it fails when CI is set and is skipped
 // otherwise.
 import type { Locator, Page } from '@playwright/test';
-import { closeAll, channelButton, chooseMicrophone, expect, rememberPushToTalk, signIn, test } from './fixtures';
+import { notSendingText, sendingText, closeAll, channelButton, chooseMicrophone, expect, rememberPushToTalk, signIn, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, watchPage, type VoiceWorld } from './voice-world';
 
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
@@ -199,8 +199,15 @@ test.describe('choosing the microphone', () => {
   }
 
   // holdTalk holds the talk key on a page, with focus away from any field.
+  // The click on the heading is a press outside Voice options, which closes
+  // it (issue #2189); a panel that was open is opened again for the test.
   async function holdTalk(page: Page): Promise<void> {
+    const options = voiceRegion(page).getByRole('button', { name: 'Voice options' });
+    const wasOpen = (await options.getAttribute('aria-expanded')) === 'true';
+    // The open panel can cover the heading, so it is closed to click there.
+    if (wasOpen) await options.click();
     await page.getByRole('heading', { name: 'Conch' }).click();
+    if (wasOpen) await options.click();
     await page.keyboard.down('Backquote');
   }
 
@@ -225,14 +232,14 @@ test.describe('choosing the microphone', () => {
       await list.selectOption({ label: 'Fake Audio Input 1' });
       await expect(voice).toContainText('In use: Fake Audio Input 1', { timeout: 2_000 });
       await expect(voice).toContainText(/Connected in #voice-room/);
-      await expect(voice.getByText('Microphone in use')).toBeVisible();
+      await expect(voice.getByText('This page is using your microphone.')).toBeVisible();
       await expect.poll(async () => (await vw.audit()).some((e) => e.actor === actor && e.action === 'voice_joined'), { timeout: 15_000 }).toBe(true);
       const quiet = await delta(b.page, 2000);
       await holdTalk(a.page);
-      await expect(voice).toContainText('Transmitting');
+      await expect(voice.locator('.voice-tx')).toHaveText(sendingText);
       const loud = await delta(b.page, 2000);
       await a.page.keyboard.up('Backquote');
-      await expect(voice).toContainText('Not transmitting');
+      await expect(voice.locator('.voice-tx')).toHaveText(notSendingText);
       expect(loud, `bytes while A talks on Fake Audio Input 1 (${String(loud)}) versus quiet (${String(quiet)})`).toBeGreaterThan(quiet * 4 + 2000);
 
       // A reload keeps the choice for the tab. Chromium gives every device a
@@ -247,12 +254,12 @@ test.describe('choosing the microphone', () => {
       // A switch while transmitting ends the press: reported as a pair, and
       // nothing sent again until a new press.
       await holdTalk(a.page);
-      await expect(voice).toContainText('Transmitting');
+      await expect(voice.locator('.voice-tx')).toHaveText(sendingText);
       await again.selectOption({ label: 'Fake Audio Input 2' });
-      await expect(voice).toContainText('Not transmitting');
+      await expect(voice.locator('.voice-tx')).toHaveText(notSendingText);
       await expect(voice).toContainText('In use: Fake Audio Input 2', { timeout: 2_000 });
       await new Promise((r) => setTimeout(r, 1000));
-      await expect(voice).toContainText('Not transmitting');
+      await expect(voice.locator('.voice-tx')).toHaveText(notSendingText);
       await a.page.keyboard.up('Backquote');
       const transmits = async () => (await vw.audit()).filter((e) => e.actor === actor && e.action.startsWith('voice_transmit')).map((e) => e.action);
       const pair = ['voice_transmit_started', 'voice_transmit_stopped'];
@@ -264,11 +271,11 @@ test.describe('choosing the microphone', () => {
       const before = await captures(a.page);
       await unplug(a.page, two);
       await expect(voice.getByRole('status').filter({ hasText: missingNote })).toBeVisible();
-      await expect(voice.getByText('Microphone in use')).toHaveCount(0);
+      await expect(voice.getByText('This page is using your microphone.')).toHaveCount(0);
       await expect(again.locator('option', { hasText: 'Fake Audio Input 2' })).toHaveCount(0);
       await holdTalk(a.page);
       const unplugged = await delta(b.page, 3000);
-      await expect(voice).toContainText('Not transmitting');
+      await expect(voice.locator('.voice-tx')).toHaveText(notSendingText);
       await a.page.keyboard.up('Backquote');
       expect(unplugged, `bytes while A holds the key with the microphone gone (${String(unplugged)}) versus talking (${String(loud)})`).toBeLessThan(loud / 4);
       expect(await captures(a.page), 'captures after the device went').toBe(before);
@@ -276,17 +283,17 @@ test.describe('choosing the microphone', () => {
       // System default is a choice: captured again, and the note goes.
       await again.selectOption({ label: 'System default' });
       await expect(voice.getByText(missingNote)).toHaveCount(0);
-      await expect(voice.getByText('Microphone in use')).toBeVisible();
+      await expect(voice.getByText('This page is using your microphone.')).toBeVisible();
       await expect(voice).toContainText('In use: Fake Default Audio Input', { timeout: 2_000 });
 
       // Its capture ends: missing again, and nothing is captured after.
       const chosen = await captures(a.page);
       await endCapture(a.page);
       await expect(voice.getByRole('status').filter({ hasText: missingNote })).toBeVisible();
-      await expect(voice.getByText('Microphone in use')).toHaveCount(0);
+      await expect(voice.getByText('This page is using your microphone.')).toHaveCount(0);
       await holdTalk(a.page);
       const ended = await delta(b.page, 3000);
-      await expect(voice).toContainText('Not transmitting');
+      await expect(voice.locator('.voice-tx')).toHaveText(notSendingText);
       await a.page.keyboard.up('Backquote');
       expect(ended, `bytes while A holds the key with the capture ended (${String(ended)}) versus talking (${String(loud)})`).toBeLessThan(loud / 4);
       expect(await captures(a.page), 'captures after the capture ended').toBe(chosen);
@@ -325,7 +332,7 @@ test.describe('choosing the microphone', () => {
       await box.uncheck();
       await expect(voice).toContainText('Off: your microphone is sent as it is.', { timeout: 5_000 });
       await expect(voice).toContainText(/Connected in #voice-room/);
-      await expect(voice.getByText('Microphone in use')).toBeVisible();
+      await expect(voice.getByText('This page is using your microphone.')).toBeVisible();
       const requests = await asked(a.page);
       expect(requests).toHaveLength(first + 1);
       expect(requests.at(-1)).toMatchObject({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
@@ -334,10 +341,10 @@ test.describe('choosing the microphone', () => {
       await expect.poll(async () => (await vw.audit()).some((e) => e.actor === actor && e.action === 'voice_joined'), { timeout: 15_000 }).toBe(true);
       const quiet = await delta(b.page, 2000);
       await holdTalk(a.page);
-      await expect(voice).toContainText('Transmitting');
+      await expect(voice.locator('.voice-tx')).toHaveText(sendingText);
       const loud = await delta(b.page, 2000);
       await a.page.keyboard.up('Backquote');
-      await expect(voice).toContainText('Not transmitting');
+      await expect(voice.locator('.voice-tx')).toHaveText(notSendingText);
       expect(loud, `bytes while A talks with processing off (${String(loud)}) versus quiet (${String(quiet)})`).toBeGreaterThan(quiet * 4 + 2000);
 
       // One reported pair, and nothing audited as unreported.

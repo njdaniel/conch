@@ -712,11 +712,16 @@ describe('the desktop screen companion with the real helper, conchd, LiveKit and
     await eventually(async () => (await a.facts()).phase === 'stopped' || (await a.facts()).phase === 'idle', 10_000, "the companion's room to be left");
     expect((await a.facts()).roomState, "the companion's room disconnected").toBe('disconnected');
     expect(a.ends).toContain('leave');
-    // #1685: a lost Leave shows up here as a roughly 21 s ghost (LiveKit's
-    // dead-connection removal); the fix lives in the helper, not in this bound.
-    const left = Date.now();
-    expect(await absentSoon(world.a), 'p<A> went with the helper').toBe(true);
-    note(`the helper's leave to p<A> gone took ${String(Date.now() - left)} ms`);
+    // #1685: a lost Leave can leave a roughly 21 s ghost. Keep the shorter
+    // polling window and include the helper's redacted diagnostics on failure.
+    const pollStarted = Date.now();
+    const gone = await absentSoon(world.a);
+    const waited = Date.now() - pollStarted;
+    if (!gone) {
+      note(`p<A> still listed after ${String(waited)} ms of polling. Helper stderr was ${JSON.stringify(a.owner.sup.diagnostics())}`);
+    }
+    expect(gone, 'p<A> went with the helper').toBe(true);
+    note(`polling for p<A> to be gone took ${String(waited)} ms`);
   });
 
   it('the helper killed by its pid ends the companion, removed within the poller grace', async () => {

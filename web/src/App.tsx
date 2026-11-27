@@ -546,8 +546,13 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   // The quick switcher asked to show a public channel's directory row (issue #1492).
   const [browseAsk, setBrowseAsk] = useState<{ readonly n: number; readonly name: string } | undefined>(undefined);
   // A channel's ⋯ menu (issue #1135) or Add a person asked for the invite
-  // panel: a count, so asking twice opens it twice.
-  const [inviteAsk, setInviteAsk] = useState<{ readonly n: number } | undefined>(undefined);
+  // panel: a count, so asking twice opens it twice, and the channel's id if
+  // it came from a row. The explanation uses the current membership and settings.
+  const [inviteAsk, setInviteAsk] = useState<{ readonly n: number; readonly channelId?: number } | undefined>(undefined);
+  const inviteChannelId = inviteAsk?.channelId;
+  const inviteChannel = inviteChannelId === undefined
+    ? undefined
+    : channels.channels.find((channel) => channel.id === inviteChannelId && !isArchived(channel));
   const restoreSearchFocus = useRef(false);
   useEffect(() => {
     if (searchOpen) {
@@ -2043,8 +2048,8 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
             : {})}
           {...(auth.principal.may_invite === true
             ? {
-                onInviteTo: () => {
-                  setInviteAsk((ask) => ({ n: (ask?.n ?? 0) + 1 }));
+                onInviteTo: (channel) => {
+                  setInviteAsk((ask) => ({ n: (ask?.n ?? 0) + 1, channelId: channel.id }));
                 },
               }
             : {})}
@@ -2084,7 +2089,14 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
             // Everyone signed in is offered the panel; one whose right to make
             // links is off is told why and gets no form (issue #990). A guest
             // visit has none.
-            visit === null ? <InvitePanel origin={origin} me={auth.principal} request={inviteAsk} onUnauthorized={onUnauthorized} /> : null
+            visit === null ? (
+              <InvitePanel
+                origin={origin}
+                me={auth.principal}
+                request={inviteAsk === undefined ? undefined : { n: inviteAsk.n, channel: inviteChannel }}
+                onUnauthorized={onUnauthorized}
+              />
+            ) : null
           }
           firstRun={
             // Whoever may make a channel (POST /v1/channels checks

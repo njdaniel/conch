@@ -57,6 +57,7 @@ const item = (id: number) => {
   return el;
 };
 const log = () => screen.getByRole('log', { name: 'Messages' });
+const more = (id: number) => within(item(id)).getByRole('button', { name: /^More actions for / });
 
 // The elements Tab would stop at inside the log, in order: what the browser
 // would visit, given each one's tabindex.
@@ -77,8 +78,8 @@ afterEach(() => {
 describe('the log is one tab stop', () => {
   it('has the newest message and its own controls as its only stops, with 30 held', () => {
     render(conversation(many(30)));
-    // 30 is member-1's: the message, name, ⋯ and Reply. Nothing else in the log.
-    expect(stops().map((el) => el.getAttribute('data-message-id') ?? el.textContent)).toEqual(['30', 'member-1', '⋯', 'Reply']);
+    // 30 is member-1's: the message, name and ⋯ are the only tab stops.
+    expect(stops().map((el) => el.getAttribute('data-message-id') ?? el.textContent)).toEqual(['30', 'member-1', '⋯']);
     expect(stops()[0]).toBe(item(30));
     expect(log().tabIndex).toBe(-1);
   });
@@ -89,32 +90,28 @@ describe('the log is one tab stop', () => {
       as_of: '2026-11-06T10:00:00Z', reactions: [{ emoji: '👍', count: 1, me: false }],
     })) } });
     render(conversation(many(30)));
-    const add = (id: number) => within(item(id)).getByRole('button', { name: /^Add reaction to / });
-    await waitFor(() => { expect(add(30).hasAttribute('disabled')).toBe(false); });
-    expect(stops().map((el) => el.getAttribute('data-message-id') ?? el.textContent)).toEqual(['30', 'member-1', '⋯', 'Reply']);
+    const chip = (id: number) => within(item(id)).getByRole('button', { name: /1 reaction$/ });
+    await waitFor(() => { expect(chip(30).hasAttribute('disabled')).toBe(false); });
+    expect(stops().map((el) => el.getAttribute('data-message-id') ?? el.textContent)).toEqual(['30', 'member-1', '⋯']);
     act(() => { item(30).focus(); });
     fireEvent.keyDown(item(30), { key: 'ArrowUp' });
     expect(document.activeElement).toBe(item(29));
-    expect(stops().map((el) => el.getAttribute('data-message-id') ?? el.textContent)).toEqual(['29', 'owner', '⋯', 'Reply']);
+    expect(stops().map((el) => el.getAttribute('data-message-id') ?? el.textContent)).toEqual(['29', 'owner', '⋯']);
     fireEvent.keyDown(item(29), { key: 'ArrowRight' });
-    expect(document.activeElement).toBe(add(29));
-    expect(add(29).parentElement).toBe(within(item(29)).getByRole('button', { name: /^Reply to / }).parentElement);
-    fireEvent.keyDown(add(29), { key: 'ArrowRight' });
-    const chip = within(item(29)).getByRole('button', { name: /1 reaction$/ });
-    expect(document.activeElement).toBe(chip);
-    fireEvent.keyDown(chip, { key: 'ArrowRight' });
+    expect(document.activeElement).toBe(chip(29));
+    fireEvent.keyDown(chip(29), { key: 'ArrowRight' });
     const who = within(item(29)).getByRole('button', { name: /^Who reacted/ });
     expect(document.activeElement).toBe(who);
     fireEvent.keyDown(who, { key: 'Escape' });
     expect(document.activeElement).toBe(item(29));
     // Explicit -1 survives the generic log roving helper in both messages.
-    expect(add(29).tabIndex).toBe(-1);
-    expect(add(30).tabIndex).toBe(-1);
-    fireEvent.keyDown(item(29), { key: 'ArrowRight' });
-    fireEvent.click(add(29));
+    expect(chip(29).tabIndex).toBe(-1);
+    expect(chip(30).tabIndex).toBe(-1);
+    fireEvent.click(more(29));
+    fireEvent.click(within(item(29)).getByRole('menuitem', { name: 'Add reaction' }));
     expect(document.activeElement).toBe(screen.getByRole('searchbox'));
     fireEvent.keyDown(screen.getByRole('searchbox'), { key: 'Escape' });
-    expect(document.activeElement).toBe(add(29));
+    expect(document.activeElement).toBe(more(29));
   });
 
   it('keeps the log itself focusable for scrolling when it holds no message', () => {
@@ -125,11 +122,11 @@ describe('the log is one tab stop', () => {
   it('moves the stop to the message last focused, with its controls', () => {
     render(conversation(many(6)));
     fireEvent.focus(item(3));
-    expect(stops().map((el) => el.getAttribute('data-message-id') ?? el.textContent)).toEqual(['3', 'owner', '⋯', 'Reply']);
+    expect(stops().map((el) => el.getAttribute('data-message-id') ?? el.textContent)).toEqual(['3', 'owner', '⋯']);
     // Focus on a control inside another message moves the stop there too.
-    fireEvent.focus(within(item(4)).getByRole('button', { name: /^Reply to / }));
+    fireEvent.focus(more(4));
     expect(stops()[0]).toBe(item(4));
-    expect(stops()).toHaveLength(4);
+    expect(stops()).toHaveLength(3);
   });
 
   it('falls back to the newest when the message last focused is gone', () => {
@@ -162,11 +159,11 @@ describe('arrow keys', () => {
 
   it('are left alone when focus is on a control inside a message', () => {
     render(conversation(many(3)));
-    const reply = within(item(3)).getByRole('button', { name: /^Reply to / });
-    reply.focus();
-    const proceeded = fireEvent.keyDown(reply, { key: 'ArrowUp' });
+    const button = more(3);
+    button.focus();
+    const proceeded = fireEvent.keyDown(button, { key: 'ArrowUp' });
     expect(proceeded).toBe(true);
-    expect(document.activeElement).toBe(reply);
+    expect(document.activeElement).toBe(button);
   });
 
   it('are left alone with a modifier held', () => {
@@ -205,9 +202,8 @@ describe('a message arriving', () => {
 describe('the existing keyboard flows', () => {
   it('opens the menu and the editor from the keyboard in the stop message', () => {
     render(conversation(many(4)));
-    const more = within(item(4)).getByRole('button', { name: /^More actions for / });
-    more.focus();
-    fireEvent.click(more);
+    more(4).focus();
+    fireEvent.click(more(4));
     fireEvent.click(screen.getByRole('menuitem', { name: 'Edit' }));
     const box = within(item(4)).getByRole('textbox', { name: /^Edit member-1's message, / });
     expect(document.activeElement).toBe(box);
@@ -222,7 +218,7 @@ describe('names', () => {
     const stamp = clock((messages[11] as MessageV2).created_at);
     expect(messageName(messages[11] as MessageV2, people)).toBe(`member-1's message, ${stamp}`);
     expect(within(item(12)).getByRole('button', { name: `More actions for member-1's message, ${stamp}` })).toBeTruthy();
-    expect(within(item(11)).getByRole('button', { name: /^Reply to owner's message, \d\d:\d\d$/ })).toBeTruthy();
+    expect(within(item(11)).getByRole('button', { name: /^More actions for owner's message, \d\d:\d\d$/ })).toBeTruthy();
     // Every name in the log is free of ids.
     for (const el of Array.from(log().querySelectorAll('[aria-label]'))) {
       expect(el.getAttribute('aria-label')).not.toMatch(/message \d/);

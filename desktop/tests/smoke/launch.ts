@@ -25,6 +25,8 @@ export interface Launched {
 }
 
 export interface LaunchOptions {
+  // A private copy of the packaged app, when a test supplies its own helper.
+  readonly executable?: string;
   // Use this user data directory (it is not removed on stop), as a restart does.
   readonly userData?: string;
   readonly args?: readonly string[];
@@ -33,8 +35,9 @@ export interface LaunchOptions {
 }
 
 export function launch(options: LaunchOptions = {}): Launched {
-  if (!existsSync(APP)) {
-    throw new Error(`${APP} does not exist; run make desktop-build first`);
+  const executable = options.executable ?? APP;
+  if (!existsSync(executable)) {
+    throw new Error(`${executable} does not exist; run make desktop-build first`);
   }
   // Under /tmp where it exists: the data root must have ancestors that others
   // cannot write to (main/instance.ts), and a developer's $TMPDIR may not.
@@ -49,6 +52,16 @@ export function launch(options: LaunchOptions = {}): Launched {
     ...(options.debugPort === true ? ['--remote-debugging-port=0'] : []),
     ...(options.args ?? []),
   ];
+  // The developer's own keyring is never reached (#2077 review): unless the
+  // spec brings its own bus (./keyring.ts) or names a store itself, Chromium
+  // is told to use its built-in one. Measured with Electron 44.10.0: without
+  // this, merely starting the app on a session bus with a Secret Service adds
+  // an item to that keyring; with it, nothing is added. The app then classes
+  // storage session-only, as on CI before it had a keyring; no spec but
+  // persistence.spec.ts, which has its own bus, checks protected storage.
+  const ownBus = options.env?.['DBUS_SESSION_BUS_ADDRESS'] !== undefined;
+  const ownStore = (options.args ?? []).some((a) => a.startsWith('--password-store'));
+  if (!ownBus && !ownStore) args.splice(1, 0, '--password-store=basic');
   // A packaged app refuses remote debugging unless told it is meant
   // (main/debugging.ts); a test that asks for the port is telling it.
   const env: NodeJS.ProcessEnv = { ...process.env, ...(options.debugPort === true ? { CONCH_DESKTOP_ALLOW_CDP: '1' } : {}), ...options.env };
@@ -56,7 +69,7 @@ export function launch(options: LaunchOptions = {}): Launched {
     delete env['DISPLAY'];
     delete env['WAYLAND_DISPLAY'];
   }
-  const child = spawn(APP, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(executable, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
 
   let text = '';
   const append = (chunk: Buffer): void => {
