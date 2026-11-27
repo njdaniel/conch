@@ -8,6 +8,47 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.23] - 2026-11-27
+
+This pre-release updates the web client, the desktop app and the server. Reload open browser tabs after upgrading to get the new web client. **Upgrade the desktop app with the server:** a packaged desktop accepts only the server release it was built for, so an alpha.22 desktop refuses an alpha.23 server, and the reverse. There are no schema version changes and no database migrations since alpha.22.
+
+**Some Linux desktop testers will need to sign in again** (#2217). Alpha.22 and earlier could save a member's sign-in with Chromium's built-in key (`v10`), which offers no real protection. At startup the desktop tries to end those sign-ins at the server and deletes the local copies even if the server is unreachable. If the app says it couldn't end a sign-in, it may still be active on the server, and once the local copy is deleted the app won't retry. End it under **Settings → Your sign-ins**, use **Sign out everywhere**, or ask an operator to revoke it. Signing out on another device ends only that device's sign-in, and the app's own message wrongly suggests that (#2226). The sweep also deletes, unopened, any saved sign-in file with group or other permissions, including keyring-sealed ones, without ending it at the server (#2227). The same steps apply.
+
+### Added
+- **Keep me signed in on this computer** (#2077) is a desktop sign-in option, including in the Windows preview. Windows uses its own credential protection for your account. Linux protects saved sign-ins with the system keyring. On Linux the box is shown and checked even when the app says it can't keep the sign-in, and a locked or slow keyring that unlocks before you sign in can still save it. Uncheck the box for a sign-in that lasts until the app quits (closing to the tray keeps it running); test persistence with a full quit and relaunch. **Check again** rechecks the keyring. Operator sign-ins last only for the current window (ADR-012).
+- **A preview of what you're sharing** (#2197). When you share through the browser, your tile shows a small live thumbnail. The title names the capture type ("your entire screen", "a window" or "a tab") when the browser reports it. **Hide preview** / **Show preview** toggles it for the session. The preview comes from the local capture, with no extra upload.
+- **What’s being shared** (#2083) appears in the Linux share strip during a share with sound. To test it, start the desktop with `CONCH_LINUX_SHARE_AUDIO=1`, choose **Share with sound**, play audio in another app, then open **What’s being shared**. It appears only once the helper reports at least one stream. Share sound stays off by default because a share with sound can still carry the call's own audio (#1999). It lists up to 50 streams by app and media name, each marked **captured** or **excluded** with the reason. Live PipeWire testing and rules for excluding apps that replay call audio and limiting capture to the chosen app are still pending.
+
+### Changed
+- **The voice strip says what others hear in one phrase** (#2198). It shows "Push to talk: not sending", "Sending", "Open mic: sending", "Open mic: not sending", "Muted: not sending" or "Waiting for the server".
+  - The amber "Microphone in use" chip beside "Not transmitting" is gone. Voice options says "This page is using your microphone." while it is held. The strip says "Microphone off" once.
+  - The roster shows one badge, "speaking" or else "sending", as a dot that can't resize the chip (#2211).
+  - The talk-key and sharing help lines are behind an "About talking and sharing" button, shown only when there is something to say.
+  - A brief notice says who stopped sharing a share you were watching, in the share stage or in the voice strip when the stage is gone. On phones, the duplicate "Watching …" heading is gone.
+- **Voice options is a panel over the page** (#2189), not an inline block that pushed the layout.
+  - Escape, an outside press or the Voice options button closes it, and it works by keyboard. The phone sheet and the desktop app also show a **Close** button. In the browser, the first Escape during talk-key capture only cancels the capture; in the Linux desktop app, Escape closes key setup.
+  - Where there isn't room for the panel, as on most phones, it's a modal sheet.
+  - It closes when the window narrows, when you go to Chat, and when you leave voice.
+  - **The desktop app's Voice options behaves the same way** (#2195). Its talk-key and mute-key setup moves focus in when it opens and back when it closes. It never takes focus or keys from somewhere you've moved to (#2220).
+- **A watched screen share fits its stage at every size** (#2187). In the single-share overlay, the controls fade after 3 seconds and return on pointer movement, a tap or keyboard focus. The first tap on faded controls just brings them back. In other layouts, the first press activates the control. **Tap to play sound** appears in the controls row in compact mode and on the picture otherwise.
+- **The share quality menu stays on screen** (#2188), and **choosing an option no longer moves the list under the pointer** (#2194). The checked option is marked with ✓, which stays visible in high-contrast mode.
+
+### Fixed
+- **A muted person's own roster no longer shows them as "speaking"** (#2186).
+- **The Members drawer keeps keyboard focus inside it** on phones and narrow windows (#2196). Tab wraps inside the drawer, Escape and the backdrop return focus to Members, and shortcuts such as Ctrl+K don't act on the page behind it. On a phone, **Open run** closes the drawer, switches to Chat and focuses the run detail.
+- **The voice controls no longer jump on a phone** (#2202, #2210, #2211): the roster's row, and your own chip in it, is held from the first in-voice frame; joining Watch-only doesn't reflow them; and Hold to talk doesn't move when someone starts speaking.
+- **Screen-share quality** (#2157). Browser captures up to 854 pixels on the long edge are capped at 2 Mbps. On older servers, saved 480p and 1440p choices fall back to 720p and 1080p, respectively.
+- After a permission change in voice, browser and desktop read presence the same way and retry a brief failure (#2162, #2164, #2167); a successful read keeps the roster on screen during reconnect and keeps 480p, 1440p and the current share quality. Chat scrollers keep hidden text clipped and stay pinned to the end when their width changes (#2168, #2173).
+- **Hidden Chat no longer adds page scrolling** on short phone Voice views (#2171).
+- **The voice presence socket waits for the new credential during a password change** (#2157), instead of using the one being replaced.
+
+### Security
+- **Linux desktop removes legacy sign-ins saved with Chromium's built-in key** (#2217). The app tries to end them at the server and deletes the local copies even if the server can't be reached. Once the local copy is deleted, it won't retry. If the old sign-in may still be active, end it under **Settings → Your sign-ins**, use **Sign out everywhere**, or ask an operator to revoke it. Group- or world-readable sign-in files are deleted unopened and not ended at the server (#2227). The desktop now requires real keyring protection to report a Linux sign-in as sealed (#2077).
+- **Packaged desktop builds refuse `NODE_DEBUG`** (#2155), so a debug environment can't make Node log credentials.
+
+### Known issues
+- **Conch screen sharing in iOS 27 Safari still needs a device test** (#2205). Safari on iOS 27 exposes the screen-sharing capability Conch already checks for. See the [Safari `getDisplayMedia()` test report](https://github.com/mdn/browser-compat-data/issues/30654); Conch's own device test is pending.
+
 ## [0.1.0-alpha.22] - 2026-11-24
 
 This pre-release updates the server, CLI and desktop together. Reload open browser tabs after upgrading to get the new web client. **Upgrade the desktop app with the server:** a packaged desktop accepts only the server release it was built for, so an alpha.21 desktop refuses an alpha.22 server, and the reverse.
