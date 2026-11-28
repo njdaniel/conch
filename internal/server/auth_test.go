@@ -323,10 +323,14 @@ var routeExpectations = map[string]routeExpectation{
 	// Local direct messages (issue #2019): the operator's bootstrap credential
 	// is its own, so it reaches the handlers: it opens a conversation with
 	// alice (principal 2) and finds no conversation 1 to read or change.
-	"POST /v1/dms":                     {classAuth, "/v1/dms", `{"peer_id":2}`, 200},
-	"GET /v1/dms":                      {classAuth, "/v1/dms", "", 200},
-	"GET /v1/dms/{conversation}":       {classAuth, "/v1/dms/1", "", 404},
-	"PUT /v1/dms/{conversation}/state": {classAuth, "/v1/dms/1/state", `{"state":"open"}`, 404},
+	"POST /v1/dms":                                     {classAuth, "/v1/dms", `{"peer_id":2}`, 200},
+	"GET /v1/dms":                                      {classAuth, "/v1/dms", "", 200},
+	"GET /v1/dms/{conversation}":                       {classAuth, "/v1/dms/1", "", 404},
+	"PUT /v1/dms/{conversation}/state":                 {classAuth, "/v1/dms/1/state", `{"state":"open"}`, 404},
+	"GET /v1/dms/{conversation}/messages":              {classAuth, "/v1/dms/1/messages", "", 404},
+	"POST /v1/dms/{conversation}/messages":             {classAuth, "/v1/dms/1/messages", `{"body":"hello","client_nonce":"test"}`, 404},
+	"PATCH /v1/dms/{conversation}/messages/{message}":  {classAuth, "/v1/dms/1/messages/1", `{"body":"changed"}`, 404},
+	"DELETE /v1/dms/{conversation}/messages/{message}": {classAuth, "/v1/dms/1/messages/1", "", 404},
 	// Sessions (issue #265). Chosen to change and audit nothing: an empty
 	// create is a 400 (a client is required), the session routes use an id
 	// that does not exist, and the list reads a channel every fixture caller
@@ -806,8 +810,8 @@ func TestRoleMatrix(t *testing.T) {
 			// reaches the upgrade check (426). A self-made credential opening it is covered by
 			// TestPersonStreamWhoMayOpen and TestSelfMadeCredentialRoutesRefuseOthers.
 			var personStreamRefused bool
-			if rt.pattern == "GET /v1/events/person/ws" || strings.HasPrefix(strings.TrimPrefix(strings.TrimPrefix(rt.pattern, "GET "), "POST "), "/v1/dms") || strings.HasPrefix(rt.pattern, "PUT /v1/dms") {
-				// The DM routes (issue #2019) are in selfMadeCredentialRoutes too.
+			if rt.pattern == "GET /v1/events/person/ws" || strings.Contains(rt.pattern, " /v1/dms") {
+				// Every DM route is in selfMadeCredentialRoutes.
 				agentWant, personStreamRefused = http.StatusForbidden, true
 			}
 			// Signing out (issue #439) succeeds for any member and revokes

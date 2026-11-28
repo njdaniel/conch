@@ -42,9 +42,8 @@ import (
 //     row can come from an act-as credential or a member's pre-migration
 //     credential.
 //
-// The per-person stream (#2040), conversation routes (#2019) and private
-// call routes (#2030) are registered here. Every route that reads or writes
-// a person's DMs or calls belongs here, sockets included.
+// Every route that reads or writes a person's DMs or calls belongs here,
+// sockets included.
 //
 // A route that serves both a person's own data and anything else (one
 // socket for channels and DMs, say) cannot be listed whole without
@@ -61,6 +60,11 @@ var selfMadeCredentialRoutes = map[string]dmGuestPolicy{
 	"GET /v1/dms":                      dmGuestForbidden,
 	"GET /v1/dms/{conversation}":       dmGuestForbidden,
 	"PUT /v1/dms/{conversation}/state": dmGuestForbidden,
+	// Retained DM history and author sends, edits and removals (#2021).
+	"GET /v1/dms/{conversation}/messages":              dmGuestForbidden,
+	"POST /v1/dms/{conversation}/messages":             dmGuestForbidden,
+	"PATCH /v1/dms/{conversation}/messages/{message}":  dmGuestForbidden,
+	"DELETE /v1/dms/{conversation}/messages/{message}": dmGuestForbidden,
 	// The seven private call routes (#2030, ADR-017 Decision 7): an invite,
 	// the history of a pair, the reconnect snapshot and the four actions.
 	// The media-join route (#2032) joins this list in its own change.

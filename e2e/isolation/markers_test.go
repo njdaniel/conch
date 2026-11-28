@@ -22,6 +22,8 @@ func testMarkers() *markers {
 // the request named and numbers whose kind is not A's.
 func TestMarkerScan(t *testing.T) {
 	m := testMarkers()
+	m.id("message", "A's channel message", 8)
+	m.id("dm_message", "A's direct message", 9)
 	for _, tc := range []struct {
 		name  string
 		body  string
@@ -34,6 +36,10 @@ func TestMarkerScan(t *testing.T) {
 		{"a refusal that names the channel nobody asked for", `{"code":"forbidden","message":"not a member of alpha-3fa2c1-9be1c2d4"}`,
 			asked{}, []string{"A's channel name"}},
 		{"A's message in a list", `{"messages":[{"id":9,"body":"hello alpha-3fa2c1-07aa51e0"}]}`, asked{}, []string{"A's message"}},
+		{"A's direct message in a list", `{"messages":[{"schema":"conch.dm_message.v1","id":9}]}`, asked{}, []string{"dm_message id 9"}},
+		{"a direct message sharing a channel message's id", `{"message":{"schema":"conch.dm_message.v1","id":8}}`, asked{}, nil},
+		{"a DM inbox's last message", `{"conversations":[{"schema":"conch.dm_conversation.v1","last_message_id":9}]}`, asked{}, []string{"dm_message id 9"}},
+		{"a DM inbox's read mark", `{"conversations":[{"schema":"conch.dm_conversation.v1","last_read_id":9}]}`, asked{}, []string{"dm_message id 9"}},
 		{"a search snippet cut short", `{"snippet":"…3fa2c1-07a…"}`, asked{}, []string{"A's message"}},
 		{"a highlight that splits the word", `{"snippet":"<b>alpha-3f</b>a2c1-07aa51e0"}`, asked{}, []string{"A's message"}},
 		{"five characters are not a piece", `{"snippet":"07aa5"}`, asked{}, nil},

@@ -4,30 +4,21 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"slices"
 
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
-// Local direct messages, the first routes (issue #2019, epic #2013, ADR-017):
-// open or resume, the caller's inbox, one conversation, and the caller's own
-// state of it. Every route is in selfMadeCredentialRoutes, so every row has
-// two prober outcomes. Bea joined through an invite and made her own
-// credential: her own rows succeed. Ola was made by hand and her credential
-// came through POST /v1/principals/{id}/credentials, which the store records
-// as made by another: every request is refused to her with 403
-// own_sign_in_required, reads included (withoutPassword, as for the person
-// stream). That refusal is the end-to-end proof that an operator's act-as
-// credential cannot open a person's DMs, and it stays an expectation of the
-// rows, not a property to loosen.
+// Local direct messages (issues #2019 and #2021, ADR-017). Bea uses her own
+// credential and can open and list her conversations. Ola uses one issued by
+// the operator and gets 403 own_sign_in_required on every DM route.
 //
-// B's prober opens a conversation with B's own other member (bob), never an
-// A person, so a success holds nothing of A's. A's one conversation is ann's
-// empty open with abe (world.go): B names its id, and the answer must be the
-// one a conversation that never existed gets (404 dm_not_found, the ghost
-// comparison), whatever the prober's role. B's inbox never holds it.
+// Bea names Ann and Abe's conversation and gets the same 404 dm_not_found
+// as for a conversation that never existed. When she uses their message ID
+// in her own conversation with Bob, the refusal also matches the answer
+// for a message that never existed.
 
-// dmNotFound is the refusal for a conversation id the caller is not part of.
 // bobOf is the B member the prober opens a conversation with: the first of
 // B's people who is not the prober. The route check's stand-in world has one
 // person, who is then the stand-in's peer too (no request is sent).
@@ -42,7 +33,7 @@ func bobOf(w *world) int64 {
 
 // dmMatrixRows are the rows of the DM routes.
 func dmMatrixRows() []row {
-	return []row{
+	rows := []row{
 		{route: "POST /v1/dms", what: "opens a conversation with a member of her own group", own: true, withoutPassword: personNotOwn, inspect: checkDMOpen,
 			probe: func(w *world, _ subject) probe { return post("/v1/dms", schema.OpenDMRequestV1{PeerID: bobOf(w)}) }},
 		{route: "GET /v1/dms", what: "lists her own inbox", own: true, withoutPassword: personNotOwn, inspect: checkDMInbox,
@@ -54,6 +45,104 @@ func dmMatrixRows() []row {
 				return put("/v1/dms/"+id(s.id)+"/state", schema.SetDMStateRequestV1{State: schema.DMStateHidden})
 			}},
 	}
+
+	for _, r := range dmMessageRoutes {
+		rows = append(rows, row{route: r.route, what: r.what, pick: aConversation, want: dmNotFound, withoutPassword: personNotOwn,
+			probe: func(w *world, s subject) probe { return r.probe(dmMessagesPath(s.id), w.a.dmMessageID) }})
+		if r.item {
+			rows = append(rows, row{route: r.route, what: "targets A's message in B's conversation", pick: aDMMessage, want: messageNotFound, withoutPassword: personNotOwn,
+				probe: func(w *world, s subject) probe { return r.probe(dmMessagesPath(w.b.dmID), s.id) }})
+		}
+	}
+	for _, cursor := range []struct{ name, query string }{{"after", "after="}, {"before", "order=desc&before="}} {
+		rows = append(rows, row{route: "GET /v1/dms/{conversation}/messages", what: "pages B's conversation using A's message as " + cursor.name,
+			pick: aDMMessage, want: answer{http.StatusBadRequest, "invalid_request"}, withoutPassword: personNotOwn,
+			probe: func(w *world, s subject) probe { return get(dmMessagesPath(w.b.dmID) + "?" + cursor.query + id(s.id)) }})
+	}
+	return rows
+}
+
+var dmMessageRoutes = []struct {
+	route string
+	what  string
+	item  bool // the path also addresses a message
+	probe func(path string, message int64) probe
+}{
+	{route: "GET /v1/dms/{conversation}/messages", what: "reads A's conversation history",
+		probe: func(path string, _ int64) probe { return get(path) }},
+	{route: "POST /v1/dms/{conversation}/messages", what: "sends a message to A's conversation",
+		probe: func(path string, _ int64) probe {
+			return post(path, schema.PostDMMessageRequestV1{Body: "a message from another session", ClientNonce: "isolation-probe"})
+		}},
+	{route: "PATCH /v1/dms/{conversation}/messages/{message}", what: "edits a message in A's conversation", item: true,
+		probe: func(path string, message int64) probe {
+			return probe{method: http.MethodPatch, path: path + "/" + id(message), body: schema.EditDMMessageRequestV1{Body: "an edit from another session"}}
+		}},
+	{route: "DELETE /v1/dms/{conversation}/messages/{message}", what: "removes a message in A's conversation", item: true,
+		probe: func(path string, message int64) probe { return del(path + "/" + id(message)) }},
+}
+
+func dmMessagesPath(conversation int64) string {
+	return "/v1/dms/" + id(conversation) + "/messages"
+}
+
+func aDMMessage(w *world) subject {
+	return subject{kind: "dm_message", id: w.a.dmMessageID}
+}
+
+func (w *world) seedDMMessage(ann *member) error {
+	body := w.aName("word-dm")
+	var sent schema.PostDMMessageResponseV1
+	if err := ann.api.call(http.MethodPost, dmMessagesPath(w.a.dmID), schema.PostDMMessageRequestV1{Body: body, ClientNonce: "isolation-fixture"}, &sent); err != nil {
+		return fmt.Errorf("ann sends a direct message to abe: %w", err)
+	}
+	if err := sent.Validate(); err != nil {
+		return fmt.Errorf("ann's direct message: %w", err)
+	}
+	w.a.dmMessageID = sent.Message.ID
+	w.marks.id("dm_message", "A's direct message", w.a.dmMessageID)
+	w.marks.str("A's direct message", body)
+	return nil
+}
+
+// checkDMMessageCredentials tries the same routes as Ann, the author of the
+// fixture message. An act-as credential and a revoked self-issued session
+// must each be refused even though the account is still a participant.
+func (w *world) checkDMMessageCredentials(ann, actAs *member) error {
+	prober := w.prober
+	defer func() { w.prober = prober }()
+
+	check := func(m *member, want answer) error {
+		rows := make([]row, 0, len(dmMessageRoutes))
+		for _, r := range dmMessageRoutes {
+			rows = append(rows, row{route: r.route, what: r.what, want: want,
+				probe: func(w *world, _ subject) probe { return r.probe(dmMessagesPath(w.a.dmID), w.a.dmMessageID) }})
+		}
+		_, err := w.runMatrix(m, rows)
+		return err
+	}
+	if err := check(actAs, personNotOwn); err != nil {
+		return fmt.Errorf("using Ann's act-as credential: %w", err)
+	}
+	session, err := w.signIn(w.newcomer("Ann's DM sign-in"), ann.name, ann.id, joinPassword)
+	if err != nil {
+		return err
+	}
+	w.registerMember(session)
+	var history schema.ListDMMessagesResponseV1
+	if err := session.api.call(http.MethodGet, dmMessagesPath(w.a.dmID), nil, &history); err != nil {
+		return err
+	}
+	if len(history.Messages) != 1 || history.Messages[0].ID != w.a.dmMessageID || history.Messages[0].Body != w.aName("word-dm") {
+		return fmt.Errorf("the live sign-in of Ann did not read the fixture message in her conversation")
+	}
+	if err := w.op.call(http.MethodDelete, "/v1/credentials/"+id(session.credID), nil, nil); err != nil {
+		return err
+	}
+	if err := check(session, answer{http.StatusUnauthorized, "unauthenticated"}); err != nil {
+		return fmt.Errorf("using Ann's revoked sign-in: %w", err)
+	}
+	return nil
 }
 
 // checkDMOpen is the open row's own check: the answer is a valid response, the
