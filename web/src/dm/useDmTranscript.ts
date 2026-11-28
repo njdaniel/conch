@@ -5,7 +5,7 @@
 // can never show another conversation's messages (no matter what is late).
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore } from 'react';
 import type { DMConversationV1, DMMessageV1, DMReadStateV1 } from '../schema/generated';
-import { isDmOperationServed, type DmApi, type DmFailure, type DmFrame } from './api';
+import type { DmApi, DmFailure, DmFrame } from './api';
 import { canRetrySend, merge, ordered, pendingSends, revisionOf, settle, type Held, type Pending, type PendingSends } from './model';
 
 // What the person may write while their retained history is still readable.
@@ -114,7 +114,6 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
   const pending = useSyncExternalStore(sends.subscribe, sends.get);
   const recovery = useMemo(() => ({
     after: null as number | null,
-    historyAvailable: null as boolean | null, // null until history support is known
     running: false,
     requested: false,
     active: false,
@@ -155,54 +154,27 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
   // cursor. A write reply or live frame can arrive ahead of unseen changes.
   const catchUp = useCallback(async () => {
     const active = () => recovery.active && !recovery.revoked;
-    const requested = () => recovery.requested;
     if (!active()) return;
-    if (recovery.running) {
-      recovery.requested = true;
-      return;
-    }
+    recovery.requested = true;
+    if (recovery.running || recovery.after === null) return;
     recovery.running = true;
-    // A successful poll may leave the messages unchanged. Wake a failed read mark anyway.
-    const retryRead = () => {
-      if (reading.retry) setReadPoll((poll) => poll + 1);
-    };
     try {
-      for (let page = 0; page < 20 && recovery.after !== null; page++) {
+      while (recovery.requested) {
         recovery.requested = false;
         const after: number = recovery.after;
         const result = await api.changes(conversation, after);
         if (!active()) return;
         if (!result.ok) {
-          if (result.failure !== 'unsupported') {
-            fail(result.failure);
-            return;
-          }
-          recovery.after = null;
-          break;
+          fail(result.failure);
+          return;
         }
-        act({ type: 'merge', messages: result.value.messages });
-        retryRead();
-        recovery.after = revisionOf(result.value.messages, after);
-        const more = result.value.next_after !== undefined && result.value.next_after > after;
-        if (!more && !requested()) return;
+        const { messages, next_after: next } = result.value;
+        act({ type: 'merge', messages });
+        recovery.after = revisionOf(messages, after);
+        if (next === recovery.after && next > after) recovery.requested = true;
+        // Even an empty changes page lets a transient read-mark failure retry.
+        if (reading.retry) setReadPoll((poll) => poll + 1);
       }
-      if (recovery.after !== null) return;
-      if (recovery.historyAvailable === null) {
-        if (live.current.status === 'loading') recovery.requested = true;
-        return;
-      }
-      recovery.requested = false;
-      const [info, latest] = await Promise.all([
-        api.get(conversation),
-        recovery.historyAvailable ? api.history(conversation, { order: 'desc' }) : null,
-      ]);
-      if (!active()) return;
-      if (info.ok) act({ type: 'conversation', conversation: info.value });
-      else if (fail(info.failure)) return;
-      // Merge the latest page without moving the cursor for earlier history.
-      if (latest?.ok) act({ type: 'merge', messages: latest.value.messages });
-      else if (latest !== null && fail(latest.failure)) return;
-      if (info.ok || latest?.ok) retryRead();
     } finally {
       recovery.running = false;
     }
@@ -223,15 +195,13 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
     if (!current()) return;
     if (!page.ok) {
       if (page.failure === 'unsupported') {
-        recovery.historyAvailable = false;
         act({ type: 'metadata', conversation: info.value });
       } else if (!fail(page.failure)) act({ type: 'status', status: 'failed' });
       return;
     }
-    recovery.historyAvailable = true;
-    recovery.after = isDmOperationServed('listDmChanges') ? info.value.revision : null;
+    recovery.after = info.value.revision;
     act({ type: 'loaded', conversation: info.value, messages: [...page.value.messages].reverse(), older: page.value.next_before ?? null });
-    if (recovery.requested || (recovery.after !== null && revisionOf(page.value.messages, recovery.after) > recovery.after)) void catchUp();
+    if (recovery.requested || revisionOf(page.value.messages, recovery.after) > recovery.after) void catchUp();
   }, [api, conversation, act, fail, recovery, catchUp]);
 
   useEffect(() => {
@@ -285,7 +255,6 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
   const messages = useMemo(() => ordered(state.messages), [state.messages]);
   const newest = messages.at(-1)?.id ?? 0;
   useEffect(() => {
-    if (!isDmOperationServed('markDmRead')) return;
     if (state.status !== 'ready' || !viewing || !visible || newest <= state.lastRead) return;
     if (reading.id >= newest && !reading.retry) return;
     reading.id = newest;
@@ -362,23 +331,9 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
       fail(result.failure);
       return result.failure;
     }
-    if (recovery.after !== null) await catchUp();
-    if (!active() || recovery.after !== null) return null;
-    // A message removed from an earlier page may be outside the latest page.
-    // History cursors must name an existing message in the conversation.
-    const held = ordered(live.current.messages);
-    const at = held.findIndex((copy) => copy.id === message);
-    const newer = held[at + 1];
-    const page = await api.history(conversation, newer === undefined
-      ? { order: 'asc', after: held[at - 1]?.id }
-      : { order: 'desc', before: newer.id });
-    if (!active()) return null;
-    if (page.ok) {
-      const tombstone = page.value.messages.find((copy) => copy.id === message && copy.removed === true);
-      if (tombstone !== undefined) act({ type: 'merge', messages: [tombstone] });
-    } else fail(page.failure);
+    await catchUp();
     return null;
-  }, [api, conversation, act, catchUp, fail, recovery]);
+  }, [api, conversation, catchUp, fail, recovery]);
 
   const loadOlder = useCallback(async () => {
     const before = live.current.older;

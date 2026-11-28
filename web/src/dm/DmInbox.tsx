@@ -5,7 +5,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from
 import type { DMAcceptPolicy, DMConversationV1 } from '../schema/generated';
 import { Avatar } from '../Icons';
 import { timeOf } from '../time';
-import { isDmOperationServed, type DmApi } from './api';
+import type { DmApi } from './api';
 import { useDm, type DmValue } from './DmContext';
 import { peerName } from './model';
 
@@ -37,7 +37,7 @@ function Row({ conversation, selected, onOpen, onHide }: {
       <button type="button" className="dm-open" aria-current={selected ? 'true' : undefined} onClick={(event) => { onOpen(event.currentTarget); }}>
         <span className="dm-name">{name}</span>
         {conversation.last_message_at === undefined ? null : <time className="hint" dateTime={conversation.last_message_at}>{timeOf(conversation.last_message_at)}</time>}
-        {isDmOperationServed('markDmRead') && conversation.unread > 0 ? <span className="badge">{`${String(conversation.unread)} unread`}</span> : null}
+        {conversation.unread > 0 ? <span className="badge">{`${String(conversation.unread)} unread`}</span> : null}
       </button>
       <button type="button" className="dm-hide" aria-label={`Hide the conversation with ${name}`} onClick={(event) => { onHide(event.currentTarget); }}>
         Hide
@@ -129,7 +129,7 @@ function InboxPanel({ dm, onOpen }: { readonly dm: DmValue; readonly onOpen: OnO
     <nav aria-label="Direct messages" className="dm-inbox">
       <h2 ref={heading} tabIndex={-1} data-dm-inbox-heading>
         Direct messages
-        {isDmOperationServed('markDmRead') && inbox.unread > 0 ? <span className="badge">{`${String(inbox.unread)} unread`}</span> : null}
+        {inbox.unread > 0 ? <span className="badge">{`${String(inbox.unread)} unread`}</span> : null}
       </h2>
       {status === 'loading' ? <p role="status" className="empty">Loading messages…</p> : null}
       {status === 'failed' ? (

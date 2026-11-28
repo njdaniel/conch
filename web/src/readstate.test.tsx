@@ -6,7 +6,7 @@ import { App } from './App';
 import { restore } from './api';
 import { badgeText, markInterval, useReadState } from './useReadState';
 import { Conversation } from './Conversation';
-import { conversation } from './dm/testkit';
+import { conversation, snapshot } from './dm/testkit';
 import type { ReadStateV1 } from './schema/readstate';
 import type { MessageV2 } from './schema/message';
 import { chatFor, chatReducer, initialChat, maxHeld, pageSize } from './state/messages';
@@ -113,7 +113,7 @@ function install() {
         return Promise.resolve(json({ schema: 'conch.session.v1', id: 100, principal_id: 2, kind: 'human', name: 'ada', client: 'browser', state: 'online', status: 'online', started_at: at, last_seen_at: at, interventions: [], outcome_unknown: false }, 201));
       }
       if (server.dms) {
-        if (path === '/v1/dms') return Promise.resolve(json({ conversations: url.searchParams.get('state') === 'open' ? [conversation()] : [] }));
+        if (path === '/v1/dms/snapshot') return Promise.resolve(json({ ...snapshot(), conversations: [conversation()] }));
         if (path === '/v1/dms/12') return Promise.resolve(json(conversation()));
         if (path === '/v1/dms/12/messages') return Promise.resolve(json({ order: 'desc', messages: [] }));
         if (path === '/v1/directory/channels') return Promise.resolve(json({ channels: channels.map((channel) => ({

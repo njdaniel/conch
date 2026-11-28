@@ -3,8 +3,8 @@
 // change drops everything and ignores any answer still on its way, because ids
 // of one server mean nothing on another.
 //
-// The list route gives the inbox on its own. A DM snapshot, when available,
-// also says whether starting and sending DMs is enabled for the viewer.
+// The snapshot carries the inbox rows and whether DMs are enabled for the
+// viewer. Use the list route when the snapshot reaches its row limit.
 import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react';
 import type { DMConversationV1, DMReadStateV1, DMSnapshotV1, DMState } from '../schema/generated';
 import type { DmApi, DmFailure, DmFrame, DmResult } from './api';
@@ -98,10 +98,10 @@ export function useDmInbox(api: DmApi | null, scope: string): Inbox {
     }
   }, [act, requests]);
 
-  const applyRows = useCallback(async (snapshot: DMSnapshotV1 | null, isCurrent: () => boolean) => {
+  const applyRows = useCallback(async (snapshot: DMSnapshotV1, isCurrent: () => boolean) => {
     if (api === null) return;
-    const rows = new Map(snapshot?.conversations.map((c) => [c.id, c]));
-    if (snapshot === null || snapshot.more) {
+    const rows = new Map(snapshot.conversations.map((c) => [c.id, c]));
+    if (snapshot.more) {
       for (const state of ['open', 'archived'] as const) {
         const seen = new Set<string>();
         let cursor: string | undefined;
@@ -125,7 +125,7 @@ export function useDmInbox(api: DmApi | null, scope: string): Inbox {
         }
       }
     }
-    if (isCurrent()) act({ type: 'rows', conversations: [...rows.values()], enabled: snapshot?.dms_enabled ?? true });
+    if (isCurrent()) act({ type: 'rows', conversations: [...rows.values()], enabled: snapshot.dms_enabled });
   }, [api, act, fail]);
 
   const refresh = useCallback(async () => {
@@ -134,10 +134,6 @@ export function useDmInbox(api: DmApi | null, scope: string): Inbox {
     requests.running = version;
     const isCurrent = () => version === requests.revision;
     try {
-      if (api.snapshot === undefined) {
-        await applyRows(null, isCurrent);
-        return;
-      }
       const result = await api.snapshot();
       if (!isCurrent()) return;
       if (result.ok) await applyRows(result.value, isCurrent);

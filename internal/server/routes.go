@@ -223,8 +223,11 @@ func (s *Server) routeTable() []route {
 		// own_sign_in_required, reads included. Not previewable.
 		rt("POST /v1/dms", accessAuthenticated, hf(s.handleOpenDM)),
 		rt("GET /v1/dms", accessAuthenticated, hf(s.handleListDMs)),
+		rt("GET /v1/dms/snapshot", accessAuthenticated, hf(s.handleDMSnapshot)),
 		rt("GET /v1/dms/{conversation}", accessAuthenticated, hf(s.handleGetDM)),
 		rt("PUT /v1/dms/{conversation}/state", accessAuthenticated, hf(s.handleSetDMState)),
+		rt("GET /v1/dms/{conversation}/changes", accessAuthenticated, hf(s.handleListDMChanges)),
+		rt("PUT /v1/dms/{conversation}/read-state", accessAuthenticated, hf(s.handleMarkDMRead)),
 		rt("GET /v1/dms/{conversation}/messages", accessAuthenticated, hf(s.handleListDMMessages)),
 		rt("POST /v1/dms/{conversation}/messages", accessAuthenticated, hf(s.handlePostDMMessage)),
 		rt("PATCH /v1/dms/{conversation}/messages/{message}", accessAuthenticated, hf(s.handleEditDMMessage)),

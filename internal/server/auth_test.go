@@ -325,7 +325,10 @@ var routeExpectations = map[string]routeExpectation{
 	// alice (principal 2) and finds no conversation 1 to read or change.
 	"POST /v1/dms":                                     {classAuth, "/v1/dms", `{"peer_id":2}`, 200},
 	"GET /v1/dms":                                      {classAuth, "/v1/dms", "", 200},
+	"GET /v1/dms/snapshot":                             {classAuth, "/v1/dms/snapshot", "", 200},
 	"GET /v1/dms/{conversation}":                       {classAuth, "/v1/dms/1", "", 404},
+	"GET /v1/dms/{conversation}/changes":               {classAuth, "/v1/dms/1/changes", "", 404},
+	"PUT /v1/dms/{conversation}/read-state":            {classAuth, "/v1/dms/1/read-state", `{"last_read_id":1}`, 404},
 	"PUT /v1/dms/{conversation}/state":                 {classAuth, "/v1/dms/1/state", `{"state":"open"}`, 404},
 	"GET /v1/dms/{conversation}/messages":              {classAuth, "/v1/dms/1/messages", "", 404},
 	"POST /v1/dms/{conversation}/messages":             {classAuth, "/v1/dms/1/messages", `{"body":"hello","client_nonce":"test"}`, 404},

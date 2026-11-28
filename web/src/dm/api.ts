@@ -15,6 +15,7 @@ import {
   dmFileV1,
   dmPreferencesV1,
   dmReadStateV1,
+  dmSnapshotV1,
   editDMMessageResponseV1,
   listDMChangesResponseV1,
   listDMConversationsResponseV1,
@@ -90,7 +91,7 @@ export interface HistoryQuery {
 }
 
 export interface DmApi {
-  snapshot?: () => Promise<DmResult<DMSnapshotV1>>;
+  snapshot: () => Promise<DmResult<DMSnapshotV1>>;
   list: (state?: Exclude<DMState, 'hidden'>, cursor?: string) => Promise<DmResult<ListDMConversationsResponseV1>>;
   open: (peer: number) => Promise<DmResult<DMConversationV1>>;
   get: (conversation: number) => Promise<DmResult<DMConversationV1>>;
@@ -193,6 +194,7 @@ function createDmApi(access?: { readonly denied: () => boolean; readonly deny: (
   const nativeSave = platform.services.saveFile;
 
   return {
+    snapshot: () => read(call('dmSnapshot'), dmSnapshotV1),
     list: (state, cursor) => read(call('listDms', undefined, queryOf({ ...(state === undefined ? {} : { state }), ...(cursor === undefined ? {} : { cursor }) })), listDMConversationsResponseV1),
     open: async (peer) => {
       const request: OpenDMRequestV1 = { peer_id: peer };
@@ -261,8 +263,7 @@ function createDmApi(access?: { readonly denied: () => boolean; readonly deny: (
       const request: DMPreferencesV1 = { accept };
       return write(call('putDmPreferences'), request, dmPreferencesV1, (parsed) => parsed as DMPreferencesV1);
     },
-    // The person socket exists (#2040), but its DM snapshot and fan-out are
-    // unwired on the server (#2022). Re-read served REST routes while visible.
+    // Refresh the inbox snapshot and open conversation's changes while visible.
     live: (listener) => {
       const timer = window.setInterval(() => {
         if (document.visibilityState === 'visible') listener({ type: 'poll' });

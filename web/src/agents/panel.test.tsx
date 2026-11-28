@@ -5,7 +5,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import type { BoundFunctions, queries } from '@testing-library/dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../App';
-import { conversation } from '../dm/testkit';
+import { conversation, snapshot } from '../dm/testkit';
 import type { SessionStatus } from '../schema/session';
 
 const origin = 'http://127.0.0.1:8080';
@@ -205,8 +205,8 @@ function install() {
       const path = url.pathname;
       const method = init?.method ?? 'GET';
       if (path === '/v1/whoami') return Promise.resolve(json({ ...me, capabilities: { dm: server.dms } }));
-      if (path === '/v1/dms' && server.dms) {
-        return Promise.resolve(json({ conversations: url.searchParams.get('state') === 'open' ? [conversation()] : [] }));
+      if (path === '/v1/dms/snapshot' && server.dms) {
+        return Promise.resolve(json({ ...snapshot(), conversations: [conversation()] }));
       }
       if (path === '/v1/dms/12' && server.dms) return Promise.resolve(json(conversation()));
       if (path === '/v1/channels') return Promise.resolve(json({ channels: server.channels }));

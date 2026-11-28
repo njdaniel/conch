@@ -7,7 +7,7 @@ import { BlocksProvider } from '../blocks';
 import { windowOf } from '../fakewindow';
 import { Lobby } from '../Lobby';
 import { VoiceLive, VoiceSheet } from '../phone';
-import type { DMPreferencesV1 } from '../schema/generated';
+import type { DMPreferencesV1, DMReadStateV1, ListDMMessagesResponseV1 } from '../schema/generated';
 import { ProfileCard } from '../ProfileCard';
 import { initialChannels } from '../state/channels';
 import { useVoice } from '../voice/useVoice';
@@ -17,7 +17,7 @@ import { DmInbox } from './DmInbox';
 import { DmProvider } from './DmContext';
 import { DmRoute, type DmConversationView } from './DmRoute';
 import { canMessage } from './MessageAction';
-import { conversation, fake, fixture, later, me, mockOperationAvailability, peerMessage, snapshot } from './testkit';
+import { conversation, fake, fixture, later, me, peerMessage, snapshot } from './testkit';
 
 beforeEach(() => {
   Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
@@ -52,7 +52,6 @@ describe('the inbox', () => {
   });
 
   it('lists conversations with the recipient, unread counts and a per-viewer hide, apart from any member directory', async () => {
-    mockOperationAvailability({ markDmRead: true });
     const f = fake();
     render(provide(f.api, <DmInbox />));
     const nav = await screen.findByRole('navigation', { name: 'Direct messages' });
@@ -67,18 +66,52 @@ describe('the inbox', () => {
     expect(screen.queryByRole('region', { name: 'Members list' })).toBeNull();
   });
 
-  it('shows no stuck unread badge after opening a conversation while read marks are unserved', async () => {
-    mockOperationAvailability({ markDmRead: false });
-    const markRead = vi.fn<DmApi['markRead']>().mockResolvedValue({ ok: false, failure: 'unsupported' });
-    const f = fake({ markRead });
-    const view = render(provide(f.api, <DmInbox />));
-    const nav = await screen.findByRole('navigation', { name: 'Direct messages' });
-    const row = await within(nav).findByRole('button', { name: /^Grace/ });
-    fireEvent.click(row);
-    view.rerender(provide(f.api, <><DmInbox /><DmRoute conversationId={12} /></>));
-    await screen.findByRole('log', { name: 'Messages' });
-    expect(within(screen.getByRole('navigation', { name: 'Direct messages' })).queryAllByText(/\d+ unread/)).toHaveLength(0);
-    expect(markRead).not.toHaveBeenCalled();
+  it('clears the snapshot unread count after reading through the production adapter', async () => {
+    const row = conversation();
+    const page = fixture<ListDMMessagesResponseV1>('list-dm-messages-response-v1');
+    const mark = { ...fixture<DMReadStateV1>('dm-read-state-v1'), last_read_id: 4310, unread: 0 };
+    const calls: string[] = [];
+    const markRead = vi.fn(() => Response.json(mark));
+    window.sessionStorage.setItem('conch.web.token', 'conch_member_secret');
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(input instanceof Request ? input.url : input, window.location.href);
+      const request = `${init?.method ?? 'GET'} ${path.pathname}`;
+      calls.push(request);
+      switch (request) {
+        case 'GET /v1/whoami':
+          return Promise.resolve(Response.json({ id: me, kind: 'human', name: 'Ada', role: 'member' }));
+        case 'GET /v1/dms/snapshot':
+          return Promise.resolve(Response.json({ ...snapshot(), conversations: [row] }));
+        case 'GET /v1/dms':
+          return Promise.resolve(Response.json({ conversations: path.searchParams.get('state') === 'open' ? [row] : [] }));
+        case 'GET /v1/dms/12':
+          return Promise.resolve(Response.json(row));
+        case 'GET /v1/dms/12/messages':
+          return Promise.resolve(Response.json(page));
+        case 'PUT /v1/dms/12/read-state':
+          expect(init?.body).toBe(JSON.stringify({ last_read_id: mark.last_read_id }));
+          return Promise.resolve(markRead());
+        default:
+          return Promise.resolve(new Response('404 page not found', { status: 404 }));
+      }
+    }));
+    try {
+      expect((await restore()).ok).toBe(true);
+      const view = render(provide(dmApi, <DmInbox />));
+      const nav = screen.getByRole('navigation', { name: 'Direct messages' });
+      const open = await within(nav).findByRole('button', { name: /^Grace/ });
+      expect(within(nav).getAllByText('1 unread')).toHaveLength(2);
+      expect(markRead).not.toHaveBeenCalled();
+      fireEvent.click(open);
+      view.rerender(provide(dmApi, <><DmInbox /><DmRoute conversationId={row.id} /></>));
+      await screen.findByRole('log', { name: 'Messages' });
+      await waitFor(() => { expect(within(nav).queryAllByText('1 unread')).toHaveLength(0); });
+      expect(markRead).toHaveBeenCalledTimes(1);
+      expect(calls).toContain('GET /v1/dms/snapshot');
+    } finally {
+      window.sessionStorage.clear();
+      await listChannels();
+    }
   });
 
   it('states loading, empty, failed, off and own-sign-in-required, and shows nothing for a server with no DMs', async () => {
@@ -97,10 +130,10 @@ describe('the inbox', () => {
     expect(await screen.findByText('Direct messages are off.')).toBeDefined();
     third.unmount();
 
-    const snap = vi.fn()
+    const snap = vi.fn<DmApi['snapshot']>()
       .mockResolvedValueOnce({ ok: false, failure: 'network' })
       .mockResolvedValue({ ok: true, value: snapshot() });
-    const fourth = render(provide(fake({ snapshot: snap as NonNullable<DmApi['snapshot']> }).api, <DmInbox />));
+    const fourth = render(provide(fake({ snapshot: snap }).api, <DmInbox />));
     fireEvent.click(await screen.findByRole('button', { name: 'Try again' }));
     expect(await screen.findByRole('list', { name: 'Conversations' })).toBeDefined();
     fourth.unmount();
@@ -149,7 +182,6 @@ describe('the inbox', () => {
   });
 
   it('pages open and archived rows beyond the snapshot cap without double-counting overlap', async () => {
-    mockOperationAvailability({ markDmRead: true });
     const top = conversation();
     const older = { ...top, id: 21, peer_name: 'Ken', unread: 3 };
     const archived = { ...top, id: 22, peer_name: 'Margaret', unread: 5, state: 'archived' as const };
@@ -165,7 +197,7 @@ describe('the inbox', () => {
   });
 
   it('refreshes for incoming changes while the page stays visible', async () => {
-    const snapshotCall = vi.fn<NonNullable<DmApi['snapshot']>>()
+    const snapshotCall = vi.fn<DmApi['snapshot']>()
       .mockResolvedValueOnce({ ok: true, value: { ...snapshot(), conversations: [] } })
       .mockResolvedValueOnce({ ok: true, value: snapshot() });
     const f = fake({ snapshot: snapshotCall });
@@ -205,7 +237,7 @@ describe('the inbox', () => {
     expect(select.value).toBe('nobody');
   });
 
-  it('opens, hides and resumes through the routes main serves when history and settings are absent', async () => {
+  it('opens, hides and resumes when the snapshot is served and settings are absent', async () => {
     const row = conversation();
     let hidden = false;
     const json = (body: unknown) => new Response(JSON.stringify(body));
@@ -216,8 +248,8 @@ describe('the inbox', () => {
       const method = init?.method ?? 'GET';
       calls.push(`${method} ${path.pathname}`);
       if (path.pathname === '/v1/whoami') return Promise.resolve(json({ id: me, kind: 'human', name: 'Ada', role: 'member' }));
-      if (path.pathname === '/v1/dms' && method === 'GET') {
-        return Promise.resolve(json({ conversations: hidden || path.searchParams.get('state') === 'archived' ? [] : [row] }));
+      if (path.pathname === '/v1/dms/snapshot') {
+        return Promise.resolve(json({ ...snapshot(), conversations: hidden ? [] : [row] }));
       }
       if (path.pathname === '/v1/dms' && method === 'POST') {
         hidden = false;
@@ -249,7 +281,7 @@ describe('the inbox', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Grace' }));
       fireEvent.click(screen.getByRole('button', { name: 'Message Grace' }));
       await within(nav).findByRole('button', { name: /^Grace/ });
-      expect(calls).not.toContain('GET /v1/dms/snapshot');
+      expect(calls).toContain('GET /v1/dms/snapshot');
     } finally {
       window.sessionStorage.clear();
       await listChannels();
@@ -510,7 +542,6 @@ describe('in the lobby', () => {
   });
 
   it('marks a new DM read only when its Chat view is visible', async () => {
-    mockOperationAvailability({ markDmRead: true });
     phoneWindow();
     const f = fake();
     lobby(f.api);

@@ -270,6 +270,63 @@ func (s *Store) DMConversationFor(ctx context.Context, viewer, convID int64) (DM
 	return out, err
 }
 
+// dmLivePairTx starts with the retained-history check, then applies the live
+// pair's block rule. A missing or invisible conversation has no live access.
+func dmLivePairTx(ctx context.Context, tx execer, viewer, convID int64) (dmRow, bool, error) {
+	row, err := dmViewTx(ctx, tx, viewer, convID)
+	if errors.Is(err, ErrDMNotFound) {
+		return dmRow{}, false, nil
+	}
+	if err != nil {
+		return dmRow{}, false, err
+	}
+	blocked, err := dmBlockedEitherWayTx(ctx, tx, row.lo, row.hi)
+	return row, !blocked && err == nil, err
+}
+
+// DMFrameAllowed is the socket's current DM access check. A reader's DM
+// switch and the server switch govern live delivery. History stays readable.
+func (s *Store) DMFrameAllowed(ctx context.Context, viewer, convID int64) (allowed bool, err error) {
+	err = s.dmReadTx(ctx, func(tx execer) error {
+		_, live, err := dmLivePairTx(ctx, tx, viewer, convID)
+		if err != nil || !live {
+			return err
+		}
+		allowed, err = dmEnabledForTx(ctx, tx, viewer)
+		return err
+	})
+	return allowed, err
+}
+
+// DMMessageFrameRecipients finds the currently eligible recipients of a
+// committed message change. Each candidate goes through the same visibility
+// rule as a history reader and must have DMs enabled for live delivery.
+func (s *Store) DMMessageFrameRecipients(ctx context.Context, author, convID int64) ([]int64, error) {
+	var recipients []int64
+	err := s.dmReadTx(ctx, func(tx execer) error {
+		pair, live, err := dmLivePairTx(ctx, tx, author, convID)
+		if err != nil || !live {
+			return err
+		}
+		for _, reader := range []int64{author, pair.peer(author)} {
+			if _, err := dmViewTx(ctx, tx, reader, convID); errors.Is(err, ErrDMNotFound) {
+				continue
+			} else if err != nil {
+				return err
+			}
+			enabled, err := dmEnabledForTx(ctx, tx, reader)
+			if err != nil {
+				return err
+			}
+			if enabled {
+				recipients = append(recipients, reader)
+			}
+		}
+		return nil
+	})
+	return recipients, err
+}
+
 // DMListCursor is where the next page of ListDMConversations starts: the
 // sort key of the last conversation of the previous one. The zero value
 // starts from the top. The server wraps it in an opaque cursor; it is never
@@ -303,6 +360,30 @@ func (s *Store) ListDMConversations(ctx context.Context, viewer int64, state sch
 	if cursor.ID < 0 || cursor.At < 0 || (cursor.Empty && cursor.At != 0) {
 		return nil, errors.New("store: list conversations: a bad cursor")
 	}
+	var out []DMConversation
+	err := s.dmReadTx(ctx, func(tx execer) (err error) {
+		out, err = dmListConversationsTx(ctx, tx, viewer, state, cursor, limit)
+		return err
+	})
+	return out, err
+}
+
+// DMSnapshotFor reads the viewer's open and archived conversations and the
+// caller's DM switches in one snapshot. The extra row signals another page.
+func (s *Store) DMSnapshotFor(ctx context.Context, viewer int64) (rows []DMConversation, enabled bool, err error) {
+	err = s.dmReadTx(ctx, func(tx execer) (err error) {
+		rows, err = dmListConversationsTx(ctx, tx, viewer, "", DMListCursor{}, schema.MaxDMSnapshotConversations+1)
+		if err != nil {
+			return err
+		}
+		enabled, err = dmEnabledForTx(ctx, tx, viewer)
+		return err
+	})
+	return rows, enabled, err
+}
+
+// An empty state includes both open and archived conversations.
+func dmListConversationsTx(ctx context.Context, tx execer, viewer int64, state schema.DMState, cursor DMListCursor, limit int) ([]DMConversation, error) {
 	// ?3 is the cursor's group (0 has messages, 1 none), ?4 its time, ?5 its
 	// id: the sort key is (no message, last_message_at DESC, id DESC).
 	group := 0
@@ -310,42 +391,40 @@ func (s *Store) ListDMConversations(ctx context.Context, viewer int64, state sch
 		group = 1
 	}
 	var out []DMConversation
-	err := s.dmReadTx(ctx, func(tx execer) error {
-		rows, err := tx.QueryContext(ctx, dmSelectConversation+` WHERE `+dmVisibleCond+` AND COALESCE(vs.state, 'open') = ?2
+	rows, err := tx.QueryContext(ctx, dmSelectConversation+` WHERE `+dmVisibleCond+`
+			AND COALESCE(vs.state, 'open') <> 'hidden' AND (?2 = '' OR COALESCE(vs.state, 'open') = ?2)
 			AND (?3 = 0 AND ?4 = 0 AND ?5 = 0
 			  OR (lm.id IS NULL) > ?3
 			  OR (lm.id IS NULL) = ?3 AND (?3 = 1 AND c.id < ?5
 			       OR ?3 = 0 AND (lm.created_at < ?4 OR lm.created_at = ?4 AND c.id < ?5)))
 			ORDER BY lm.id IS NULL, lm.created_at DESC, c.id DESC LIMIT ?6`,
-			viewer, string(state), group, cursor.At, cursor.ID, limit)
+		viewer, string(state), group, cursor.At, cursor.ID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: list conversations of %d: %w", viewer, err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		c, err := scanDMConversation(rows, viewer)
 		if err != nil {
-			return fmt.Errorf("store: list conversations of %d: %w", viewer, err)
+			return nil, fmt.Errorf("store: list conversations of %d: %w", viewer, err)
 		}
-		defer func() { _ = rows.Close() }()
-		for rows.Next() {
-			c, err := scanDMConversation(rows, viewer)
-			if err != nil {
-				return fmt.Errorf("store: list conversations of %d: %w", viewer, err)
-			}
-			out = append(out, c)
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list conversations of %d: %w", viewer, err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for i := range out {
+		if out[i].Unread, err = dmUnreadTx(ctx, tx, out[i].ID, viewer, out[i].LastReadID); err != nil {
+			return nil, err
 		}
-		if err := rows.Err(); err != nil {
-			return fmt.Errorf("store: list conversations of %d: %w", viewer, err)
+		if err = dmFillPeerTx(ctx, tx, viewer, &out[i]); err != nil {
+			return nil, err
 		}
-		if err := rows.Close(); err != nil {
-			return err
-		}
-		for i := range out {
-			if out[i].Unread, err = dmUnreadTx(ctx, tx, out[i].ID, viewer, out[i].LastReadID); err != nil {
-				return err
-			}
-			if err = dmFillPeerTx(ctx, tx, viewer, &out[i]); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	return out, err
+	}
+	return out, nil
 }
 
 // CursorAfter is the cursor that continues a list after c.
@@ -479,8 +558,22 @@ func (s *Store) DMMessageFor(ctx context.Context, viewer, convID, messageID int6
 	return out, err
 }
 
-// ErrDMHistoryCursor covers an unknown or foreign history anchor.
+// ErrDMHistoryCursor covers an unknown or foreign message anchor.
 var ErrDMHistoryCursor = errors.New("store: direct message cursor is not in the requested conversation")
+
+// dmMessageCursorTx checks an anchor after the caller has run dmViewTx.
+func dmMessageCursorTx(ctx context.Context, q execer, convID, messageID int64) error {
+	var found bool
+	err := q.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM direct_messages WHERE conversation_id = ? AND id = ?)`,
+		convID, messageID).Scan(&found)
+	if err != nil {
+		return fmt.Errorf("store: check message cursor in conversation %d: %w", convID, err)
+	}
+	if !found {
+		return ErrDMHistoryCursor
+	}
+	return nil
+}
 
 // ListDMMessagesPage returns up to limit messages of conversation convID as
 // viewer reads them, in the direction of page (the channel MessagePage's
@@ -511,14 +604,8 @@ func (s *Store) ListDMMessagesPage(ctx context.Context, viewer, convID int64, pa
 			return err
 		}
 		if anchor := max(page.After, page.Before); anchor != 0 {
-			var found bool
-			err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM direct_messages WHERE conversation_id = ? AND id = ?)`,
-				convID, anchor).Scan(&found)
-			if err != nil {
-				return fmt.Errorf("store: check message cursor in conversation %d: %w", convID, err)
-			}
-			if !found {
-				return ErrDMHistoryCursor
+			if err := dmMessageCursorTx(ctx, tx, convID, anchor); err != nil {
+				return err
 			}
 		}
 		rows, err := tx.QueryContext(ctx, `SELECT `+dmMessageColumns+dmMessageFrom+
@@ -534,6 +621,9 @@ func (s *Store) ListDMMessagesPage(ctx context.Context, viewer, convID int64, pa
 	})
 	return out, err
 }
+
+// ErrDMChangesCursor means the cursor is past this conversation's revision.
+var ErrDMChangesCursor = errors.New("store: direct message cursor is past the conversation revision")
 
 // ListDMChanges returns up to limit messages of conversation convID whose
 // revision is above after, each once as it is now (its send, its latest edit
@@ -552,6 +642,19 @@ func (s *Store) ListDMChanges(ctx context.Context, viewer, convID, after int64, 
 	err := s.dmReadTx(ctx, func(tx execer) error {
 		if _, err := dmViewTx(ctx, tx, viewer, convID); err != nil {
 			return err
+		}
+		// Every revision up to the current one was issued in this conversation.
+		// An edit or removal may have replaced the row at the requested revision.
+		if after > 0 {
+			var issued bool
+			err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM direct_messages WHERE conversation_id = ? AND revision >= ?)`,
+				convID, after).Scan(&issued)
+			if err != nil {
+				return fmt.Errorf("store: check revision cursor in conversation %d: %w", convID, err)
+			}
+			if !issued {
+				return ErrDMChangesCursor
+			}
 		}
 		rows, err := tx.QueryContext(ctx, `SELECT `+dmMessageColumns+dmMessageFrom+
 			` WHERE m.conversation_id = ? AND m.revision > ? ORDER BY m.revision ASC LIMIT ?`,

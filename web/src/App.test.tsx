@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
-import { conversation } from './dm/testkit';
+import { conversation, snapshot } from './dm/testkit';
 import { windowOf } from './fakewindow';
 import { SPOILER_FILE_PREFIX } from './schema/file';
 import { attachmentNames, forgetFileNames, rememberFileName } from './spoilerFiles';
@@ -122,13 +122,12 @@ describe('DM credential capability', () => {
   });
 
   it('stops DM requests when a DM action returns a credential refusal', async () => {
-    const list = vi.fn(() => json({ conversations: [conversation()] }));
+    const readSnapshot = vi.fn(() => json({ ...snapshot(), conversations: [conversation()] }));
     const hide = vi.fn(() => json({ code: 'own_sign_in_required', message: 'Use your own sign-in' }, 403));
     serve({
       ...asMember,
       '/v1/whoami': () => json({ ...member, capabilities: { dm: true } }),
-      '/v1/dms?state=open': list,
-      '/v1/dms?state=archived': () => json({ conversations: [] }),
+      '/v1/dms/snapshot': readSnapshot,
       '/v1/dms/12/state': hide,
     });
     render(<App origin={origin} />);
@@ -138,16 +137,16 @@ describe('DM credential capability', () => {
     expect(hide).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole('navigation', { name: 'Direct messages' })).toBeNull();
     await refocus();
-    expect(list).toHaveBeenCalledTimes(1);
+    expect(readSnapshot).toHaveBeenCalledTimes(1);
     expect(screen.getByRole('button', { name: 'Settings' })).toBeDefined();
   });
 
   it('handles an unexpected inbox 403 without application console errors or further requests', async () => {
-    const list = vi.fn(() => json({ code: 'forbidden', message: 'Forbidden' }, 403));
+    const readSnapshot = vi.fn(() => json({ code: 'forbidden', message: 'Forbidden' }, 403));
     const requests = serve({
       ...asMember,
       '/v1/whoami': () => json({ ...member, capabilities: { dm: true } }),
-      '/v1/dms?state=open': list,
+      '/v1/dms/snapshot': readSnapshot,
     });
     const errors = vi.spyOn(console, 'error');
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
@@ -156,7 +155,7 @@ describe('DM credential capability', () => {
       signIn();
       await screen.findByRole('button', { name: 'Settings' });
       await act(async () => {});
-      expect(list).toHaveBeenCalledTimes(1);
+      expect(readSnapshot).toHaveBeenCalledTimes(1);
       expect(screen.queryByRole('navigation', { name: 'Direct messages' })).toBeNull();
       await refocus();
       await act(() => vi.advanceTimersByTimeAsync(45_000));

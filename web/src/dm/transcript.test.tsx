@@ -93,7 +93,6 @@ describe('the transcript', () => {
   });
 
   it('retries a transient read-mark failure after a successful poll with no new messages', async () => {
-    mockOperationAvailability({ markDmRead: true });
     const markRead = vi.fn<DmApi['markRead']>()
       .mockResolvedValueOnce({ ok: false, failure: 'network' })
       .mockResolvedValue({ ok: true, value: { ...fixture<DMReadStateV1>('dm-read-state-v1'), last_read_id: 4310 } });
@@ -289,7 +288,6 @@ describe('the transcript', () => {
   });
 
   it('edits and removes only the viewer’s own messages, and shows the server’s tombstone', async () => {
-    mockOperationAvailability({ listDmChanges: true });
     const own = ownMessage();
     const gone = { ...own, revision: 8, removed: true, body: removedBody, file_ids: undefined };
     const changes = vi.fn(() => Promise.resolve({ ok: true as const, value: { messages: [gone] } }));
@@ -316,51 +314,67 @@ describe('the transcript', () => {
     expect(screen.getByText(removedBody)).toBeDefined();
   });
 
-  it('polls the latest history for replies, edits and removals while the changes route is unserved', async () => {
-    mockOperationAvailability({ listDmChanges: false });
-    const initial = fixture<ListDMMessagesResponseV1>('list-dm-messages-response-v1');
-    const reply = { ...peerMessage(), id: 4311, revision: 7, body: 'A new reply' };
-    const edit = { ...peerMessage(), id: 4310, revision: 8, body: 'An edited reply' };
-    const removal = { ...removedMessage(), id: ownMessage().id, revision: 9 };
+  it('applies a polled edit and replaces a removed message on an earlier loaded page', async () => {
+    const earlier = { ...peerMessage(), id: 4300, revision: 3, body: 'An earlier message' };
+    const removed = { ...earlier, revision: 7, removed: true, body: removedBody };
+    const edited = { ...peerMessage(), revision: 8, body: 'An edited reply' };
+    const latest = { order: 'desc' as const, messages: [peerMessage()], next_before: 4310 };
     const history = vi.fn<DmApi['history']>()
-      .mockResolvedValueOnce({ ok: true, value: initial })
-      .mockResolvedValue({ ok: true, value: { order: 'desc', messages: [reply, edit, removal], next_before: 4305 } });
-    const changes = vi.fn<DmApi['changes']>().mockResolvedValue({ ok: false, failure: 'unsupported' });
+      .mockResolvedValueOnce({ ok: true, value: latest })
+      .mockResolvedValueOnce({ ok: true, value: { order: 'desc', messages: [earlier] } })
+      .mockResolvedValue({ ok: true, value: { ...latest, messages: [edited] } });
+    const changes = vi.fn<DmApi['changes']>().mockResolvedValue({ ok: true, value: { messages: [removed, edited] } });
     const f = fake({ history, changes });
     mount(f);
     const log = await ready();
-    expect(bodies()).toEqual(['Sure. Here is the draft.', 'Thanks, reading it now.']);
+    fireEvent.click(screen.getByRole('button', { name: 'Load earlier messages' }));
+    await screen.findByText(earlier.body);
     await act(async () => {
       f.frames({ type: 'poll' });
       await Promise.resolve();
     });
     expect(screen.getByRole('log', { name: 'Messages' })).toBe(log);
-    expect(bodies()).toEqual([removedBody, edit.body, reply.body]);
-    expect(history).toHaveBeenLastCalledWith(12, { order: 'desc' });
-    expect(changes).not.toHaveBeenCalled();
+    expect(bodies()).toEqual([removedBody, edited.body]);
+    expect(changes).toHaveBeenCalledExactlyOnceWith(12, 6);
+    expect(history).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole('button', { name: 'Load earlier messages' })).toBeNull();
   });
 
-  it('shows a successful removal from an earlier page while the changes route is unserved', async () => {
-    mockOperationAvailability({ listDmChanges: false });
-    const earlier = { ...ownMessage(), id: 4300, body: 'An earlier message' };
-    const removal = { ...earlier, revision: 7, removed: true, body: removedBody, file_ids: undefined };
-    const history = vi.fn<DmApi['history']>()
-      .mockResolvedValueOnce({ ok: true, value: { order: 'desc', messages: [peerMessage()], next_before: 4310 } })
-      .mockResolvedValueOnce({ ok: true, value: { order: 'desc', messages: [earlier] } })
-      .mockResolvedValue({ ok: true, value: { order: 'desc', messages: [removal] } });
-    const f = fake({ history, changes: vi.fn<DmApi['changes']>().mockResolvedValue({ ok: false, failure: 'unsupported' }) });
+  it('catches all 51 replies received in the background and can still load earlier history', async () => {
+    const initial = fixture<ListDMMessagesResponseV1>('list-dm-messages-response-v1');
+    const initialBodies = [...initial.messages].reverse().map((message) => message.body);
+    const earlier = { ...peerMessage(), id: 4300, revision: 3, body: 'Earlier history' };
+    const replies = Array.from({ length: 51 }, (_, i) => ({ ...peerMessage(), id: 4311 + i, revision: 7 + i, body: `Reply ${String(i + 1)}` }));
+    const newestPage = replies.slice(-50).reverse();
+    let inBackground = false;
+    const history = vi.fn<DmApi['history']>().mockImplementation((_id, { before }) => Promise.resolve({
+      ok: true,
+      value: before !== undefined
+        ? { order: 'desc', messages: [earlier] }
+        : inBackground ? { order: 'desc', messages: newestPage, next_before: newestPage.at(-1)?.id } : initial,
+    }));
+    const changes = vi.fn<DmApi['changes']>()
+      .mockResolvedValueOnce({ ok: true, value: { messages: replies.slice(0, 50), next_after: 56 } })
+      .mockResolvedValueOnce({ ok: true, value: { messages: replies.slice(50) } });
+    const f = fake({ history, changes });
     mount(f);
     await ready();
-    fireEvent.click(screen.getByRole('button', { name: 'Load earlier messages' }));
-    await screen.findByText(earlier.body);
-    fireEvent.click(screen.getByRole('button', { name: /^Remove your message/ }));
+    Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
+    fireEvent(document, new Event('visibilitychange'));
+    inBackground = true;
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Yes, remove' }));
+      fireEvent(document, new Event('visibilitychange'));
       await Promise.resolve();
     });
-    expect(f.api.remove).toHaveBeenCalledWith(12, earlier.id);
-    expect(history).toHaveBeenLastCalledWith(12, { order: 'desc', before: peerMessage().id });
-    expect(bodies()).toEqual([removedBody, peerMessage().body]);
+    const caughtUp = [...initialBodies, ...replies.map((reply) => reply.body)];
+    expect(bodies()).toEqual(caughtUp);
+    expect(changes.mock.calls).toEqual([[12, 6], [12, 56]]);
+    expect(history).toHaveBeenCalledExactlyOnceWith(12, { order: 'desc' });
+    fireEvent.click(screen.getByRole('button', { name: 'Load earlier messages' }));
+    await screen.findByText(earlier.body);
+    expect(history).toHaveBeenLastCalledWith(12, { order: 'desc', before: 4305 });
+    expect(bodies()).toEqual([earlier.body, ...caughtUp]);
     expect(screen.queryByRole('button', { name: 'Load earlier messages' })).toBeNull();
   });
 
@@ -369,7 +383,6 @@ describe('the transcript', () => {
     ['Attach a file', () => screen.queryByLabelText('Attach a file')],
     ['Download', () => screen.queryByRole('button', { name: 'Download draft.pdf' })],
   ] as const)('hides %s while its route is unserved', async (_label, query) => {
-    mockOperationAvailability({ searchDmMessages: false, uploadDmFile: false, dmFileMeta: false, dmFileBytes: false });
     mount(fake());
     await ready();
     expect(screen.getByRole('textbox', { name: 'Message to Grace' })).toBeDefined();
@@ -377,7 +390,6 @@ describe('the transcript', () => {
   });
 
   it('marks the newest message read, once', async () => {
-    mockOperationAvailability({ markDmRead: true });
     const f = fake();
     mount(f);
     await ready();
@@ -421,7 +433,6 @@ describe('the transcript', () => {
   });
 
   it('clears displayed history and composer when a refresh loses authorization', async () => {
-    mockOperationAvailability({ listDmChanges: true });
     const changes = vi.fn<DmApi['changes']>().mockResolvedValue({ ok: false, failure: 'unauthorized' });
     const f = fake({ changes });
     mount(f);
@@ -444,7 +455,6 @@ describe('the transcript', () => {
   });
 
   it('drops an answer that arrives after switching conversations', async () => {
-    mockOperationAvailability({ markDmRead: true });
     const slow = later<{ ok: true; value: unknown }>();
     const other = { ...conversation(), id: 14, peer_id: 9, peer_name: 'Linus' };
     const f = fake({
@@ -477,7 +487,6 @@ describe('the transcript', () => {
   });
 
   it('catches up with the changes route when a frame skips a revision', async () => {
-    mockOperationAvailability({ listDmChanges: true });
     const missed = { ...peerMessage(), id: 4312, revision: 9, body: 'missed one' };
     const f = fake({ changes: vi.fn(() => Promise.resolve({ ok: true as const, value: { messages: [missed] } })) });
     mount(f);
@@ -489,7 +498,6 @@ describe('the transcript', () => {
   });
 
   it('recovers a missed removal after a higher send response and a failed changes request', async () => {
-    mockOperationAvailability({ listDmChanges: true });
     const removal = { ...ownMessage(), revision: 7, removed: true, body: removedBody, file_ids: undefined };
     const changes = vi.fn<DmApi['changes']>()
       .mockResolvedValueOnce({ ok: false, failure: 'network' })
@@ -512,7 +520,6 @@ describe('the transcript', () => {
   });
 
   it('retries a failed live gap from the same revision', async () => {
-    mockOperationAvailability({ listDmChanges: true });
     const missed = { ...peerMessage(), id: 4312, revision: 7, body: 'missed one' };
     const changes = vi.fn<DmApi['changes']>()
       .mockResolvedValueOnce({ ok: false, failure: 'network' })
