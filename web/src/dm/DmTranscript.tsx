@@ -32,6 +32,7 @@ export interface DmConversationViewProps {
   readonly pendingSends?: PendingSends;
   readonly onRead?: (state: DMReadStateV1) => void;
   readonly enabled?: boolean;
+  readonly snapshotVersion?: number;
   readonly viewing?: boolean;
 }
 
@@ -288,9 +289,9 @@ export function DmTranscript(props: DmConversationViewProps) {
   return <TranscriptView key={`${props.scope}/${String(props.viewer)}/${String(props.conversationId)}`} {...props} />;
 }
 
-function TranscriptView({ conversationId, api, scope, viewer, draft, onDraft, onRead, pendingSends, enabled = true, viewing = true }: DmConversationViewProps) {
+function TranscriptView({ conversationId, api, scope, viewer, draft, onDraft, onRead, pendingSends, enabled = true, snapshotVersion = 0, viewing = true }: DmConversationViewProps) {
   const { blocked } = useBlocksContext();
-  const t = useDmTranscript(api, scope, conversationId, viewing, enabled, blocked, onRead, pendingSends);
+  const t = useDmTranscript(api, scope, conversationId, viewing, enabled, blocked, onRead, pendingSends, snapshotVersion);
   const { state, canWrite } = t;
   const [searching, setSearching] = useState(false);
   // The text being written is state here (the provider's drafts only keep it

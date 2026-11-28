@@ -16,17 +16,19 @@ export interface InboxState {
   readonly status: InboxStatus;
   readonly conversations: readonly DMConversationV1[];
   readonly enabled: boolean;
+  readonly snapshotVersion: number;
   readonly selected: number | null;
 }
 
-const start = (scope: string): InboxState => ({ scope, status: 'loading', conversations: [], enabled: true, selected: null });
+const start = (scope: string): InboxState => ({ scope, status: 'loading', conversations: [], enabled: true, snapshotVersion: 0, selected: null });
 
 // Omit that keeps the union's members apart.
 type Without<A, K extends string> = A extends unknown ? Omit<A, K> : never;
 
 type Action = { readonly scope: string } & (
   | { readonly type: 'reset' }
-  | { readonly type: 'rows'; readonly conversations: readonly DMConversationV1[]; readonly enabled: boolean }
+  | { readonly type: 'rows'; readonly conversations: readonly DMConversationV1[] }
+  | { readonly type: 'enabled'; readonly enabled: boolean }
   | { readonly type: 'status'; readonly status: InboxStatus }
   | { readonly type: 'upsert'; readonly conversation: DMConversationV1 }
   | { readonly type: 'read'; readonly state: DMReadStateV1 }
@@ -50,7 +52,9 @@ export function reduceInbox(state: InboxState, action: Action): InboxState {
   if (action.scope !== state.scope) return state;
   switch (action.type) {
     case 'rows':
-      return { ...state, status: 'ready', conversations: [...action.conversations].sort(byRecent), enabled: action.enabled };
+      return { ...state, status: 'ready', conversations: [...action.conversations].sort(byRecent) };
+    case 'enabled':
+      return { ...state, enabled: action.enabled, snapshotVersion: state.snapshotVersion + 1 };
     case 'status':
       return { ...(action.status === 'failed' ? state : start(state.scope)), status: action.status };
     case 'upsert':
@@ -99,7 +103,8 @@ export function useDmInbox(api: DmApi | null, scope: string): Inbox {
   }, [act, requests]);
 
   const applyRows = useCallback(async (snapshot: DMSnapshotV1, isCurrent: () => boolean) => {
-    if (api === null) return;
+    if (api === null || !isCurrent()) return;
+    act({ type: 'enabled', enabled: snapshot.dms_enabled });
     const rows = new Map(snapshot.conversations.map((c) => [c.id, c]));
     if (snapshot.more) {
       for (const state of ['open', 'archived'] as const) {
@@ -125,7 +130,7 @@ export function useDmInbox(api: DmApi | null, scope: string): Inbox {
         }
       }
     }
-    if (isCurrent()) act({ type: 'rows', conversations: [...rows.values()], enabled: snapshot.dms_enabled });
+    if (isCurrent()) act({ type: 'rows', conversations: [...rows.values()] });
   }, [api, act, fail]);
 
   const refresh = useCallback(async () => {

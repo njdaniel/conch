@@ -51,6 +51,7 @@ type Action = { readonly key: string } & (
   | { readonly type: 'conversation'; readonly conversation: DMConversationV1 }
   | { readonly type: 'read'; readonly lastRead: number }
   | { readonly type: 'access'; readonly access: Access }
+  | { readonly type: 'clearAccess'; readonly previous: Exclude<Access, 'ok'> }
 );
 
 export function reduce(state: TranscriptState, action: Action): TranscriptState {
@@ -89,7 +90,10 @@ export function reduce(state: TranscriptState, action: Action): TranscriptState 
     case 'read':
       return action.lastRead > state.lastRead ? { ...state, lastRead: action.lastRead } : state;
     case 'access':
+      if (state.access === 'off' && action.access === 'unavailable') return state;
       return state.access === action.access ? state : { ...state, access: action.access };
+    case 'clearAccess':
+      return state.access === action.previous ? { ...state, access: 'ok' } : state;
   }
 }
 
@@ -107,7 +111,7 @@ export interface Transcript {
   readonly reload: () => void;
 }
 
-export function useDmTranscript(api: DmApi, scope: string, conversation: number, viewing: boolean, enabled: boolean, blocked: ReadonlySet<number>, onRead?: (state: DMReadStateV1) => void, kept?: PendingSends): Transcript {
+export function useDmTranscript(api: DmApi, scope: string, conversation: number, viewing: boolean, enabled: boolean, blocked: ReadonlySet<number>, onRead?: (state: DMReadStateV1) => void, kept?: PendingSends, snapshotVersion = 0): Transcript {
   const key = `${scope}/${String(conversation)}`;
   const local = useMemo(() => pendingSends(), [key]);
   const sends = kept ?? local;
@@ -119,6 +123,7 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
     active: false,
     revoked: false,
     load: 0,
+    contactRefusal: 0,
   }), [api, key]);
   const [raw, dispatch] = useReducer(reduce, key, empty);
   const [visible, setVisible] = useState(() => document.visibilityState !== 'hidden');
@@ -146,7 +151,10 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
       return true;
     }
     if (failure === 'dms_off') act({ type: 'access', access: 'off' });
-    else if (failure === 'unavailable') act({ type: 'access', access: 'unavailable' });
+    else if (failure === 'unavailable') {
+      recovery.contactRefusal++;
+      act({ type: 'access', access: 'unavailable' });
+    }
     return false;
   }, [act, recovery]);
 
@@ -162,14 +170,23 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
       while (recovery.requested) {
         recovery.requested = false;
         const after: number = recovery.after;
+        const contactRefusal = recovery.contactRefusal;
         const result = await api.changes(conversation, after);
         if (!active()) return;
         if (!result.ok) {
+          // A poll or focus event queued during a timeout can retry this cursor.
+          if (result.failure === 'network') continue;
           fail(result.failure);
           return;
         }
         const { messages, next_after: next } = result.value;
         act({ type: 'merge', messages });
+        // Reads do not expose peer contact policy. After a fresh read the
+        // viewer can try a new write, which the server checks again.
+        if (contactRefusal !== 0 && contactRefusal === recovery.contactRefusal) {
+          recovery.contactRefusal = 0;
+          act({ type: 'clearAccess', previous: 'unavailable' });
+        }
         recovery.after = revisionOf(messages, after);
         if (next === recovery.after && next > after) recovery.requested = true;
         // Even an empty changes page lets a transient read-mark failure retry.
@@ -224,6 +241,8 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
           if (frame.conversation === conversation) void catchUp();
           return;
         case 'snapshot': {
+          if (frame.snapshot.dms_enabled) act({ type: 'clearAccess', previous: 'off' });
+          else act({ type: 'access', access: 'off' });
           const mine = frame.snapshot.conversations.find((c) => c.id === conversation);
           if (mine === undefined) return;
           act({ type: 'conversation', conversation: mine });
@@ -250,6 +269,12 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
       window.removeEventListener('focus', onFocus);
     };
   }, [api, key, conversation, load, catchUp, act, recovery]);
+
+  // A new inbox snapshot can confirm DMs are on even if it missed the time
+  // between the write refusal and the operator turning them back on.
+  useEffect(() => {
+    if (enabled) act({ type: 'clearAccess', previous: 'off' });
+  }, [act, enabled, snapshotVersion]);
 
   // The read mark follows the newest message the person can see here.
   const messages = useMemo(() => ordered(state.messages), [state.messages]);

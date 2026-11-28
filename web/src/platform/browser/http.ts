@@ -1,10 +1,10 @@
 // The browser's HttpTransport: fetch against the page's own origin. The
-// arguments of every fetch here are exactly those the client has always made,
-// built from the operation table; http.test.ts pins them.
+// fetch arguments are built from the operation table; http.test.ts pins them.
 import { operations, pathOf, previewHeader, type Call } from '../operations';
 import type { HttpTransport } from '../types';
 
 const json = 'application/json';
+const changesTimeoutMs = 10_000;
 
 // plain refuses a call that asks for a preview: only a GET carries the header,
 // so a write can never answer as someone else (the server refuses it too).
@@ -13,10 +13,23 @@ function plain(call: Call): Call {
   return call;
 }
 
+async function getChanges(path: string, init: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => { controller.abort(); }, changesTimeoutMs);
+  try {
+    const res = await fetch(path, { ...init, signal: controller.signal });
+    // A stalled body fails the request just like stalled response headers.
+    return res.body === null ? res : new Response(await res.arrayBuffer(), res);
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
 export const http: HttpTransport = {
   get(call, token) {
     if (call.previewAs !== undefined && operations[call.op].previewable !== true) throw new Error(`operation ${call.op} cannot be previewed`);
-    return fetch(pathOf(call), {
+    const path = pathOf(call);
+    const init: RequestInit = {
       headers: {
         Authorization: `Bearer ${token}`,
         Accept: json,
@@ -24,7 +37,8 @@ export const http: HttpTransport = {
       },
       cache: 'no-store',
       credentials: 'omit',
-    });
+    };
+    return call.op === 'listDmChanges' ? getChanges(path, init) : fetch(path, init);
   },
 
   send(call, token, { body, keepalive, signal }) {

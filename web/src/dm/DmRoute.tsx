@@ -44,6 +44,7 @@ export function DmRoute({ conversationId, view = transcriptView, onClose, viewin
           pendingSends: sendsFor(conversationId),
           onRead: inbox.read,
           enabled: inbox.state.enabled,
+          snapshotVersion: inbox.state.snapshotVersion,
           viewing,
         })}
       </div>

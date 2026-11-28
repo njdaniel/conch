@@ -1,13 +1,14 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { listChannels, restore } from '../api';
 import { BlocksProvider, type Blocks } from '../blocks';
 import type { DMMessageV1, DMReadStateV1, ListDMMessagesResponseV1 } from '../schema/generated';
-import type { DmApi } from './api';
+import { dmApi, type DmApi } from './api';
 import { DmProvider } from './DmContext';
 import { DmRoute } from './DmRoute';
 import { DmTranscript } from './DmTranscript';
 import { removedBody } from './model';
-import { conversation, fake, fixture, later, me, mockOperationAvailability, ownMessage, peerMessage, removedMessage, type Fake } from './testkit';
+import { conversation, fake, fixture, later, me, mockOperationAvailability, ownMessage, peerMessage, removedMessage, snapshot, type Fake } from './testkit';
 
 const scope = 'https://a.example|3';
 
@@ -287,6 +288,63 @@ describe('the transcript', () => {
     expect(bodies()).toContain('Thanks, reading it now.');
   });
 
+  it.each([true, false])('restores the composer after the peer unblocks the viewer (peer replied: %s)', async (replied) => {
+    const reply = { ...peerMessage(), id: 4311, revision: 7, body: 'Ready to talk again' };
+    const sent = { ...ownMessage(), id: 4312, revision: replied ? 8 : 7, body: 'Welcome back' };
+    const f = fake({
+      changes: vi.fn<DmApi['changes']>().mockResolvedValue({ ok: true, value: { messages: replied ? [reply] : [] } }),
+      send: vi.fn<DmApi['send']>()
+        .mockResolvedValueOnce({ ok: false, failure: 'unavailable' })
+        .mockResolvedValueOnce({ ok: true, message: sent }),
+    });
+    mount(f, 12, 'Hello');
+    const log = await ready();
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await screen.findByRole('button', { name: 'Discard' });
+    expect(screen.queryByRole('textbox', { name: 'Message to Grace' })).toBeNull();
+
+    await act(async () => {
+      f.frames({ type: 'poll' });
+      await Promise.resolve();
+    });
+    expect(bodies().includes(reply.body)).toBe(replied);
+    expect(screen.getByRole('log', { name: 'Messages' })).toBe(log);
+    fireEvent.change(screen.getByRole('textbox', { name: 'Message to Grace' }), { target: { value: sent.body } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await waitFor(() => { expect(bodies()).toContain(sent.body); });
+  });
+
+  it.each([true, false])('restores the composer when the snapshot reports DMs back on (polled while off: %s)', async (polledWhileOff) => {
+    let enabled = true;
+    const f = fake({
+      snapshot: vi.fn<DmApi['snapshot']>(() => Promise.resolve({ ok: true, value: { ...snapshot(), dms_enabled: enabled } })),
+      send: vi.fn<DmApi['send']>().mockResolvedValue({ ok: false, failure: 'dms_off' }),
+    });
+    render(<DmProvider api={f.api} scope={scope} me={me}><DmRoute conversationId={12} /></DmProvider>);
+    const log = await ready();
+    enabled = false;
+    fireEvent.change(screen.getByRole('textbox', { name: 'Message to Grace' }), { target: { value: 'Hello' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await screen.findByText('Direct messages are off.', { selector: '.banner' });
+    expect(screen.queryByRole('textbox', { name: 'Message to Grace' })).toBeNull();
+    if (polledWhileOff) {
+      await act(async () => {
+        f.frames({ type: 'poll' });
+        await Promise.resolve();
+      });
+      expect(screen.queryByRole('textbox', { name: 'Message to Grace' })).toBeNull();
+    }
+
+    enabled = true;
+    await act(async () => {
+      f.frames({ type: 'poll' });
+      await Promise.resolve();
+    });
+    expect(screen.queryByText('Direct messages are off.', { selector: '.banner' })).toBeNull();
+    expect(screen.getByRole('textbox', { name: 'Message to Grace' })).toBeDefined();
+    expect(screen.getByRole('log', { name: 'Messages' })).toBe(log);
+  });
+
   it('edits and removes only the viewer’s own messages, and shows the server’s tombstone', async () => {
     const own = ownMessage();
     const gone = { ...own, revision: 8, removed: true, body: removedBody, file_ids: undefined };
@@ -537,6 +595,68 @@ describe('the transcript', () => {
     });
     expect(changes.mock.calls).toEqual([[12, 6], [12, 6]]);
     expect(bodies().slice(-2)).toEqual(['missed one', 'live one']);
+  });
+
+  it.each(['headers', 'body'])('times out stalled browser changes %s and catches up from the same revision', async (stall) => {
+    const reply = { ...peerMessage(), id: 4311, revision: 7, body: 'After reconnecting' };
+    const changes = vi.fn<typeof fetch>()
+      .mockImplementationOnce((_path, init) => {
+        const signal = init?.signal;
+        if (stall === 'body') {
+          const body = new ReadableStream<Uint8Array>({
+            start(controller) {
+              signal?.addEventListener('abort', () => { controller.error(signal.reason); }, { once: true });
+            },
+          });
+          return Promise.resolve(new Response(body, { status: 403 }));
+        }
+        return new Promise<Response>((_resolve, reject) => {
+          signal?.addEventListener('abort', () => { reject(new DOMException('Aborted', 'AbortError')); }, { once: true });
+        });
+      })
+      .mockResolvedValueOnce(Response.json({ messages: [reply] }))
+      .mockResolvedValueOnce(Response.json({ messages: [] }));
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>((path, init) => {
+      if (path === '/v1/whoami') return Promise.resolve(Response.json({ id: me, kind: 'human', name: 'Ada', role: 'member' }));
+      if (typeof path === 'string' && path.startsWith('/v1/dms/12/changes?')) return changes(path, init);
+      throw new Error('Unexpected request');
+    }));
+    window.sessionStorage.setItem('conch.web.token', 'conch_member_secret');
+    try {
+      expect((await restore()).ok).toBe(true);
+      vi.useFakeTimers();
+      await act(async () => {
+        mount(fake({ changes: dmApi.changes, live: dmApi.live }));
+        await Promise.resolve();
+      });
+      expect(screen.getByRole('log', { name: 'Messages' })).toBeDefined();
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+      expect(changes).toHaveBeenCalledTimes(1);
+      if (stall === 'body') {
+        // The queued focus refresh can take over as soon as the deadline expires.
+        fireEvent.focus(window);
+        expect(changes).toHaveBeenCalledTimes(1);
+      }
+      await act(async () => { await vi.advanceTimersByTimeAsync(stall === 'body' ? 10_000 : 15_000); });
+      expect(changes.mock.calls.map(([path]) => path)).toEqual([
+        '/v1/dms/12/changes?after=6', '/v1/dms/12/changes?after=6',
+      ]);
+      expect(changes.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
+      expect(bodies()).toContain(reply.body);
+
+      await act(async () => {
+        fireEvent.focus(window);
+        await Promise.resolve();
+      });
+      expect(changes.mock.calls[2]?.[0]).toBe('/v1/dms/12/changes?after=7');
+    } finally {
+      cleanup();
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+      window.sessionStorage.clear();
+      await listChannels();
+    }
   });
 
   it('ignores a frame for another conversation', async () => {
