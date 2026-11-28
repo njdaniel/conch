@@ -208,6 +208,9 @@ func TestSelfMadeCredentialRoutesIncludeRequired(t *testing.T) {
 		"GET /v1/dms",                      // the inbox
 		"GET /v1/dms/{conversation}",       // one conversation
 		"PUT /v1/dms/{conversation}/state", // per-viewer archive, hide, reopen
+		"GET /v1/dms/snapshot",
+		"GET /v1/dms/{conversation}/changes",
+		"PUT /v1/dms/{conversation}/read-state",
 		"GET /v1/dms/{conversation}/messages",
 		"POST /v1/dms/{conversation}/messages",
 		"PATCH /v1/dms/{conversation}/messages/{message}",

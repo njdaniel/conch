@@ -609,17 +609,31 @@ func (s *Store) removeDMMessage(ctx context.Context, remover, convID, messageID 
 //     in the statement itself, so two clients racing cannot move it back);
 //   - a lastReadID above the newest message of the conversation is taken as
 //     that message;
+//   - a nonzero lastReadID within that range must identify a message in the
+//     conversation (a tombstone still counts);
 //   - updated_at changes only when the mark does.
 //
 // ErrDMNotFound when reader may not see the conversation. Moving a mark is
 // not contact and needs no eligibility; it is the reader's own and the peer
 // is never told.
 func (s *Store) MarkDMRead(ctx context.Context, reader, convID, lastReadID int64, now time.Time) (DMReadMark, error) {
+	mark, _, err := s.markDMRead(ctx, reader, convID, lastReadID, nil, func() time.Time { return now })
+	return mark, err
+}
+
+// MarkDMReadFromCredential rechecks the request's credential under the write
+// lock and reports whether the reader's mark advanced.
+func (s *Store) MarkDMReadFromCredential(ctx context.Context, reader, credential, convID, lastReadID int64, clock func() time.Time) (DMReadMark, bool, error) {
+	return s.markDMRead(ctx, reader, convID, lastReadID, &credential, clock)
+}
+
+func (s *Store) markDMRead(ctx context.Context, reader, convID, lastReadID int64, credential *int64, clock func() time.Time) (DMReadMark, bool, error) {
 	if lastReadID < 0 {
-		return DMReadMark{}, errors.New("store: mark direct messages read: a mark is never negative")
+		return DMReadMark{}, false, errors.New("store: mark direct messages read: a mark is never negative")
 	}
 	var out DMReadMark
-	err := s.withImmediateTx(ctx, func(tx execer) error {
+	var changed bool
+	err := s.withDMCredentialWrite(ctx, reader, credential, clock, func(tx execer, now time.Time) error {
 		if _, err := dmViewTx(ctx, tx, reader, convID); err != nil {
 			return err
 		}
@@ -629,23 +643,33 @@ func (s *Store) MarkDMRead(ctx context.Context, reader, convID, lastReadID int64
 		}
 		lastReadID = min(lastReadID, newest)
 		if lastReadID > 0 {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO dm_read_marks (principal_id, conversation_id, last_read_id, updated_at)
+			if lastReadID < newest {
+				if err := dmMessageCursorTx(ctx, tx, convID, lastReadID); err != nil {
+					return err
+				}
+			}
+			res, err := tx.ExecContext(ctx, `INSERT INTO dm_read_marks (principal_id, conversation_id, last_read_id, updated_at)
 				VALUES (?, ?, ?, ?)
 				ON CONFLICT (principal_id, conversation_id) DO UPDATE SET
-				    updated_at   = CASE WHEN excluded.last_read_id > dm_read_marks.last_read_id
-				                        THEN excluded.updated_at ELSE dm_read_marks.updated_at END,
-				    last_read_id = MAX(dm_read_marks.last_read_id, excluded.last_read_id)`,
-				reader, convID, lastReadID, now.UnixMilli()); err != nil {
+				    updated_at = excluded.updated_at, last_read_id = excluded.last_read_id
+				WHERE excluded.last_read_id > dm_read_marks.last_read_id`,
+				reader, convID, lastReadID, now.UnixMilli())
+			if err != nil {
 				return fmt.Errorf("store: mark conversation %d read for principal %d: %w", convID, reader, err)
 			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return fmt.Errorf("store: mark conversation %d read for principal %d: %w", convID, reader, err)
+			}
+			changed = n != 0
 		}
 		out, err = dmReadMarkTx(ctx, tx, convID, reader)
 		return err
 	})
 	if err != nil {
-		return DMReadMark{}, err
+		return DMReadMark{}, false, err
 	}
-	return out, nil
+	return out, changed, nil
 }
 
 // NewDMFile is a file to record in a conversation. The caller has already
