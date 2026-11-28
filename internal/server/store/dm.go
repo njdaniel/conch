@@ -318,25 +318,19 @@ type DMPost struct {
 //     conversation again (an archived one stays archived: it still counts as
 //     unread). The peer's view of the conversation begins with this message.
 func (s *Store) InsertDMMessage(ctx context.Context, post DMPost, now time.Time) (msg DMMessage, replayed bool, err error) {
-	return s.insertDMMessage(ctx, post, nil, func() time.Time { return now }, nil, nil)
+	return s.insertDMMessage(ctx, post, nil, func() time.Time { return now }, nil)
 }
 
 // InsertDMMessageFromCredential sends after rechecking the credential. It
-// spends the send budget before the conversation lookup and the new-pair
-// budget only for the first message, under the same write lock.
-func (s *Store) InsertDMMessageFromCredential(ctx context.Context, post DMPost, credential int64, clock func() time.Time, limitSend, limitNew func(time.Time) error) (DMMessage, bool, error) {
-	return s.insertDMMessage(ctx, post, &credential, clock, limitSend, limitNew)
+// spends the new-pair budget only for the first message, under the write lock.
+func (s *Store) InsertDMMessageFromCredential(ctx context.Context, post DMPost, credential int64, clock func() time.Time, limitNew func(time.Time) error) (DMMessage, bool, error) {
+	return s.insertDMMessage(ctx, post, &credential, clock, limitNew)
 }
 
-func (s *Store) insertDMMessage(ctx context.Context, post DMPost, credential *int64, clock func() time.Time, limitSend, limitNew func(time.Time) error) (msg DMMessage, replayed bool, err error) {
+func (s *Store) insertDMMessage(ctx context.Context, post DMPost, credential *int64, clock func() time.Time, limitNew func(time.Time) error) (msg DMMessage, replayed bool, err error) {
 	err = s.withDMCredentialWrite(ctx, post.AuthorID, credential, clock, func(tx execer, now time.Time) error {
 		if err := dmWriteGateTx(ctx, tx, post.AuthorID); err != nil {
 			return err
-		}
-		if limitSend != nil {
-			if err := limitSend(now); err != nil {
-				return err
-			}
 		}
 		now = now.Truncate(time.Millisecond)
 		row, err := dmViewTx(ctx, tx, post.AuthorID, post.ConversationID)
@@ -446,25 +440,19 @@ type DMMessageEdit struct {
 // the clock does. No audit row is written. Its size is the caller's check; an
 // empty or whitespace-only body is ErrDMEmptyBody.
 func (s *Store) EditDMMessage(ctx context.Context, editor, convID, messageID int64, body string, clock func() time.Time) (DMMessageEdit, error) {
-	return s.editDMMessage(ctx, editor, convID, messageID, body, nil, clock, nil)
+	return s.editDMMessage(ctx, editor, convID, messageID, body, nil, clock)
 }
 
-// EditDMMessageFromCredential edits after rechecking the credential and
-// spends the edit budget before looking up the conversation.
-func (s *Store) EditDMMessageFromCredential(ctx context.Context, editor, credential, convID, messageID int64, body string, clock func() time.Time, limitEdit func(time.Time) error) (DMMessageEdit, error) {
-	return s.editDMMessage(ctx, editor, convID, messageID, body, &credential, clock, limitEdit)
+// EditDMMessageFromCredential edits after rechecking the credential.
+func (s *Store) EditDMMessageFromCredential(ctx context.Context, editor, credential, convID, messageID int64, body string, clock func() time.Time) (DMMessageEdit, error) {
+	return s.editDMMessage(ctx, editor, convID, messageID, body, &credential, clock)
 }
 
-func (s *Store) editDMMessage(ctx context.Context, editor, convID, messageID int64, body string, credential *int64, clock func() time.Time, limitEdit func(time.Time) error) (DMMessageEdit, error) {
+func (s *Store) editDMMessage(ctx context.Context, editor, convID, messageID int64, body string, credential *int64, clock func() time.Time) (DMMessageEdit, error) {
 	var out DMMessageEdit
 	err := s.withDMCredentialWrite(ctx, editor, credential, clock, func(tx execer, now time.Time) error {
 		if err := dmWriteGateTx(ctx, tx, editor); err != nil {
 			return err
-		}
-		if limitEdit != nil {
-			if err := limitEdit(now); err != nil {
-				return err
-			}
 		}
 		row, err := dmViewTx(ctx, tx, editor, convID)
 		if err != nil {

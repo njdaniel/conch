@@ -1,6 +1,7 @@
 package server
 
 import (
+	"database/sql"
 	"fmt"
 	"net/http"
 	"slices"
@@ -90,24 +91,50 @@ func TestDMMessageRateLimits(t *testing.T) {
 	dmDecode(t, sent, &out)
 	item := fmt.Sprintf("%s/%d", base, out.Message.ID)
 
+	path, ok := testDBPaths.Load(f.srv)
+	if !ok {
+		t.Fatal("missing fixture database path")
+	}
+	db, err := sql.Open("sqlite", "file:"+path.(string)+"?_txlock=immediate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
 	for _, tt := range []struct {
 		method, path, body string
 		remaining          int
+		success            int
 		retryAfter         string
 	}{
-		{http.MethodPost, base, body, 19, "2"},
-		{http.MethodPatch, item, `{"body":"original"}`, 10, "6"},
+		{http.MethodPost, base, body, 19, http.StatusOK, "2"},
+		{http.MethodPatch, item, `{"body":"original"}`, 10, http.StatusOK, "6"},
+		{http.MethodDelete, item, "", 10, http.StatusNoContent, "6"},
 	} {
-		for range tt.remaining {
-			if rec := f.do(t, tt.method, tt.path, a.tok, tt.body); rec.Code != http.StatusOK {
-				t.Fatalf("%s before limit: %d %s", tt.method, rec.Code, rec.Body)
+		t.Run(tt.method, func(t *testing.T) {
+			for range tt.remaining {
+				if rec := f.do(t, tt.method, tt.path, a.tok, tt.body); rec.Code != tt.success {
+					t.Fatalf("before limit: %d %s, want %d", rec.Code, rec.Body, tt.success)
+				}
 			}
-		}
-		rec := f.do(t, tt.method, tt.path, a.tok, tt.body)
-		f.wantError(t, rec, http.StatusTooManyRequests, schema.ErrorCodeRateLimited)
-		if got := rec.Header().Get("Retry-After"); got != tt.retryAfter {
-			t.Errorf("%s Retry-After = %q, want %q", tt.method, got, tt.retryAfter)
-		}
+			checkLimit := func(t *testing.T) {
+				t.Helper()
+				rec := f.do(t, tt.method, tt.path, a.tok, tt.body)
+				f.wantError(t, rec, http.StatusTooManyRequests, schema.ErrorCodeRateLimited)
+				if got := rec.Header().Get("Retry-After"); got != tt.retryAfter {
+					t.Errorf("Retry-After = %q, want %q", got, tt.retryAfter)
+				}
+			}
+			t.Run("with concurrent writer", func(t *testing.T) {
+				tx, err := db.BeginTx(t.Context(), nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = tx.Rollback() }()
+				checkLimit(t)
+			})
+			checkLimit(t)
+		})
 	}
 }
 
@@ -219,8 +246,9 @@ func TestDMMessageSendAndHistory(t *testing.T) {
 
 func TestDMMessageEditAndRemoval(t *testing.T) {
 	f := newDMFixture(t)
-	a, b := f.join(t), f.join(t)
+	a, b, c := f.join(t), f.join(t), f.join(t)
 	conv := f.mustOpen(t, a, b.p.ID)
+	other := f.mustOpen(t, a, c.p.ID)
 	base := fmt.Sprintf("/v1/dms/%d/messages", conv.ID)
 	msg, _, err := f.srv.store.InsertDMMessage(t.Context(), store.DMPost{
 		ConversationID: conv.ID, AuthorID: a.p.ID, Body: "original", ClientNonce: "seed",
@@ -244,6 +272,19 @@ func TestDMMessageEditAndRemoval(t *testing.T) {
 	f.wantError(t, f.do(t, http.MethodPatch, item, b.tok, `{"body":"peer edit"}`),
 		http.StatusForbidden, errForbidden.Code)
 	f.wantError(t, f.do(t, http.MethodDelete, item, b.tok, ""), http.StatusForbidden, errForbidden.Code)
+
+	t.Run("other conversation", func(t *testing.T) {
+		wrongItem := fmt.Sprintf("/v1/dms/%d/messages/%d", other.ID, msg.ID)
+		for _, tt := range []struct{ method, body string }{
+			{http.MethodPatch, `{"body":"wrong conversation"}`},
+			{http.MethodDelete, ""},
+		} {
+			t.Run(tt.method, func(t *testing.T) {
+				f.wantError(t, f.do(t, tt.method, wrongItem, a.tok, tt.body),
+					http.StatusNotFound, errMessageNotFound.Code)
+			})
+		}
+	})
 
 	rec := f.do(t, http.MethodPatch, item, a.tok, `{"body":"edited"}`)
 	if rec.Code != http.StatusOK {

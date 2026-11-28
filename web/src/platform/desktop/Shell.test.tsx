@@ -270,11 +270,11 @@ describe('with a server active', () => {
     expect((await screen.findByRole('banner', { name: 'Server' })).textContent).toMatch(/cannot prove the sign-in was ended there/);
   });
 
-  it('names the server and tells users how to end the old sign-in', async () => {
+  it('names the server and tells users how to end a saved sign-in', async () => {
     install({ profiles: () => Promise.resolve(view({ ...active, notice: 'legacy-not-ended' })) });
     render(<DesktopShell>{child}</DesktopShell>);
     const line =
-      'A sign-in saved by an older Conch for chat.example.org may still be active. Sign in to that server with the same account and open Settings → Your sign-ins. If you recognize the old entry by its label and the date next to “since”, choose End this sign-in. You can also choose Sign out everywhere in Settings or ask an operator to revoke the old sign-in.';
+      'A saved sign-in for chat.example.org may still be active. Sign in to that server with the same account and open Settings → Your sign-ins. If you recognize the sign-in by its label and the date next to “since”, choose End this sign-in. You can also choose Sign out everywhere in Settings or ask an operator to revoke the sign-in.';
     expect((await screen.findByRole('banner', { name: 'Server' })).textContent).toContain(line);
     fireEvent.click(await screen.findByRole('button', { name: 'Servers' }));
     expect((await screen.findByRole('region', { name: 'Servers' })).textContent).toContain(line);

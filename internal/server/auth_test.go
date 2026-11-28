@@ -1314,9 +1314,11 @@ func TestWhoAmI(t *testing.T) {
 		// every permission for an owner, the member column with alice's
 		// may_invite brake applied for alice, none for an agent; and always
 		// the document's revision.
+		// The owner's bootstrap credential is the only self-made human
+		// credential in this fixture, so it alone advertises DM access.
 		{"operator", f.rootTok, schema.WhoAmIResponseV1{ID: f.root.ID, Kind: schema.PrincipalHuman, Name: "root", Role: schema.RoleOperator, ServerVersion: "v1.2.3-test", MayInvite: true, VoiceAllowed: boolPtr(true), IdentityClass: schema.IdentityOperator,
 			Auth: &schema.AuthStateV1{Scope: schema.CredentialScopeFull}, Owner: true, // the bootstrap operator is the owner (issue #790)
-			Permissions: schema.Permissions, PermissionsRevision: 1}},
+			Permissions: schema.Permissions, PermissionsRevision: 1, Capabilities: &schema.WhoAmICapabilitiesV1{DM: true}}},
 		{"member human", f.aliceTok, schema.WhoAmIResponseV1{ID: f.alice.ID, Kind: schema.PrincipalHuman, Name: "alice", Role: schema.RoleMember, ServerVersion: "v1.2.3-test", VoiceAllowed: boolPtr(true), IdentityClass: schema.IdentityMember,
 			Auth:        &schema.AuthStateV1{Scope: schema.CredentialScopeFull},
 			Permissions: []schema.Permission{schema.PermCreatePublicChannels, schema.PermCreatePrivateChannels, schema.PermSeeMemberDirectory, schema.PermUseVoice, schema.PermShareScreen, schema.PermUseCamera}, PermissionsRevision: 1}},

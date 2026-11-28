@@ -10,8 +10,8 @@ import (
 // 20 a day per person, spent on every open of a pair the caller cannot yet
 // see, refused attempts included, so probing for people costs tokens. A
 // resume of a conversation the caller already sees spends nothing. The
-// first message in a conversation also spends from this bucket. Sends and
-// edits have their own per-person buckets.
+// first message in a conversation also spends from this bucket. Sends, edits
+// and removals each have their own per-person bucket.
 const dmNewBurst = 20
 
 func defaultDMNewLimit() inviteLimit {
