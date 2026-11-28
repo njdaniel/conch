@@ -10,10 +10,11 @@ import (
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
-// Local direct messages (ADR-017). Bea uses her own credential to open and
-// list her conversations and set her contact preference. Ola uses one issued
-// by the operator and gets 403 own_sign_in_required on the member routes.
-// Both are refused the operator's server-wide switch (#2235).
+// Local direct messages (ADR-017, issues #2019, #2021, #2022 and #2235). Bea
+// uses her own credential to open, list and recover her conversations and set
+// her contact preference. Ola uses one issued by the operator and gets 403
+// own_sign_in_required on the member routes.
+// Both are refused the operator's server-wide switch.
 //
 // Bea names Ann and Abe's conversation and gets the same 404 dm_not_found
 // as for a conversation that never existed. When she uses their message ID
@@ -49,8 +50,16 @@ func dmMatrixRows() []row {
 			probe: func(*world, subject) probe {
 				return put("/v1/dms/settings", schema.DMServerSettingsV1{DMsEnabled: false})
 			}},
+		{route: "GET /v1/dms/snapshot", what: "recovers her own inbox and unread counts", own: true, withoutPassword: personNotOwn, inspect: checkDMSnapshot,
+			probe: func(*world, subject) probe { return get("/v1/dms/snapshot") }},
 		{route: "GET /v1/dms/{conversation}", what: "reads A's conversation by id", pick: aConversation, want: dmNotFound, withoutPassword: personNotOwn,
 			probe: func(_ *world, s subject) probe { return get("/v1/dms/" + id(s.id)) }},
+		{route: "GET /v1/dms/{conversation}/changes", what: "reads message changes in A's conversation", pick: aConversation, want: dmNotFound, withoutPassword: personNotOwn,
+			probe: func(_ *world, s subject) probe { return get("/v1/dms/" + id(s.id) + "/changes") }},
+		{route: "PUT /v1/dms/{conversation}/read-state", what: "marks A's conversation as read", pick: aConversation, want: dmNotFound, withoutPassword: personNotOwn,
+			probe: func(w *world, s subject) probe {
+				return put("/v1/dms/"+id(s.id)+"/read-state", schema.MarkReadRequestV1{LastReadID: w.a.dmMessageID})
+			}},
 		{route: "PUT /v1/dms/{conversation}/state", what: "hides A's conversation by id", pick: aConversation, want: dmNotFound, withoutPassword: personNotOwn,
 			probe: func(_ *world, s subject) probe {
 				return put("/v1/dms/"+id(s.id)+"/state", schema.SetDMStateRequestV1{State: schema.DMStateHidden})
@@ -204,7 +213,24 @@ func checkDMInbox(w *world, _ api, body []byte) error {
 	if err := page.Validate(); err != nil {
 		return err
 	}
-	for _, c := range page.Conversations {
+	return checkDMConversations(w, page.Conversations)
+}
+
+func checkDMSnapshot(w *world, _ api, body []byte) error {
+	var snapshot schema.DMSnapshotV1
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&snapshot); err != nil {
+		return fmt.Errorf("the snapshot is not a DM snapshot: %w", err)
+	}
+	if err := snapshot.Validate(); err != nil {
+		return err
+	}
+	return checkDMConversations(w, snapshot.Conversations)
+}
+
+func checkDMConversations(w *world, rows []schema.DMConversationV1) error {
+	for _, c := range rows {
 		if c.ID == w.a.dmID || !slices.Contains(c.ParticipantIDs, w.prober.id) {
 			return fmt.Errorf("the inbox holds conversation %d of %v", c.ID, c.ParticipantIDs)
 		}

@@ -103,6 +103,15 @@ func TestDMWritesRequireLiveOwnCredential(t *testing.T) {
 	if c, err := f.s.SetDMStateFromCredential(ctx, caller, credential, 1, schema.DMStateArchived, f.clock); err != nil || c.State != schema.DMStateArchived {
 		t.Fatalf("archive with a live credential = %+v, %v", c, err)
 	}
+	msg, _, err := f.s.InsertDMMessage(ctx, DMPost{
+		ConversationID: 1,
+		AuthorID:       f.b.PrincipalID,
+		Body:           "unread",
+		ClientNonce:    "unread",
+	}, f.clock())
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if err := f.s.RevokeCredential(ctx, "system", credential); err != nil {
 		t.Fatal(err)
@@ -117,11 +126,14 @@ func TestDMWritesRequireLiveOwnCredential(t *testing.T) {
 		if _, err := f.s.SetDMStateFromCredential(ctx, caller, id, 1, schema.DMStateHidden, f.clock); !errors.Is(err, ErrDMNoStanding) {
 			t.Errorf("hide with credential %d: %v, want %v", id, err, ErrDMNoStanding)
 		}
+		if _, changed, err := f.s.MarkDMReadFromCredential(ctx, caller, id, 1, msg.ID, f.clock); changed || !errors.Is(err, ErrCredentialInvalid) {
+			t.Errorf("mark read with credential %d: changed=%t, err=%v, want unchanged and %v", id, changed, err, ErrCredentialInvalid)
+		}
 	}
 	if n := f.count("SELECT COUNT(*) FROM dm_conversations"); n != 2 {
 		t.Errorf("conversation count after refused writes = %d, want 2", n)
 	}
-	if c, err := f.s.DMConversationFor(ctx, caller, 1); err != nil || c.State != schema.DMStateArchived {
+	if c, err := f.s.DMConversationFor(ctx, caller, 1); err != nil || c.State != schema.DMStateArchived || c.LastReadID != 0 || c.Unread != 1 {
 		t.Errorf("conversation after refused writes = %+v, %v", c, err)
 	}
 }

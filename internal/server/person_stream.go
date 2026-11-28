@@ -72,9 +72,9 @@ import (
 // principal lapsed without a drop reaching it (fail closed).
 //
 // This file holds no DM visibility rule and no SQL beyond the credential and
-// principal re-checks. The DM issues compute recipients against current state
-// and call publish; the snapshot comes from a source they install
-// (Server.dmSnapshotSource).
+// principal re-checks. DM handlers compute recipients against current state
+// and publish committed changes. The snapshot comes from the same source as
+// REST recovery (dm_sync.go).
 
 const (
 	// personQueueMax bounds the frames waiting for one socket. A socket that
@@ -341,29 +341,25 @@ func (h *personHub) isClosed() bool {
 	return h.closed
 }
 
-// dmSnapshotSource builds the reader's DM snapshot (unread counts, and later
-// the active call attempts). The DM conversation issues install the real one;
-// the stream does not know how DM state is stored. It is called after the
-// socket is subscribed, so a frame published while it runs is held, not lost.
+// dmSnapshotSource builds the reader's DM snapshot. A socket calls it after
+// subscribing so that a frame published during the read is queued.
 type dmSnapshotSource func(ctx context.Context, principalID int64) (personDMSnapshot, error)
 
 type personDMSnapshot struct {
 	doc schema.DMSnapshotV1
-	// privateOpeners maps a conversation that has never been shared to the
-	// reader who opened it, from that reader's own persisted state.
-	privateOpeners map[int64]int64
+	// emptyViewers records the reader whose persisted state makes a
+	// conversation without messages visible to them.
+	emptyViewers map[int64]int64
 }
 
 // dmFrameAccess reports whether principalID may be sent frames of DM
 // conversation conversationID right now: no personal block either way between
 // the pair (#1832), DMs enabled for the person, and the person a participant.
-// The DM store installs it. A missing hook denies every DM frame. The hook is
-// asked at write time, so a block that lands while a frame is queued stops it.
+// A missing hook denies live DM frames. The check at write time drops a
+// queued frame if a block has landed.
 type dmFrameAccess func(ctx context.Context, principalID, conversationID int64) (bool, error)
 
-// emptyDMSnapshot is the source until the DM store is installed: no
-// conversations, and DMs not available (dms_enabled false), which is the
-// truth while no DM backend exists on this server.
+// emptyDMSnapshot is the fallback when either DM stream hook is missing.
 func (s *Server) emptyDMSnapshot(_ context.Context, _ int64) (schema.DMSnapshotV1, error) {
 	return schema.DMSnapshotV1{
 		Schema:        schema.DMSnapshotSchemaV1,
@@ -372,13 +368,10 @@ func (s *Server) emptyDMSnapshot(_ context.Context, _ int64) (schema.DMSnapshotV
 	}, nil
 }
 
-// personSnapshot is the snapshot a socket opens with. It serves what
-// dmSnapshotSource returns only when dmFrameAccess is installed too: the
-// snapshot lists conversations, and the access hook is what decides, at write
-// time, whether a person may be sent those of a pair (a block), so a source
-// installed without it would show conversations the stream would not deliver.
-// With either hook missing the snapshot is the empty one (ADR-017's release
-// gate: DMs are off until the DM store installs both).
+// personSnapshot validates that the recovery snapshot belongs to its reader.
+// The snapshot includes retained conversations, including blocked pairs.
+// The separate access hook governs live changes. With either hook missing
+// the socket opens with the empty fallback.
 func (s *Server) personSnapshot(ctx context.Context, principalID int64) (schema.DMSnapshotV1, error) {
 	if s.dmSnapshotSource == nil || s.dmFrameAccess == nil {
 		return s.emptyDMSnapshot(ctx, principalID)
@@ -397,8 +390,8 @@ func (s *Server) personSnapshot(ctx context.Context, principalID int64) (schema.
 		if c.PeerID == principalID || !slices.Contains(c.ParticipantIDs, principalID) {
 			return schema.DMSnapshotV1{}, errors.New("person stream: snapshot row belongs to a different reader")
 		}
-		if c.CreatedAt == nil && result.privateOpeners[c.ID] != principalID {
-			return schema.DMSnapshotV1{}, errors.New("person stream: snapshot row has no matching private open")
+		if c.CreatedAt == nil && result.emptyViewers[c.ID] != principalID {
+			return schema.DMSnapshotV1{}, errors.New("person stream: empty conversation has no matching viewer state")
 		}
 	}
 	return snap, nil

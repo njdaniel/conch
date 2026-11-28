@@ -74,6 +74,7 @@ func TestOnlyDMVisibilityGoReadsDMRows(t *testing.T) {
 	for _, reader := range []string{
 		"DMConversationFor", "ListDMConversations", "DMMessageFor", "ListDMMessagesPage",
 		"ListDMChanges", "SearchDMMessages", "DMReadMarkFor", "DMFileVisibleTo",
+		"DMSnapshotFor", "DMFrameAllowed", "DMMessageFrameRecipients",
 	} {
 		i := strings.Index(src, "func (s *Store) "+reader+"(")
 		if i < 0 {
@@ -85,7 +86,8 @@ func TestOnlyDMVisibilityGoReadsDMRows(t *testing.T) {
 			body = src[i : i+1+end]
 		}
 		if !strings.Contains(body, "dmViewTx(") && !strings.Contains(body, "dmVisibleCond") &&
-			!strings.Contains(body, "dmConversationTx(") && !strings.Contains(body, "dmFileTx(") {
+			!strings.Contains(body, "dmConversationTx(") && !strings.Contains(body, "dmFileTx(") &&
+			!strings.Contains(body, "dmListConversationsTx(") && !strings.Contains(body, "dmLivePairTx(") {
 			t.Errorf("%s reads without the visibility function", reader)
 		}
 	}

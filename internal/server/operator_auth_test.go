@@ -659,6 +659,7 @@ var reauthDecisions = map[string]reauthDecision{
 	"POST /v1/dms":                                                                         {reauthNone, "a person opens or resumes a conversation with someone (issue #2019): no grant, and a person's own DMs refuse an operator-made credential outright (selfMadeCredentialRoutes), so there is no proof to ask for"},
 	"PUT /v1/dms/preferences":                                                              {reauthNone, "a person sets their own contact preference, with no grant"},
 	"PUT /v1/dms/{conversation}/state":                                                     {reauthNone, "a person archives, hides or reopens their own view of a conversation (issue #2019): no grant, and nothing the peer can see"},
+	"PUT /v1/dms/{conversation}/read-state":                                                {reauthNone, "moves the caller's own DM read mark"},
 	"POST /v1/dms/{conversation}/messages":                                                 {reauthNone, "a person sends a message as themselves in their own conversation, with no grant"},
 	"PATCH /v1/dms/{conversation}/messages/{message}":                                      {reauthNone, "a person edits their own direct message, with no grant"},
 	"DELETE /v1/dms/{conversation}/messages/{message}":                                     {reauthNone, "a person removes their own direct message, with no grant"},

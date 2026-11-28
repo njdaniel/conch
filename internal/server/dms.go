@@ -36,9 +36,7 @@ import (
 // peer's list, snapshot, stream and GET by id answer as for a conversation
 // that does not exist.
 //
-// GET /v1/dms/snapshot is not here: the snapshot source and the frame-access
-// hook that open the person stream to DMs are installed together by the issue
-// that wires the stream (see personSnapshot, release gate of ADR-017).
+// The reconnect snapshot and read marks are in dm_sync.go.
 
 // dmListCursorKind is the first byte of an encoded list cursor.
 const (

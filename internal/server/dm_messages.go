@@ -105,6 +105,8 @@ func (s *Server) handlePostDMMessage(w http.ResponseWriter, r *http.Request) {
 	status := http.StatusCreated
 	if replayed {
 		status = http.StatusOK
+	} else {
+		s.publishDMMessage(ctx, msg)
 	}
 	writeJSON(w, status, schema.PostDMMessageResponseV1{Message: dmMessageFromStore(msg), Replayed: replayed})
 }
@@ -138,6 +140,9 @@ func (s *Server) handleEditDMMessage(w http.ResponseWriter, r *http.Request) {
 		writeDMMessageError(w, r, err)
 		return
 	}
+	if edit.Changed {
+		s.publishDMMessage(ctx, edit.Message)
+	}
 	writeJSON(w, http.StatusOK, schema.EditDMMessageResponseV1{Message: dmMessageFromStore(edit.Message)})
 }
 
@@ -160,9 +165,13 @@ func (s *Server) handleRemoveDMMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 	credential, _ := credentialIDFrom(ctx)
-	if _, err := s.store.RemoveDMMessageFromCredential(ctx, caller.ID, credential, id, message, s.now); err != nil {
+	removal, err := s.store.RemoveDMMessageFromCredential(ctx, caller.ID, credential, id, message, s.now)
+	if err != nil {
 		writeDMMessageError(w, r, err)
 		return
+	}
+	if removal.Changed {
+		s.publishDMMessage(ctx, removal.Message)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -193,6 +202,8 @@ func writeDMMessageError(w http.ResponseWriter, r *http.Request, err error) {
 		writeDMRefusal(w, http.StatusNotFound, schema.ErrorCodeDMNotFound)
 	case errors.Is(err, store.ErrDMHistoryCursor):
 		writeError(w, http.StatusBadRequest, "invalid_request", "cursor must identify a message in this conversation")
+	case errors.Is(err, store.ErrDMChangesCursor):
+		writeError(w, http.StatusBadRequest, "invalid_request", "after is past this conversation's revision")
 	case errors.Is(err, store.ErrDMContactUnavailable):
 		writeDMRefusal(w, http.StatusForbidden, schema.ErrorCodeContactUnavailable)
 	case errors.Is(err, store.ErrDMNonceConflict):
@@ -210,7 +221,7 @@ func writeDMMessageError(w http.ResponseWriter, r *http.Request, err error) {
 		errors.Is(err, store.ErrMessageEditLimitReached):
 		writeMessageEditError(w, messageEditStoreError(r, err))
 	default:
-		slog.ErrorContext(r.Context(), "dms: message operation failed", "method", r.Method, "error", err)
+		slog.ErrorContext(r.Context(), "dms: operation failed", "method", r.Method, "error", err)
 		writeInternalError(w)
 	}
 }

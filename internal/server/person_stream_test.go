@@ -346,9 +346,7 @@ func TestPersonStreamWhoMayOpen(t *testing.T) {
 }
 
 // TestPersonStreamOpens: the first frame is the hello with an instance id of
-// this socket alone, and the second is the snapshot. With no DM store
-// installed the snapshot is empty and says DMs are not available; an
-// installed source is what is sent.
+// this socket alone, and the second is the reader's snapshot.
 func TestPersonStreamOpens(t *testing.T) {
 	f := newPersonFixture(t)
 	base := wsTestServer(t, f.srv)
@@ -361,8 +359,8 @@ func TestPersonStreamOpens(t *testing.T) {
 		if helloA.InstanceID == helloB.InstanceID {
 			t.Fatalf("both sockets were given instance id %s", helloA.InstanceID)
 		}
-		if len(snapA.Conversations) != 0 || snapA.DMsEnabled {
-			t.Errorf("the default snapshot = %+v, want empty and DMs not available", snapA)
+		if len(snapA.Conversations) != 0 || !snapA.DMsEnabled {
+			t.Errorf("the default snapshot = %+v, want an empty inbox with DMs enabled", snapA)
 		}
 		// A reconnect is a new socket: a new id.
 		_ = a.conn.CloseNow()
@@ -465,7 +463,7 @@ func TestPersonStreamSnapshotPrivacy(t *testing.T) {
 			f.srv.dmSnapshotSource = func(ctx context.Context, id int64) (personDMSnapshot, error) {
 				doc, err := f.srv.emptyDMSnapshot(ctx, id)
 				doc.Conversations = []schema.DMConversationV1{row}
-				return personDMSnapshot{doc: doc, privateOpeners: openers}, err
+				return personDMSnapshot{doc: doc, emptyViewers: openers}, err
 			}
 			c, status, _ := tryDialPerson(t, wsTestServer(t, f.srv), personPath, f.aliceTok)
 			if status != tt.status {
@@ -556,6 +554,7 @@ func TestPersonStreamSnapshotOrdering(t *testing.T) {
 
 func TestPersonStreamMissingAccessGateDropsDMs(t *testing.T) {
 	f := newPersonFixture(t)
+	f.srv.dmFrameAccess = nil
 	c := dialPerson(t, wsTestServer(t, f.srv), f.aliceTok)
 	c.open()
 	// No access hook is installed: the frame, addressed to her, is dropped.
