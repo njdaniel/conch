@@ -421,7 +421,7 @@ function PeopleGroup({ title, people, controls }: { readonly title: string; read
                 onOpenChange={(open) => { controls.setRowUi?.(person.id, { profileOpen: open }); }}
                 onDisappear={controls.onProfileDisappear}
               />
-              <MessageAction id={person.id} name={person.name} person={{ ...person, guest: member?.guest }} viewer={controls.viewer.id} />
+              <MessageAction compact id={person.id} name={person.name} person={{ ...person, guest: member?.guest }} viewer={controls.viewer.id} />
               {person.live > 1 ? <span> ({person.live} sessions)</span> : null} <span className="ag-status">{person.state}</span>
             </MemberRow>
           );

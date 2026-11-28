@@ -5,6 +5,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import type { BoundFunctions, queries } from '@testing-library/dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../App';
+import { conversation } from '../dm/testkit';
 import type { SessionStatus } from '../schema/session';
 
 const origin = 'http://127.0.0.1:8080';
@@ -130,6 +131,7 @@ const lastEvents = () => events()[events().length - 1] as FakeSocket;
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 
 interface Server {
+  dms: boolean;
   sessionCreates: Json[];
   sessionStatus: () => number;
   // The channels /v1/channels lists; two unless a test says otherwise.
@@ -170,6 +172,7 @@ const beforeOf = (url: URL) => (r: Json) => {
 
 function install() {
   server = {
+    dms: false,
     sessionCreates: [],
     sessionStatus: () => 201,
     channels: [{ id: 7, name: 'general', created_at: at }, { id: 8, name: 'ops', created_at: at }],
@@ -201,7 +204,11 @@ function install() {
       if (new Headers(init?.headers).get('Authorization') !== `Bearer ${secret}`) return Promise.resolve(json({}, 401));
       const path = url.pathname;
       const method = init?.method ?? 'GET';
-      if (path === '/v1/whoami') return Promise.resolve(json(me));
+      if (path === '/v1/whoami') return Promise.resolve(json({ ...me, capabilities: { dm: server.dms } }));
+      if (path === '/v1/dms' && server.dms) {
+        return Promise.resolve(json({ conversations: url.searchParams.get('state') === 'open' ? [conversation()] : [] }));
+      }
+      if (path === '/v1/dms/12' && server.dms) return Promise.resolve(json(conversation()));
       if (path === '/v1/channels') return Promise.resolve(json({ channels: server.channels }));
       if (path === '/v1/ws-tickets') return Promise.resolve(json({ ticket: ticketValue, expires_at: at }, 201));
       if (path === '/v1/sessions' && method === 'POST') {
@@ -1269,6 +1276,31 @@ describe('the Runs view', () => {
     const detail = within(await screen.findByRole('article', { name: 'Run detail' }));
     expect(detail.getByRole('heading', { name: 'Run #42' })).toBeDefined();
     expect(detail.getByTestId('run-state').textContent).toBe('failed');
+  });
+
+  it.each([true, false])('shows a selected run over an open DM (wide: %s)', async (wide) => {
+    // A narrow desktop uses the modal Members drawer.
+    vi.stubGlobal('matchMedia', vi.fn((query: string) => ({
+      matches: wide && query.includes('min-width'),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })));
+    server.dms = true;
+    server.channelRuns = [run()];
+    const socket = await openApp();
+    const membersButton = screen.getByRole('button', { name: 'Members' });
+    socket.send(roster([session(100, 2)]));
+    fireEvent.click(await screen.findByRole('button', { name: /^Grace/ }));
+    expect(screen.getByRole('button', { name: 'Back' })).toBeDefined();
+    if (!wide) fireEvent.click(membersButton);
+    fireEvent.click(await panel().findByRole('button', { name: '#41 · running' }));
+    const heading = screen.getByRole('heading', { name: 'Run #41' });
+    expect(heading.closest('[hidden], [inert]')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Back' })).toBeNull();
+    if (!wide) {
+      expect(screen.queryByRole('region', { name: 'Members list' })).toBeNull();
+      expect(document.activeElement).toBe(heading);
+    }
   });
 
   it('says it could not list runs, and tries again', async () => {

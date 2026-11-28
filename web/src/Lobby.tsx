@@ -222,6 +222,7 @@ export function Lobby({
   // strip, which is mounted below and does not read this.
   const dm = useDm();
   const directOpen = dm?.inbox.state.selected ?? null;
+  const selectDirect = dm?.inbox.select;
   // The person's own favorites, groups and order (issue #1493).
   const arranged = useArrangement(origin, me, channels.channels, channels.loaded);
   const inVisualOrder = useMemo(() => visualOrder(arranged.arrangement, channels.channels), [arranged.arrangement, channels.channels]);
@@ -414,7 +415,7 @@ export function Lobby({
   }, [membersOver, settingsOpen, view, phone]);
 
   function closeDirect() {
-    dm?.inbox.select(null);
+    selectDirect?.(null);
     if (phone) setView(dmOpener.current?.view ?? 'channels');
     setDmFocus('return');
   }
@@ -504,13 +505,17 @@ export function Lobby({
     setPanelOpen(false);
   }, [shownChannel]);
   const leaveDrawer = useCallback(() => {
+    // Runs use the channel conversation pane, including with Members beside it.
+    selectDirect?.(null);
+    dmOpener.current = null;
+    setDmFocus(null);
     if (!over.current.over) return;
     toCentre.current = true;
     setPanelOpen(false);
     // On a phone the centre is the Chat view's: the other views hide it, and
     // what is shown there could not take focus.
     if (phone) setView('chat');
-  }, [phone]);
+  }, [phone, selectDirect]);
   // Arriving (signing in, or a sign-in restored on reload) leaves focus on
   // the page's body, where the next Tab starts from the top: the first time a
   // conversation is shown, focus goes to its heading (issue #590). Only then:
@@ -662,7 +667,7 @@ export function Lobby({
             the page: every other part of them is inert then, one by one. */}
         <div className={panelOpen ? 'areas' : 'areas side-closed'} inert={settingsOpen || asking || voiceSheet}>
           {/* The switcher's entry is above the Channels navigation, not in it: that holds channel controls only. */}
-          <div className="channels" inert={membersOver || (phone && view !== 'channels')}>
+          <div className="channels" inert={membersOver || (directOpen !== null && phone && view !== 'channels')}>
             {channels.loaded ? (
             <ChannelNav
               channels={inVisualOrder}
@@ -671,7 +676,7 @@ export function Lobby({
               me={me}
               refresh={directoryTick}
               onOpen={(name) => {
-                dm?.inbox.select(null);
+                selectDirect?.(null);
                 onOpen(name);
                 if (phone) {
                   toHeading.current = true;
@@ -714,7 +719,7 @@ export function Lobby({
                     joinVoice.current?.(channel);
                   }}
                   onOpen={(name) => {
-                    dm?.inbox.select(null);
+                    selectDirect?.(null);
                     onOpen(name);
                     if (phone) {
                       toHeading.current = true;
@@ -750,7 +755,7 @@ export function Lobby({
           </div>
           <main ref={centre} className="centre" inert={membersOver}>
             <div ref={setStage} className="stage" />
-            <section ref={conversationEl} aria-label="Conversation" className="conversation" inert={phone && view !== 'chat'}>
+            <section ref={conversationEl} aria-label="Conversation" className="conversation" inert={directOpen !== null && phone && view !== 'chat'}>
               {temporary === true ? <TemporaryBanner /> : null}
               {banner}
               {channels.lost === undefined ? null : (
@@ -766,7 +771,7 @@ export function Lobby({
                 />
               )}
               {/* Kept mounted while a DM is open: the channel's feed and drafts carry on. */}
-              <div className="keep-mounted" hidden={directOpen !== null} inert={directOpen !== null}>
+              <div className="keep-mounted" hidden={directOpen !== null}>
                 {conversation}
                 {phone ? null : firstRun}
               </div>

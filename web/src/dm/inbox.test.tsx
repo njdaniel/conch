@@ -2,13 +2,15 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { useContext, useEffect } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { listChannels, restore } from '../api';
+import * as api from '../api';
 import { BlocksProvider } from '../blocks';
 import { windowOf } from '../fakewindow';
 import { Lobby } from '../Lobby';
-import { VoiceLive } from '../phone';
+import { VoiceLive, VoiceSheet } from '../phone';
 import type { DMPreferencesV1 } from '../schema/generated';
 import { ProfileCard } from '../ProfileCard';
 import { initialChannels } from '../state/channels';
+import { useVoice } from '../voice/useVoice';
 import { dmApi, type DmApi } from './api';
 import { DmContextProbe } from './probe';
 import { DmInbox } from './DmInbox';
@@ -357,7 +359,7 @@ describe('in the lobby', () => {
     useEffect(() => { report(true); }, [report]);
     return <Probe name="voice" />;
   }
-  function lobby(api: DmApi, panel: React.ReactNode = <p>Nobody</p>) {
+  function lobby(api: DmApi, panel: React.ReactNode = <p>Nobody</p>, voice: React.ReactNode = <ActiveVoice />) {
     return render(
       <DmProvider api={api} scope="https://a.example|3" me={me}>
         <Lobby
@@ -369,7 +371,7 @@ describe('in the lobby', () => {
           connection="connected"
           conversation={<Probe name="conversation" />}
           panel={panel}
-          voice={<ActiveVoice />}
+          voice={voice}
           invites={null}
           onOpen={() => undefined}
           onRetry={() => undefined}
@@ -388,6 +390,7 @@ describe('in the lobby', () => {
     })));
   }
   beforeEach(() => { events.length = 0; });
+  afterEach(() => { vi.restoreAllMocks(); });
 
   it('opens a conversation in the middle without touching the voice section, and keeps the channel mounted', async () => {
     windowOf(true);
@@ -412,6 +415,65 @@ describe('in the lobby', () => {
     fireEvent.click(rows[0] as HTMLElement);
     expect(await screen.findByRole('log', { name: 'Messages' })).toBeDefined();
     expect(events).not.toContain('unmount voice');
+  });
+
+  it('clears all modal inertness when Voice options closes with no DM selected', async () => {
+    function Voice() {
+      const { report } = useContext(VoiceSheet);
+      return (
+        <>
+          <button type="button" onClick={() => { report(true); }}>Voice options</button>
+          <button type="button" onClick={() => { report(false); }}>Close options</button>
+        </>
+      );
+    }
+    phoneWindow();
+    const { container } = lobby(fake().api, undefined, <Voice />);
+    await screen.findByRole('button', { name: /^Grace/ });
+    fireEvent.click(screen.getByRole('button', { name: 'Voice' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Voice options' }));
+    expect(container.querySelector('.areas[inert]')).not.toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Close options' }));
+    expect(container.querySelectorAll('[inert]:not(.reserved)')).toHaveLength(0);
+  });
+
+  it('keeps the same Voice view and a single join request through a DM round trip', async () => {
+    const session = later<api.VoiceSessionResult>();
+    const createSession = vi.spyOn(api, 'createVoiceSession').mockReturnValue(session.promise);
+    const onUnauthorized = vi.fn();
+    function Voice() {
+      const voice = useVoice({ channel: 'general', signedIn: true, voiceAllowed: true, reachable: true, onUnauthorized });
+      const report = useContext(VoiceLive);
+      const joining = voice.state.phase === 'connecting';
+      useEffect(() => { report(joining); }, [joining, report]);
+      return (
+        <section aria-label="Voice call">
+          <Probe name="voice" />
+          {joining ? <p>Connecting</p> : <button type="button" onClick={() => { voice.join(); }}>Join voice</button>}
+        </section>
+      );
+    }
+    phoneWindow();
+    const { container } = lobby(fake().api, <ProfileCard id={5} person={{ name: 'Grace', kind: 'human' }} viewer={me} />, <Voice />);
+    const voiceTab = screen.getByRole('button', { name: 'Voice' });
+    fireEvent.click(voiceTab);
+    const voice = screen.getByRole('region', { name: 'Voice call' });
+    fireEvent.click(within(voice).getByRole('button', { name: 'Join voice' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Members' }));
+    const drawer = within(screen.getByRole('region', { name: 'Members list' }));
+    fireEvent.click(drawer.getByRole('button', { name: 'Grace' }));
+    const message = await drawer.findByRole('button', { name: 'Message Grace' });
+    message.focus();
+    fireEvent.click(message);
+    const back = await screen.findByRole('button', { name: 'Back' });
+    expect(screen.getByRole('region', { name: 'Voice call' })).toBe(voice);
+    fireEvent.click(back);
+    expect(voiceTab.getAttribute('aria-current')).toBe('page');
+    expect(screen.getByRole('region', { name: 'Voice call' })).toBe(voice);
+    expect(within(voice).getByText('Connecting')).toBeDefined();
+    expect(events).toEqual(['mount conversation', 'mount voice']);
+    expect(createSession.mock.calls).toEqual([['general']]);
+    expect(container.querySelectorAll('[inert]:not(.reserved)')).toHaveLength(0);
   });
 
   it('moves focus from the phone inbox into Chat and back while voice stays active', async () => {

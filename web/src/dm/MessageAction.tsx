@@ -1,5 +1,6 @@
 import { useContext, useState } from 'react';
 import { useBlocksContext } from '../blocks';
+import { Glyph } from '../Icons';
 import type { IdentityInput } from '../identityMarks';
 import { DmOpened, useDm } from './DmContext';
 import { cannotMessage } from './model';
@@ -14,13 +15,14 @@ export function canMessage(person: IdentityInput | undefined, id: number, viewer
   return id > 0 && id !== viewer;
 }
 
-// MessageAction opens, or resumes, the conversation with one person. It is
-// offered while the inbox is ready, DMs are on, and the viewer hasn't blocked the peer.
-export function MessageAction({ id, name, person, viewer, onOpened }: {
+// MessageAction opens or resumes a conversation while the inbox is ready,
+// DMs are on, and the viewer hasn't blocked the peer.
+export function MessageAction({ id, name, person, viewer, compact = false, onOpened }: {
   readonly id: number;
   readonly name: string;
   readonly person: IdentityInput | undefined;
   readonly viewer?: number | undefined;
+  readonly compact?: boolean;
   readonly onOpened?: () => HTMLElement | null;
 }) {
   const dm = useDm();
@@ -56,11 +58,11 @@ export function MessageAction({ id, name, person, viewer, onOpened }: {
       : 'Could not open the conversation. Try again.');
   }
   return (
-    <span className="message-action">
-      <button type="button" aria-label={`Message ${name}`} aria-disabled={busy} onClick={(event) => {
+    <span className="dm-message-action">
+      <button type="button" className={compact ? 'icon-button' : undefined} aria-label={`Message ${name}`} aria-disabled={busy} onClick={(event) => {
         if (!busy) void start(event.currentTarget);
       }}>
-        Message
+        {compact ? <Glyph name="chat" /> : 'Message'}
       </button>
       {problem === '' ? null : <span role="alert" className="hint">{problem}</span>}
     </span>
