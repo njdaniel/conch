@@ -524,14 +524,15 @@ async function refused(res: Response): Promise<{ readonly ok: false; readonly fa
 
 // withStatus preserves a refusal's HTTP status for a reader that treats one
 // status as final, without changing the shape of other calls' answers (#1562).
-async function get<T>(request: Call, token: string, check: Validator<T>, withStatus = false): Promise<ApiResult<T>> {
+async function get<T>(request: Call, token: string, check: Validator<T>, withStatus = false, signal?: AbortSignal): Promise<ApiResult<T>> {
   let res: Response;
   try {
-    res = await platform.http.get(request, token);
+    res = await platform.http.get(request, token, signal);
   } catch {
-    noteNoAnswer();
+    if (!signal?.aborted) noteNoAnswer();
     return { ok: false, failure: 'network' };
   }
+  if (signal?.aborted) return { ok: false, failure: 'network' };
   if (!res.ok) await noteRefusal(res);
   if (res.status === 401) return { ok: false, failure: 'unauthorized' };
   if (!res.ok) {
@@ -558,11 +559,13 @@ async function get<T>(request: Call, token: string, check: Validator<T>, withSta
 // A 401 for a credential this page has since replaced is not a sign-out: the
 // call is asked again with the new one (settleRefusal, issue #1000).
 // signIn and restore are the calls that do not use it: they check a candidate.
-async function authed<T>(request: Call, check: Validator<T>, withStatus = false): Promise<ApiResult<T>> {
+async function authed<T>(request: Call, check: Validator<T>, withStatus = false, signal?: AbortSignal): Promise<ApiResult<T>> {
   let held = current();
   if (held === null) return { ok: false, failure: 'unauthorized' };
   for (let sent = 0; sent < resends; sent++) {
-    const result = await get(request, held.token, check, withStatus);
+    if (signal?.aborted) break;
+    const result = await get(request, held.token, check, withStatus, signal);
+    if (signal?.aborted) break;
     if (result.ok || result.failure !== 'unauthorized') return result;
     const next = await settleRefusal(held, true);
     if (next === null) return result;
@@ -603,6 +606,7 @@ async function authedSend(request: Call, body?: unknown, keepalive = false, sign
   let held = current();
   if (held === null) return { kind: 'unauthorized' };
   for (let sent = 0; sent < resends; sent++) {
+    if (signal?.aborted) break;
     const reply = await sendProving(held, request, body, keepalive, signal);
     if (reply.kind !== 'replaced') return reply;
     // A write that replaces the credential carries a proof made for the
@@ -621,7 +625,9 @@ async function sendProving(held: Held, request: Call, body?: unknown, keepalive 
   const reply = await sendWith(held, request, body, keepalive, signal);
   if (reply.kind !== 'reply' || reply.res.status !== 403 || askReauth === null) return reply;
   if ((await refusalCode(reply.res.clone())) !== reauthRequired) return reply;
+  if (signal?.aborted) return { kind: 'none' };
   if (!(await proveAgain())) return reply;
+  if (signal?.aborted) return { kind: 'none' };
   const again = current();
   if (again === null) return { kind: 'unauthorized' };
   return sendWith(again, request, body, keepalive, signal);
@@ -684,6 +690,7 @@ async function sendWith(held: Held, request: Call, body?: unknown, keepalive = f
     return { kind: 'none' };
   }
   if (!res.ok) await noteRefusal(res);
+  if (signal?.aborted) return { kind: 'none' };
   // A 401 auth_failed is a password or a code that is not right, presented
   // to a route that takes one (a re-authentication, a password change, an
   // authenticator's confirmation; issue #714): the credential still works,
@@ -3512,6 +3519,7 @@ async function authedFile(send: (token: string) => Promise<Response>, signal?: A
       return { kind: 'none' };
     }
     if (!res.ok) await noteRefusal(res);
+    if (signal?.aborted) return { kind: 'none' };
     if (res.status !== 401) return { kind: 'reply', res };
     await discard(res);
     const next = await settleRefusal(held, true);
@@ -3524,11 +3532,11 @@ async function authedFile(send: (token: string) => Promise<Response>, signal?: A
 
 // The DM adapter uses the same credential and refusal handling as channels.
 export const dmTransport = {
-  read: authed,
-  write: authedSend,
+  read: <T>(request: Call, check: Validator<T>, signal: AbortSignal) => authed(request, check, true, signal),
+  write: (request: Call, body: unknown, signal: AbortSignal) => authedSend(request, body, false, signal),
   upload: (request: Call, mediaType: string, bytes: Blob, signal: AbortSignal) =>
     authedFile((token) => platform.http.upload(request, token, mediaType, bytes, signal), signal),
-  download: (request: Call) => authedFile((token) => platform.http.download(request, token)),
+  download: (request: Call, signal: AbortSignal) => authedFile((token) => platform.http.download(request, token, signal), signal),
 } as const;
 
 // The request builders and route availability for the direct-message adapter.

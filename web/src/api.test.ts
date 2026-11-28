@@ -128,6 +128,51 @@ describe('DM file authorization', () => {
   });
 });
 
+describe.each(['headers', 'success body', 'refusal body'])('DM deadline for stalled %s', (stall) => {
+  it.each([
+    ['snapshot', dmApi.snapshot],
+    ['inbox list', () => dmApi.list('open')],
+    ['conversation details', () => dmApi.get(12)],
+    ['history', () => dmApi.history(12, { order: 'desc' })],
+    ['changes', () => dmApi.changes(12, 6)],
+    ['read mark', () => dmApi.markRead(12, 4310)],
+    ['open', () => dmApi.open(5)],
+    ['hide', () => dmApi.setState(12, 'hidden')],
+    ['send', () => dmApi.send(12, { body: 'Hello', client_nonce: 'nonce' })],
+    ['edit', () => dmApi.edit(12, 4310, 'Edited')],
+    ['remove', () => dmApi.remove(12, 4310)],
+    ['search', () => dmApi.search(12, 'Hello')],
+    ['file metadata', () => dmApi.fileMeta(12, 41)],
+    ['file upload', () => dmApi.uploadFile(12, 'draft.png', 'image/png', new Blob(['x']), new AbortController().signal)],
+    ['file download', () => dmApi.fileBytes(12, 41)],
+    ['set preferences', () => dmApi.setPreferences('everyone')],
+  ] as const)('releases %s at the shared deadline', async (name, request) => {
+    await signedInFrom(window.sessionStorage, memberToken);
+    const status = stall === 'refusal body' ? 403 : name === 'remove' ? 204 : 200;
+    const body = status === 204 ? new Response(null, { status }) : new Response(new ReadableStream(), { status });
+    // Chromium can leave a 204 body to drain even though it contains no data.
+    if (status === 204) vi.spyOn(body, 'arrayBuffer').mockImplementation(() => new Promise(() => undefined));
+    const response = stall === 'headers'
+      ? new Promise<Response>(() => undefined)
+      : Promise.resolve(body);
+    const fetch = vi.fn<typeof globalThis.fetch>(() => response);
+    vi.stubGlobal('fetch', fetch);
+    vi.useFakeTimers();
+    try {
+      const done = vi.fn();
+      void request().then(done);
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(done).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(done).toHaveBeenCalledExactlyOnceWith({ ok: false, failure: name === 'send' ? 'unconfirmed' : 'network' });
+      expect(fetch.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('openSocket', () => {
   it('answers a plain network failure, carrying nothing of the error, when the WebSocket constructor throws', async () => {
     await signedInFrom(window.sessionStorage, operatorToken);

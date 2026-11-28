@@ -90,11 +90,12 @@ export function useDmInbox(api: DmApi | null, scope: string): Inbox {
   const held = useRef(state);
   held.current = state;
 
-  const requests = useMemo(() => ({ revision: 0, open: 0, running: null as number | null, active: false }), [api, scope]);
+  const requests = useMemo(() => ({ revision: 0, open: 0, running: null as symbol | null, requested: false, active: false }), [api, scope]);
 
   const fail = useCallback((failure: DmFailure) => {
     if (failure === 'unauthorized' || failure === 'own_sign_in_required' || failure === 'forbidden' || failure === 'unsupported' || failure === 'not_found') {
       requests.open++;
+      requests.requested = false;
       const status = failure === 'unauthorized' ? 'revoked' : failure === 'own_sign_in_required' ? failure : 'unsupported';
       act({ type: 'status', status });
     } else if (held.current.status !== 'ready') {
@@ -134,17 +135,23 @@ export function useDmInbox(api: DmApi | null, scope: string): Inbox {
   }, [api, act, fail]);
 
   const refresh = useCallback(async () => {
-    if (api === null || requests.running !== null || !requests.active) return;
-    const version = ++requests.revision;
-    requests.running = version;
-    const isCurrent = () => version === requests.revision;
+    if (api === null || !requests.active) return;
+    requests.requested = true;
+    if (requests.running !== null) return;
+    const run = Symbol();
+    requests.running = run;
     try {
-      const result = await api.snapshot();
-      if (!isCurrent()) return;
-      if (result.ok) await applyRows(result.value, isCurrent);
-      else fail(result.failure);
+      while (requests.running === run && requests.requested) {
+        requests.requested = false;
+        const version = ++requests.revision;
+        const isCurrent = () => version === requests.revision;
+        const result = await api.snapshot();
+        if (!isCurrent()) continue;
+        if (result.ok) await applyRows(result.value, isCurrent);
+        else fail(result.failure);
+      }
     } finally {
-      if (requests.running === version) requests.running = null;
+      if (requests.running === run) requests.running = null;
     }
   }, [api, applyRows, fail, requests]);
 
@@ -172,6 +179,7 @@ export function useDmInbox(api: DmApi | null, scope: string): Inbox {
       requests.open++;
       requests.revision++;
       requests.running = null;
+      requests.requested = false;
       stop();
       document.removeEventListener('visibilitychange', onFocus);
       window.removeEventListener('focus', onFocus);

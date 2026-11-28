@@ -197,7 +197,11 @@ function MessageRow({ message, mine, author, api, conversation, canWrite, onEdit
 
 function PendingRow({ pending, canWrite, onRetry, onDiscard }: { readonly pending: Pending; readonly canWrite: boolean; readonly onRetry: () => void; readonly onDiscard: () => void }) {
   const line =
-    pending.status === 'sending' ? 'Sending…' : pending.failure === 'unavailable' ? cannotMessage : pending.failure === 'dms_off' ? 'Direct messages are off.' : pending.status === 'unconfirmed' ? 'Not confirmed. It may not have been sent.' : 'Not sent.';
+    pending.status === 'sending' ? 'Sending…'
+      : pending.status === 'unconfirmed' ? 'Not confirmed. It may not have been sent.'
+        : pending.failure === 'unavailable' ? 'Not sent: this person couldn’t be messaged.'
+          : pending.failure === 'dms_off' ? 'Not sent: direct messages were off.'
+            : 'Not sent.';
   return (
     <li className="message dm-message pending" data-pending={pending.nonce}>
       <p className="dm-body">{pending.body}</p>

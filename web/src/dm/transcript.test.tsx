@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { listChannels, restore } from '../api';
 import { BlocksProvider, type Blocks } from '../blocks';
+import { DmInbox } from './DmInbox';
 import type { DMMessageV1, DMReadStateV1, ListDMMessagesResponseV1 } from '../schema/generated';
 import { dmApi, type DmApi } from './api';
 import { DmProvider } from './DmContext';
@@ -345,6 +346,95 @@ describe('the transcript', () => {
     expect(screen.getByRole('log', { name: 'Messages' })).toBe(log);
   });
 
+  it.each(['snapshot', 'list', 'history', 'read mark'] as const)('recovers on the next refresh after a stalled %s', async (kind) => {
+    const stalled = later<Response>();
+    const calls = vi.fn<typeof fetch>();
+    const row = conversation();
+    const mark = { ...fixture<DMReadStateV1>('dm-read-state-v1'), last_read_id: row.last_message_id, unread: 0 };
+    let snapshots = 0;
+    let reads = 0;
+    let recovering = false;
+    let enabled = true;
+    const fetchDm: typeof fetch = (path, init) => {
+      const url = new URL(path instanceof Request ? path.url : path, window.location.href);
+      switch (`${init?.method ?? 'GET'} ${url.pathname}`) {
+        case 'GET /v1/whoami':
+          return Promise.resolve(Response.json({ id: me, kind: 'human', name: 'Ada', role: 'member' }));
+        case 'GET /v1/dms/snapshot':
+          snapshots++;
+          if (kind === 'snapshot' && snapshots === 2) return stalled.promise;
+          return Promise.resolve(Response.json({ ...snapshot(), dms_enabled: enabled, conversations: kind === 'list' ? [] : [row], more: kind === 'list' }));
+        case 'GET /v1/dms':
+          if (!recovering) return stalled.promise;
+          return Promise.resolve(Response.json({ conversations: url.searchParams.get('state') === 'open' ? [row] : [] }));
+        case 'GET /v1/dms/12':
+          return Promise.resolve(Response.json(row));
+        case 'GET /v1/dms/12/messages':
+          if (kind === 'history' && !recovering) return stalled.promise;
+          return Promise.resolve(Response.json(fixture<ListDMMessagesResponseV1>('list-dm-messages-response-v1')));
+        case 'GET /v1/dms/12/changes':
+          return Promise.resolve(Response.json({ messages: [] }));
+        case 'PUT /v1/dms/12/read-state':
+          if (kind === 'read mark' && ++reads === 1) return stalled.promise;
+          return Promise.resolve(Response.json(mark));
+        case 'POST /v1/dms/12/messages':
+          return Promise.resolve(Response.json({ code: 'dms_off', message: 'Direct messages are off.' }, { status: 403 }));
+        default:
+          throw new Error(`Unexpected request: ${url.pathname}`);
+      }
+    };
+    vi.stubGlobal('fetch', calls.mockImplementation(fetchDm));
+    window.sessionStorage.setItem('conch.web.token', 'conch_member_secret');
+    try {
+      expect((await restore()).ok).toBe(true);
+      vi.useFakeTimers();
+      await act(async () => {
+        render(<DmProvider api={dmApi} scope={scope} me={me}><DmInbox /><DmRoute conversationId={12} /></DmProvider>);
+        await Promise.resolve();
+      });
+      if (kind === 'snapshot') {
+        enabled = false;
+        fireEvent.change(screen.getByRole('textbox', { name: 'Message to Grace' }), { target: { value: 'Hello' } });
+        await act(async () => {
+          fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+          await Promise.resolve();
+        });
+        expect(screen.queryByRole('textbox', { name: 'Message to Grace' })).toBeNull();
+        await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+        expect(snapshots).toBe(2);
+      }
+
+      recovering = true;
+      enabled = true;
+      // Inbox refreshes already queued by focus should run when the deadline
+      // expires, even before the next interval tick.
+      fireEvent.focus(window);
+      await act(async () => { await vi.advanceTimersByTimeAsync(kind === 'snapshot' || kind === 'list' ? 10_000 : 15_000); });
+
+      if (kind === 'list') expect(screen.getByRole('button', { name: /^Grace/ })).toBeDefined();
+      if (kind === 'history') expect(screen.getByRole('log', { name: 'Messages' })).toBeDefined();
+      if (kind === 'read mark') {
+        const readCalls = calls.mock.calls.filter(([path]) => path === '/v1/dms/12/read-state');
+        expect(readCalls.map(([, init]) => init?.body)).toEqual(Array(2).fill(JSON.stringify({ last_read_id: mark.last_read_id })));
+      }
+      if (kind === 'snapshot') {
+        expect(screen.getByRole('textbox', { name: 'Message to Grace' })).toBeDefined();
+        expect(screen.getByText('Not sent: direct messages were off.')).toBeDefined();
+        await act(async () => {
+          stalled.resolve(Response.json({ ...snapshot(), dms_enabled: false }));
+          await stalled.promise;
+        });
+        expect(screen.getByRole('textbox', { name: 'Message to Grace' })).toBeDefined();
+      }
+    } finally {
+      cleanup();
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+      window.sessionStorage.clear();
+      await listChannels();
+    }
+  });
+
   it('edits and removes only the viewer’s own messages, and shows the server’s tombstone', async () => {
     const own = ownMessage();
     const gone = { ...own, revision: 8, removed: true, body: removedBody, file_ids: undefined };
@@ -600,20 +690,9 @@ describe('the transcript', () => {
   it.each(['headers', 'body'])('times out stalled browser changes %s and catches up from the same revision', async (stall) => {
     const reply = { ...peerMessage(), id: 4311, revision: 7, body: 'After reconnecting' };
     const changes = vi.fn<typeof fetch>()
-      .mockImplementationOnce((_path, init) => {
-        const signal = init?.signal;
-        if (stall === 'body') {
-          const body = new ReadableStream<Uint8Array>({
-            start(controller) {
-              signal?.addEventListener('abort', () => { controller.error(signal.reason); }, { once: true });
-            },
-          });
-          return Promise.resolve(new Response(body, { status: 403 }));
-        }
-        return new Promise<Response>((_resolve, reject) => {
-          signal?.addEventListener('abort', () => { reject(new DOMException('Aborted', 'AbortError')); }, { once: true });
-        });
-      })
+      .mockImplementationOnce(() => stall === 'body'
+        ? Promise.resolve(new Response(new ReadableStream(), { status: 403 }))
+        : later<Response>().promise)
       .mockResolvedValueOnce(Response.json({ messages: [reply] }))
       .mockResolvedValueOnce(Response.json({ messages: [] }));
     vi.stubGlobal('fetch', vi.fn<typeof fetch>((path, init) => {

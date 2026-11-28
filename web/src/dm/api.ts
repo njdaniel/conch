@@ -148,8 +148,8 @@ async function refusal(res: Response): Promise<{ readonly code?: string; readonl
   return {};
 }
 
-async function readResult<T>(request: DmCall, check: Validator<T>): Promise<DmResult<T>> {
-  const result = await dmTransport.read(request, check, true);
+async function readResult<T>(request: DmCall, check: Validator<T>, signal: AbortSignal): Promise<DmResult<T>> {
+  const result = await dmTransport.read(request, check, signal);
   if (result.ok) return { ok: true, value: result.value };
   if (result.failure === 'unauthorized') return { ok: false, failure: 'unauthorized' };
   if (result.failure === 'network' || result.status === undefined || result.status >= 500) return { ok: false, failure: 'network' };
@@ -179,18 +179,43 @@ const { call, queryOf } = dmRequest;
 export const isDmOperationServed = dmRequest.isOperationServed;
 
 const pageLimit = '50';
+const requestTimeoutMs = 10_000;
+
+async function withDeadline<T>(run: (signal: AbortSignal) => Promise<DmResult<T>>, caller?: AbortSignal): Promise<DmResult<T>> {
+  if (caller?.aborted) return { ok: false, failure: 'network' };
+  const controller = new AbortController();
+  let abort = () => {};
+  // Bound the whole operation, including body readers and transports that
+  // cannot cancel their underlying work.
+  const cancelled = new Promise<DmResult<T>>((resolve) => {
+    abort = () => {
+      resolve({ ok: false, failure: 'network' });
+      controller.abort();
+    };
+  });
+  caller?.addEventListener('abort', abort, { once: true });
+  const timer = window.setTimeout(abort, requestTimeoutMs);
+  try {
+    return await Promise.race([run(controller.signal), cancelled]);
+  } finally {
+    window.clearTimeout(timer);
+    caller?.removeEventListener('abort', abort);
+  }
+}
 
 function createDmApi(access?: { readonly denied: () => boolean; readonly deny: () => void }): DmApi {
-  async function request<T>(run: () => Promise<DmResult<T>>): Promise<DmResult<T>> {
+  async function withAccess<T>(run: () => Promise<DmResult<T>>): Promise<DmResult<T>> {
     if (access?.denied() === true) return { ok: false, failure: 'forbidden' };
     const result = await run();
     if (!result.ok && (result.failure === 'forbidden' || result.failure === 'own_sign_in_required')) access?.deny();
     return result;
   }
 
-  const read = <T>(call: DmCall, check: Validator<T>) => request(() => readResult(call, check));
+  const request = <T>(run: (signal: AbortSignal) => Promise<DmResult<T>>, caller?: AbortSignal) =>
+    withAccess(() => withDeadline(run, caller));
+  const read = <T>(call: DmCall, check: Validator<T>) => request((signal) => readResult(call, check, signal));
   const write = <T>(call: DmCall, body: unknown, check: Validator<unknown> | null, value: (parsed: unknown) => T) =>
-    request(async () => settled(await dmTransport.write(call, body), check, value));
+    request(async (signal) => settled(await dmTransport.write(call, body, signal), check, value));
   const nativeSave = platform.services.saveFile;
 
   return {
@@ -234,12 +259,12 @@ function createDmApi(access?: { readonly denied: () => boolean; readonly deny: (
       return read(call('searchDmMessages', { conversation }, queryOf(values)), searchDMMessagesResponseV1);
     },
     fileMeta: (conversation, file) => read(call('dmFileMeta', { conversation, file }), dmFileV1),
-    uploadFile: (conversation, name, mediaType, bytes, signal) => request(async () => {
+    uploadFile: (conversation, name, mediaType, bytes, caller) => request(async (signal) => {
       const reply = await dmTransport.upload(call('uploadDmFile', { conversation }, `filename=${encodeURIComponent(name)}`), mediaType, bytes, signal);
       return settled(reply, dmFileV1, (parsed) => parsed as DMFileV1);
-    }),
-    fileBytes: (conversation, file) => request(async () => {
-      const reply = await dmTransport.download(call('dmFileBytes', { conversation, file }));
+    }, caller),
+    fileBytes: (conversation, file) => request(async (signal) => {
+      const reply = await dmTransport.download(call('dmFileBytes', { conversation, file }), signal);
       if (reply.kind === 'none') return { ok: false, failure: 'network' };
       if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
       if (!reply.res.ok) return { ok: false, failure: failureOf(reply.res.status, (await refusal(reply.res)).code) };
@@ -250,7 +275,8 @@ function createDmApi(access?: { readonly denied: () => boolean; readonly deny: (
       }
     }),
     ...(nativeSave === undefined ? {} : {
-      saveFile: (conversation: number, file: number) => request<null>(async () => {
+      // The native service owns its file requests and waits for a save dialog.
+      saveFile: (conversation: number, file: number) => withAccess<null>(async () => {
         const outcome = await nativeSave({ conversation, file });
         if (outcome === 'unauthorized' || outcome === 'forbidden') return { ok: false, failure: outcome };
         if (outcome === 'failed') return { ok: false, failure: 'refused' };

@@ -123,6 +123,7 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
     active: false,
     revoked: false,
     load: 0,
+    retryLoad: false,
     contactRefusal: 0,
   }), [api, key]);
   const [raw, dispatch] = useReducer(reduce, key, empty);
@@ -169,6 +170,7 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
     try {
       while (recovery.requested) {
         recovery.requested = false;
+        if (reading.retry) setReadPoll((poll) => poll + 1);
         const after: number = recovery.after;
         const contactRefusal = recovery.contactRefusal;
         const result = await api.changes(conversation, after);
@@ -189,8 +191,6 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
         }
         recovery.after = revisionOf(messages, after);
         if (next === recovery.after && next > after) recovery.requested = true;
-        // Even an empty changes page lets a transient read-mark failure retry.
-        if (reading.retry) setReadPoll((poll) => poll + 1);
       }
     } finally {
       recovery.running = false;
@@ -201,16 +201,19 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
     // Read the baseline before history so changes concurrent with history
     // never fall below the recovery cursor.
     const request = ++recovery.load;
+    recovery.retryLoad = false;
     const current = () => recovery.active && !recovery.revoked && recovery.load === request;
     const info = await api.get(conversation);
     if (!current()) return;
     if (!info.ok) {
+      recovery.retryLoad = info.failure === 'network';
       if (!fail(info.failure)) act({ type: 'status', status: 'failed' });
       return;
     }
     const page = await api.history(conversation, { order: 'desc' });
     if (!current()) return;
     if (!page.ok) {
+      recovery.retryLoad = page.failure === 'network';
       if (page.failure === 'unsupported') {
         act({ type: 'metadata', conversation: info.value });
       } else if (!fail(page.failure)) act({ type: 'status', status: 'failed' });
@@ -225,6 +228,11 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
     dispatch({ type: 'reset', key });
     recovery.active = true;
     void load();
+    const sync = () => {
+      if (!recovery.active || recovery.revoked) return;
+      if (recovery.retryLoad) void load();
+      else void catchUp();
+    };
     // A frame for this conversation; other conversations are the inbox's.
     const stop = api.live((frame: DmFrame) => {
       switch (frame.type) {
@@ -251,14 +259,14 @@ export function useDmTranscript(api: DmApi, scope: string, conversation: number,
         }
         case 'poll':
         case 'lost':
-          void catchUp();
+          sync();
           return;
       }
     });
     const onFocus = () => {
       const visibleNow = document.visibilityState !== 'hidden';
       setVisible(visibleNow);
-      if (visibleNow) void catchUp();
+      if (visibleNow) sync();
     };
     document.addEventListener('visibilitychange', onFocus);
     window.addEventListener('focus', onFocus);

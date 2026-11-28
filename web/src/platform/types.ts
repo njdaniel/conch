@@ -40,7 +40,7 @@ import type {
 // response, or rejects when there was no answer at all, as fetch does.
 export interface HttpTransport {
   // A GET with the bearer credential.
-  get(call: Call, token: string): Promise<Response>;
+  get(call: Call, token: string, signal?: AbortSignal): Promise<Response>;
   // A POST, PUT or DELETE with the bearer credential and, for a JSON body,
   // body. keepalive lets the request outlive the page; signal ends it.
   send(call: Call, token: string, request: { readonly body?: unknown; readonly keepalive: boolean; readonly signal?: AbortSignal }): Promise<Response>;
@@ -52,7 +52,7 @@ export interface HttpTransport {
   // A file's bytes as the request body, with the declared media type.
   upload(call: Call, token: string, mediaType: string, bytes: Blob, signal: AbortSignal): Promise<Response>;
   // A file's bytes.
-  download(call: Call, token: string): Promise<Response>;
+  download(call: Call, token: string, signal?: AbortSignal): Promise<Response>;
 }
 
 // The handlers of one live feed, as WebSocket's.
