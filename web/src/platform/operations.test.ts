@@ -55,11 +55,7 @@ describe('the operation table', () => {
   // list can only shrink and is empty when the server catches up.
   const awaitingServer = new Set<OperationId>([
     'dmSnapshot',
-    'listDmMessages',
     'listDmChanges',
-    'postDmMessage',
-    'editDmMessage',
-    'removeDmMessage',
     'markDmRead',
     'searchDmMessages',
     'uploadDmFile',
