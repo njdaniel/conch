@@ -67,20 +67,20 @@ type group struct {
 	openCode     string // its code
 	invites      []int64
 
-	msgIDs    []int64
-	root      int64 // a thread root
-	whisper   int64
-	netName   string
-	netID     int64
-	fileName  string
-	fileID    int64
-	sessionID int64
-	runID     int64
-	interID   int64
-	// dmID is a conversation of A's: ann opened it with abe (issue #2019).
-	dmID     int64
-	callID   string // A's accepted attempt in that conversation
-	approval int64
+	msgIDs      []int64
+	root        int64 // a thread root
+	whisper     int64
+	netName     string
+	netID       int64
+	fileName    string
+	fileID      int64
+	sessionID   int64
+	runID       int64
+	interID     int64
+	dmID        int64  // Ann with Abe for A, Bea with Bob for B
+	dmMessageID int64  // the message Ann sent to Abe (A only)
+	callID      string // A's accepted attempt in that conversation
+	approval    int64
 	// agentSession is the group agent's own session (B only).
 	agentSession int64
 	reportID     int64
@@ -352,15 +352,20 @@ func (w *world) buildGroups() error {
 	w.marks.secret("A's member link code", link.Code)
 	w.marks.id("invite", "ann's member link", link.Invite.ID)
 
-	// ann opens a conversation with abe: A's, by an id of a space of its own.
-	// It is empty and private to ann, so B's prober can name its id and must
-	// be told what it is told of one that never existed (dmrows.go).
-	var dm schema.OpenDMResponseV1
-	if err := ann.api.call(http.MethodPost, "/v1/dms", schema.OpenDMRequestV1{PeerID: w.a.people[1].id}, &dm); err != nil {
+	// Each pair opens its own conversation so the matrix can try A's message
+	// ID against both conversations. B's stays empty for the open row.
+	var dmA, dmB schema.OpenDMResponseV1
+	if err := ann.api.call(http.MethodPost, "/v1/dms", schema.OpenDMRequestV1{PeerID: w.a.people[1].id}, &dmA); err != nil {
 		return fmt.Errorf("ann opens a conversation with abe: %w", err)
 	}
-	w.a.dmID = dm.Conversation.ID
-	w.marks.id("conversation", "A's conversation", dm.Conversation.ID)
+	if err := bea.api.call(http.MethodPost, "/v1/dms", schema.OpenDMRequestV1{PeerID: bob.id}, &dmB); err != nil {
+		return fmt.Errorf("bea opens a conversation with bob: %w", err)
+	}
+	w.a.dmID, w.b.dmID = dmA.Conversation.ID, dmB.Conversation.ID
+	if w.a.dmID <= 0 || w.b.dmID <= 0 || w.a.dmID == w.b.dmID {
+		return fmt.Errorf("expected distinct conversations for A and B, got %d and %d", w.a.dmID, w.b.dmID)
+	}
+	w.marks.id("conversation", "A's conversation", w.a.dmID)
 	return nil
 }
 
@@ -499,6 +504,10 @@ func (w *world) activityA() error {
 	ann, abe, amy := a.people[0], a.people[1], a.people[2]
 	camp, den := a.channels[0], a.channels[1]
 	var err error
+
+	if err := w.seedDMMessage(ann); err != nil {
+		return err
+	}
 
 	// Messages, by each version of the API, a thread and a whisper.
 	if a.root, err = w.post(a, ann, camp, schema.PostMessageRequestV2{Body: w.aName("word-root")}); err != nil {

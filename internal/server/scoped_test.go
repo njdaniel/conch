@@ -118,7 +118,7 @@ var scopedReaders = []struct {
 
 var readStatus = map[readAccess]int{readOK: http.StatusOK, readNotFound: http.StatusNotFound, readForbidden: http.StatusForbidden, readUnauth: http.StatusUnauthorized}
 
-// scopedReadPaths names every way a client can read messages. Each has a row
+// scopedReadPaths names every way a client can read channel messages. Each has a row
 // in the table below. A new read path must be added to this list AND to
 // TestScopedMessagesExactSets; TestEveryMessageReadPathIsInTheLeakTest fails
 // until it is.
@@ -151,14 +151,14 @@ func (f *scopedFixture) labelsToIDs(t *testing.T, ids map[string]int64, labels [
 }
 
 // TestScopedMessagesExactSets is the leak test. For every reader and every
-// path by which messages can be read, it asserts the EXACT set of message ids
+// path by which channel messages can be read, it asserts the exact set of message ids
 // received: not "contains", not "excludes the secret". v0 and v1 readers see
 // channel-wide messages only; v2 readers and agents reading over MCP (which
 // speaks the v2 envelope, issue #117) also see scoped messages, and only the
 // ones they are a recipient of. Operators get no exemption.
 //
-// EVERY NEW WAY TO READ MESSAGES MUST ADD A COLUMN HERE (and to
-// scopedReadPaths). Sockets are opened before the corpus is posted, since a
+// Each new way to read channel messages adds a column here and to
+// scopedReadPaths. Sockets are opened before the corpus is posted, since a
 // socket carries live traffic only; the last message, a channel-wide one,
 // ends each read.
 func TestScopedMessagesExactSets(t *testing.T) {
@@ -386,9 +386,9 @@ func TestScopedMessagesExactSets(t *testing.T) {
 	}
 }
 
-// Every route that can return message content, and every MCP tool that reads
-// it, must be covered by TestScopedMessagesExactSets. Adding one without
-// extending that test fails here.
+// Every route or MCP tool that reads channel message content must be covered
+// by TestScopedMessagesExactSets. Adding one without extending that test
+// fails here.
 func TestEveryMessageReadPathIsInTheLeakTest(t *testing.T) {
 	f := newScopedFixture(t)
 	covered := map[string]bool{}
@@ -421,6 +421,11 @@ func TestEveryMessageReadPathIsInTheLeakTest(t *testing.T) {
 		// not channel messages and have no channel scope to leak; it can
 		// never carry a channel frame, and its tests are in
 		// person_stream_test.go (TestPersonStreamNeverCarriesAChannelFrame).
+		// DM history has its own pair-visibility and channel-isolation tests
+		// (TestDMMessageRouteAccess and TestDMMessageSendAndHistory).
+		if rt.pattern == "GET /v1/dms/{conversation}/messages" {
+			continue
+		}
 		isRead := strings.HasPrefix(rt.pattern, "GET ") && !reactionReads[rt.pattern] && rt.pattern != "GET /v1/voice/ws" && rt.pattern != "GET /v1/voice/occupancy/ws" && rt.pattern != "GET /v1/events/ws" && rt.pattern != "GET /v1/events/person/ws" &&
 			(strings.Contains(rt.pattern, "/messages") || strings.HasSuffix(rt.pattern, "/ws") || strings.HasSuffix(rt.pattern, "/notifications/pending"))
 		if isRead && !covered[rt.pattern] {
