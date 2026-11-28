@@ -28,6 +28,8 @@ import {
   createInviteResponseV2,
   disableJoinersRequestV1,
   disableJoinersResponseV1,
+  dmReadStateV1,
+  dmSnapshotV1,
   invitePreviewV2,
   createProblemReportRequestV1,
   createProblemReportResponseV1,
@@ -77,6 +79,7 @@ import {
   joinSettingsResponseV1,
   listActivityResponseV1,
   listChannelMembersResponseV1,
+  listDMChangesResponseV1,
   listChannelsResponse,
   listGuestsResponseV1,
   listInterventionsResponseV1,
@@ -416,6 +419,10 @@ export const operations = {
   fileBytes: op('GET', '/v2/files/{id}', 'bearer'),
   listReadState: op('GET', '/v1/read-state', 'bearer', { response: reply(listReadStateResponseV1) }),
   markRead: op('PUT', '/v1/channels/{channel}/read-state', 'bearer', { request: check(markReadRequestV1), response: reply(readStateV1) }),
+
+  dmSnapshot: op('GET', '/v1/dms/snapshot', 'bearer', { response: reply(dmSnapshotV1) }),
+  listDmChanges: op('GET', '/v1/dms/{conversation}/changes', 'bearer', { response: reply(listDMChangesResponseV1) }),
+  markDmRead: op('PUT', '/v1/dms/{conversation}/read-state', 'bearer', { request: check(markReadRequestV1), response: reply(dmReadStateV1) }),
 
   // Live feeds. A ticket is a single-use credential for one socket: main asks
   // for it and opens the socket itself, so the renderer never holds one.

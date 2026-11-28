@@ -65,6 +65,10 @@ var selfMadeCredentialRoutes = map[string]dmGuestPolicy{
 	"POST /v1/dms/{conversation}/messages":             dmGuestForbidden,
 	"PATCH /v1/dms/{conversation}/messages/{message}":  dmGuestForbidden,
 	"DELETE /v1/dms/{conversation}/messages/{message}": dmGuestForbidden,
+	// DM recovery and the reader's own mark (#2022).
+	"GET /v1/dms/snapshot":                  dmGuestForbidden,
+	"GET /v1/dms/{conversation}/changes":    dmGuestForbidden,
+	"PUT /v1/dms/{conversation}/read-state": dmGuestForbidden,
 	// Private calls (ADR-017 Decision 7): invites, history, the reconnect
 	// snapshot and actions (#2030), plus media joins (#2032).
 	"POST /v1/dms/{conversation}/calls": privateCallGuestForbidden,

@@ -231,11 +231,9 @@ type Server struct {
 	// kept apart from events: it carries no channel.
 	person *personHub
 	// dmSnapshotSource builds the DM snapshot a person socket opens with.
-	// Nil means emptyDMSnapshot; the DM issues install the real one.
 	dmSnapshotSource dmSnapshotSource
 	// dmFrameAccess decides, per DM frame at write time, whether a person
-	// socket may be sent it (person_stream.go). Nil denies every frame: the socket drops them, so
-	// DMs reach no one until the DM store installs both hooks.
+	// socket may be sent it (person_stream.go). Nil denies live DM frames.
 	dmFrameAccess dmFrameAccess
 	// eventsBeforeEpochWrite, when set by a test, runs before every frame an
 	// events socket writes that is held to a read-state epoch (a read state
@@ -298,6 +296,7 @@ type Server struct {
 	dmSendLimits   *dmWriteLimiter
 	dmEditLimits   *dmWriteLimiter
 	dmRemoveLimits *dmWriteLimiter
+	dmReadLimits   *dmWriteLimiter
 	// notificationLimits bounds the notification routes
 	// (notification_limits.go), in memory only; its clock is now. Tests
 	// replace it with setNotificationLimits before serving.
@@ -375,6 +374,7 @@ func New(cfg Config, st *store.Store) *Server {
 		dmSendLimits:   newDMWriteLimiter(inviteLimit{"dm_sends_per_principal", 20, 40 * time.Second}),
 		dmEditLimits:   newDMWriteLimiter(defaultMessageEditLimit()),
 		dmRemoveLimits: newDMWriteLimiter(inviteLimit{"dm_removals_per_principal", 10, time.Minute}),
+		dmReadLimits:   newDMWriteLimiter(inviteLimit{"dm_read_marks_per_principal", 20, 40 * time.Second}),
 		passwords:      newPasswords(), logins: newLoginLimiter(loginLimitsFor(cfg)), addressMAC: newAddressMACKey(),
 		setupLimits: newSetupLimiter(cfg), messageEditLimits: newMessageEditLimiter(defaultMessageEditLimit())}
 	// The server's name is a permanent name nobody may take (issue #760):
@@ -384,6 +384,8 @@ func New(cfg Config, st *store.Store) *Server {
 	s.voice = newVoicePoller(s)
 	s.events = newEventsHub()
 	s.person = newPersonHub()
+	s.dmSnapshotSource = s.dmSnapshot
+	s.dmFrameAccess = st.DMFrameAllowed
 	s.metrics = newServerMetrics(s)
 	s.pushSender = s.newPushSender()
 	// Runs that end with their session change without SetRunState, so the

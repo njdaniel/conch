@@ -144,6 +144,12 @@ func checkMessageReads(t *testing.T, fset *token.FileSet, path string, file *ast
 			// a read named, say, MessagesSince or LastMessage.
 			if recv := types.ExprString(sel.X); (recv == "store" || strings.HasSuffix(recv, ".store")) && strings.Contains(name, "Message") {
 				switch name {
+				case "DMMessageFrameRecipients":
+					// The store applies pair visibility and current live access.
+					if filepath.Base(path) != "dm_sync.go" {
+						t.Errorf("%s: %s calls %s outside the DM publisher", path, fset.Position(x.Pos()), name)
+					}
+					return true
 				case "ListDMMessagesPage", "InsertDMMessageFromCredential", "EditDMMessageFromCredential", "RemoveDMMessageFromCredential":
 					// These store methods apply pair visibility through dmViewTx.
 					// TestDMMessageRouteAccess exercises the request's caller and
