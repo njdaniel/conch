@@ -634,3 +634,62 @@ func TestDMRoutesRefuseAgentsGuestsAndAuthOff(t *testing.T) {
 		t.Errorf("AuthOff open: %d %s", rec.Code, rec.Body)
 	}
 }
+
+func TestWhoAmIDMCapabilityMatchesRoutes(t *testing.T) {
+	f := newProvenanceFixture(t)
+	guest := f.seedGuest(t, "Pat")
+	revoked := (&dmFixture{authFixture: f.authFixture}).join(t)
+	if rec := f.do(t, http.MethodDelete, currentCredentialPath, revoked.tok, ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("sign out = %d %s, want 204", rec.Code, rec.Body)
+	}
+	now := f.srv.now()
+	setupToken, err := f.srv.store.IssueSetupToken(t.Context(), f.root.ID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setup, err := f.srv.store.RedeemSetupToken(t.Context(), store.HashSetupToken(setupToken.Token), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tt := range []struct {
+		name, token string
+		whoami, dm  int
+	}{
+		{"self-issued", f.joinerTok, http.StatusOK, http.StatusOK},
+		{"owner's own bootstrap", f.rootTok, http.StatusOK, http.StatusOK},
+		{"act-as", f.actAsTok, http.StatusOK, http.StatusForbidden},
+		{"operator-issued sign-in link", f.linkTok, http.StatusOK, http.StatusForbidden},
+		{"revoked", revoked.tok, http.StatusUnauthorized, http.StatusUnauthorized},
+		{"guest", guest.Token, http.StatusOK, http.StatusForbidden},
+		{"agent", f.botTok, http.StatusOK, http.StatusForbidden},
+		{"setup-scoped", setup.Token, http.StatusOK, http.StatusForbidden},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			who := f.do(t, http.MethodGet, "/v1/whoami", tt.token, "")
+			if who.Code != tt.whoami {
+				t.Fatalf("whoami = %d %s, want %d", who.Code, who.Body, tt.whoami)
+			}
+			fields := decodeBody[map[string]json.RawMessage](t, who)
+			raw, hasCapabilities := fields["capabilities"]
+			var capabilities map[string]bool
+			if hasCapabilities {
+				if err := json.Unmarshal(raw, &capabilities); err != nil {
+					t.Fatalf("decode capabilities: %v", err)
+				}
+			}
+			if hasCapabilities && !capabilities["dm"] {
+				t.Errorf("whoami sent capabilities %s, want it omitted when DM access is denied", raw)
+			}
+			for _, path := range []string{"/v1/dms?state=open", "/v1/calls/current"} {
+				rec := f.do(t, http.MethodGet, path, tt.token, "")
+				if rec.Code != tt.dm {
+					t.Errorf("%s = %d %s, want %d", path, rec.Code, rec.Body, tt.dm)
+				}
+				if allowed := rec.Code == http.StatusOK; capabilities["dm"] != allowed {
+					t.Errorf("whoami capabilities.dm = %t, %s accepted credential = %t", capabilities["dm"], path, allowed)
+				}
+			}
+		})
+	}
+}

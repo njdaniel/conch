@@ -26,12 +26,8 @@ import (
 //     credential does not reach a person's calls; it stays an expectation of
 //     the row.
 //
-// The rows name no object of A's: A has no conversation the matrix can name,
-// since the routes that open one (the DM routes, #2019) are not served yet,
-// so the ids are ones never issued, and a call is only ever reached through
-// one of A's conversations or A's attempt ids. When the DM routes exist, the
-// world builder gives A a conversation and an attempt, and these rows grow a
-// pick (A's id, with the ghost comparison) beside the ones here.
+// The media row names A's accepted attempt and compares its refusal with the
+// answer for a never-issued id. The other lookup rows use never-issued ids.
 
 var (
 	dmNotFound   = answer{http.StatusNotFound, schema.ErrorCodeDMNotFound}
@@ -48,6 +44,30 @@ const (
 
 func callsOfConversation() string {
 	return "/v1/dms/" + strconv.Itoa(neverIssuedConversation) + "/calls"
+}
+
+func (w *world) acceptCallA() error {
+	ann, abe := w.a.people[0], w.a.people[1]
+	var invite schema.PrivateCallResponseV1
+	path := fmt.Sprintf("/v1/dms/%d/calls", w.a.dmID)
+	if err := ann.api.call(http.MethodPost, path, schema.InvitePrivateCallRequestV1{ActionID: "isolation-invite"}, &invite); err != nil {
+		return err
+	}
+	var accepted schema.PrivateCallResponseV1
+	path = "/v1/calls/" + invite.Call.ID + "/accept"
+	action := schema.PrivateCallActionRequestV1{ActionID: "isolation-accept", Revision: invite.Call.Revision}
+	if err := abe.api.call(http.MethodPost, path, action, &accepted); err != nil {
+		return err
+	}
+	if accepted.Call.ID != invite.Call.ID || accepted.Call.State != schema.PrivateCallStateAccepted {
+		return fmt.Errorf("accept did not return A's accepted call")
+	}
+	if err := accepted.Call.Validate(); err != nil {
+		return err
+	}
+	w.a.callID = accepted.Call.ID
+	w.marks.str("A's call attempt", w.a.callID)
+	return nil
 }
 
 // checkNoCurrentCall is the snapshot row's own check: a valid snapshot with
@@ -92,8 +112,13 @@ func callMatrixRows() []row {
 		callAction("accept"), callAction("decline"), callAction("cancel"), callAction("hangup"),
 		{route: "POST /v1/calls/{call}/session", what: "requests media for a call attempt she has no part in",
 			want: callNotFound, withoutPassword: personNotOwn,
-			probe: func(*world, subject) probe {
-				return probe{method: http.MethodPost, path: "/v1/calls/" + neverIssuedCall + "/session"}
+			pick: func(w *world) subject { return subject{kind: "call", name: w.a.callID} },
+			probe: func(_ *world, s subject) probe {
+				id := s.name
+				if len(id) < schema.MinPrivateCallIDBytes {
+					id = neverIssuedCall
+				}
+				return post("/v1/calls/"+id+"/session", nil)
 			}},
 	}
 }

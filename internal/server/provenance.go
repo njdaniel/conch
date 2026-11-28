@@ -10,16 +10,16 @@ import (
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
-// selfMadeCredentialRoutes are the routes that refuse a credential its
-// principal did not make for themselves (issue #2042, child of #2013;
-// Nick's decision 4 of 2026-11-19): a person's direct messages, their calls
-// and their per-person stream. act_as_members lets an operator mint a
-// credential or a sign-in link for any member who is not an owner; on these
+// selfMadeCredentialRoutes are the routes that require a full-scope
+// credential a human member or operator made for themselves (issue #2042,
+// child of #2013): a person's direct messages, their calls and their
+// per-person stream. act_as_members lets an operator mint a credential
+// or a sign-in link for any member who is not an owner; on these
 // routes such a credential gets 403 own_sign_in_required, so the operator
 // can still sign in and post as the member but cannot read their DMs or
 // join their calls. Every other route is unchanged.
 //
-// guard wraps every route named here with requireSelfMadeCredential, under
+// guard wraps every route named here with requireDMCredential, under
 // AuthRequired, outside the recent-auth gate, so a credential made by
 // another is told to sign in rather than asked for a proof it cannot give.
 // TestSelfMadeCredentialRoutes holds each entry to a registered,
@@ -29,18 +29,18 @@ import (
 // The rules for every route that fills it:
 //
 //   - A route that serves both HTTP and a WebSocket upgrade calls the check
-//     (selfMadeCredential, or listing it here) before the upgrade, so a
+//     (dmCredentialRefusal, or listing it here) before the upgrade, so a
 //     refused credential is answered with an HTTP status and never gets a
 //     socket.
 //   - MCP tools bypass guard: /mcp has its own bearer authentication and
 //     never passes through this check. No MCP tool may read or write a
 //     person's DMs or calls.
 //   - An agent can never pass: ADR-017 confirms agents reach no DM or call,
-//     and selfMadeCredential refuses a non-human caller first, with 403
-//     forbidden audited agents_use_mcp, as every human-only route does and
-//     as the DM schema's refusal order says (pkg/schema/dm.go; ADR-017
-//     Decision 14). An own_sign_in_required audit row can come from an
-//     act-as credential or a member's pre-migration credential.
+//     and requireDMCredential refuses a full-scope non-human caller before
+//     checking provenance, with 403 forbidden audited agents_use_mcp
+//     (pkg/schema/dm.go; ADR-017 Decision 14). An own_sign_in_required audit
+//     row can come from an act-as credential or a member's pre-migration
+//     credential.
 //
 // The per-person stream (#2040), conversation routes (#2019) and private
 // call routes (#2030) are registered here. Every route that reads or writes
@@ -48,102 +48,114 @@ import (
 //
 // A route that serves both a person's own data and anything else (one
 // socket for channels and DMs, say) cannot be listed whole without
-// refusing the rest: it calls selfMadeCredential itself before it sends the
+// refusing the rest: it calls dmCredentialRefusal itself before it sends the
 // person's own data.
-var selfMadeCredentialRoutes = map[string]bool{
+var selfMadeCredentialRoutes = map[string]dmGuestPolicy{
 	// The per-person events stream (#2040): DM frames and rings for the
 	// caller alone. A ticket-opened socket is judged by its credential's
 	// stored provenance (requestCredentialSelfMade).
-	"GET /v1/events/person/ws": true,
+	"GET /v1/events/person/ws": dmGuestForbidden,
 	// Open, resume, list, read one and set the caller's own state of a
 	// conversation (#2019). Reads are refused too.
-	"POST /v1/dms":                     true,
-	"GET /v1/dms":                      true,
-	"GET /v1/dms/{conversation}":       true,
-	"PUT /v1/dms/{conversation}/state": true,
-	// The seven private call routes (#2030, ADR-017 Decision 7): an invite,
-	// the history of a pair, the reconnect snapshot and the four actions.
-	// Their handlers rely on this guard. The media-join route (#2032)
-	// requires the same credential provenance.
-	"POST /v1/dms/{conversation}/calls": true,
-	"GET /v1/dms/{conversation}/calls":  true,
-	"GET /v1/calls/current":             true,
-	"POST /v1/calls/{call}/accept":      true,
-	"POST /v1/calls/{call}/decline":     true,
-	"POST /v1/calls/{call}/cancel":      true,
-	"POST /v1/calls/{call}/hangup":      true,
-	"POST /v1/calls/{call}/session":     true,
+	"POST /v1/dms":                     dmGuestForbidden,
+	"GET /v1/dms":                      dmGuestForbidden,
+	"GET /v1/dms/{conversation}":       dmGuestForbidden,
+	"PUT /v1/dms/{conversation}/state": dmGuestForbidden,
+	// Private calls (ADR-017 Decision 7): invites, history, the reconnect
+	// snapshot and actions (#2030), plus media joins (#2032).
+	"POST /v1/dms/{conversation}/calls": privateCallGuestForbidden,
+	"GET /v1/dms/{conversation}/calls":  privateCallGuestForbidden,
+	"GET /v1/calls/current":             privateCallGuestForbidden,
+	"POST /v1/calls/{call}/accept":      privateCallGuestForbidden,
+	"POST /v1/calls/{call}/decline":     privateCallGuestForbidden,
+	"POST /v1/calls/{call}/cancel":      privateCallGuestForbidden,
+	"POST /v1/calls/{call}/hangup":      privateCallGuestForbidden,
+	"POST /v1/calls/{call}/session":     privateCallGuestForbidden,
 }
 
-// requireSelfMadeCredential wraps next so it runs only for a request whose
-// credential is self-made (selfMadeCredential); any other gets the answer
-// selfMadeCredential writes.
-func (s *Server) requireSelfMadeCredential(next http.Handler) http.Handler {
+// dmGuestPolicy preserves the guest response each route used before sharing
+// its credential check with whoami.
+type dmGuestPolicy int
+
+const (
+	dmGuestForbidden dmGuestPolicy = iota
+	privateCallGuestForbidden
+)
+
+// requireDMCredential enforces the credential decision and writes and audits
+// refusals. The handlers check for a missing identity themselves under AuthOff.
+func (s *Server) requireDMCredential(next http.Handler, guestPolicy dmGuestPolicy) http.Handler {
+	if !s.cfg.authRequired() {
+		return next
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !s.selfMadeCredential(w, r) {
+		ctx := r.Context()
+		refusal, err := s.dmCredentialRefusal(ctx)
+		if err != nil {
+			slog.ErrorContext(ctx, "provenance: read credential failed", "error", err)
+			writeInternalError(w)
 			return
 		}
-		next.ServeHTTP(w, r)
+		caller, _ := callerFrom(ctx)
+		switch refusal {
+		case "":
+			next.ServeHTTP(w, r)
+		case errUnauthenticated.Code:
+			writeUnauthenticated(w)
+		case schema.ErrorCodeSetupIncomplete:
+			writeSetupScopeRefused(w)
+		case errForbidden.Code:
+			subject := r.Pattern
+			if subject == "" {
+				subject = "<unmatched>"
+			}
+			s.auditAgentDenial(ctx, caller.ID, subject, "", 0, denyAgentOnHumanRoute)
+			writeError(w, http.StatusForbidden, errForbidden.Code, "agents cannot use a person's direct messages or calls")
+		case schema.ErrorCodeOwnSignInRequired:
+			s.refuseCredentialMadeByAnother(w, r, caller)
+		case schema.ErrorCodeGuestNotAllowed:
+			if guestPolicy == privateCallGuestForbidden {
+				w.Header().Set("Cache-Control", "no-store")
+				writeError(w, http.StatusForbidden, errForbidden.Code, "private calls require a human member")
+			} else {
+				s.denyForbidden(w, r, caller, schema.ErrorCodeGuestNotAllowed, "a guest cannot do this")
+			}
+		default:
+			writeInternalError(w)
+		}
 	})
 }
 
-// selfMadeCredential reports whether the request's credential was made by
-// its own principal (store.RequestCredential.SelfMade, provenance.go in the
-// store). When it was not, it has written the answer and the caller writes
-// nothing more. The order of refusals: a non-human caller first, 403
-// forbidden audited as agents_use_mcp (the agent is told nothing about
-// signing in, which is wording for people); then 403
-// own_sign_in_required, audited as a denial, for a person's credential made
-// by another; 401 when the request has no credential at
-// all, which under AuthRequired is a wiring bug and denies; 500 when the
-// store cannot say. A ticket-authenticated socket has its credential's id
-// but not the rest, so the provenance is read from the store by that id.
-//
-// Under AuthOff there are no credentials and every request is the system
-// actor, as for every other check guard makes: it reports true.
-//
-// A previewed request (Conch-Preview-As) is refused whatever the
-// credential: the administrator would be reading as the member.
-func (s *Server) selfMadeCredential(w http.ResponseWriter, r *http.Request) bool {
-	if !s.cfg.authRequired() {
-		return true
-	}
-	ctx := r.Context()
+// dmCredentialRefusal is the credential gate shared by whoami, DMs and
+// private calls. It returns the refusal code or a store error without writing
+// a response or an audit row. Authentication has checked liveness and
+// already requires full scope for tickets. A setup bearer can reach whoami.
+func (s *Server) dmCredentialRefusal(ctx context.Context) (string, error) {
 	caller, ok := callerFrom(ctx)
 	if !ok {
-		writeUnauthenticated(w)
-		return false
+		return errUnauthenticated.Code, nil
+	}
+	if cred, ok := requestCredentialFrom(ctx); ok && (cred.Scope != schema.CredentialScopeFull || cred.SetupTOTPOnly) {
+		return schema.ErrorCodeSetupIncomplete, nil
 	}
 	if caller.Kind != store.PrincipalHuman {
-		subject := r.Pattern
-		if subject == "" {
-			subject = "<unmatched>"
-		}
-		s.auditAgentDenial(ctx, caller.ID, subject, "", 0, denyAgentOnHumanRoute)
-		writeError(w, http.StatusForbidden, errForbidden.Code, "agents cannot use a person's direct messages or calls")
-		return false
+		return errForbidden.Code, nil
 	}
 	if _, previewed := previewFrom(ctx); previewed {
-		s.refuseCredentialMadeByAnother(w, r, caller)
-		return false
+		return schema.ErrorCodeOwnSignInRequired, nil
 	}
 	self, err := s.requestCredentialSelfMade(ctx)
 	switch {
 	case errors.Is(err, errNoRequestCredential), errors.Is(err, store.ErrCredentialNotFound):
-		// No credential under AuthRequired is never the middleware's doing:
-		// deny rather than allow.
-		writeUnauthenticated(w)
-		return false
+		return errUnauthenticated.Code, nil
 	case err != nil:
-		slog.ErrorContext(ctx, "provenance: read credential failed", "error", err)
-		writeInternalError(w)
-		return false
+		return "", err
+	case !self:
+		return schema.ErrorCodeOwnSignInRequired, nil
+	case caller.GuestState != "" && caller.GuestState != schema.GuestStateConverted:
+		return schema.ErrorCodeGuestNotAllowed, nil
 	}
-	if !self {
-		s.refuseCredentialMadeByAnother(w, r, caller)
-		return false
-	}
-	return true
+	return "", nil
 }
 
 // errNoRequestCredential is a request that carries no credential.

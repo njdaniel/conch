@@ -121,6 +121,17 @@ type WhoAmIResponseV1 struct {
 	// Permissions; a server with it always sends it (it is at least 1), so
 	// a revision with no Permissions means the caller holds none.
 	PermissionsRevision int64 `json:"permissions_revision,omitempty"`
+	// Capabilities describes what the current credential can access.
+	// Omission means no capabilities are advertised.
+	Capabilities *WhoAmICapabilitiesV1 `json:"capabilities,omitempty"`
+}
+
+// WhoAmICapabilitiesV1 describes the optional capabilities in a whoami response.
+type WhoAmICapabilitiesV1 struct {
+	// DM is true when the credential is eligible for DM and private-call
+	// routes. Omission means false. Individual requests still have their
+	// own conversation and call checks.
+	DM bool `json:"dm,omitempty"`
 }
 
 // Validate reports whether r is a well-formed whoami response: server_mode,

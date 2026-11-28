@@ -29,10 +29,9 @@ func (s *Server) routeTable() []route {
 		{pattern: "GET /v1/events/ws", access: accessAuthenticated, handler: hf(s.handleEventsWS), acceptsTicket: true},
 		// The per-person events stream (issue #2040): DM frames and, later,
 		// rings, scoped to the caller, with no channel. A credential the person
-		// made for themselves only: the route is in selfMadeCredentialRoutes,
-		// which refuses another's credential and an agent (403
-		// own_sign_in_required), and the handler refuses a guest, all before
-		// the upgrade. It takes a ticket, as the channel socket does.
+		// made for themselves only: requireDMCredential refuses guests, agents
+		// and credentials made by someone else before the upgrade. It takes
+		// a ticket, as the channel socket does.
 		{pattern: "GET /v1/events/person/ws", access: accessAuthenticated, handler: hf(s.handlePersonEventsWS), acceptsTicket: true},
 		rt("POST /v1/ws-tickets", accessAuthenticated, hf(s.handleCreateWSTicket)),
 		rt("GET /v1/whoami", accessAuthenticated, hf(s.handleWhoAmI)),
@@ -43,7 +42,9 @@ func (s *Server) routeTable() []route {
 		rt("POST /v1/calls/{call}/decline", accessAuthenticated, s.privateCallAction(schema.PrivateCallEventDecline, callActions)),
 		rt("POST /v1/calls/{call}/cancel", accessAuthenticated, s.privateCallAction(schema.PrivateCallEventCancel, callActions)),
 		rt("POST /v1/calls/{call}/hangup", accessAuthenticated, s.privateCallAction(schema.PrivateCallEventHangup, callActions)),
-		rt("POST /v1/calls/{call}/session", accessAuthenticated, hf(s.handlePrivateCallSession)),
+		rt("POST /v1/calls/{call}/session", accessAuthenticated, hf(func(w http.ResponseWriter, r *http.Request) {
+			s.handlePrivateCallSession(w, r, callActions)
+		})),
 		// Preview as member (issue #1515): the entry read of the one request
 		// header, Conch-Preview-As. It is one of the five previewable routes.
 		rt("GET /v1/preview", accessAuthenticated, hf(s.handlePreview)).asPreviewable(),

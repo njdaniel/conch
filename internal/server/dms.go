@@ -112,23 +112,12 @@ func writeDMRefusal(w http.ResponseWriter, status int, code string) {
 	writeJSON(w, status, body)
 }
 
-// dmCaller is the check every DM route starts with: a verified person. The
-// guard has already refused a credential another made (selfMadeCredentialRoutes);
-// this keeps the agent and guest refusals of every people-only route, and
-// with authentication off there is no person to hold a conversation.
-func (s *Server) dmCaller(w http.ResponseWriter, r *http.Request) (store.Principal, bool) {
+// dmCaller gets the person admitted by requireDMCredential. With
+// authentication off there is no person to hold a conversation.
+func dmCaller(w http.ResponseWriter, r *http.Request) (store.Principal, bool) {
 	caller, ok := callerFrom(r.Context())
 	if !ok {
 		writeDMRefusal(w, http.StatusBadRequest, schema.ErrorCodeDMRequireAuth)
-		return store.Principal{}, false
-	}
-	switch {
-	case caller.Kind != store.PrincipalHuman:
-		s.auditAgentDenial(r.Context(), caller.ID, r.Pattern, "", 0, denyAgentOnHumanRoute)
-		writeError(w, http.StatusForbidden, errForbidden.Code, "direct messages are for people")
-		return store.Principal{}, false
-	case caller.IsGuest():
-		s.denyForbidden(w, r, caller, schema.ErrorCodeGuestNotAllowed, "a guest cannot do this")
 		return store.Principal{}, false
 	}
 	return caller, true
@@ -166,7 +155,7 @@ func dmConversationDoc(c store.DMConversation) schema.DMConversationV1 {
 // handleOpenDM serves POST /v1/dms.
 func (s *Server) handleOpenDM(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	caller, ok := s.dmCaller(w, r)
+	caller, ok := dmCaller(w, r)
 	if !ok {
 		return
 	}
@@ -206,7 +195,7 @@ func (s *Server) handleOpenDM(w http.ResponseWriter, r *http.Request) {
 // open is not in theirs.
 func (s *Server) handleListDMs(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	caller, ok := s.dmCaller(w, r)
+	caller, ok := dmCaller(w, r)
 	if !ok {
 		return
 	}
@@ -258,7 +247,7 @@ func (s *Server) handleListDMs(w http.ResponseWriter, r *http.Request) {
 // is not part of, one that does not exist and an empty one its peer opened
 // all answer the same 404 dm_not_found, whatever the caller's role.
 func (s *Server) handleGetDM(w http.ResponseWriter, r *http.Request) {
-	caller, ok := s.dmCaller(w, r)
+	caller, ok := dmCaller(w, r)
 	if !ok {
 		return
 	}
@@ -282,7 +271,7 @@ func (s *Server) handleGetDM(w http.ResponseWriter, r *http.Request) {
 // archive, hide or reopen. It changes nothing for the peer, sends the peer
 // nothing and needs no contact eligibility.
 func (s *Server) handleSetDMState(w http.ResponseWriter, r *http.Request) {
-	caller, ok := s.dmCaller(w, r)
+	caller, ok := dmCaller(w, r)
 	if !ok {
 		return
 	}

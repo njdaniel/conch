@@ -404,12 +404,9 @@ func (s *Server) personSnapshot(ctx context.Context, principalID int64) (schema.
 	return snap, nil
 }
 
-// personStreamCaller is the check before the upgrade: a verified person with
-// a credential. The guard has already refused agents and checked credential
-// provenance (selfMadeCredentialRoutes). This check refuses guests and also
-// refuses and audits any agent that reaches it without the guard. With
-// authentication off there is no verified person.
-func (s *Server) personStreamCaller(w http.ResponseWriter, r *http.Request) (store.Principal, int64, bool) {
+// personStreamCaller reads the identity admitted by requireDMCredential and
+// checks the upgrade request. With authentication off there is no caller.
+func personStreamCaller(w http.ResponseWriter, r *http.Request) (store.Principal, int64, bool) {
 	caller, ok := callerFrom(r.Context())
 	if !ok {
 		writeError(w, http.StatusBadRequest, schema.ErrorCodeDMRequireAuth, "the person stream requires authentication")
@@ -420,30 +417,17 @@ func (s *Server) personStreamCaller(w http.ResponseWriter, r *http.Request) (sto
 		writeUnauthenticated(w)
 		return store.Principal{}, 0, false
 	}
-	switch {
-	case caller.Kind != store.PrincipalHuman:
-		s.auditAgentDenial(r.Context(), caller.ID, r.Pattern, "", 0, denyAgentOnHumanRoute)
-		writeError(w, http.StatusForbidden, errForbidden.Code, "the person stream is for people")
-		return store.Principal{}, 0, false
-	case caller.IsGuest():
-		s.denyForbidden(w, r, caller, schema.ErrorCodeGuestNotAllowed, "a guest cannot do this")
-		return store.Principal{}, 0, false
-	case caller.DisabledAt != nil || caller.HiddenAt != nil:
+	if caller.DisabledAt != nil || caller.HiddenAt != nil {
 		writeUnauthenticated(w)
 		return store.Principal{}, 0, false
 	}
-	// An ordinary HTTP request cannot upgrade and needs no provenance read.
+	// An ordinary HTTP request cannot upgrade.
 	if len(r.Header.Values("Upgrade")) == 0 {
 		w.Header().Set("Connection", "Upgrade")
 		w.Header().Set("Upgrade", "websocket")
 		http.Error(w, "a WebSocket upgrade is required", http.StatusUpgradeRequired)
 		return store.Principal{}, 0, false
 	}
-	// Provenance (a credential the person made for themselves, not an
-	// operator's act-as credential or sign-in link) is checked by guard before
-	// this handler runs: the route is in selfMadeCredentialRoutes (#2042,
-	// #2047), which answers 403 own_sign_in_required for a ticket as for a
-	// bearer.
 	return caller, credID, true
 }
 
@@ -480,7 +464,7 @@ func (s *Server) personStillAllowed(ctx context.Context, principalID, credID int
 // nothing is upgraded for a refusal.
 func (s *Server) handlePersonEventsWS(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	caller, credID, ok := s.personStreamCaller(w, r)
+	caller, credID, ok := personStreamCaller(w, r)
 	if !ok {
 		return
 	}

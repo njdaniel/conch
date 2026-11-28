@@ -467,6 +467,64 @@ func TestPrivateCallMediaDeletionWaitsForCreate(t *testing.T) {
 	}
 }
 
+func TestPrivateCallMediaSessionWaitsBehindDeletion(t *testing.T) {
+	f, _, bobTok, _ := privateCallHTTPFixture(t)
+	media := addFakePrivateCallMedia(t, f.srv)
+	call := answerPrivateCallMediaTest(t, f, invitePrivateCallMediaTest(t, f, "first"), bobTok, "answer")
+	path := "/v1/calls/" + call.ID
+	session := privateCallSessionTest(t, f.do(t, "POST", path+"/session", f.aliceTok, ""))
+
+	preparing := make(chan struct{})
+	now := f.srv.now()
+	clockReads := 0
+	f.srv.now = func() time.Time {
+		clockReads++
+		// The request reads the clock for rate limiting, then again inside
+		// the preparation transaction, where it holds SQLite's write lock.
+		if clockReads == 2 {
+			close(preparing)
+		}
+		return now
+	}
+	unlock := sync.OnceFunc(f.srv.voice.lockPrivateCallRoom(session.Room))
+	done := make(chan struct{})
+	var rec *httptest.ResponseRecorder
+	go func() {
+		defer close(done)
+		rec = f.do(t, "POST", path+"/session", bobTok, "")
+	}()
+	defer func() {
+		unlock()
+		<-done
+	}()
+	select {
+	case <-preparing:
+	case <-done:
+		t.Fatalf("session returned %d before preparing the room", rec.Code)
+	case <-time.After(5 * time.Second):
+		t.Fatal("session did not reach the preparation transaction")
+	}
+	// Hangup must serialize after preparation. Finish deletion under the
+	// room lock before the prepared request can proceed to CreateRoom.
+	decodePrivateCallResponse(t, f.do(t, "POST", path+"/hangup", f.aliceTok,
+		privateCallTestCommand(call, "hangup")), http.StatusOK)
+	if err := media.DeleteRoom(t.Context(), session.Room); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.srv.store.MarkPrivateCallMediaDeleted(t.Context(), session.Room); err != nil {
+		t.Fatal(err)
+	}
+	unlock()
+	<-done
+	privateCallTestConflict(t, rec, schema.PrivateCallStateEnded)
+	if _, exists := media.rooms[session.Room]; exists {
+		t.Error("the waiting session recreated the retired room")
+	}
+	if len(media.signed) != 1 {
+		t.Error("the waiting session signed a grant for the retired room")
+	}
+}
+
 // Private-call integration measurements to take (LiveKit 1.13.7,
 // synchronized clocks):
 // Record grant-to-join, revocation-commit-to-disconnect and stale-rejoin-to-

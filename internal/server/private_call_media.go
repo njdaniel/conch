@@ -34,9 +34,13 @@ func (p *voicePoller) privateCallMedia() privateCallMediaService {
 	return nil
 }
 
-func (s *Server) handlePrivateCallSession(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.privateCallActor(w, r)
+func (s *Server) handlePrivateCallSession(w http.ResponseWriter, r *http.Request, limit *channelWriteLimiter) {
+	actor, ok := privateCallActor(w, r)
 	if !ok {
+		return
+	}
+	if allowed, retry := limit.take(actor.PrincipalID, 0, s.now()); !allowed {
+		writeRateLimited(w, &rateLimitedError{retryAfter: retry})
 		return
 	}
 	id := r.PathValue("call")

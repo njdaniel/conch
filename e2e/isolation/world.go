@@ -79,6 +79,7 @@ type group struct {
 	interID   int64
 	// dmID is a conversation of A's: ann opened it with abe (issue #2019).
 	dmID     int64
+	callID   string // A's accepted attempt in that conversation
 	approval int64
 	// agentSession is the group agent's own session (B only).
 	agentSession int64

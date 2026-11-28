@@ -34,9 +34,10 @@ var privateCallMediaWatchMigration = []string{
 	`CREATE INDEX private_calls_ended_at ON private_calls (ended_at) WHERE ended_at IS NOT NULL`,
 }
 
-// The pinned LiveKit issues refresh tokens for 10 minutes and allows about
-// 60 seconds of expiry leeway. Watch for recreated rooms on the fast pass
-// for that long after retirement. The orphan sweep checks older rooms.
+// Watch retired rooms on the fast pass for one refresh token's 10-minute
+// lifetime plus about a minute of LiveKit expiry leeway. With room.auto_create
+// disabled, a retired room name cannot be recreated. If enabled, each rejoin
+// yields a fresh refresh token, so the orphan sweep keeps checking older rooms.
 const privateCallMediaWatchWindow = 11 * time.Minute
 
 func retireCallRoom(ctx context.Context, tx execer, id string) error {
