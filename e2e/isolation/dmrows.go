@@ -10,9 +10,10 @@ import (
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
-// Local direct messages (issues #2019 and #2021, ADR-017). Bea uses her own
-// credential and can open and list her conversations. Ola uses one issued by
-// the operator and gets 403 own_sign_in_required on every DM route.
+// Local direct messages (ADR-017). Bea uses her own credential to open and
+// list her conversations and set her contact preference. Ola uses one issued
+// by the operator and gets 403 own_sign_in_required on the member routes.
+// Both are refused the operator's server-wide switch (#2235).
 //
 // Bea names Ann and Abe's conversation and gets the same 404 dm_not_found
 // as for a conversation that never existed. When she uses their message ID
@@ -38,6 +39,16 @@ func dmMatrixRows() []row {
 			probe: func(w *world, _ subject) probe { return post("/v1/dms", schema.OpenDMRequestV1{PeerID: bobOf(w)}) }},
 		{route: "GET /v1/dms", what: "lists her own inbox", own: true, withoutPassword: personNotOwn, inspect: checkDMInbox,
 			probe: func(*world, subject) probe { return get("/v1/dms") }},
+		{route: "GET /v1/dms/preferences", what: "reads her own contact preference", own: true, withoutPassword: personNotOwn, inspect: checkDMPreferences,
+			probe: func(*world, subject) probe { return get("/v1/dms/preferences") }},
+		{route: "PUT /v1/dms/preferences", what: "sets her own contact preference", own: true, withoutPassword: personNotOwn, inspect: checkDMPreferences,
+			probe: func(*world, subject) probe { return put("/v1/dms/preferences", schema.DefaultDMPreferences()) }},
+		{route: "GET /v1/dms/settings", what: "reads the operator's server-wide DM switch", want: operatorOnly,
+			probe: func(*world, subject) probe { return get("/v1/dms/settings") }},
+		{route: "PUT /v1/dms/settings", what: "turns off DMs server-wide as a member", want: operatorOnly,
+			probe: func(*world, subject) probe {
+				return put("/v1/dms/settings", schema.DMServerSettingsV1{DMsEnabled: false})
+			}},
 		{route: "GET /v1/dms/{conversation}", what: "reads A's conversation by id", pick: aConversation, want: dmNotFound, withoutPassword: personNotOwn,
 			probe: func(_ *world, s subject) probe { return get("/v1/dms/" + id(s.id)) }},
 		{route: "PUT /v1/dms/{conversation}/state", what: "hides A's conversation by id", pick: aConversation, want: dmNotFound, withoutPassword: personNotOwn,
@@ -60,6 +71,19 @@ func dmMatrixRows() []row {
 			probe: func(w *world, s subject) probe { return get(dmMessagesPath(w.b.dmID) + "?" + cursor.query + id(s.id)) }})
 	}
 	return rows
+}
+
+func checkDMPreferences(_ *world, _ api, body []byte) error {
+	var prefs schema.DMPreferencesV1
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&prefs); err != nil {
+		return fmt.Errorf("invalid DM preference response: %w", err)
+	}
+	if want := schema.DefaultDMPreferences(); prefs != want {
+		return fmt.Errorf("DM preference = %+v, want %+v", prefs, want)
+	}
+	return nil
 }
 
 var dmMessageRoutes = []struct {

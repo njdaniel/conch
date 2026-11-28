@@ -130,7 +130,9 @@ func answerCode(t *testing.T, rec *httptest.ResponseRecorder) string {
 // (issue #2042). A self-made credential is never refused on that ground;
 // what the route then answers is the route's own. An agent is refused first,
 // with 403 forbidden audited agents_use_mcp, never own_sign_in_required
-// (issue #2098). A guest's own credential passes provenance.
+// (issue #2098). A guest's own credential passes provenance. For the
+// server-wide settings the access class runs first, and the route tests
+// exercise provenance with an operator that has the required access.
 func TestSelfMadeCredentialRoutesRefuseOthers(t *testing.T) {
 	f := newProvenanceFixture(t)
 	guest := f.seedGuest(t, "Pat")
@@ -161,6 +163,13 @@ func TestSelfMadeCredentialRoutesRefuseOthers(t *testing.T) {
 			{"guest's own visit", guest.Token, true, false},
 		} {
 			t.Run(pattern+"/"+tt.name, func(t *testing.T) {
+				access := f.srv.routeByPattern[pattern].access
+				if (access == accessOperator || access == accessPermission) && tt.token != f.rootTok {
+					rec := httptest.NewRecorder()
+					serve(rec, requestFor(pattern, tt.token))
+					assertErrorBody(t, rec, http.StatusForbidden, errForbidden.Code)
+					return
+				}
 				var auditBefore int64
 				if tt.agent {
 					var err error
@@ -212,6 +221,10 @@ func TestSelfMadeCredentialRoutesIncludeRequired(t *testing.T) {
 		"POST /v1/dms/{conversation}/messages",
 		"PATCH /v1/dms/{conversation}/messages/{message}",
 		"DELETE /v1/dms/{conversation}/messages/{message}",
+		"GET /v1/dms/preferences",
+		"PUT /v1/dms/preferences",
+		"GET /v1/dms/settings",
+		"PUT /v1/dms/settings",
 		// The private call routes (#2030).
 		"POST /v1/dms/{conversation}/calls",
 		"GET /v1/dms/{conversation}/calls",
@@ -304,20 +317,16 @@ func TestSelfMadeCredentialCheck(t *testing.T) {
 // Every route in selfMadeCredentialRoutes is registered, authenticated
 // (an exempt route has no credential to judge), not previewable (a preview
 // reads as the member, which these routes exist to prevent) and out of the
-// setup scope. Every registered DM and call route is covered unless exempted.
+// setup scope. Every registered DM and call route is covered.
 func TestSelfMadeCredentialRoutes(t *testing.T) {
 	srv := newTestServerWithConfig(t, Config{AuthMode: AuthRequired})
-	// Future operator switch routes may be exempted by their full pattern,
-	// with a comment explaining the operator permission that gates each one.
-	dmAndCallCredentialExemptions := map[string]bool{}
 	for pattern := range srv.routeByPattern {
 		path := pattern
 		if _, rest, ok := strings.Cut(pattern, " "); ok {
 			path = rest
 		}
 		_, guarded := selfMadeCredentialRoutes[pattern]
-		if (strings.HasPrefix(path, "/v1/dms") || strings.HasPrefix(path, "/v1/calls")) &&
-			!dmAndCallCredentialExemptions[pattern] && !guarded {
+		if (strings.HasPrefix(path, "/v1/dms") || strings.HasPrefix(path, "/v1/calls")) && !guarded {
 			t.Errorf("registered DM or call route %s is missing from selfMadeCredentialRoutes", pattern)
 		}
 	}

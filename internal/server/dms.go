@@ -112,8 +112,8 @@ func writeDMRefusal(w http.ResponseWriter, status int, code string) {
 	writeJSON(w, status, body)
 }
 
-// dmCaller gets the person admitted by requireDMCredential. With
-// authentication off there is no person to hold a conversation.
+// dmCaller gets the person admitted by requireDMCredential. DM routes
+// require a caller even when authentication is off.
 func dmCaller(w http.ResponseWriter, r *http.Request) (store.Principal, bool) {
 	caller, ok := callerFrom(r.Context())
 	if !ok {

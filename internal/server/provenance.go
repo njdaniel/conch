@@ -12,12 +12,11 @@ import (
 
 // selfMadeCredentialRoutes are the routes that require a full-scope
 // credential a human member or operator made for themselves (issue #2042,
-// child of #2013): a person's direct messages, their calls and their
+// child of #2013): direct messages and their settings, private calls and the
 // per-person stream. act_as_members lets an operator mint a credential
-// or a sign-in link for any member who is not an owner; on these
-// routes such a credential gets 403 own_sign_in_required, so the operator
-// can still sign in and post as the member but cannot read their DMs or
-// join their calls. Every other route is unchanged.
+// or a sign-in link for a non-owner. On these routes the access class runs
+// first, then provenance refuses such credentials with 403
+// own_sign_in_required.
 //
 // guard wraps every route named here with requireDMCredential, under
 // AuthRequired, outside the recent-auth gate, so a credential made by
@@ -35,12 +34,12 @@ import (
 //   - MCP tools bypass guard: /mcp has its own bearer authentication and
 //     never passes through this check. No MCP tool may read or write a
 //     person's DMs or calls.
-//   - An agent can never pass: ADR-017 confirms agents reach no DM or call,
-//     and requireDMCredential refuses a full-scope non-human caller before
-//     checking provenance, with 403 forbidden audited agents_use_mcp
-//     (pkg/schema/dm.go; ADR-017 Decision 14). An own_sign_in_required audit
-//     row can come from an act-as credential or a member's pre-migration
-//     credential.
+//   - An agent can never pass: ADR-017 confirms agents reach no DM or call.
+//     On routes of class accessAuthenticated, requireDMCredential refuses a
+//     full-scope non-human caller before checking provenance, with 403
+//     forbidden audited agents_use_mcp (ADR-017 Decision 14). An
+//     own_sign_in_required audit row can come from an act-as credential or
+//     a member's pre-migration credential.
 //
 // Every route that reads or writes a person's DMs or calls belongs here,
 // sockets included.
@@ -65,6 +64,11 @@ var selfMadeCredentialRoutes = map[string]dmGuestPolicy{
 	"POST /v1/dms/{conversation}/messages":             dmGuestForbidden,
 	"PATCH /v1/dms/{conversation}/messages/{message}":  dmGuestForbidden,
 	"DELETE /v1/dms/{conversation}/messages/{message}": dmGuestForbidden,
+	// The caller's own contact preference and the operator's server switch (#2235).
+	"GET /v1/dms/preferences": dmGuestForbidden,
+	"PUT /v1/dms/preferences": dmGuestForbidden,
+	"GET /v1/dms/settings":    dmGuestForbidden,
+	"PUT /v1/dms/settings":    dmGuestForbidden,
 	// The seven private call routes (#2030, ADR-017 Decision 7): an invite,
 	// the history of a pair, the reconnect snapshot and the four actions.
 	// The media-join route (#2032) joins this list in its own change.
@@ -185,5 +189,5 @@ func (s *Server) requestCredentialSelfMade(ctx context.Context) (bool, error) {
 // as every refusal of an authorization check is.
 func (s *Server) refuseCredentialMadeByAnother(w http.ResponseWriter, r *http.Request, caller store.Principal) {
 	s.denyForbidden(w, r, caller, schema.ErrorCodeOwnSignInRequired,
-		"this is a member's own conversation or call, and this sign-in was made by someone else (an operator's credential or sign-in link, or one older than this check): sign in yourself, with your password or a device link you made, and try again")
+		"this action requires your own sign-in. Sign in with your password or a device link you made, then try again")
 }

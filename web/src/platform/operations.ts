@@ -28,6 +28,7 @@ import {
   createInviteResponseV2,
   disableJoinersRequestV1,
   disableJoinersResponseV1,
+  dmPreferencesV1,
   invitePreviewV2,
   createProblemReportRequestV1,
   createProblemReportResponseV1,
@@ -404,6 +405,9 @@ export const operations = {
   endPushRegistration: op('DELETE', '/v1/push/registrations/{id}', 'bearer'),
   getNotificationPreferences: op('GET', '/v1/notifications/preferences', 'bearer', { response: reply(notificationPreferencesV1) }),
   putNotificationPreferences: op('PUT', '/v1/notifications/preferences', 'bearer', { request: check(putNotificationPreferencesRequestV1), response: reply(notificationPreferencesV1) }),
+  // Direct-message contact preferences belong to the signed-in person.
+  getDmPreferences: op('GET', '/v1/dms/preferences', 'bearer', { response: reply(dmPreferencesV1) }),
+  putDmPreferences: op('PUT', '/v1/dms/preferences', 'bearer', { request: check(dmPreferencesV1), response: reply(dmPreferencesV1) }),
   // Personal blocks (issue #1832): the caller's own list, no other's.
   listBlocks: op('GET', '/v1/blocks', 'bearer', { response: reply(listBlocksResponseV1) }),
   putBlock: op('PUT', '/v1/blocks/{principal}', 'bearer', { response: reply(blockV1) }),
