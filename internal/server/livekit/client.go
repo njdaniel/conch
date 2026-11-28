@@ -287,6 +287,16 @@ func (p wireParticipant) participant() Participant {
 // ListParticipants returns the participants of room. A room LiveKit does not
 // have is an empty list, not an error (measured on 1.13.7).
 func (c *Client) ListParticipants(ctx context.Context, room string) ([]Participant, error) {
+	return c.listParticipants(ctx, room, false)
+}
+
+// ListParticipantsIfRoomExists treats a missing room as an empty one. Private
+// calls use this to observe disconnects when LiveKit has closed an empty room.
+func (c *Client) ListParticipantsIfRoomExists(ctx context.Context, room string) ([]Participant, error) {
+	return c.listParticipants(ctx, room, true)
+}
+
+func (c *Client) listParticipants(ctx context.Context, room string, allowMissing bool) ([]Participant, error) {
 	var resp struct {
 		Participants []wireParticipant `json:"participants"`
 	}
@@ -297,6 +307,10 @@ func (c *Client) ListParticipants(ctx context.Context, room string) ([]Participa
 	}
 	grant := adminGrant{RoomAdmin: true, Room: room}
 	if err := c.call(ctx, "ListParticipants", grant, map[string]any{"room": room}, &resp); err != nil {
+		var status httpStatusError
+		if allowMissing && errors.As(err, &status) && status.status == http.StatusNotFound && status.twirpCode == "not_found" {
+			return nil, nil
+		}
 		return nil, err
 	}
 	out := make([]Participant, 0, len(resp.Participants))

@@ -77,8 +77,9 @@ type group struct {
 	sessionID   int64
 	runID       int64
 	interID     int64
-	dmID        int64 // Ann with Abe for A, Bea with Bob for B
-	dmMessageID int64 // the message Ann sent to Abe (A only)
+	dmID        int64  // Ann with Abe for A, Bea with Bob for B
+	dmMessageID int64  // the message Ann sent to Abe (A only)
+	callID      string // A's accepted attempt in that conversation
 	approval    int64
 	// agentSession is the group agent's own session (B only).
 	agentSession int64

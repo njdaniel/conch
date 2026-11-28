@@ -157,6 +157,8 @@ type DMConversation struct {
 	Revision int64
 	// State is the viewer's own archive/hide state; open when never set.
 	State schema.DMState
+	// HasViewerState reports whether the viewer has a persisted state row.
+	HasViewerState bool
 	// LastMessageID is the newest message's id, 0 when there is none, and
 	// LastMessageAt when it was posted (zero when there is none). A removed
 	// message still counts: its tombstone keeps its place.
@@ -168,7 +170,7 @@ type DMConversation struct {
 
 // dmSelectConversation reads one conversation's per-viewer columns; ?1 is the
 // viewer and ?2 the conversation.
-const dmSelectConversation = `SELECT c.id, c.lo, c.hi, COALESCE(fm.created_at, 0), COALESCE(vs.state, 'open'),
+const dmSelectConversation = `SELECT c.id, c.lo, c.hi, COALESCE(fm.created_at, 0), COALESCE(vs.state, 'open'), vs.principal_id IS NOT NULL,
 	COALESCE(lm.id, 0), COALESCE(lm.created_at, 0), COALESCE(rm.last_read_id, 0),
 	COALESCE((SELECT MAX(revision) FROM direct_messages WHERE conversation_id = c.id), 0)
 	FROM dm_conversations c
@@ -181,7 +183,7 @@ func scanDMConversation(row interface{ Scan(...any) error }, viewer int64) (DMCo
 	var c DMConversation
 	var created, lastAt int64
 	var state string
-	if err := row.Scan(&c.ID, &c.Lo, &c.Hi, &created, &state, &c.LastMessageID, &lastAt, &c.LastReadID, &c.Revision); err != nil {
+	if err := row.Scan(&c.ID, &c.Lo, &c.Hi, &created, &state, &c.HasViewerState, &c.LastMessageID, &lastAt, &c.LastReadID, &c.Revision); err != nil {
 		return DMConversation{}, err
 	}
 	if c.Revision > 0 {

@@ -42,6 +42,9 @@ func (s *Server) routeTable() []route {
 		rt("POST /v1/calls/{call}/decline", accessAuthenticated, s.privateCallAction(schema.PrivateCallEventDecline, callActions)),
 		rt("POST /v1/calls/{call}/cancel", accessAuthenticated, s.privateCallAction(schema.PrivateCallEventCancel, callActions)),
 		rt("POST /v1/calls/{call}/hangup", accessAuthenticated, s.privateCallAction(schema.PrivateCallEventHangup, callActions)),
+		rt("POST /v1/calls/{call}/session", accessAuthenticated, hf(func(w http.ResponseWriter, r *http.Request) {
+			s.handlePrivateCallSession(w, r, callActions)
+		})),
 		// Preview as member (issue #1515): the entry read of the one request
 		// header, Conch-Preview-As. It is one of the five previewable routes.
 		rt("GET /v1/preview", accessAuthenticated, hf(s.handlePreview)).asPreviewable(),
