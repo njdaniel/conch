@@ -221,11 +221,15 @@ func (s *Server) routeTable() []route {
 		rt("GET /v1/notifications/preferences", accessAuthenticated, s.membersOnly(hf(s.handleGetNotificationPreferences))),
 		rt("PUT /v1/notifications/preferences", accessAuthenticated, s.membersOnly(hf(s.handlePutNotificationPreferences))),
 		rt("GET /v1/notifications/pending", accessAuthenticated, s.membersOnly(hf(s.handleListPendingNotifications))),
-		// Local direct messages (issues #2019 and #2021, ADR-017). Every route
-		// is in selfMadeCredentialRoutes: an operator-made credential gets 403
-		// own_sign_in_required, reads included. Not previewable.
+		// Local direct messages (ADR-017). Every route is in
+		// selfMadeCredentialRoutes and outside preview. The server-wide switch
+		// has the access and recent-auth rules of the joining settings.
 		rt("POST /v1/dms", accessAuthenticated, hf(s.handleOpenDM)),
 		rt("GET /v1/dms", accessAuthenticated, hf(s.handleListDMs)),
+		rt("GET /v1/dms/preferences", accessAuthenticated, hf(s.handleGetDMPreferences)),
+		rt("PUT /v1/dms/preferences", accessAuthenticated, hf(s.handlePutDMPreferences)),
+		rt("GET /v1/dms/settings", accessOperator, hf(s.handleGetDMServerSettings)),
+		rt("PUT /v1/dms/settings", accessPermission, hf(s.handlePutDMServerSettings)).needs(schema.PermChangeServerSettings),
 		rt("GET /v1/dms/snapshot", accessAuthenticated, hf(s.handleDMSnapshot)),
 		rt("GET /v1/dms/{conversation}", accessAuthenticated, hf(s.handleGetDM)),
 		rt("PUT /v1/dms/{conversation}/state", accessAuthenticated, hf(s.handleSetDMState)),
@@ -506,6 +510,7 @@ var recentAuthRoutes = map[string]reauthRule{
 	"PUT /v1/principals/{id}/invite-permission":                    reauthAlways,
 	"PUT /v1/principals/{id}/voice-permission":                     reauthAlways,
 	"PUT /v1/invites/settings":                                     reauthAlways,
+	"PUT /v1/dms/settings":                                         reauthAlways,
 	"POST /v1/principals/{id}/sign-in-links":                       reauthAlways,
 	// Guest entry (issue #710): opening or closing joining to guests, and
 	// ending visits, one or in bulk.

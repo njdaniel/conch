@@ -52,6 +52,11 @@ describe('the operation table', () => {
     expect(served.has(pattern(entry.method, entry.path)), `${id}: ${entry.method} ${entry.path}`).toBe(true);
   });
 
+  it.each([['getDmPreferences', 'GET'], ['putDmPreferences', 'PUT']])('binds %s to the caller’s DM preferences', (id, method) => {
+    const entry = entries.find(([name]) => name === id)?.[1];
+    expect(entry).toMatchObject({ method, path: '/v1/dms/preferences', auth: 'bearer' });
+  });
+
   it('has one entry per request: no method and path twice', () => {
     const seen = entries.map(([, entry]) => pattern(entry.method, entry.path));
     expect(new Set(seen).size).toBe(seen.length);

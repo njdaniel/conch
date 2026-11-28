@@ -161,6 +161,7 @@ var routePermissions = map[string]schema.Permission{
 	"PUT /v1/channels/{channel}/nets/{net}/members/{principal_id}":    schema.PermManageChannels,
 	"DELETE /v1/channels/{channel}/nets/{net}/members/{principal_id}": schema.PermManageChannels,
 	"PUT /v1/join/settings":                                           schema.PermChangeServerSettings,
+	"PUT /v1/dms/settings":                                            schema.PermChangeServerSettings,
 	"PUT /v1/permissions":                                             schema.PermChangeServerSettings,
 	"GET /v1/audit":                                                   schema.PermReadAuditLog,
 }
@@ -326,6 +327,10 @@ var routeExpectations = map[string]routeExpectation{
 	// alice (principal 2) and finds no conversation 1 to read or change.
 	"POST /v1/dms":                                     {classAuth, "/v1/dms", `{"peer_id":2}`, 200},
 	"GET /v1/dms":                                      {classAuth, "/v1/dms", "", 200},
+	"GET /v1/dms/preferences":                          {classAuth, "/v1/dms/preferences", "", 200},
+	"PUT /v1/dms/preferences":                          {classAuth, "/v1/dms/preferences", `{"accept":"everyone"}`, 200},
+	"GET /v1/dms/settings":                             {classOp, "/v1/dms/settings", "", 200},
+	"PUT /v1/dms/settings":                             {classPerm, "/v1/dms/settings", `{"dms_enabled":true}`, 200},
 	"GET /v1/dms/snapshot":                             {classAuth, "/v1/dms/snapshot", "", 200},
 	"GET /v1/dms/{conversation}":                       {classAuth, "/v1/dms/1", "", 404},
 	"GET /v1/dms/{conversation}/changes":               {classAuth, "/v1/dms/1/changes", "", 404},
