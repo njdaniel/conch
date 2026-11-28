@@ -457,6 +457,11 @@ func TestPrivateCallHTTPRefusedActionsAreRateLimited(t *testing.T) {
 		assertErrorBody(t, f.do(t, "POST", base+action, bobSecondTok, privateCallTestCommand(call, action)),
 			http.StatusTooManyRequests, schema.ErrorCodeRateLimited)
 	}
+	rec := f.do(t, "POST", base+"session", bobSecondTok, "")
+	assertErrorBody(t, rec, http.StatusTooManyRequests, schema.ErrorCodeRateLimited)
+	if got := rec.Header().Get("Retry-After"); got != "1" {
+		t.Fatalf("session Retry-After = %q, want 1", got)
+	}
 	now = now.Add(privateCallActionRefill)
 	decodePrivateCallResponse(t, f.do(t, "POST", base+"accept", bobSecondTok,
 		privateCallTestCommand(call, "accept")), http.StatusOK)
