@@ -410,7 +410,7 @@ function PeopleGroup({ title, people, controls }: { readonly title: string; read
         {people.map((person) => {
           const member = controls.members.find((m) => m.principal_id === person.id);
           return (
-            <MemberRow key={`${String(controls.channel.id)}:${String(person.id)}`} {...controls} principalId={person.id} className={`ag-person state-${person.state}`}>
+            <MemberRow key={`${String(controls.channel.id)}:${String(person.id)}`} {...controls} principalId={person.id} className={`ag-person state-${person.state}`} showIdentity={false}>
               <Avatar id={person.id} name={person.name} />
               <ProfileCard
                 id={person.id}
@@ -422,7 +422,11 @@ function PeopleGroup({ title, people, controls }: { readonly title: string; read
                 onDisappear={controls.onProfileDisappear}
               />
               <MessageAction compact id={person.id} name={person.name} person={{ ...person, guest: member?.guest }} viewer={controls.viewer.id} />
-              {person.live > 1 ? <span> ({person.live} sessions)</span> : null} <span className="ag-status">{person.state}</span>
+              <div className="member-details">
+                {person.live > 1 ? <span> ({person.live} sessions)</span> : null}
+                <span className="ag-status">{person.state}</span>
+                {member === undefined ? null : <IdentityMarks {...member} id={member.principal_id} viewer={controls.viewer.id} />}
+              </div>
             </MemberRow>
           );
         })}

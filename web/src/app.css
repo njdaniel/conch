@@ -2534,6 +2534,10 @@ label {
   gap: 0 var(--s2);
 }
 
+.member-details {
+  display: contents;
+}
+
 .ag-agent > .avatar {
   flex: none;
   width: 1.75rem;
@@ -2680,18 +2684,22 @@ label {
   background: var(--muted);
 }
 
+.state-online > .member-details > .ag-status,
 .state-online > .ag-status {
   color: var(--accent);
 }
 
+.state-online > .member-details > .ag-status::before,
 .state-online > .ag-status::before {
   background: var(--accent);
 }
 
+.state-stale > .member-details > .ag-status,
 .state-stale > .ag-status {
   color: var(--warn);
 }
 
+.state-stale > .member-details > .ag-status::before,
 .state-stale > .ag-status::before {
   background: var(--warn);
 }
@@ -7150,7 +7158,17 @@ button.link {
 @media (max-width: 699px) {
   .dm-row button, .dm-back { min-height: 2.75rem; }
   .ag-person:has(> .dm-message-action) { column-gap: var(--s1); }
-  .ag-person:has(> .dm-message-action) > .ag-status::before { content: none; }
+  /* Let presence and badges wrap beside the profile button and its touch
+     target when Message takes a second column of actions. */
+  .ag-person:has(> .dm-message-action) > .member-details {
+    display: flex;
+    flex: 1;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0 var(--s1);
+  }
+  .ag-person:has(> .dm-message-action) > .member-details > * { white-space: nowrap; }
+  .ag-person:has(> .dm-message-action) .ag-status::before { content: none; }
   .ag-person > .dm-message-action > button { min-width: 2.75rem; }
 }
 

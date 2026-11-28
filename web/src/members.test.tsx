@@ -247,6 +247,15 @@ describe('administration controls', () => {
 });
 
 describe('identity marks', () => {
+  it('groups presence and badges beside the profile control so they can wrap together', () => {
+    draw(props('operator'));
+    const person = within(row('avery'));
+    const presence = person.getByText('offline');
+    const badge = person.getByText('Approver').closest('.identity-mark');
+    expect(presence.parentElement).toBe(badge?.parentElement);
+    expect(presence.parentElement?.contains(person.getByRole('button', { name: 'avery' }))).toBe(false);
+  });
+
   it('draws MemberRow marks through the shared component in wire order', () => {
     draw({ ...props('operator'), viewer: { id: 1, role: 'operator', guest: false } });
     const olivia = row('olivia');
