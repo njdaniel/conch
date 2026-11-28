@@ -17,11 +17,7 @@ import (
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
-// selfMadeStandIn is a route that is in selfMadeCredentialRoutes only for
-// these tests: the DM and call routes and the per-person stream (#2019,
-// #2021, #2030, #2040) do not exist yet, and the guard must be shown to
-// work before they do. Each real one, once listed, is driven by the same
-// table.
+// selfMadeStandIn exercises the guard with a handler that always succeeds.
 const selfMadeStandIn = "GET /v1/test-only/self-made"
 
 // provenanceFixture is the auth fixture with joiner, a member who joined by
@@ -91,7 +87,7 @@ func newProvenanceFixture(t *testing.T) *provenanceFixture {
 // behind the authentication middleware: 200 "ok" when it runs.
 func (f *provenanceFixture) guardedStandIn(t *testing.T) http.Handler {
 	t.Helper()
-	selfMadeCredentialRoutes[selfMadeStandIn] = true
+	selfMadeCredentialRoutes[selfMadeStandIn] = dmGuestForbidden
 	t.Cleanup(func() { delete(selfMadeCredentialRoutes, selfMadeStandIn) })
 	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok"))
@@ -127,14 +123,14 @@ func answerCode(t *testing.T, rec *httptest.ResponseRecorder) string {
 }
 
 // Every route that is a person's own (their DMs, their calls, their stream:
-// selfMadeCredentialRoutes, with the stand-in until they exist) takes a
+// selfMadeCredentialRoutes, including the stand-in) takes a
 // self-made credential and refuses, with 403 own_sign_in_required, an
 // operator's act-as credential, the redemption of a sign-in link an
 // operator made, and a credential from before the provenance migration
 // (issue #2042). A self-made credential is never refused on that ground;
 // what the route then answers is the route's own. An agent is refused first,
 // with 403 forbidden audited agents_use_mcp, never own_sign_in_required
-// (issue #2098); a guest is a person and gets the person's answers.
+// (issue #2098). A guest's own credential passes provenance.
 func TestSelfMadeCredentialRoutesRefuseOthers(t *testing.T) {
 	f := newProvenanceFixture(t)
 	guest := f.seedGuest(t, "Pat")
@@ -190,7 +186,9 @@ func TestSelfMadeCredentialRoutesRefuseOthers(t *testing.T) {
 				if refused == tt.self {
 					t.Fatalf("answer %d %s (%s); want refused %v", rec.Code, code, rec.Body.String(), !tt.self)
 				}
-				if pattern == selfMadeStandIn && tt.self && (rec.Code != http.StatusOK || rec.Body.String() != "ok") {
+				if pattern == selfMadeStandIn && tt.token == guest.Token {
+					assertErrorBody(t, rec, http.StatusForbidden, schema.ErrorCodeGuestNotAllowed)
+				} else if pattern == selfMadeStandIn && tt.self && (rec.Code != http.StatusOK || rec.Body.String() != "ok") {
 					t.Errorf("the stand-in answered %d %q to a self-made credential", rec.Code, rec.Body.String())
 				}
 			})
@@ -219,7 +217,7 @@ func TestSelfMadeCredentialRoutesIncludeRequired(t *testing.T) {
 		"POST /v1/calls/{call}/cancel",
 		"POST /v1/calls/{call}/hangup",
 	} {
-		if !selfMadeCredentialRoutes[pattern] {
+		if _, ok := selfMadeCredentialRoutes[pattern]; !ok {
 			t.Errorf("%s is not in selfMadeCredentialRoutes", pattern)
 		}
 	}
@@ -239,7 +237,7 @@ func TestSelfMadeCredentialOtherRoutesUnchanged(t *testing.T) {
 	}
 }
 
-// selfMadeCredential on its own: a ticket-authenticated socket carries only
+// requireDMCredential on its own: a ticket-authenticated socket carries only
 // the credential's id, and its provenance is read from the store; a
 // previewed request is refused whatever the credential; a request with no
 // credential, or an id the store does not know, is unauthenticated; under
@@ -270,7 +268,7 @@ func TestSelfMadeCredentialCheck(t *testing.T) {
 		{"ticket for a migrated credential", f.srv, ticket(f.migratedTok), http.StatusForbidden, schema.ErrorCodeOwnSignInRequired},
 		{"credential the store does not know", f.srv, withCredentialID(withCaller(ctx, f.joiner), 1<<40), http.StatusUnauthorized, ""},
 		{"previewed, on a self-made credential", f.srv,
-			withPreview(withRequestCredential(withCaller(ctx, f.joiner), store.RequestCredential{ID: idOf(f.rootTok), SelfMade: true}),
+			withPreview(withRequestCredential(withCaller(ctx, f.joiner), store.RequestCredential{ID: idOf(f.rootTok), Scope: schema.CredentialScopeFull, SelfMade: true}),
 				previewContext{Actor: f.root, Target: f.joiner}),
 			http.StatusForbidden, schema.ErrorCodeOwnSignInRequired},
 		{"agent, on a ticket", f.srv, withCredentialID(withCaller(ctx, f.bot), idOf(f.botTok)), http.StatusForbidden, errForbidden.Code},
@@ -281,10 +279,10 @@ func TestSelfMadeCredentialCheck(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ran := false
-			h := tt.srv.requireSelfMadeCredential(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			h := tt.srv.requireDMCredential(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				ran = true
 				w.WriteHeader(http.StatusOK)
-			}))
+			}), dmGuestForbidden)
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil).WithContext(tt.ctx))
 			if rec.Code != tt.status || ran != (tt.status == http.StatusOK) {
@@ -313,8 +311,9 @@ func TestSelfMadeCredentialRoutes(t *testing.T) {
 		if _, rest, ok := strings.Cut(pattern, " "); ok {
 			path = rest
 		}
+		_, guarded := selfMadeCredentialRoutes[pattern]
 		if (strings.HasPrefix(path, "/v1/dms") || strings.HasPrefix(path, "/v1/calls")) &&
-			!dmAndCallCredentialExemptions[pattern] && !selfMadeCredentialRoutes[pattern] {
+			!dmAndCallCredentialExemptions[pattern] && !guarded {
 			t.Errorf("registered DM or call route %s is missing from selfMadeCredentialRoutes", pattern)
 		}
 	}

@@ -395,8 +395,8 @@ func (s *Server) guard(rt route) http.Handler {
 	// A person's own DMs, calls and stream refuse a credential made by
 	// another (issue #2042), before any proof is asked for: such a
 	// credential cannot give one that would help.
-	if selfMadeCredentialRoutes[rt.pattern] {
-		handler = s.requireSelfMadeCredential(handler)
+	if guestPolicy, ok := selfMadeCredentialRoutes[rt.pattern]; ok {
+		handler = s.requireDMCredential(handler, guestPolicy)
 	}
 	switch rt.access {
 	case accessOperator:
@@ -660,8 +660,9 @@ func (s *Server) bindCallerID(w http.ResponseWriter, r *http.Request, id *int64,
 	return true
 }
 
-// handleWhoAmI serves GET /v1/whoami. With no caller (AuthOff) there is no
-// identity to report, so it answers 401 like any unauthenticated request.
+// handleWhoAmI serves GET /v1/whoami. It advertises capabilities.dm when the
+// credential passes the gate for DMs and private calls. Without a caller it
+// answers 401.
 func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 	caller, ok := callerFrom(r.Context())
 	if !ok {
@@ -691,6 +692,9 @@ func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 		// what they may do, not how the server is set.
 		Permissions:         perms,
 		PermissionsRevision: revision,
+	}
+	if refusal, err := s.dmCredentialRefusal(r.Context()); refusal == "" && err == nil {
+		resp.Capabilities = &schema.WhoAmICapabilitiesV1{DM: true}
 	}
 	// ADR-011 item 2.3: everyone is told, absent in normal mode.
 	if s.cfg.temporary() {
