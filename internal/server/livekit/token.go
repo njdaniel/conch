@@ -17,8 +17,8 @@ type JoinParams struct {
 	Identity string
 	// Room is the one room the token admits its holder to.
 	Room string
-	// CanPublish allows publishing a microphone track. Without it the holder
-	// can only listen.
+	// CanPublish allows publishing the microphone source alone, for both
+	// channel voice and private calls. Without it the holder can only listen.
 	CanPublish bool
 	// Companion, when set, replaces the person's grant (a microphone, and
 	// receiving) with a companion's or a viewer's (issue #933). Nil is the

@@ -65,9 +65,8 @@ var selfMadeCredentialRoutes = map[string]dmGuestPolicy{
 	"POST /v1/dms/{conversation}/messages":             dmGuestForbidden,
 	"PATCH /v1/dms/{conversation}/messages/{message}":  dmGuestForbidden,
 	"DELETE /v1/dms/{conversation}/messages/{message}": dmGuestForbidden,
-	// The seven private call routes (#2030, ADR-017 Decision 7): an invite,
-	// the history of a pair, the reconnect snapshot and the four actions.
-	// The media-join route (#2032) joins this list in its own change.
+	// Private calls (ADR-017 Decision 7): invites, history, the reconnect
+	// snapshot and actions (#2030), plus media joins (#2032).
 	"POST /v1/dms/{conversation}/calls": privateCallGuestForbidden,
 	"GET /v1/dms/{conversation}/calls":  privateCallGuestForbidden,
 	"GET /v1/calls/current":             privateCallGuestForbidden,
@@ -75,6 +74,7 @@ var selfMadeCredentialRoutes = map[string]dmGuestPolicy{
 	"POST /v1/calls/{call}/decline":     privateCallGuestForbidden,
 	"POST /v1/calls/{call}/cancel":      privateCallGuestForbidden,
 	"POST /v1/calls/{call}/hangup":      privateCallGuestForbidden,
+	"POST /v1/calls/{call}/session":     privateCallGuestForbidden,
 }
 
 // dmGuestPolicy preserves the guest response each route used before sharing

@@ -1213,7 +1213,7 @@ func TestVoicePresenceNotConfigured(t *testing.T) {
 }
 
 // TestVoicePollerShutdownMidPass: Serve returns promptly while a pass is
-// blocked in LiveKit, and leaves no goroutine.
+// blocked in LiveKit, and both the channel and private media loops exit.
 func TestVoicePollerShutdownMidPass(t *testing.T) {
 	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
 	f.inUse(t, f.ops)
@@ -1222,11 +1222,12 @@ func TestVoicePollerShutdownMidPass(t *testing.T) {
 	t.Cleanup(func() { close(hold) })
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- f.srv.Serve(ctx) }()
 	<-f.lk.entered // a pass is in flight
-	if n := loopGoroutines(); n != 1 {
-		t.Fatalf("poller goroutines while serving = %d, want 1", n)
+	if n := loopGoroutines(); n != 2 {
+		t.Fatalf("poller goroutines while serving = %d, want 2", n)
 	}
 	start := time.Now()
 	cancel()

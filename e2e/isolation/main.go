@@ -280,6 +280,9 @@ func run(h *harness) (summary, error) {
 	}
 	h.say("ok   sockets: B's %d open sockets (every socket variant on both B channels, and the occupancy socket with the bearer and a ticket) carried B's control, none with anything of A", len(bsock.feeds))
 
+	if err := w.acceptCallA(); err != nil {
+		return sum, fmt.Errorf("group A's accepted call: %w", err)
+	}
 	total := 0
 	for _, m := range []*member{w.b.people[0], w.b.people[2]} {
 		n, err := w.runMatrix(m, matrixRows())

@@ -45,6 +45,8 @@ var wantDMTables = []string{
 // later migration's author has added theirs: the rewind must leave no object
 // of a migration the old version has not made.
 var dmDropStatements = []string{
+	"DROP TABLE call_room_holders", // migration 56 (issue #2032)
+	"DROP TABLE call_rooms",
 	"DROP TABLE private_call_actions", // migration 55 (issue #2030)
 	"DROP TABLE private_call_holders",
 	"DROP TABLE private_calls",
@@ -61,8 +63,7 @@ var dmDropStatements = []string{
 }
 
 // dropDMObjects returns a migrated database to its state before migration 53:
-// migrations 53, 54 and 55 only add tables and a column, so removing them (and
-// the triggers that go with them) and the version is that state.
+// remove the tables, dependent indexes, triggers and column added since then.
 func dropDMObjects(t *testing.T, s *Store, version int) {
 	t.Helper()
 	for _, stmt := range dmDropStatements {
@@ -77,7 +78,7 @@ func dropDMObjects(t *testing.T, s *Store, version int) {
 
 // TestPrivateCallMigrationFollowsThePolicyMigration pins the order the
 // migrations were registered in: the DM store's 53, the contact policy's
-// dmPolicyMigration (54) and the private calls' (55), last.
+// dmPolicyMigration (54), private calls (55), and private-call media (56–57).
 func TestPrivateCallMigrationFollowsThePolicyMigration(t *testing.T) {
 	at := func(n int, want []string) {
 		t.Helper()
@@ -88,9 +89,8 @@ func TestPrivateCallMigrationFollowsThePolicyMigration(t *testing.T) {
 	at(dmPolicyMigration-1, dmMigration)
 	at(dmPolicyMigration, dmPolicyMigrationStatements)
 	at(dmPolicyMigration+1, privateCallMigration)
-	if len(migrations) != dmPolicyMigration+1 {
-		t.Errorf("%d migrations; the private calls' is meant to be last, at %d", len(migrations), dmPolicyMigration+1)
-	}
+	at(dmPolicyMigration+2, privateCallMediaMigration)
+	at(dmPolicyMigration+3, privateCallMediaWatchMigration)
 }
 
 func copyFile(t *testing.T, from, to string) {
