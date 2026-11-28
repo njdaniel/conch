@@ -179,6 +179,8 @@ export interface Operation {
   // name. A query is not part of the template; a call names it.
   readonly path: string;
   readonly auth: Auth;
+  // The wire contract is defined, but conchd has yet to register the handler.
+  readonly awaitingServer?: true;
   // The request body's validator, when the call has a JSON body with a schema
   // type; the response body's, when the answer is a document.
   readonly request?: Validator<never>;
@@ -443,21 +445,21 @@ export const operations = {
   // never reached through a channel operation, nor a channel through these.
   openDm: op('POST', '/v1/dms', 'bearer', { request: check(openDMRequestV1), response: reply(openDMResponseV1) }),
   listDms: op('GET', '/v1/dms', 'bearer', { response: reply(listDMConversationsResponseV1) }),
-  dmSnapshot: op('GET', '/v1/dms/snapshot', 'bearer', { response: reply(dmSnapshotV1) }),
+  dmSnapshot: op('GET', '/v1/dms/snapshot', 'bearer', { awaitingServer: true, response: reply(dmSnapshotV1) }),
   getDm: op('GET', '/v1/dms/{conversation}', 'bearer', { response: reply(dmConversationV1) }),
   listDmMessages: op('GET', '/v1/dms/{conversation}/messages', 'bearer', { response: reply(listDMMessagesResponseV1) }),
-  listDmChanges: op('GET', '/v1/dms/{conversation}/changes', 'bearer', { response: reply(listDMChangesResponseV1) }),
+  listDmChanges: op('GET', '/v1/dms/{conversation}/changes', 'bearer', { awaitingServer: true, response: reply(listDMChangesResponseV1) }),
   postDmMessage: op('POST', '/v1/dms/{conversation}/messages', 'bearer', { request: check(postDMMessageRequestV1), response: reply(postDMMessageResponseV1) }),
   editDmMessage: op('PATCH', '/v1/dms/{conversation}/messages/{message}', 'bearer', { request: check(editDMMessageRequestV1), response: reply(editDMMessageResponseV1) }),
   removeDmMessage: op('DELETE', '/v1/dms/{conversation}/messages/{message}', 'bearer'),
-  markDmRead: op('PUT', '/v1/dms/{conversation}/read-state', 'bearer', { request: check(markReadRequestV1), response: reply(dmReadStateV1) }),
+  markDmRead: op('PUT', '/v1/dms/{conversation}/read-state', 'bearer', { awaitingServer: true, request: check(markReadRequestV1), response: reply(dmReadStateV1) }),
   setDmState: op('PUT', '/v1/dms/{conversation}/state', 'bearer', { request: check(setDMStateRequestV1), response: reply(dmConversationV1) }),
-  searchDmMessages: op('GET', '/v1/dms/{conversation}/search', 'bearer', { response: reply(searchDMMessagesResponseV1) }),
-  uploadDmFile: op('POST', '/v1/dms/{conversation}/files', 'bearer', { response: reply(dmFileV1) }),
-  dmFileMeta: op('GET', '/v1/dms/{conversation}/files/{file}', 'bearer', { response: reply(dmFileV1) }),
-  dmFileBytes: op('GET', '/v1/dms/{conversation}/files/{file}/content', 'bearer'),
-  getDmPreferences: op('GET', '/v1/dms/preferences', 'bearer', { response: reply(dmPreferencesV1) }),
-  putDmPreferences: op('PUT', '/v1/dms/preferences', 'bearer', { request: check(dmPreferencesV1), response: reply(dmPreferencesV1) }),
+  searchDmMessages: op('GET', '/v1/dms/{conversation}/search', 'bearer', { awaitingServer: true, response: reply(searchDMMessagesResponseV1) }),
+  uploadDmFile: op('POST', '/v1/dms/{conversation}/files', 'bearer', { awaitingServer: true, response: reply(dmFileV1) }),
+  dmFileMeta: op('GET', '/v1/dms/{conversation}/files/{file}', 'bearer', { awaitingServer: true, response: reply(dmFileV1) }),
+  dmFileBytes: op('GET', '/v1/dms/{conversation}/files/{file}/content', 'bearer', { awaitingServer: true }),
+  getDmPreferences: op('GET', '/v1/dms/preferences', 'bearer', { awaitingServer: true, response: reply(dmPreferencesV1) }),
+  putDmPreferences: op('PUT', '/v1/dms/preferences', 'bearer', { awaitingServer: true, request: check(dmPreferencesV1), response: reply(dmPreferencesV1) }),
 
   // Live feeds. A ticket is a single-use credential for one socket: main asks
   // for it and opens the socket itself, so the renderer never holds one.
@@ -510,6 +512,8 @@ export const operations = {
 } as const satisfies Record<string, Operation>;
 
 export type OperationId = keyof typeof operations;
+
+export const isOperationServed = (id: OperationId): boolean => operations[id].awaitingServer !== true;
 
 // The values a path template takes. Numbers are written as decimal.
 export type Params = Readonly<Record<string, string | number>>;

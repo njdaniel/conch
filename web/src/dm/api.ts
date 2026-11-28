@@ -175,6 +175,7 @@ async function settled<T>(reply: Awaited<ReturnType<typeof dmTransport.write>>, 
 }
 
 const { call, queryOf } = dmRequest;
+export const isDmOperationServed = dmRequest.isOperationServed;
 
 const pageLimit = '50';
 

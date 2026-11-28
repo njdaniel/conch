@@ -4,6 +4,7 @@
 // only; it needs no network, no browser and no running conchd.
 import { vi } from 'vitest';
 import type { DMAcceptPolicy, DMConversationV1, DMFileV1, DMMessageV1, DMPreferencesV1, DMReadStateV1, DMSnapshotV1, DMState, ListDMMessagesResponseV1, SearchDMMessagesResponseV1 } from '../schema/generated';
+import * as dmApi from './api';
 import type { DmApi, DmFrame } from './api';
 
 const files = import.meta.glob<unknown>('../../../pkg/schema/testdata/*.json', { eager: true, import: 'default' });
@@ -25,6 +26,11 @@ export const file = (): DMFileV1 => fixture('dm-file-v1');
 
 // The viewer of the fixtures is principal 3; the peer, 5 (Grace).
 export const me = 3;
+
+export function mockOperationAvailability(overrides: Partial<Record<Parameters<typeof dmApi.isDmOperationServed>[0], boolean>>) {
+  const actual = dmApi.isDmOperationServed;
+  vi.spyOn(dmApi, 'isDmOperationServed').mockImplementation((id) => overrides[id] ?? actual(id));
+}
 
 export interface Fake {
   readonly api: DmApi;

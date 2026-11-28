@@ -1,13 +1,13 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BlocksProvider, type Blocks } from '../blocks';
-import type { DMMessageV1, DMReadStateV1 } from '../schema/generated';
+import type { DMMessageV1, DMReadStateV1, ListDMMessagesResponseV1 } from '../schema/generated';
 import type { DmApi } from './api';
 import { DmProvider } from './DmContext';
 import { DmRoute } from './DmRoute';
 import { DmTranscript } from './DmTranscript';
 import { removedBody } from './model';
-import { conversation, fake, fixture, later, me, ownMessage, peerMessage, removedMessage, type Fake } from './testkit';
+import { conversation, fake, fixture, later, me, mockOperationAvailability, ownMessage, peerMessage, removedMessage, type Fake } from './testkit';
 
 const scope = 'https://a.example|3';
 
@@ -26,7 +26,10 @@ const bodies = () => within(screen.getByRole('list', { name: /oldest first/ })).
 beforeEach(() => {
   Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 describe('the transcript', () => {
   it('shows the peer and the history oldest first, each message under its author', async () => {
@@ -90,6 +93,7 @@ describe('the transcript', () => {
   });
 
   it('retries a transient read-mark failure after a successful poll with no new messages', async () => {
+    mockOperationAvailability({ markDmRead: true });
     const markRead = vi.fn<DmApi['markRead']>()
       .mockResolvedValueOnce({ ok: false, failure: 'network' })
       .mockResolvedValue({ ok: true, value: { ...fixture<DMReadStateV1>('dm-read-state-v1'), last_read_id: 4310 } });
@@ -166,6 +170,7 @@ describe('the transcript', () => {
   });
 
   it('uses the native save dialog for a DM file when available', async () => {
+    mockOperationAvailability({ dmFileMeta: true, dmFileBytes: true });
     const saveFile = vi.fn(() => Promise.resolve({ ok: true as const, value: null }));
     const base = fake({ fileBytes: vi.fn<DmApi['fileBytes']>().mockResolvedValue({ ok: false, failure: 'network' }) });
     mount({ ...base, api: { ...base.api, saveFile } });
@@ -246,6 +251,7 @@ describe('the transcript', () => {
   });
 
   it('keeps the send and its attachments when the reply arrives after switching routes', async () => {
+    mockOperationAvailability({ uploadDmFile: true });
     const answer = later<Awaited<ReturnType<DmApi['send']>>>();
     const send = vi.fn<DmApi['send']>()
       .mockReturnValueOnce(answer.promise)
@@ -283,6 +289,7 @@ describe('the transcript', () => {
   });
 
   it('edits and removes only the viewer’s own messages, and shows the server’s tombstone', async () => {
+    mockOperationAvailability({ listDmChanges: true });
     const own = ownMessage();
     const gone = { ...own, revision: 8, removed: true, body: removedBody, file_ids: undefined };
     const changes = vi.fn(() => Promise.resolve({ ok: true as const, value: { messages: [gone] } }));
@@ -309,7 +316,68 @@ describe('the transcript', () => {
     expect(screen.getByText(removedBody)).toBeDefined();
   });
 
+  it('polls the latest history for replies, edits and removals while the changes route is unserved', async () => {
+    mockOperationAvailability({ listDmChanges: false });
+    const initial = fixture<ListDMMessagesResponseV1>('list-dm-messages-response-v1');
+    const reply = { ...peerMessage(), id: 4311, revision: 7, body: 'A new reply' };
+    const edit = { ...peerMessage(), id: 4310, revision: 8, body: 'An edited reply' };
+    const removal = { ...removedMessage(), id: ownMessage().id, revision: 9 };
+    const history = vi.fn<DmApi['history']>()
+      .mockResolvedValueOnce({ ok: true, value: initial })
+      .mockResolvedValue({ ok: true, value: { order: 'desc', messages: [reply, edit, removal], next_before: 4305 } });
+    const changes = vi.fn<DmApi['changes']>().mockResolvedValue({ ok: false, failure: 'unsupported' });
+    const f = fake({ history, changes });
+    mount(f);
+    const log = await ready();
+    expect(bodies()).toEqual(['Sure. Here is the draft.', 'Thanks, reading it now.']);
+    await act(async () => {
+      f.frames({ type: 'poll' });
+      await Promise.resolve();
+    });
+    expect(screen.getByRole('log', { name: 'Messages' })).toBe(log);
+    expect(bodies()).toEqual([removedBody, edit.body, reply.body]);
+    expect(history).toHaveBeenLastCalledWith(12, { order: 'desc' });
+    expect(changes).not.toHaveBeenCalled();
+  });
+
+  it('shows a successful removal from an earlier page while the changes route is unserved', async () => {
+    mockOperationAvailability({ listDmChanges: false });
+    const earlier = { ...ownMessage(), id: 4300, body: 'An earlier message' };
+    const removal = { ...earlier, revision: 7, removed: true, body: removedBody, file_ids: undefined };
+    const history = vi.fn<DmApi['history']>()
+      .mockResolvedValueOnce({ ok: true, value: { order: 'desc', messages: [peerMessage()], next_before: 4310 } })
+      .mockResolvedValueOnce({ ok: true, value: { order: 'desc', messages: [earlier] } })
+      .mockResolvedValue({ ok: true, value: { order: 'desc', messages: [removal] } });
+    const f = fake({ history, changes: vi.fn<DmApi['changes']>().mockResolvedValue({ ok: false, failure: 'unsupported' }) });
+    mount(f);
+    await ready();
+    fireEvent.click(screen.getByRole('button', { name: 'Load earlier messages' }));
+    await screen.findByText(earlier.body);
+    fireEvent.click(screen.getByRole('button', { name: /^Remove your message/ }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Yes, remove' }));
+      await Promise.resolve();
+    });
+    expect(f.api.remove).toHaveBeenCalledWith(12, earlier.id);
+    expect(history).toHaveBeenLastCalledWith(12, { order: 'desc', before: peerMessage().id });
+    expect(bodies()).toEqual([removedBody, peerMessage().body]);
+    expect(screen.queryByRole('button', { name: 'Load earlier messages' })).toBeNull();
+  });
+
+  it.each([
+    ['Search', () => screen.queryByRole('button', { name: 'Search' })],
+    ['Attach a file', () => screen.queryByLabelText('Attach a file')],
+    ['Download', () => screen.queryByRole('button', { name: 'Download draft.pdf' })],
+  ] as const)('hides %s while its route is unserved', async (_label, query) => {
+    mockOperationAvailability({ searchDmMessages: false, uploadDmFile: false, dmFileMeta: false, dmFileBytes: false });
+    mount(fake());
+    await ready();
+    expect(screen.getByRole('textbox', { name: 'Message to Grace' })).toBeDefined();
+    expect(query()).toBeNull();
+  });
+
   it('marks the newest message read, once', async () => {
+    mockOperationAvailability({ markDmRead: true });
     const f = fake();
     mount(f);
     await ready();
@@ -318,6 +386,7 @@ describe('the transcript', () => {
   });
 
   it('reads files and searches through the conversation’s own endpoints', async () => {
+    mockOperationAvailability({ searchDmMessages: true, dmFileMeta: true, dmFileBytes: true });
     const f = fake();
     mount(f);
     await ready();
@@ -331,6 +400,7 @@ describe('the transcript', () => {
   });
 
   it('attaches an uploaded file by its id', async () => {
+    mockOperationAvailability({ uploadDmFile: true });
     const f = fake();
     mount(f);
     await ready();
@@ -351,6 +421,7 @@ describe('the transcript', () => {
   });
 
   it('clears displayed history and composer when a refresh loses authorization', async () => {
+    mockOperationAvailability({ listDmChanges: true });
     const changes = vi.fn<DmApi['changes']>().mockResolvedValue({ ok: false, failure: 'unauthorized' });
     const f = fake({ changes });
     mount(f);
@@ -373,6 +444,7 @@ describe('the transcript', () => {
   });
 
   it('drops an answer that arrives after switching conversations', async () => {
+    mockOperationAvailability({ markDmRead: true });
     const slow = later<{ ok: true; value: unknown }>();
     const other = { ...conversation(), id: 14, peer_id: 9, peer_name: 'Linus' };
     const f = fake({
@@ -405,6 +477,7 @@ describe('the transcript', () => {
   });
 
   it('catches up with the changes route when a frame skips a revision', async () => {
+    mockOperationAvailability({ listDmChanges: true });
     const missed = { ...peerMessage(), id: 4312, revision: 9, body: 'missed one' };
     const f = fake({ changes: vi.fn(() => Promise.resolve({ ok: true as const, value: { messages: [missed] } })) });
     mount(f);
@@ -416,6 +489,7 @@ describe('the transcript', () => {
   });
 
   it('recovers a missed removal after a higher send response and a failed changes request', async () => {
+    mockOperationAvailability({ listDmChanges: true });
     const removal = { ...ownMessage(), revision: 7, removed: true, body: removedBody, file_ids: undefined };
     const changes = vi.fn<DmApi['changes']>()
       .mockResolvedValueOnce({ ok: false, failure: 'network' })
@@ -438,6 +512,7 @@ describe('the transcript', () => {
   });
 
   it('retries a failed live gap from the same revision', async () => {
+    mockOperationAvailability({ listDmChanges: true });
     const missed = { ...peerMessage(), id: 4312, revision: 7, body: 'missed one' };
     const changes = vi.fn<DmApi['changes']>()
       .mockResolvedValueOnce({ ok: false, failure: 'network' })

@@ -15,7 +15,7 @@ import { Avatar } from '../Icons';
 import { formatSize } from '../fileSize';
 import type { DMConversationV1, DMFileV1, DMMessageV1, DMReadStateV1 } from '../schema/generated';
 import { dateTimeOf, timeOf } from '../time';
-import type { DmApi, DmFailure } from './api';
+import { isDmOperationServed, type DmApi, type DmFailure } from './api';
 import { DmComposer } from './DmComposer';
 import { canRetrySend, cannotMessage, noAccess, peerName, type Pending, type PendingSends } from './model';
 import { useDmTranscript } from './useDmTranscript';
@@ -100,6 +100,7 @@ function MessageRow({ message, mine, author, api, conversation, canWrite, onEdit
   const [problem, setProblem] = useState('');
   const [busy, setBusy] = useState(false);
   const removed = message.removed === true;
+  const canDownload = isDmOperationServed('dmFileMeta') && isDmOperationServed('dmFileBytes');
   const when = timeOf(message.created_at);
   const row = useRef<HTMLLIElement>(null);
   const editButton = useRef<HTMLButtonElement>(null);
@@ -174,7 +175,7 @@ function MessageRow({ message, mine, author, api, conversation, canWrite, onEdit
       ) : (
         <p className="dm-body">{removed ? <em>{message.body}</em> : message.body}</p>
       )}
-      {removed ? null : (message.file_ids ?? []).map((id) => <FileChip key={id} api={api} conversation={conversation} id={id} />)}
+      {!removed && canDownload ? (message.file_ids ?? []).map((id) => <FileChip key={id} api={api} conversation={conversation} id={id} />) : null}
       {mine && !removed && shownMode === 'view' ? (
         <span className="dm-actions">
           {canWrite ? <button ref={editButton} type="button" aria-label={`Edit your message from ${when}`} onClick={() => { setText(message.body); setMode('edit'); }}>Edit</button> : null}
@@ -344,17 +345,18 @@ function TranscriptView({ conversationId, api, scope, viewer, draft, onDraft, on
   }
 
   const historyAvailable = state.status === 'ready';
+  const canSearch = historyAvailable && isDmOperationServed('searchDmMessages');
   return (
     <section aria-label={`Conversation with ${peer}`} className="dm-transcript">
       <header className="dm-header">
         <Avatar id={conversation.peer_id} name={peer} />
         <h2>{peer}</h2>
-        {historyAvailable ? <button ref={searchButton} type="button" aria-expanded={searching} onClick={() => { setSearching((on) => !on); }}>Search</button> : null}
+        {canSearch ? <button ref={searchButton} type="button" aria-expanded={searching} onClick={() => { setSearching((on) => !on); }}>Search</button> : null}
         {conversation.state === 'archived' ? <span className="hint">Archived</span> : null}
       </header>
       {state.access === 'unavailable' || blocked.has(conversation.peer_id) ? <p role="status" className="banner">{cannotMessage}</p> : null}
       {(!enabled || state.access === 'off') ? <p role="status" className="banner">Direct messages are off.</p> : null}
-      {searching && historyAvailable ? <Search api={api} conversation={conversationId} viewer={viewer} name={peer} onClose={() => {
+      {searching && canSearch ? <Search api={api} conversation={conversationId} viewer={viewer} name={peer} onClose={() => {
         setSearching(false);
         searchButton.current?.focus();
       }} /> : null}

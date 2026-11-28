@@ -6,7 +6,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { formatSize } from '../fileSize';
 import type { DMFileV1 } from '../schema/generated';
-import type { DmApi } from './api';
+import { isDmOperationServed, type DmApi } from './api';
 
 export function DmComposer({ api, conversation, name, draft, onDraft, onSend }: {
   readonly api: DmApi;
@@ -94,18 +94,20 @@ export function DmComposer({ api, conversation, name, draft, onDraft, onSend }: 
         />
       </label>
       <div className="composer-actions">
-        <label className="attach">
-          Attach a file
-          <input
-            ref={picker}
-            type="file"
-            onChange={(event) => {
-              const file = event.target.files?.[0];
-              if (picker.current !== null) picker.current.value = '';
-              if (file !== undefined) void attach(file);
-            }}
-          />
-        </label>
+        {isDmOperationServed('uploadDmFile') ? (
+          <label className="attach">
+            Attach a file
+            <input
+              ref={picker}
+              type="file"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (picker.current !== null) picker.current.value = '';
+                if (file !== undefined) void attach(file);
+              }}
+            />
+          </label>
+        ) : null}
         <button type="submit" disabled={!canSend}>Send</button>
       </div>
       {uploading ? <p role="status" className="hint">Uploading…</p> : null}

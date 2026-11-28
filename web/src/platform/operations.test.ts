@@ -1,10 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { call, fileQuery, operations, pathOf, previewCall, queryOf, type OperationId } from './operations';
+import { call, fileQuery, isOperationServed, operations, pathOf, previewCall, queryOf, type OperationId } from './operations';
 
-// internal/server/routes.go is the server's route table. Every entry of the
-// operation table must be a route it serves, so the table cannot name a
-// request conchd would answer 404.
+// Verify the operation table's availability against the handlers registered
+// in internal/server/routes.go. The UI uses the same availability to offer controls.
 // Read through Node's fs (vitest runs in Node, from web/), so the dev server
 // needs no widened file access.
 const routesSource = readFileSync('../internal/server/routes.go', 'utf8');
@@ -48,27 +47,10 @@ describe('the operation table', () => {
     expect(served.has('GET /v1/whoami')).toBe(true);
   });
 
-  // The direct message routes (issue #2016, pkg/schema/dm.go) are a contract
-  // the web client is built against before conchd serves them (ADR-017, the
-  // server issues of #2013). Each is listed here until its route is
-  // registered; a listed operation that the server does serve fails, so this
-  // list can only shrink and is empty when the server catches up.
-  const awaitingServer = new Set<OperationId>([
-    'dmSnapshot',
-    'listDmChanges',
-    'markDmRead',
-    'searchDmMessages',
-    'uploadDmFile',
-    'dmFileMeta',
-    'dmFileBytes',
-    'getDmPreferences',
-    'putDmPreferences',
-  ]);
-
-  it.each(entries)('%s is a route conchd serves', (id, entry) => {
+  // Registering a handler requires clearing awaitingServer so the UI can use it.
+  it.each(entries)('%s matches the availability of its conchd route', (id, entry) => {
     const route = served.has(pattern(entry.method, entry.path));
-    if (awaitingServer.has(id)) expect(route, `${id} is served now: take it out of awaitingServer`).toBe(false);
-    else expect(route, `${id}: ${entry.method} ${entry.path}`).toBe(true);
+    expect(isOperationServed(id), `${entry.method} ${entry.path} ${route ? 'is registered in routes.go' : 'is missing from routes.go'}`).toBe(route);
   });
 
   it('has one entry per request: no method and path twice', () => {

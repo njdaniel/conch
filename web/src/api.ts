@@ -219,7 +219,7 @@ import {
   type UpdateProblemReportRequestV1,
 } from './schema/report';
 import { fromServer, type Validator } from './schema/validate';
-import { call, fileQuery, operations, previewCall, queryOf, type Call, type OperationId } from './platform/operations';
+import { call, fileQuery, isOperationServed, operations, previewCall, queryOf, type Call, type OperationId } from './platform/operations';
 import { previewResponseV1, type PreviewResponseV1 } from './schema/preview';
 import { platform } from './platform';
 import type { FeedConnection, Held, Place, PushSubscriptionTarget } from './platform/types';
@@ -3531,8 +3531,7 @@ export const dmTransport = {
   download: (request: Call) => authedFile((token) => platform.http.download(request, token)),
 } as const;
 
-// The request builders the direct-message adapter uses. The operation table is
-// read by this module and the platform alone (hygiene.test.ts), so dm/api.ts
-// takes its builders from here and never names the table itself.
-export const dmRequest = { call, queryOf } as const;
+// The request builders and route availability for the direct-message adapter.
+// The operation table is read by this module and the platform alone (hygiene.test.ts).
+export const dmRequest = { call, queryOf, isOperationServed } as const;
 export type DmCall = Call;

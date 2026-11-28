@@ -17,7 +17,7 @@ import { DmInbox } from './DmInbox';
 import { DmProvider } from './DmContext';
 import { DmRoute, type DmConversationView } from './DmRoute';
 import { canMessage } from './MessageAction';
-import { conversation, fake, fixture, later, me, peerMessage, snapshot } from './testkit';
+import { conversation, fake, fixture, later, me, mockOperationAvailability, peerMessage, snapshot } from './testkit';
 
 beforeEach(() => {
   Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
@@ -25,6 +25,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
@@ -51,6 +52,7 @@ describe('the inbox', () => {
   });
 
   it('lists conversations with the recipient, unread counts and a per-viewer hide, apart from any member directory', async () => {
+    mockOperationAvailability({ markDmRead: true });
     const f = fake();
     render(provide(f.api, <DmInbox />));
     const nav = await screen.findByRole('navigation', { name: 'Direct messages' });
@@ -63,6 +65,20 @@ describe('the inbox', () => {
     expect(rows[2]?.textContent).toContain('Linus');
     expect(within(nav).getByRole('heading', { name: /Direct messages/ }).textContent).toContain('1 unread');
     expect(screen.queryByRole('region', { name: 'Members list' })).toBeNull();
+  });
+
+  it('shows no stuck unread badge after opening a conversation while read marks are unserved', async () => {
+    mockOperationAvailability({ markDmRead: false });
+    const markRead = vi.fn<DmApi['markRead']>().mockResolvedValue({ ok: false, failure: 'unsupported' });
+    const f = fake({ markRead });
+    const view = render(provide(f.api, <DmInbox />));
+    const nav = await screen.findByRole('navigation', { name: 'Direct messages' });
+    const row = await within(nav).findByRole('button', { name: /^Grace/ });
+    fireEvent.click(row);
+    view.rerender(provide(f.api, <><DmInbox /><DmRoute conversationId={12} /></>));
+    await screen.findByRole('log', { name: 'Messages' });
+    expect(within(screen.getByRole('navigation', { name: 'Direct messages' })).queryAllByText(/\d+ unread/)).toHaveLength(0);
+    expect(markRead).not.toHaveBeenCalled();
   });
 
   it('states loading, empty, failed, off and own-sign-in-required, and shows nothing for a server with no DMs', async () => {
@@ -133,6 +149,7 @@ describe('the inbox', () => {
   });
 
   it('pages open and archived rows beyond the snapshot cap without double-counting overlap', async () => {
+    mockOperationAvailability({ markDmRead: true });
     const top = conversation();
     const older = { ...top, id: 21, peer_name: 'Ken', unread: 3 };
     const archived = { ...top, id: 22, peer_name: 'Margaret', unread: 5, state: 'archived' as const };
@@ -493,6 +510,7 @@ describe('in the lobby', () => {
   });
 
   it('marks a new DM read only when its Chat view is visible', async () => {
+    mockOperationAvailability({ markDmRead: true });
     phoneWindow();
     const f = fake();
     lobby(f.api);
