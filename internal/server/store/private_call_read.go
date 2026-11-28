@@ -12,7 +12,7 @@ import (
 // CurrentPrivateCall is the participant's non-terminal attempt, if any.
 func (s *Store) CurrentPrivateCall(ctx context.Context, actor PrivateCallActor, clock func() time.Time) (schema.PrivateCallSnapshotV1, error) {
 	out := schema.PrivateCallSnapshotV1{Schema: schema.PrivateCallSnapshotSchemaV1}
-	err := s.withImmediateTx(ctx, func(tx execer) error {
+	err := s.withPrivateCallTx(ctx, func(tx execer) error {
 		now := clock().Truncate(time.Millisecond)
 		out.TakenAt = schema.NewTimestamp(now)
 		if live, err := privateCallRequestLive(ctx, tx, actor, now); err != nil {
@@ -21,11 +21,16 @@ func (s *Store) CurrentPrivateCall(ctx context.Context, actor PrivateCallActor, 
 			return ErrPrivateCallNotFound
 		}
 		c, err := livePrivateCallHeldBy(ctx, tx, actor.PrincipalID, now)
-		if c.ID != "" {
-			doc := c.view(actor)
-			out.Call = &doc
+		if c.ID == "" || err != nil {
+			return err
 		}
-		return err
+		known, err := dmMayKnowTx(ctx, tx, actor.PrincipalID, c.peer(actor.PrincipalID))
+		if !known || err != nil {
+			return err
+		}
+		doc := c.view(actor)
+		out.Call = &doc
+		return nil
 	})
 	return out, err
 }

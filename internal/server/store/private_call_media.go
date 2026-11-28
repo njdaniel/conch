@@ -101,7 +101,7 @@ func (s *Store) GrantPrivateCallMedia(ctx context.Context, id string, actor Priv
 }
 
 func (s *Store) withPrivateCallMedia(ctx context.Context, id string, actor PrivateCallActor, clock func() time.Time, allowed func(execer, privateCall) error) (out PrivateCallResult, err error) {
-	err = s.withImmediateTx(ctx, func(tx execer) error {
+	err = s.withPrivateCallTx(ctx, func(tx execer) error {
 		now := clock().Truncate(time.Millisecond)
 		if live, err := privateCallRequestLive(ctx, tx, actor, now); err != nil {
 			return err
@@ -239,7 +239,7 @@ func (s *Store) PrivateCallRoomStates(ctx context.Context, names []string) (map[
 // credential is the selected credential seen in the room, or zero when
 // absent. A late observation cannot resurrect an expired attempt.
 func (s *Store) ObservePrivateCallEndpoints(ctx context.Context, id string, revision, callerCredential, calleeCredential int64, clock func() time.Time) error {
-	return s.withImmediateTx(ctx, func(tx execer) error {
+	return s.withPrivateCallTx(ctx, func(tx execer) error {
 		c, err := privateCallByID(ctx, tx, id)
 		if err != nil {
 			return err

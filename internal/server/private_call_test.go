@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -238,6 +239,58 @@ func TestPrivateCallHTTPPermissionLoss(t *testing.T) {
 	assertErrorBody(t, f.do(t, "POST", "/v1/calls/"+unavailable.ID+"/decline", bobTok,
 		privateCallTestCommand(unavailable, "decline")), 404, schema.ErrorCodeCallNotFound)
 	assertErrorBody(t, f.do(t, "POST", privateCallTestPair, bobTok, `{"action_id":"invite-back"}`), 403, schema.ErrorCodeVoiceNotAllowed)
+}
+
+func TestPrivateCallRevocationFailureDoesNotUndoContainment(t *testing.T) {
+	for _, fault := range []struct {
+		name, statement string
+	}{
+		{"missing ring deadline", `UPDATE private_calls SET deadline = NULL`},
+		// The transition updates the call before releasing its holders.
+		{"failed holder release", `CREATE TRIGGER fail_call_holder_release BEFORE DELETE ON private_call_holders
+			BEGIN SELECT RAISE(ABORT, 'cannot release call holder'); END`},
+	} {
+		for _, action := range []string{"block", "disable", "revoke-all"} {
+			t.Run(fault.name+"/"+action, func(t *testing.T) {
+				f, bob, phone, laptop := privateCallHTTPFixture(t)
+				call := decodePrivateCallResponse(t, f.do(t, "POST", privateCallTestPair,
+					f.aliceTok, `{"action_id":"ring"}`), http.StatusCreated).Call
+				db := privateCallFixtureDB(t, f)
+				ctx := t.Context()
+				if _, err := db.ExecContext(ctx, fault.statement); err != nil {
+					t.Fatal(err)
+				}
+				switch action {
+				case "block":
+					if rec := f.do(t, "PUT", blockPath(f.alice.ID), phone, ""); rec.Code != http.StatusOK {
+						t.Fatalf("block = %d %s", rec.Code, rec.Body)
+					}
+					if blocked, err := f.srv.store.IsBlocked(ctx, bob.ID, f.alice.ID); !blocked || err != nil {
+						t.Fatalf("persisted block = %t, %v", blocked, err)
+					}
+				case "disable":
+					if changed, err := f.srv.store.DisablePrincipal(ctx, "system", bob.ID); !changed || err != nil {
+						t.Fatalf("disable = %t, %v", changed, err)
+					}
+					if p, err := f.srv.store.PrincipalByID(ctx, bob.ID); err != nil || p.DisabledAt == nil {
+						t.Fatalf("persisted disabled_at = %v, %v", p.DisabledAt, err)
+					}
+				case "revoke-all":
+					if n, err := f.srv.store.RevokeAllCredentials(ctx, "system", bob.ID); n != 2 || err != nil {
+						t.Fatalf("revoke-all = %d, %v, want 2 revoked credentials", n, err)
+					}
+				}
+				if action == "disable" || action == "revoke-all" {
+					for i, token := range []string{phone, laptop} {
+						if _, err := f.srv.store.ResolveCredential(ctx, token); !errors.Is(err, store.ErrCredentialInvalid) {
+							t.Errorf("credential %d after %s = %v, want invalid", i+1, action, err)
+						}
+					}
+				}
+				assertStoredCallState(t, f, call.ID, schema.PrivateCallStateRinging, 1)
+			})
+		}
+	}
 }
 
 // privateCallTestListener lets Serve reach Accept without binding a socket.

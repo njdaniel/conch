@@ -90,6 +90,32 @@ func applyPrivateCallServerEvent(ctx context.Context, tx execer, c *privateCall,
 	return transitionPrivateCall(ctx, tx, c, row, 0, now)
 }
 
+// revokeHeldPrivateCall applies an authority change to the call it affects.
+// A nonzero peer or credential narrows revocation to the pair or selected
+// endpoint. The authority write and revocation share a lock, with the call
+// transition isolated so a malformed call cannot undo the authority change.
+func revokeHeldPrivateCall(ctx context.Context, tx execer, principalID, peerID, credentialID int64, now time.Time) error {
+	return withPrivateCallSavepoint(ctx, tx, "store: could not revoke held private call", slog.Int64("principal_id", principalID), func() error {
+		c, err := privateCallHeldBy(ctx, tx, principalID)
+		if errors.Is(err, ErrPrivateCallNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if (peerID != 0 && c.peer(principalID) != peerID) ||
+			(credentialID != 0 && c.selectedCredential(principalID) != credentialID) {
+			return nil
+		}
+		return applyPrivateCallServerEvent(ctx, tx, &c, schema.PrivateCallEventRevoked, now)
+	})
+}
+
+func reconcileHeldPrivateCall(ctx context.Context, tx execer, principalID int64, now time.Time) error {
+	_, err := livePrivateCallHeldBy(ctx, tx, principalID, now)
+	return err
+}
+
 func heldPrivateCallIDs(ctx context.Context, tx execer) ([]string, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT call_id FROM private_call_holders`)
 	if err != nil {
@@ -107,41 +133,55 @@ func heldPrivateCallIDs(ctx context.Context, tx execer) ([]string, error) {
 	return ids, rows.Err()
 }
 
-func sweepPrivateCall(ctx context.Context, tx execer, id string, now time.Time) error {
-	if _, err := tx.ExecContext(ctx, `SAVEPOINT sweep_private_call`); err != nil {
+func withPrivateCallSavepoint(ctx context.Context, tx execer, message string, target slog.Attr, run func() error) error {
+	if _, err := tx.ExecContext(ctx, `SAVEPOINT private_call`); err != nil {
 		return err
 	}
-	c, err := privateCallByID(ctx, tx, id)
-	if err == nil {
-		_, err = refreshPrivateCall(ctx, tx, &c, now)
-	}
-	if err != nil {
-		slog.ErrorContext(ctx, "store: could not sweep private call", "call_id", id, "error", err)
-		if _, rollbackErr := tx.ExecContext(ctx, `ROLLBACK TO sweep_private_call`); rollbackErr != nil {
+	if err := run(); err != nil {
+		slog.LogAttrs(ctx, slog.LevelError, message, target, slog.Any("error", err))
+		if _, rollbackErr := tx.ExecContext(ctx, `ROLLBACK TO private_call`); rollbackErr != nil {
 			return errors.Join(err, rollbackErr)
 		}
 	}
-	_, err = tx.ExecContext(ctx, `RELEASE sweep_private_call`)
+	_, err := tx.ExecContext(ctx, `RELEASE private_call`)
 	return err
+}
+
+func sweepPrivateCall(ctx context.Context, tx execer, id string, now time.Time) error {
+	return withPrivateCallSavepoint(ctx, tx, "store: could not sweep private call", slog.String("call_id", id), func() error {
+		c, err := privateCallByID(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		_, err = refreshPrivateCall(ctx, tx, &c, now)
+		return err
+	})
 }
 
 // SweepPrivateCalls enforces persisted deadlines and current entitlements
 // even while clients make no requests. It also expires old retry receipts.
 func (s *Store) SweepPrivateCalls(ctx context.Context, clock func() time.Time) error {
-	return s.withImmediateTx(ctx, func(tx execer) error {
+	return s.withPrivateCallTx(ctx, func(tx execer) error {
 		now := clock().Truncate(time.Millisecond)
-		ids, err := heldPrivateCallIDs(ctx, tx)
-		if err != nil {
+		if err := reconcilePrivateCalls(ctx, tx, now); err != nil {
 			return err
 		}
-		for _, id := range ids {
-			if err := sweepPrivateCall(ctx, tx, id, now); err != nil {
-				return err
-			}
-		}
-		_, err = tx.ExecContext(ctx, `DELETE FROM private_call_actions WHERE expires_at <= ?`, now.UnixMilli())
+		_, err := tx.ExecContext(ctx, `DELETE FROM private_call_actions WHERE expires_at <= ?`, now.UnixMilli())
 		return err
 	})
+}
+
+func reconcilePrivateCalls(ctx context.Context, tx execer, now time.Time) error {
+	ids, err := heldPrivateCallIDs(ctx, tx)
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if err := sweepPrivateCall(ctx, tx, id, now); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // RestartPrivateCalls reconciles all live attempts before a server serves.

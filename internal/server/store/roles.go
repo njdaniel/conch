@@ -352,11 +352,14 @@ func (s *Store) SetRole(ctx context.Context, actor string, actorID, targetID int
 		out  RoleChangeResult
 		runs []EndedRun
 	)
-	err := s.withImmediateTx(ctx, func(tx execer) error {
+	err := s.withPrivateCallTx(ctx, func(tx execer) error {
 		runs = nil
 		var err error
 		out, err = setRoleTx(ctx, tx, actor, actorID, targetID, role, owner, now, &runs)
-		return err
+		if err != nil || !out.Changed {
+			return err
+		}
+		return reconcileHeldPrivateCall(ctx, tx, targetID, now)
 	})
 	if err != nil {
 		return RoleChangeResult{}, err

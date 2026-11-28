@@ -478,6 +478,7 @@ func TestPrivateCallRepeatLimitCountsRevokedRings(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newPrivateCallFixture(t, openTestStore(t))
+			setCredentialClock(t, &f.now)
 			start := f.now
 			const window = 10 * time.Minute
 			for i := 0; i < 5; i++ {

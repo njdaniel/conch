@@ -100,7 +100,7 @@ func (s *Store) PutBlock(ctx context.Context, ownerID, blockedID int64, seeAll b
 	if ownerID == blockedID {
 		return schema.BlockV1{}, false, ErrBlockSelf
 	}
-	err = s.withImmediateTx(ctx, func(tx execer) error {
+	err = s.withPrivateCallTx(ctx, func(tx execer) error {
 		cond, args := listedPrincipalSQL(ownerID, seeAll)
 		var one int
 		switch err := tx.QueryRowContext(ctx,
@@ -129,6 +129,9 @@ func (s *Store) PutBlock(ctx context.Context, ownerID, blockedID int64, seeAll b
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO blocks (owner_id, blocked_id, created_at) VALUES (?, ?, ?)`,
 			ownerID, blockedID, now.UnixMilli()); err != nil {
+			return err
+		}
+		if err := revokeHeldPrivateCall(ctx, tx, ownerID, blockedID, 0, now); err != nil {
 			return err
 		}
 		entry, err = scanBlock(tx.QueryRowContext(ctx, `SELECT `+blockColumns+`

@@ -716,10 +716,18 @@ func (s *Store) PutPermissions(ctx context.Context, actor string, actorID int64,
 	}
 	now = now.Truncate(time.Millisecond)
 	var out PermissionsWrite
-	err := s.withImmediateTx(ctx, func(tx execer) error {
+	err := s.withPrivateCallTx(ctx, func(tx execer) error {
 		var err error
 		out, err = putPermissionsTx(ctx, tx, actor, actorID, req, now)
-		return err
+		if err != nil {
+			return err
+		}
+		for _, change := range out.Changes {
+			if change.Permission == schema.PermUseVoice && !change.Granted {
+				return reconcilePrivateCalls(ctx, tx, now)
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		return PermissionsWrite{}, err

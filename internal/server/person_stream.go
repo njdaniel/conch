@@ -24,7 +24,7 @@ import (
 //
 // GET /v1/events/person/ws is scoped to one signed-in person, not to a
 // channel. A member with no channel open still gets their direct-message
-// frames on it and, when the call frames land (#2029), incoming-call rings.
+// frames and incoming-call rings on it.
 //
 // Why a route of its own, not /v1/events/ws without ?channel=: the channel
 // socket's hub, its subscription and every frame it builds are keyed by a
@@ -33,12 +33,11 @@ import (
 // whose one job is to carry channel documents, and "this socket never carries
 // a channel frame" would depend on a branch inside it. Here it is structural:
 // this file has no channel in any signature, and the only way a frame reaches
-// a socket is publish(principal, doc) with a doc of a registered kind
-// (personFrameKinds). The channel socket's behaviour and code are unchanged.
+// a socket is through a registered DM frame or a committed call revision.
 //
 // What a socket sends, in order: conch.person_stream_hello.v1 (its own
-// instance id), conch.dm_snapshot.v1, then the registered frames addressed to
-// its principal as they are published, and the heartbeat every socket gets
+// instance id), conch.dm_snapshot.v1, a private call snapshot, then the
+// frames addressed to its principal and the heartbeat every socket gets
 // (conch.heartbeat.v1, keepalive.go), which a client's silence watchdog lives
 // on and which names no one. Frames are addressed by principal id:
 // a frame published for principal 7 reaches only 7's sockets. A frame that
@@ -89,8 +88,7 @@ type personDoc interface{ Validate() error }
 // personFrameKind is one entry of the stream's frame-kind registry. A frame
 // kind is a schema this stream may carry; publish refuses a document no entry
 // accepts, so a channel document (or any other) cannot be sent on it by
-// mistake. The call frames of #2029 are one more entry here, and need no
-// change to the hub or the socket.
+// mistake. Call frames are built separately for the receiving credential.
 type personFrameKind struct {
 	// schema is the schema name the frame carries, for logs.
 	schema string
@@ -153,13 +151,16 @@ var personFrameKinds = []personFrameKind{
 	kindOf(schema.DMChangedSchemaV1, func(f readerDMChange) dmKey {
 		return dmKey{conversationID: f.ConversationID, readerID: f.readerID}
 	}),
-	// TODO(#2029): the call frames (call.state) are registered here.
 }
 
-// personFrame is one encoded, validated frame in a socket's queue.
+// personFrame is an encoded DM frame or a reference to a persisted call
+// revision. A call document is built only when its socket can write it.
 type personFrame struct {
 	raw []byte
 	key dmKey // the DM conversation and revision it carries
+
+	callID       string
+	callRevision int64
 }
 
 var errPersonFrameKind = errors.New("server: a document that is not a person-stream frame")
@@ -264,6 +265,11 @@ func (h *personHub) publish(principalID int64, doc personDoc) error {
 	if f.key.readerID != 0 && f.key.readerID != principalID {
 		return errors.New("server: DM change addressed to a different reader")
 	}
+	h.enqueue(principalID, f)
+	return nil
+}
+
+func (h *personHub) enqueue(principalID int64, f personFrame) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for sub := range h.subs {
@@ -280,7 +286,6 @@ func (h *personHub) publish(principalID int64, doc personDoc) error {
 		default:
 		}
 	}
-	return nil
 }
 
 // take returns what is waiting and empties it, or live=false once dropped.
@@ -341,8 +346,8 @@ func (h *personHub) isClosed() bool {
 	return h.closed
 }
 
-// dmSnapshotSource builds the reader's DM snapshot (unread counts, and later
-// the active call attempts). The DM conversation issues install the real one;
+// dmSnapshotSource builds the reader's DM snapshot with unread counts.
+// The DM conversation issues install the real one;
 // the stream does not know how DM state is stored. It is called after the
 // socket is subscribed, so a frame published while it runs is held, not lost.
 type dmSnapshotSource func(ctx context.Context, principalID int64) (personDMSnapshot, error)
@@ -528,6 +533,9 @@ type personStream struct {
 	// already in the snapshot. A conversation the snapshot does not list has
 	// no entry, and its frames are all sent.
 	snapRevisions map[int64]int64
+	// call is the last call projection sent to this socket, including the
+	// live attempt from its snapshot. Only one attempt per person can be live.
+	call *schema.PrivateCallV1
 }
 
 func snapshotRevisions(snap schema.DMSnapshotV1) map[int64]int64 {
@@ -543,7 +551,7 @@ func snapshotRevisions(snap schema.DMSnapshotV1) map[int64]int64 {
 func (p *personStream) run(ctx context.Context, snap schema.DMSnapshotV1, recheck <-chan time.Time) {
 	ctx = p.s.keepAlive(ctx, p.conn, true)
 	hello := schema.PersonStreamHelloV1{Schema: schema.PersonStreamHelloSchemaV1, InstanceID: p.sub.instanceID}
-	if !p.sendDoc(ctx, hello) || !p.sendDoc(ctx, snap) {
+	if !p.sendDoc(ctx, hello) || !p.sendDoc(ctx, snap) || !p.sendPrivateCallSnapshot(ctx) {
 		return
 	}
 	for {
@@ -592,6 +600,12 @@ func (p *personStream) flush(ctx context.Context) bool {
 		return false
 	}
 	for _, f := range frames {
+		if f.callID != "" {
+			if !p.sendPrivateCallUpdate(ctx, f.callID, f.callRevision) {
+				return false
+			}
+			continue
+		}
 		if f.key.revision != 0 && f.key.revision <= p.snapRevisions[f.key.conversationID] {
 			continue // the snapshot already reflects it
 		}

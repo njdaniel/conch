@@ -379,11 +379,10 @@ func (s *Store) DMServerSettings(ctx context.Context) (schema.DMServerSettingsV1
 // changed. callerID's change_server_settings is asked again under the write
 // lock (ErrPermissionDenied); 0 means no caller (authentication off). A
 // change is audited as dm_settings_changed, subject server, in the same
-// transaction; a repeat writes nothing. It ends no live call by itself: the
-// caller runs whatever ends them after it commits.
+// transaction; a repeat writes nothing. Turning it off revokes live calls.
 func (s *Store) SetDMServerSettings(ctx context.Context, actor string, callerID int64, settings schema.DMServerSettingsV1, now time.Time) (changed bool, err error) {
 	now = now.Truncate(time.Millisecond)
-	err = s.withImmediateTx(ctx, func(tx execer) error {
+	err = s.withPrivateCallTx(ctx, func(tx execer) error {
 		changed = false
 		if callerID != 0 {
 			held, err := permittedTx(ctx, tx, callerID, schema.PermChangeServerSettings)
@@ -410,6 +409,11 @@ func (s *Store) SetDMServerSettings(ctx context.Context, actor string, callerID 
 			settingDMsEnabled, fmt.Sprintf("%t", settings.DMsEnabled), now.UnixMilli()); err != nil {
 			return fmt.Errorf("store: set the direct message switch: %w", err)
 		}
+		if !settings.DMsEnabled {
+			if err := reconcilePrivateCalls(ctx, tx, now); err != nil {
+				return err
+			}
+		}
 		changed = true
 		return appendAuditEventTx(ctx, tx, actor, AuditDMSettingsChanged, "server",
 			fmt.Sprintf("dms_enabled=%t", settings.DMsEnabled), now)
@@ -434,11 +438,11 @@ func (s *Store) DMsEnabledFor(ctx context.Context, principalID int64) (bool, err
 // ErrOwnerProtected for an owner target, a hidden or unknown id is
 // ErrPrincipalNotFound and an agent ErrNotAPerson. A change is audited as
 // dm_permission_changed naming only the person switched; a repeat writes
-// nothing. It is content-blind: it reads and shows no conversation. It ends
-// no live call by itself.
+// nothing. Turning it off revokes the person's live call. The switch exposes
+// no conversation or attempt to its operator.
 func (s *Store) SetDMAllowed(ctx context.Context, actor string, callerID, principalID int64, allowed bool, now time.Time) (changed bool, err error) {
 	now = now.Truncate(time.Millisecond)
-	err = s.withImmediateTx(ctx, func(tx execer) error {
+	err = s.withPrivateCallTx(ctx, func(tx execer) error {
 		changed = false
 		forbidOwner := false // no caller (authentication off): no owner protection
 		if callerID != 0 {
@@ -482,6 +486,11 @@ func (s *Store) SetDMAllowed(ctx context.Context, actor string, callerID, princi
 		}
 		if _, err := tx.ExecContext(ctx, "UPDATE principals SET dm_allowed = ? WHERE id = ?", boolInt(allowed), principalID); err != nil {
 			return fmt.Errorf("store: set dm_allowed: %w", err)
+		}
+		if !allowed {
+			if err := revokeHeldPrivateCall(ctx, tx, principalID, 0, 0, now); err != nil {
+				return err
+			}
 		}
 		changed = true
 		return appendAuditEventTx(ctx, tx, actor, AuditDMPermissionChanged, principalActor(principalID),

@@ -1233,6 +1233,8 @@ type Store struct {
 	// authChanged, when set, is told which principals' authentication
 	// generation a committed restore moved on (issue #716).
 	authChanged func([]int64)
+	// privateCallUpdate receives committed call revisions for live delivery.
+	privateCallUpdate func(PrivateCallUpdate)
 	// voiceRoomPrefix starts the name of each new voice room; empty means
 	// the default. See SetVoiceRoomPrefix.
 	voiceRoomPrefix string

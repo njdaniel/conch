@@ -164,7 +164,7 @@ func principalState(ctx context.Context, tx execer, principalID int64) (role Rol
 func (s *Store) DisablePrincipal(ctx context.Context, actor string, principalID int64, forbidOwner ...bool) (changed bool, err error) {
 	var runs []EndedRun
 	var guests []EndedGuest
-	err = s.withImmediateTx(ctx, func(tx execer) error {
+	err = s.withPrivateCallTx(ctx, func(tx execer) error {
 		runs, guests = nil, nil
 		now := credentialNow().Truncate(time.Millisecond)
 		if changed, err = disablePrincipalTx(ctx, tx, actor, principalID, now, &runs, len(forbidOwner) > 0 && forbidOwner[0]); err != nil {
@@ -217,6 +217,9 @@ func disablePrincipalTx(ctx context.Context, tx execer, actor string, principalI
 		return false, fmt.Errorf("store: disable principal: %w", err)
 	} else if n != 1 {
 		return false, nil
+	}
+	if err := revokeHeldPrivateCall(ctx, tx, principalID, 0, 0, now); err != nil {
+		return false, err
 	}
 	if err := appendAuditEventTx(ctx, tx, actor, "principal_disabled", principalActor(principalID), "", now); err != nil {
 		return false, err
@@ -345,7 +348,7 @@ func (s *Store) RevokeAllCredentialsAs(ctx context.Context, actor string, actorI
 	var n int
 	var runs []EndedRun
 	var guests []EndedGuest
-	err := s.withImmediateTx(ctx, func(tx execer) error {
+	err := s.withPrivateCallTx(ctx, func(tx execer) error {
 		runs, guests = nil, nil
 		if _, err := selfOrAdministratorTx(ctx, tx, actorID, principalID); err != nil {
 			return err
@@ -370,6 +373,9 @@ func (s *Store) RevokeAllCredentialsAs(ctx context.Context, actor string, actorI
 			}
 		}
 		if n, err = revokePrincipalCredentialsTx(ctx, tx, actor, principalID, "revoke-all", SessionEndedByRevocation, now, &runs); err != nil {
+			return err
+		}
+		if err := revokeHeldPrivateCall(ctx, tx, principalID, 0, 0, now); err != nil {
 			return err
 		}
 		if err := appendAuditEventTx(ctx, tx, actor, "credentials_revoked_all", principalActor(principalID), fmt.Sprintf("count=%d", n), now); err != nil {

@@ -80,7 +80,7 @@ func (s *Store) InvitePrivateCall(ctx context.Context, conversationID int64, act
 		return PrivateCallResult{}, err
 	}
 	var out PrivateCallResult
-	err := s.withImmediateTx(ctx, func(tx execer) error {
+	err := s.withPrivateCallTx(ctx, func(tx execer) error {
 		cmd := privateCallCommand{actor: actor, actionID: req.ActionID, event: schema.PrivateCallEventInvite,
 			target: strconv.FormatInt(conversationID, 10), now: clock().Truncate(time.Millisecond)}
 		if err := dmWriteGateTx(ctx, tx, actor.PrincipalID); err != nil {
@@ -214,7 +214,7 @@ func (s *Store) ActOnPrivateCall(ctx context.Context, id, event string, actor Pr
 		return PrivateCallResult{}, err
 	}
 	var out PrivateCallResult
-	err := s.withImmediateTx(ctx, func(tx execer) error {
+	err := s.withPrivateCallTx(ctx, func(tx execer) error {
 		cmd := privateCallCommand{actor: actor, actionID: req.ActionID, event: event, target: id,
 			revision: req.Revision, now: clock().Truncate(time.Millisecond)}
 		c, err := privateCallByID(ctx, tx, id)
