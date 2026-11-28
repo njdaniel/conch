@@ -282,6 +282,88 @@ func TestPrivateCallStreamBlockDiscardsQueuedRing(t *testing.T) {
 	callStreamMarker(t, f, bob.ID, phone)
 }
 
+func TestPrivateCallStreamRechecksQueuedRing(t *testing.T) {
+	for _, change := range []string{"authority lost before sweep", "hide_members"} {
+		t.Run(change, func(t *testing.T) {
+			f, bob, phoneToken, _ := privateCallHTTPFixture(t)
+			f.srv.dmFrameAccess = allowPersonDMFixture
+			// Hold delivery of the committed ring until after access changes.
+			f.srv.store.OnPrivateCallUpdate(nil)
+			base := wsTestServer(t, f.srv)
+			phone, snap := dialPrivateCallStream(t, base, phoneToken)
+			if snap.Call != nil {
+				t.Fatalf("initial call snapshot = %+v", snap.Call)
+			}
+			call := decodePrivateCallResponse(t, f.do(t, "POST", privateCallTestPair,
+				f.aliceTok, `{"action_id":"ring"}`), http.StatusCreated).Call
+
+			switch change {
+			case "authority lost before sweep":
+				// Bypass inline revocation to leave the original revision live
+				// in storage, as when authority expires between sweeps.
+				if _, err := privateCallFixtureDB(t, f).Exec(`INSERT INTO blocks (owner_id, blocked_id, created_at)
+					VALUES (?, ?, ?)`, f.alice.ID, bob.ID, f.srv.now().UnixMilli()); err != nil {
+					t.Fatal(err)
+				}
+			case "hide_members":
+				hidePrivateCallPeers(t, f)
+			}
+			f.srv.person.enqueue(bob.ID, personFrame{callID: call.ID, callRevision: call.Revision})
+			callStreamMarker(t, f, bob.ID, phone)
+			assertStoredCallState(t, f, call.ID, schema.PrivateCallStateRinging, call.Revision)
+		})
+	}
+}
+
+func TestPrivateCallCurrentSnapshotsHideUnknownPeer(t *testing.T) {
+	f, _, phoneToken, _ := privateCallHTTPFixture(t)
+	base := wsTestServer(t, f.srv)
+	call := decodePrivateCallResponse(t, f.do(t, "POST", privateCallTestPair,
+		f.aliceTok, `{"action_id":"ring"}`), http.StatusCreated).Call
+	phone, snap := dialPrivateCallStream(t, base, phoneToken)
+	if snap.Call == nil || snap.Call.ID != call.ID {
+		t.Fatalf("initial call snapshot = %+v, want %s", snap.Call, call.ID)
+	}
+	_ = phone.conn.CloseNow()
+	// The two members share no channel, so disabling directory visibility
+	// makes the caller unknown to the callee while the call is still ringing.
+	hidePrivateCallPeers(t, f)
+	_, snap = dialPrivateCallStream(t, base, phoneToken)
+	if snap.Call != nil {
+		t.Errorf("reconnect disclosed a call from an unknown peer: %+v", snap.Call)
+	}
+
+	rec := f.do(t, "GET", "/v1/calls/current", phoneToken, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("current call = %d %s", rec.Code, rec.Body)
+	}
+	var current schema.PrivateCallSnapshotV1
+	dmDecode(t, rec, &current)
+	if err := current.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if current.Call != nil {
+		t.Errorf("GET /v1/calls/current disclosed a call from an unknown peer: %+v", current.Call)
+	}
+	assertStoredCallState(t, f, call.ID, schema.PrivateCallStateRinging, call.Revision)
+}
+
+func hidePrivateCallPeers(t *testing.T, f *authFixture) {
+	t.Helper()
+	ctx := t.Context()
+	st := f.srv.store
+	doc, err := st.Permissions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.PutPermissions(ctx, fmt.Sprintf("principal:%d", f.root.ID), f.root.ID, schema.PutPermissionsRequestV1{
+		Revision: doc.Revision,
+		Changes:  []schema.PermissionChangeV1{{Permission: schema.PermSeeMemberDirectory, Role: schema.PermissionRoleMember, Granted: false}},
+	}, f.srv.now()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPrivateCallStreamAfterRestart(t *testing.T) {
 	f, _, phoneToken, _ := privateCallHTTPFixture(t)
 	base := wsTestServer(t, f.srv)

@@ -81,7 +81,7 @@ func (s *Store) SetVoiceAllowed(ctx context.Context, actor string, callerID, pri
 			return fmt.Errorf("store: set voice_allowed: %w", err)
 		}
 		if !allowed {
-			if err := reconcileHeldPrivateCall(ctx, tx, principalID, now); err != nil {
+			if err := revokeHeldPrivateCall(ctx, tx, principalID, 0, 0, now); err != nil {
 				return err
 			}
 		}
