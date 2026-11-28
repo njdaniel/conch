@@ -153,6 +153,39 @@ func TestDMSyncLiveAndRecovery(t *testing.T) {
 	}
 }
 
+func TestDMSnapshotRejectsPeersPrivateOpen(t *testing.T) {
+	f := newDMFixture(t)
+	opener, peer := f.join(t), f.join(t)
+	conv := f.mustOpen(t, opener, peer.p.ID)
+	f.srv.dmSnapshotSource = func(ctx context.Context, reader int64) (personDMSnapshot, error) {
+		rows, enabled, err := f.srv.store.DMSnapshotFor(ctx, reader)
+		if err != nil {
+			return personDMSnapshot{}, err
+		}
+		if reader == peer.p.ID {
+			// Simulate an overbroad visibility query returning the opener's
+			// empty conversation even though the reader has no viewer row.
+			rows = append(rows, store.DMConversation{
+				ID:       conv.ID,
+				Lo:       conv.ParticipantIDs[0],
+				Hi:       conv.ParticipantIDs[1],
+				PeerID:   opener.p.ID,
+				PeerName: opener.p.Name,
+				State:    schema.DMStateOpen,
+			})
+		}
+		return f.srv.buildDMSnapshot(reader, rows, enabled), nil
+	}
+	base := wsTestServer(t, f.srv)
+	_, snap := dialPerson(t, base, opener.tok).open()
+	if len(snap.Conversations) != 1 || snap.Conversations[0].ID != conv.ID || snap.Conversations[0].CreatedAt != nil {
+		t.Fatalf("opener's snapshot = %+v, want the empty conversation %d", snap, conv.ID)
+	}
+	if _, status, _ := tryDialPerson(t, base, personPath, peer.tok); status != http.StatusInternalServerError {
+		t.Fatalf("peer's socket upgrade = %d, want %d", status, http.StatusInternalServerError)
+	}
+}
+
 func TestDMSyncSnapshotAndCursors(t *testing.T) {
 	f := newDMFixture(t)
 	a, b, c := f.join(t), f.join(t), f.join(t)
@@ -246,7 +279,7 @@ func TestDMReadLimitPrecedesWriteLock(t *testing.T) {
 }
 
 func TestDMQueuedDeliveryRechecksAccess(t *testing.T) {
-	for _, reason := range []string{"block", "disable"} {
+	for _, reason := range []string{"block", "disable", "switched off"} {
 		t.Run(reason, func(t *testing.T) {
 			testDMQueuedDelivery(t, reason)
 		})
@@ -260,9 +293,11 @@ func testDMQueuedDelivery(t *testing.T, reason string) {
 	ab := f.mustOpen(t, a, b.p.ID)
 	cb := f.mustOpen(t, c, b.p.ID)
 	entered, unblockCheck := make(chan struct{}), make(chan struct{})
+	checked := make(chan struct{})
 	access := f.srv.dmFrameAccess
 	f.srv.dmFrameAccess = func(ctx context.Context, reader, conv int64) (bool, error) {
 		if reader == b.p.ID && conv == ab.ID {
+			defer close(checked)
 			close(entered)
 			select {
 			case <-unblockCheck:
@@ -293,12 +328,32 @@ func testDMQueuedDelivery(t *testing.T, reason string) {
 		}
 		return
 	}
-	_, _, err := f.srv.store.PutBlock(t.Context(), a.p.ID, b.p.ID, false, f.srv.now())
-	close(unblockCheck)
-	if err != nil {
-		t.Fatal(err)
+	if reason == "switched off" {
+		setAllowed := func(allowed bool) {
+			t.Helper()
+			changed, err := f.srv.store.SetDMAllowed(t.Context(), "system", f.root.ID, b.p.ID, allowed, f.srv.now())
+			if err != nil || !changed {
+				t.Fatalf("set reader's DMs to %t: changed=%t, err=%v", allowed, changed, err)
+			}
+		}
+		setAllowed(false)
+		close(unblockCheck)
+		select {
+		case <-checked:
+		case <-time.After(eventsReadTimeout):
+			t.Fatal("queued frame's delivery check did not finish")
+		}
+		// The check has captured its decision. Re-enable DMs so a later
+		// message can mark the next frame expected on the same socket.
+		setAllowed(true)
+	} else {
+		_, _, err := f.srv.store.PutBlock(t.Context(), a.p.ID, b.p.ID, false, f.srv.now())
+		close(unblockCheck)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustDMReply(t, f, a, http.MethodDelete, fmt.Sprintf("/v1/dms/%d/messages/%d", ab.ID, queued.Message.ID), "", http.StatusNoContent, nil)
 	}
-	mustDMReply(t, f, a, http.MethodDelete, fmt.Sprintf("/v1/dms/%d/messages/%d", ab.ID, queued.Message.ID), "", http.StatusNoContent, nil)
 	var msg schema.PostDMMessageResponseV1
 	mustDMReply(t, f, c, http.MethodPost, fmt.Sprintf("/v1/dms/%d/messages", cb.ID),
 		`{"body":"still allowed","client_nonce":"allowed"}`, http.StatusCreated, &msg)

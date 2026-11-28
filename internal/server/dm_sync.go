@@ -16,6 +16,10 @@ func (s *Server) dmSnapshot(ctx context.Context, reader int64) (personDMSnapshot
 	if err != nil {
 		return personDMSnapshot{}, err
 	}
+	return s.buildDMSnapshot(reader, rows, enabled), nil
+}
+
+func (s *Server) buildDMSnapshot(reader int64, rows []store.DMConversation, enabled bool) personDMSnapshot {
 	more := len(rows) > schema.MaxDMSnapshotConversations
 	if more {
 		rows = rows[:schema.MaxDMSnapshotConversations]
@@ -32,12 +36,11 @@ func (s *Server) dmSnapshot(ctx context.Context, reader int64) (personDMSnapshot
 	}
 	for _, c := range rows {
 		snap.doc.Conversations = append(snap.doc.Conversations, dmConversationDoc(c))
-		if c.CreatedAt.IsZero() {
-			// A conversation without messages needs the reader's own viewer row.
+		if c.CreatedAt.IsZero() && c.HasViewerState {
 			snap.emptyViewers[c.ID] = reader
 		}
 	}
-	return snap, nil
+	return snap
 }
 
 func (s *Server) handleDMSnapshot(w http.ResponseWriter, r *http.Request) {
