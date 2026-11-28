@@ -1,10 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { call, fileQuery, operations, pathOf, previewCall, queryOf, type OperationId } from './operations';
+import { call, fileQuery, isOperationServed, operations, pathOf, previewCall, queryOf, type OperationId } from './operations';
 
-// internal/server/routes.go is the server's route table. Every entry of the
-// operation table must be a route it serves, so the table cannot name a
-// request conchd would answer 404.
+// Verify the operation table's availability against the handlers registered
+// in internal/server/routes.go. The UI uses the same availability to offer controls.
 // Read through Node's fs (vitest runs in Node, from web/), so the dev server
 // needs no widened file access.
 const routesSource = readFileSync('../internal/server/routes.go', 'utf8');
@@ -13,7 +12,7 @@ const routesSource = readFileSync('../internal/server/routes.go', 'utf8');
 // without their names (the server calls a principal {principal_id}, the table
 // {principal}).
 const pattern = (method: string, path: string) => `${method} ${path.replace(/\{\w+\}/g, '{}')}`;
-const served = new Set([...routesSource.matchAll(/"((?:GET|POST|PUT|DELETE) \/[^"\s]*)"/g)].map((match) => {
+const served = new Set([...routesSource.matchAll(/"((?:GET|POST|PUT|PATCH|DELETE) \/[^"\s]*)"/g)].map((match) => {
   const [method = '', path = ''] = (match[1] ?? '').split(' ');
   return pattern(method, path);
 }));
@@ -48,8 +47,10 @@ describe('the operation table', () => {
     expect(served.has('GET /v1/whoami')).toBe(true);
   });
 
-  it.each(entries)('%s is a route conchd serves', (id, entry) => {
-    expect(served.has(pattern(entry.method, entry.path)), `${id}: ${entry.method} ${entry.path}`).toBe(true);
+  // Registering a handler requires clearing awaitingServer so the UI can use it.
+  it.each(entries)('%s matches the availability of its conchd route', (id, entry) => {
+    const route = served.has(pattern(entry.method, entry.path));
+    expect(isOperationServed(id), `${entry.method} ${entry.path} ${route ? 'is registered in routes.go' : 'is missing from routes.go'}`).toBe(route);
   });
 
   it('has one entry per request: no method and path twice', () => {
@@ -149,6 +150,24 @@ describe('the operation table', () => {
     const sockets = entries.filter(([, entry]) => entry.socket === true);
     expect(sockets.map(([id]) => id).sort()).toEqual(['eventsSocket', 'messagesSocket', 'occupancySocket', 'personSocket', 'voiceSocket']);
     for (const [, entry] of sockets) expect(entry.method).toBe('GET');
+  });
+});
+
+describe('the direct message operations', () => {
+  it('are the routes of pkg/schema/dm.go, in a conversation id space of their own', () => {
+    expect(pathOf(call('openDm'))).toBe('/v1/dms');
+    expect(pathOf(call('listDmMessages', { conversation: 12 }, queryOf({ order: 'desc' })))).toBe('/v1/dms/12/messages?order=desc');
+    expect(operations.editDmMessage.method).toBe('PATCH');
+    expect(pathOf(call('editDmMessage', { conversation: 12, message: 42 }))).toBe('/v1/dms/12/messages/42');
+    expect(pathOf(call('removeDmMessage', { conversation: 12, message: 42 }))).toBe('/v1/dms/12/messages/42');
+    expect(pathOf(call('dmFileMeta', { conversation: 12, file: 41 }))).toBe('/v1/dms/12/files/41');
+  });
+  it('are reads and writes of people with a bearer credential, and none can be previewed', () => {
+    for (const [id, entry] of entries) {
+      if (!/^dm|Dm/.test(id)) continue;
+      expect(entry.auth, id).toBe('bearer');
+      expect(entry.previewable, id).toBeUndefined();
+    }
   });
 });
 

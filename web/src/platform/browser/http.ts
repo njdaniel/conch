@@ -1,6 +1,5 @@
 // The browser's HttpTransport: fetch against the page's own origin. The
-// arguments of every fetch here are exactly those the client has always made,
-// built from the operation table; http.test.ts pins them.
+// fetch arguments are built from the operation table; http.test.ts pins them.
 import { operations, pathOf, previewHeader, type Call } from '../operations';
 import type { HttpTransport } from '../types';
 
@@ -14,9 +13,10 @@ function plain(call: Call): Call {
 }
 
 export const http: HttpTransport = {
-  get(call, token) {
+  get(call, token, signal) {
     if (call.previewAs !== undefined && operations[call.op].previewable !== true) throw new Error(`operation ${call.op} cannot be previewed`);
-    return fetch(pathOf(call), {
+    const path = pathOf(call);
+    const init: RequestInit = {
       headers: {
         Authorization: `Bearer ${token}`,
         Accept: json,
@@ -24,7 +24,9 @@ export const http: HttpTransport = {
       },
       cache: 'no-store',
       credentials: 'omit',
-    });
+      ...(signal === undefined ? {} : { signal }),
+    };
+    return fetch(path, init);
   },
 
   send(call, token, { body, keepalive, signal }) {
@@ -72,11 +74,12 @@ export const http: HttpTransport = {
     });
   },
 
-  download(call, token) {
+  download(call, token, signal) {
     return fetch(pathOf(plain(call)), {
       headers: { Authorization: `Bearer ${token}` },
       cache: 'no-store',
       credentials: 'omit',
+      ...(signal === undefined ? {} : { signal }),
     });
   },
 };

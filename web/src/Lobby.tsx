@@ -1,4 +1,4 @@
-import { useCallback, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { ChannelList } from './ChannelList';
 import { ChannelNav } from './ChannelNav';
 import { GroupsPanel } from './ChannelGroups';
@@ -9,6 +9,9 @@ import type { InVoice } from './voice/useOccupancy';
 import { ChannelJoin, type ChannelJoinHandler } from './voice/channelJoin';
 import { headingId } from './Conversation';
 import { Avatar, Glyph } from './Icons';
+import { DmInbox } from './dm/DmInbox';
+import { DmOpened, useDm } from './dm/DmContext';
+import { DmRoute } from './dm/DmRoute';
 import { ServerVersion, TemporaryBanner } from './ServerVersion';
 import { AddPerson, JoiningSettings, SettingsOpen, type JoiningRequest } from './joiningSettings';
 import { DrawerOver, LeaveDrawer, OverlayReport, setPageModal } from './pageModal';
@@ -214,6 +217,12 @@ export function Lobby({
   // a time. All of them stay mounted, so a switch only changes what is shown:
   // the draft, the log's place and the call are untouched.
   const phone = usePhone();
+  // Direct messages (ADR-017): a separate inbox beside Channels, and an open
+  // conversation that takes the middle of the page. Neither touches the voice
+  // strip, which is mounted below and does not read this.
+  const dm = useDm();
+  const directOpen = dm?.inbox.state.selected ?? null;
+  const selectDirect = dm?.inbox.select;
   // The person's own favorites, groups and order (issue #1493).
   const arranged = useArrangement(origin, me, channels.channels, channels.loaded);
   const inVisualOrder = useMemo(() => visualOrder(arranged.arrangement, channels.channels), [arranged.arrangement, channels.channels]);
@@ -223,7 +232,7 @@ export function Lobby({
   const [chosen, setView] = useState<PhoneView | null>(null);
   // Chat with nothing open (the channel was lost or closed on this tab) is
   // Channels.
-  const chatOpen = channels.loaded && channels.selected !== null;
+  const chatOpen = (channels.loaded && channels.selected !== null) || directOpen !== null;
   const wanted: PhoneView = chosen ?? 'chat';
   const view: PhoneView = wanted === 'chat' && !chatOpen ? 'channels' : wanted;
   const [live, setLive] = useState(false);
@@ -389,6 +398,43 @@ export function Lobby({
   // (LeaveDrawer): focus goes there, not to Members.
   const toCentre = useRef(false);
   const centre = useRef<HTMLElement>(null);
+  const dmOpener = useRef<{ readonly button: HTMLElement; readonly view: PhoneView } | null>(null);
+  const [dmFocus, setDmFocus] = useState<'enter' | 'return' | null>(null);
+  const openDirect = useCallback((opener: HTMLElement) => {
+    let button = opener;
+    if (membersOver && membersBody.current?.contains(opener) === true) {
+      setPanelOpen(false);
+      button = membersButton.current ?? opener;
+    } else if (settingsOpen && opener.closest('#settings-panel') !== null) {
+      setSettingsOpen(false);
+      button = settingsButton.current ?? opener;
+    }
+    dmOpener.current = { button, view };
+    if (phone) setView('chat');
+    setDmFocus('enter');
+  }, [membersOver, settingsOpen, view, phone]);
+
+  function closeDirect() {
+    selectDirect?.(null);
+    if (phone) setView(dmOpener.current?.view ?? 'channels');
+    setDmFocus('return');
+  }
+
+  useLayoutEffect(() => {
+    if (dmFocus === null || modalNow || overlays > 0) return;
+    if (dmFocus === 'enter') {
+      if (directOpen === null) return;
+      centre.current?.querySelector<HTMLElement>('[data-dm-entry]')?.focus();
+    } else {
+      const opener = dmOpener.current?.button;
+      if (opener?.isConnected === true && opener.closest('[hidden], [inert]') === null) opener.focus();
+      else if (!phone || view === 'channels') lobbyEl.current?.querySelector<HTMLElement>('[data-dm-inbox-heading]')?.focus();
+      else if (view === 'chat') document.getElementById(headingId)?.focus();
+      else voiceTab.current?.focus();
+      dmOpener.current = null;
+    }
+    setDmFocus(null);
+  }, [dmFocus, directOpen, modalNow, overlays, phone, view]);
   // What the focus recovery below reads, as of the last render.
   const over = useRef({ over: false, blocked: false });
   over.current = { over: membersOver, blocked: settingsOpen || asking || overlays > 0 };
@@ -459,13 +505,17 @@ export function Lobby({
     setPanelOpen(false);
   }, [shownChannel]);
   const leaveDrawer = useCallback(() => {
+    // Runs use the channel conversation pane, including with Members beside it.
+    selectDirect?.(null);
+    dmOpener.current = null;
+    setDmFocus(null);
     if (!over.current.over) return;
     toCentre.current = true;
     setPanelOpen(false);
     // On a phone the centre is the Chat view's: the other views hide it, and
     // what is shown there could not take focus.
     if (phone) setView('chat');
-  }, [phone]);
+  }, [phone, selectDirect]);
   // Arriving (signing in, or a sign-in restored on reload) leaves focus on
   // the page's body, where the next Tab starts from the top: the first time a
   // conversation is shown, focus goes to its heading (issue #590). Only then:
@@ -563,6 +613,7 @@ export function Lobby({
     <JoiningSettings.Provider value={joining}>
     <SettingsOpen.Provider value={settingsOpen}>
     <OverlayReport.Provider value={reportOverlay}>
+    <DmOpened.Provider value={openDirect}>
     <AddPerson.Provider value={onAddPerson === undefined ? null : addPerson}>
       <div ref={lobbyEl} className={`${phone ? `lobby phone view-${view}${live ? ' in-voice' : ''}` : 'lobby'}${band === undefined ? '' : ' has-band'}`}>
         {/* While Settings is open the rest of the page is inert: the panel is
@@ -616,7 +667,7 @@ export function Lobby({
             the page: every other part of them is inert then, one by one. */}
         <div className={panelOpen ? 'areas' : 'areas side-closed'} inert={settingsOpen || asking || voiceSheet}>
           {/* The switcher's entry is above the Channels navigation, not in it: that holds channel controls only. */}
-          <div className="channels" inert={membersOver}>
+          <div className="channels" inert={membersOver || (directOpen !== null && phone && view !== 'channels')}>
             {channels.loaded ? (
             <ChannelNav
               channels={inVisualOrder}
@@ -625,6 +676,7 @@ export function Lobby({
               me={me}
               refresh={directoryTick}
               onOpen={(name) => {
+                selectDirect?.(null);
                 onOpen(name);
                 if (phone) {
                   toHeading.current = true;
@@ -667,6 +719,7 @@ export function Lobby({
                     joinVoice.current?.(channel);
                   }}
                   onOpen={(name) => {
+                    selectDirect?.(null);
                     onOpen(name);
                     if (phone) {
                       toHeading.current = true;
@@ -697,11 +750,12 @@ export function Lobby({
               <p className="empty">Loading channels…</p>
             )}
           </nav>
+            <DmInbox onOpen={openDirect} />
             {channels.loaded && visit === undefined && channels.channels.length > 0 ? <GroupsPanel controls={arranged} /> : null}
           </div>
           <main ref={centre} className="centre" inert={membersOver}>
             <div ref={setStage} className="stage" />
-            <section ref={conversationEl} aria-label="Conversation" className="conversation">
+            <section ref={conversationEl} aria-label="Conversation" className="conversation" inert={directOpen !== null && phone && view !== 'chat'}>
               {temporary === true ? <TemporaryBanner /> : null}
               {banner}
               {channels.lost === undefined ? null : (
@@ -709,8 +763,18 @@ export function Lobby({
                   You no longer have access to #{channels.lost}
                 </p>
               )}
-              {conversation}
-              {phone ? null : firstRun}
+              {directOpen === null ? null : (
+                <DmRoute
+                  conversationId={directOpen}
+                  onClose={closeDirect}
+                  viewing={!modalNow && overlays === 0 && (!phone || view === 'chat')}
+                />
+              )}
+              {/* Kept mounted while a DM is open: the channel's feed and drafts carry on. */}
+              <div className="keep-mounted" hidden={directOpen !== null}>
+                {conversation}
+                {phone ? null : firstRun}
+              </div>
             </section>
           </main>
           <aside aria-label="Members panel" className="panel">
@@ -887,6 +951,7 @@ export function Lobby({
         {overlay}
       </div>
     </AddPerson.Provider>
+    </DmOpened.Provider>
     </OverlayReport.Provider>
     </SettingsOpen.Provider>
     </JoiningSettings.Provider>

@@ -2534,6 +2534,10 @@ label {
   gap: 0 var(--s2);
 }
 
+.member-details {
+  display: contents;
+}
+
 .ag-agent > .avatar {
   flex: none;
   width: 1.75rem;
@@ -2680,18 +2684,22 @@ label {
   background: var(--muted);
 }
 
+.state-online > .member-details > .ag-status,
 .state-online > .ag-status {
   color: var(--accent);
 }
 
+.state-online > .member-details > .ag-status::before,
 .state-online > .ag-status::before {
   background: var(--accent);
 }
 
+.state-stale > .member-details > .ag-status,
 .state-stale > .ag-status {
   color: var(--warn);
 }
 
+.state-stale > .member-details > .ag-status::before,
 .state-stale > .ag-status::before {
   background: var(--warn);
 }
@@ -5590,8 +5598,7 @@ button.link {
     contain: size;
   }
 
-  .lobby:not(.phone) .conversation > .ag-run,
-  .lobby:not(.phone) .conversation > .first-run {
+  .lobby:not(.phone) .conversation > .keep-mounted > :is(.ag-run, .first-run) {
     flex: 1 1 0;
     min-height: 0;
     overflow-y: auto;
@@ -7106,6 +7113,63 @@ button.link {
   display: block;
   width: 100%;
   max-width: 100%;
+}
+
+/* Direct messages (#2026, #2027). The wrapper keeps the channel conversation
+   mounted, without a box of its own, while a DM is open. */
+.keep-mounted { display: contents; }
+.keep-mounted[hidden] { display: none; }
+.dm-inbox { margin-block: var(--s4); }
+.dm-inbox h2 { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s2); }
+.dm-inbox ul { list-style: none; margin: 0; padding: 0; }
+.dm-row { display: flex; align-items: center; gap: 0.5rem; }
+.dm-row .dm-open { flex: 1; display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; min-width: 0; text-align: start; }
+.dm-name, .dm-header h2 { overflow-wrap: anywhere; min-width: 0; }
+.dm-row.selected .dm-open { font-weight: 700; }
+.dm-route, .dm-view, .dm-transcript { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; }
+.dm-back { align-self: start; margin: var(--s2) var(--s3); }
+.dm-header { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; padding-inline: var(--s3); }
+.dm-log { flex: 1; overflow-y: auto; padding-inline: var(--s3); }
+.dm-log ol { list-style: none; margin: 0; padding: 0; }
+.dm-body { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0.15rem 0; }
+.dm-message.pending { opacity: 0.8; }
+.dm-search, .dm-file { overflow-wrap: anywhere; }
+.dm-search { padding-inline: var(--s3); }
+.dm-search input { max-width: 100%; }
+.dm-composer textarea { width: 100%; box-sizing: border-box; }
+.dm-message-action { display: inline-flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+
+/* Reserve space beside the row's menu for Message. Both controls stay at
+   the edge when the name, presence or badges wrap. */
+.ag-person:has(> .dm-message-action) { padding-right: 2.75rem; }
+.ag-person.has-actions:has(> .dm-message-action) { padding-right: 5.5rem; }
+.ag-person:has(> .dm-message-action) > .message-menu { right: 0; }
+.ag-person > .dm-message-action { display: contents; }
+.ag-person > .dm-message-action > button {
+  position: absolute;
+  top: 0;
+  right: 0;
+  min-width: 2.25rem;
+  padding: 0 var(--s2);
+}
+.ag-person.has-actions > .dm-message-action > button { right: 2.75rem; }
+.ag-person > .dm-message-action > [role='alert'] { flex-basis: 100%; }
+
+@media (max-width: 699px) {
+  .dm-row button, .dm-back { min-height: 2.75rem; }
+  .ag-person:has(> .dm-message-action) { column-gap: var(--s1); }
+  /* Let presence and badges wrap beside the profile button and its touch
+     target when Message takes a second column of actions. */
+  .ag-person:has(> .dm-message-action) > .member-details {
+    display: flex;
+    flex: 1;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0 var(--s1);
+  }
+  .ag-person:has(> .dm-message-action) > .member-details > * { white-space: nowrap; }
+  .ag-person:has(> .dm-message-action) .ag-status::before { content: none; }
+  .ag-person > .dm-message-action > button { min-width: 2.75rem; }
 }
 
 /* Personal blocks (issue #1832): a blocked person's message is one quiet row

@@ -1,11 +1,12 @@
 // Unread counts and the read mark (UX-02), against a fake conchd (fetch) and a
 // fake WebSocket. No network, no browser.
-import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { restore } from './api';
 import { badgeText, markInterval, useReadState } from './useReadState';
 import { Conversation } from './Conversation';
+import { conversation, snapshot } from './dm/testkit';
 import type { ReadStateV1 } from './schema/readstate';
 import type { MessageV2 } from './schema/message';
 import { chatFor, chatReducer, initialChat, maxHeld, pageSize } from './state/messages';
@@ -73,6 +74,7 @@ const state = (channel_id: number, unread: number, last_read_id = 0): ReadStateV
 });
 
 interface Server {
+  dms?: boolean;
   events: boolean;
   readDelay: Promise<void> | null;
   history: unknown[];
@@ -101,11 +103,22 @@ function install() {
       const path = url.pathname;
       // Without voice, so the page opens no voice socket beside the
       // conversation's (issue #585): every socket counted here is its.
-      if (path === '/v1/whoami') return Promise.resolve(json({ id: 2, kind: 'human', name: 'ada', role: 'member', voice_allowed: false }));
+      if (path === '/v1/whoami') return Promise.resolve(json({
+        id: 2, kind: 'human', name: 'ada', role: 'member', voice_allowed: false,
+        ...(server.dms ? { capabilities: { dm: true } } : {}),
+      }));
       if (path === '/v1/channels') return Promise.resolve(json({ channels }));
       if (path === '/v1/ws-tickets') return Promise.resolve(json({ ticket: ticketValue, expires_at: at }, 201));
       if (server.events && path === '/v1/sessions' && init?.method === 'POST') {
         return Promise.resolve(json({ schema: 'conch.session.v1', id: 100, principal_id: 2, kind: 'human', name: 'ada', client: 'browser', state: 'online', status: 'online', started_at: at, last_seen_at: at, interventions: [], outcome_unknown: false }, 201));
+      }
+      if (server.dms) {
+        if (path === '/v1/dms/snapshot') return Promise.resolve(json({ ...snapshot(), conversations: [conversation()] }));
+        if (path === '/v1/dms/12') return Promise.resolve(json(conversation()));
+        if (path === '/v1/dms/12/messages') return Promise.resolve(json({ order: 'desc', messages: [] }));
+        if (path === '/v1/directory/channels') return Promise.resolve(json({ channels: channels.map((channel) => ({
+          ...channel, visibility: 'public', joined: true, default: false, manages: false,
+        })) }));
       }
       if (path === '/v1/read-state') {
         server.gets++;
@@ -273,6 +286,36 @@ describe('the mark', () => {
     await waitFor(() => {
       expect(noBadges()).toHaveLength(0);
     });
+  });
+
+  it('keeps a hidden channel unread and reveals a channel opened from the directory or a message link', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: vi.fn() });
+    server.dms = true;
+    server.history = [message(1)];
+    const socket = await openChat();
+    await waitFor(() => { expect(server.puts.map((mark) => mark.id)).toEqual([1]); });
+    const inbox = await screen.findByRole('navigation', { name: 'Direct messages' });
+    const openDm = () => fireEvent.click(within(inbox).getByRole('button', { name: /^Grace/ }));
+    openDm();
+    await screen.findByRole('textbox', { name: 'Message to Grace' });
+    socket.send(message(2));
+    expect(await badge('1 unread')).toBeDefined();
+    expect(server.puts.map((mark) => mark.id)).toEqual([1]);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Browse channels' }));
+    const directory = await screen.findByRole('region', { name: 'Channel directory' });
+    fireEvent.click(await within(directory).findByRole('button', { name: 'ops' }));
+    expect(await screen.findByLabelText('Message #ops')).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Back' })).toBeNull();
+
+    openDm();
+    await screen.findByRole('textbox', { name: 'Message to Grace' });
+    act(() => {
+      window.history.replaceState(null, '', '#/c/general/m/1');
+      window.dispatchEvent(new Event('hashchange'));
+    });
+    expect(await screen.findByLabelText('Message #general')).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Back' })).toBeNull();
   });
 
   it('never puts the token in a URL', async () => {

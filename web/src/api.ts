@@ -219,7 +219,7 @@ import {
   type UpdateProblemReportRequestV1,
 } from './schema/report';
 import { fromServer, type Validator } from './schema/validate';
-import { call, fileQuery, operations, previewCall, queryOf, type Call, type OperationId } from './platform/operations';
+import { call, fileQuery, isOperationServed, operations, previewCall, queryOf, type Call, type OperationId } from './platform/operations';
 import { previewResponseV1, type PreviewResponseV1 } from './schema/preview';
 import { platform } from './platform';
 import type { FeedConnection, Held, Place, PushSubscriptionTarget } from './platform/types';
@@ -524,14 +524,15 @@ async function refused(res: Response): Promise<{ readonly ok: false; readonly fa
 
 // withStatus preserves a refusal's HTTP status for a reader that treats one
 // status as final, without changing the shape of other calls' answers (#1562).
-async function get<T>(request: Call, token: string, check: Validator<T>, withStatus = false): Promise<ApiResult<T>> {
+async function get<T>(request: Call, token: string, check: Validator<T>, withStatus = false, signal?: AbortSignal): Promise<ApiResult<T>> {
   let res: Response;
   try {
-    res = await platform.http.get(request, token);
+    res = await platform.http.get(request, token, signal);
   } catch {
-    noteNoAnswer();
+    if (!signal?.aborted) noteNoAnswer();
     return { ok: false, failure: 'network' };
   }
+  if (signal?.aborted) return { ok: false, failure: 'network' };
   if (!res.ok) await noteRefusal(res);
   if (res.status === 401) return { ok: false, failure: 'unauthorized' };
   if (!res.ok) {
@@ -558,11 +559,13 @@ async function get<T>(request: Call, token: string, check: Validator<T>, withSta
 // A 401 for a credential this page has since replaced is not a sign-out: the
 // call is asked again with the new one (settleRefusal, issue #1000).
 // signIn and restore are the calls that do not use it: they check a candidate.
-async function authed<T>(request: Call, check: Validator<T>, withStatus = false): Promise<ApiResult<T>> {
+async function authed<T>(request: Call, check: Validator<T>, withStatus = false, signal?: AbortSignal): Promise<ApiResult<T>> {
   let held = current();
   if (held === null) return { ok: false, failure: 'unauthorized' };
   for (let sent = 0; sent < resends; sent++) {
-    const result = await get(request, held.token, check, withStatus);
+    if (signal?.aborted) break;
+    const result = await get(request, held.token, check, withStatus, signal);
+    if (signal?.aborted) break;
     if (result.ok || result.failure !== 'unauthorized') return result;
     const next = await settleRefusal(held, true);
     if (next === null) return result;
@@ -603,6 +606,7 @@ async function authedSend(request: Call, body?: unknown, keepalive = false, sign
   let held = current();
   if (held === null) return { kind: 'unauthorized' };
   for (let sent = 0; sent < resends; sent++) {
+    if (signal?.aborted) break;
     const reply = await sendProving(held, request, body, keepalive, signal);
     if (reply.kind !== 'replaced') return reply;
     // A write that replaces the credential carries a proof made for the
@@ -621,7 +625,9 @@ async function sendProving(held: Held, request: Call, body?: unknown, keepalive 
   const reply = await sendWith(held, request, body, keepalive, signal);
   if (reply.kind !== 'reply' || reply.res.status !== 403 || askReauth === null) return reply;
   if ((await refusalCode(reply.res.clone())) !== reauthRequired) return reply;
+  if (signal?.aborted) return { kind: 'none' };
   if (!(await proveAgain())) return reply;
+  if (signal?.aborted) return { kind: 'none' };
   const again = current();
   if (again === null) return { kind: 'unauthorized' };
   return sendWith(again, request, body, keepalive, signal);
@@ -684,6 +690,7 @@ async function sendWith(held: Held, request: Call, body?: unknown, keepalive = f
     return { kind: 'none' };
   }
   if (!res.ok) await noteRefusal(res);
+  if (signal?.aborted) return { kind: 'none' };
   // A 401 auth_failed is a password or a code that is not right, presented
   // to a route that takes one (a re-authentication, a password change, an
   // authenticator's confirmation; issue #714): the credential still works,
@@ -2432,27 +2439,10 @@ export type UploadResult =
 // server's early 413, which answers before reading), so a byte counter would
 // be a lie. A 401 signs out, as everywhere.
 export async function uploadFile(channel: string, name: string, mediaType: string, bytes: Blob, signal: AbortSignal): Promise<UploadResult> {
-  let held = current();
-  if (held === null) return { ok: false, outcome: 'unauthorized' };
-  let res: Response;
-  for (let sent = 0; ; sent++) {
-    try {
-      res = await platform.http.upload(call('uploadFile', { channel }, fileQuery(name)), held.token, mediaType, bytes, signal);
-    } catch {
-      if (signal.aborted) return { ok: false, outcome: 'cancelled' };
-      noteNoAnswer();
-      return { ok: false, outcome: 'network' };
-    }
-    if (!res.ok) await noteRefusal(res);
-    if (res.status !== 401) break;
-    // A 401 is answered before the bytes are stored: sent again with a
-    // credential since replaced, it is still one file (issue #1000).
-    await discard(res);
-    const next = await settleRefusal(held, true);
-    if (next === null) return { ok: false, outcome: 'unauthorized' };
-    if (next === 'stale' || sent + 1 >= resends) return { ok: false, outcome: 'network' };
-    held = next;
-  }
+  const reply = await authedFile((token) => platform.http.upload(call('uploadFile', { channel }, fileQuery(name)), token, mediaType, bytes, signal), signal);
+  if (reply.kind === 'unauthorized') return { ok: false, outcome: 'unauthorized' };
+  if (reply.kind === 'none') return { ok: false, outcome: signal.aborted ? 'cancelled' : 'network' };
+  const { res } = reply;
   if (!res.ok) return { ok: false, outcome: 'refused', ...(await requestRefusal(res, 'The server refused the upload')) };
   try {
     const parsed: unknown = await res.json();
@@ -2482,24 +2472,10 @@ export async function getFileMeta(id: number): Promise<FileResult<FileV1>> {
 // always application/octet-stream with nosniff: the caller that renders them
 // must validate the content itself, and never trust the stored media type.
 export async function fetchFileBytes(id: number): Promise<FileResult<Blob>> {
-  let held = current();
-  if (held === null) return { ok: false, failure: 'unauthorized' };
-  let res: Response;
-  for (let sent = 0; ; sent++) {
-    try {
-      res = await platform.http.download(call('fileBytes', { id }), held.token);
-    } catch {
-      noteNoAnswer();
-      return { ok: false, failure: 'network' };
-    }
-    if (!res.ok) await noteRefusal(res);
-    if (res.status !== 401) break;
-    await discard(res);
-    const next = await settleRefusal(held, true);
-    if (next === null) return { ok: false, failure: 'unauthorized' };
-    if (next === 'stale' || sent + 1 >= resends) return { ok: false, failure: 'network' };
-    held = next;
-  }
+  const reply = await authedFile((token) => platform.http.download(call('fileBytes', { id }), token));
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  const { res } = reply;
   if (res.status === 404) {
     await discard(res);
     return { ok: false, failure: 'unavailable' };
@@ -3528,3 +3504,42 @@ function publishRemoval(data: unknown) {
     if (message?.removed === true) for (const receive of removalWatchers) receive(message);
   } catch { /* Unknown frames are ignored. */ }
 }
+
+// A file request can retry after a 401 because the refusal precedes any write.
+async function authedFile(send: (token: string) => Promise<Response>, signal?: AbortSignal): Promise<PostReply> {
+  let held = current();
+  if (held === null) return { kind: 'unauthorized' };
+  for (let sent = 0; sent < resends; sent++) {
+    if (signal?.aborted) return { kind: 'none' };
+    let res: Response;
+    try {
+      res = await send(held.token);
+    } catch {
+      if (!signal?.aborted) noteNoAnswer();
+      return { kind: 'none' };
+    }
+    if (!res.ok) await noteRefusal(res);
+    if (signal?.aborted) return { kind: 'none' };
+    if (res.status !== 401) return { kind: 'reply', res };
+    await discard(res);
+    const next = await settleRefusal(held, true);
+    if (next === null) return { kind: 'unauthorized' };
+    if (next === 'stale') return { kind: 'none' };
+    held = next;
+  }
+  return { kind: 'none' };
+}
+
+// The DM adapter uses the same credential and refusal handling as channels.
+export const dmTransport = {
+  read: <T>(request: Call, check: Validator<T>, signal: AbortSignal) => authed(request, check, true, signal),
+  write: (request: Call, body: unknown, signal: AbortSignal) => authedSend(request, body, false, signal),
+  upload: (request: Call, mediaType: string, bytes: Blob, signal: AbortSignal) =>
+    authedFile((token) => platform.http.upload(request, token, mediaType, bytes, signal), signal),
+  download: (request: Call, signal: AbortSignal) => authedFile((token) => platform.http.download(request, token, signal), signal),
+} as const;
+
+// The request builders and route availability for the direct-message adapter.
+// The operation table is read by this module and the platform alone (hygiene.test.ts).
+export const dmRequest = { call, queryOf, isOperationServed } as const;
+export type DmCall = Call;

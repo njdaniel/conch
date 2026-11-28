@@ -55,6 +55,7 @@ import {
   writeTalkKeyLabel,
   writeVoiceMode,
 } from './api';
+import { dmApi } from './dm/api';
 
 afterEach(async () => {
   vi.unstubAllGlobals();
@@ -114,6 +115,63 @@ async function signedInFrom(storage: Storage, token: string): Promise<void> {
   const result = await restore();
   expect(result.ok).toBe(true);
 }
+
+describe('DM file authorization', () => {
+  it.each([
+    ['upload', () => dmApi.uploadFile(12, 'draft.png', 'image/png', new Blob(['x']), new AbortController().signal)],
+    ['download', () => dmApi.fileBytes(12, 41)],
+  ] as const)('signs out when a DM %s gets a 401', async (_name, fileRequest) => {
+    await signedInFrom(window.sessionStorage, memberToken);
+    serve(() => json({}, 401));
+    expect(await fileRequest()).toEqual({ ok: false, failure: 'unauthorized' });
+    expect(hasToken()).toBe(false);
+  });
+});
+
+describe.each(['headers', 'success body', 'refusal body'])('DM deadline for stalled %s', (stall) => {
+  it.each([
+    ['snapshot', dmApi.snapshot],
+    ['inbox list', () => dmApi.list('open')],
+    ['conversation details', () => dmApi.get(12)],
+    ['history', () => dmApi.history(12, { order: 'desc' })],
+    ['changes', () => dmApi.changes(12, 6)],
+    ['read mark', () => dmApi.markRead(12, 4310)],
+    ['open', () => dmApi.open(5)],
+    ['hide', () => dmApi.setState(12, 'hidden')],
+    ['send', () => dmApi.send(12, { body: 'Hello', client_nonce: 'nonce' })],
+    ['edit', () => dmApi.edit(12, 4310, 'Edited')],
+    ['remove', () => dmApi.remove(12, 4310)],
+    ['search', () => dmApi.search(12, 'Hello')],
+    ['file metadata', () => dmApi.fileMeta(12, 41)],
+    ['file upload', () => dmApi.uploadFile(12, 'draft.png', 'image/png', new Blob(['x']), new AbortController().signal)],
+    ['file download', () => dmApi.fileBytes(12, 41)],
+    ['set preferences', () => dmApi.setPreferences('everyone')],
+  ] as const)('releases %s at the shared deadline', async (name, request) => {
+    await signedInFrom(window.sessionStorage, memberToken);
+    const status = stall === 'refusal body' ? 403 : name === 'remove' ? 204 : 200;
+    const body = status === 204 ? new Response(null, { status }) : new Response(new ReadableStream(), { status });
+    // Chromium can leave a 204 body to drain even though it contains no data.
+    if (status === 204) vi.spyOn(body, 'arrayBuffer').mockImplementation(() => new Promise(() => undefined));
+    const response = stall === 'headers'
+      ? new Promise<Response>(() => undefined)
+      : Promise.resolve(body);
+    const fetch = vi.fn<typeof globalThis.fetch>(() => response);
+    vi.stubGlobal('fetch', fetch);
+    vi.useFakeTimers();
+    try {
+      const done = vi.fn();
+      void request().then(done);
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(done).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(done).toHaveBeenCalledExactlyOnceWith({ ok: false, failure: name === 'send' ? 'unconfirmed' : 'network' });
+      expect(fetch.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
 
 describe('openSocket', () => {
   it('answers a plain network failure, carrying nothing of the error, when the WebSocket constructor throws', async () => {
@@ -1270,6 +1328,7 @@ describe('a credential replaced while a call was out', () => {
 
   const file = { schema: 'conch.file.v1', id: 17, channel_id: 4, uploader_id: 2, filename: 'a.png', media_type: 'image/png', size: 3, sha256: 'a'.repeat(64), created_at: at };
   const uploading = '/v2/channels/ops/files?filename=a.png';
+  const dmDownload = '/v1/dms/12/files/41/content';
 
   // A stand-in server whose password change rotates memberToken into
   // rotatedToken: once it has, the old one is refused (and the new one too,
@@ -1307,7 +1366,7 @@ describe('a credential replaced while a call was out', () => {
       if (c.path === probing) return json(voicePresence);
       if (c.path === '/v1/reauth') return json({ until: '2099-10-31T12:10:00.000Z' });
       if (c.path === uploading) return json(file, 201);
-      if (c.path === '/v2/files/17') return new Response(new Uint8Array([1, 2, 3]));
+      if (c.path === '/v2/files/17' || c.path === dmDownload) return new Response(new Uint8Array([1, 2, 3]));
       return new Response(null, { status: 204 });
     });
     return { calls, held, state };
@@ -1663,6 +1722,7 @@ describe('a credential replaced while a call was out', () => {
   it.each([
     { name: 'an upload', path: uploading, method: 'POST', run: () => uploadFile('ops', 'a.png', 'image/png', new Blob([new Uint8Array([1, 2, 3])]), new AbortController().signal), want: { ok: true, file } },
     { name: 'a download', path: '/v2/files/17', method: 'GET', run: () => fetchFileBytes(17), want: { ok: true, value: expect.any(Blob) as unknown } },
+    { name: 'a DM download', path: dmDownload, method: 'GET', run: () => dmApi.fileBytes(12, 41), want: { ok: true, value: expect.any(Blob) as unknown } },
   ])('sends $name again with the new credential', async ({ path, method, run, want }) => {
     const server = await signedInToChange();
     const old = holding(server, method, path, memberToken);

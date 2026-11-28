@@ -32,7 +32,7 @@ import { parseFeedRequest, type Feeds } from './api/feeds.ts';
 import { targetOf, isOperationId, paramOk } from './api/target.ts';
 import { previewable } from './api/target.ts';
 import { invocable, type DisplayStep, type ReplaceStep, type Service, type SignInStep } from './api/service.ts';
-import { isFileId, parseUpload, MAX_UPLOAD_BYTES, type Files } from './files.ts';
+import { parseFileTarget, parseUpload, MAX_UPLOAD_BYTES, type Files } from './files.ts';
 import { LINK_GESTURE_MS, type Gestures } from './gestures.ts';
 import type { DocumentGate } from './document.ts';
 import type { Notifications } from './notifications.ts';
@@ -254,6 +254,11 @@ const isFeedId = (value: unknown): value is number => typeof value === 'number' 
 const feedId = (args: readonly unknown[]): readonly unknown[] | null => (args.length === 1 && isFeedId(args[0]) ? args : null);
 
 const none = (args: readonly unknown[]): readonly unknown[] | null => (args.length === 0 ? args : null);
+
+const fileTarget = (args: readonly unknown[]): readonly unknown[] | null => {
+  const parsed = args.length === 1 ? parseFileTarget(args[0]) : null;
+  return parsed === null ? null : [parsed];
+};
 
 // signIn is the spec of a function that takes one request of the operation's
 // request type and sends that operation.
@@ -681,15 +686,15 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
   },
   downloadFile: {
     limit: 300,
-    maxBytes: 32,
-    parse: (args) => (args.length === 1 && isFileId(args[0]) ? args : null),
-    run: ({ files }, [id]) => files.download(id as number),
+    maxBytes: 80,
+    parse: fileTarget,
+    run: ({ files }, [download]) => files.download(download as Parameters<IpcDeps['files']['download']>[0]),
   },
   saveFile: {
     limit: 30,
-    maxBytes: 32,
-    parse: (args) => (args.length === 1 && isFileId(args[0]) ? args : null),
-    run: ({ files }, [id]) => files.save(id as number),
+    maxBytes: 80,
+    parse: fileTarget,
+    run: ({ files }, [file]) => files.save(file as Parameters<IpcDeps['files']['save']>[0]),
     gesture: true,
   },
   // Notifications are activation-owned and carry no action or activation data.
