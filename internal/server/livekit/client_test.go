@@ -1053,3 +1053,30 @@ func TestGetParticipantAnswers(t *testing.T) {
 		t.Errorf("no room: %v, %v; want a refusal that is not ErrUnavailable", found, err)
 	}
 }
+
+func TestListParticipantsIfRoomExists(t *testing.T) {
+	for _, tt := range []struct {
+		name, body string
+		missing    bool
+	}{
+		{"room gone", `{"code":"not_found","msg":"requested room does not exist"}`, true},
+		{"wrong route", `{"code":"bad_route"}`, false},
+		{"proxy 404", "Not Found", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, _ := fakeLiveKit(t, 404, tt.body)
+			c := testClient(t, srv.URL)
+			participants, err := c.ListParticipantsIfRoomExists(t.Context(), "conch-a")
+			if tt.missing {
+				if err != nil || len(participants) != 0 {
+					t.Fatalf("missing room: %d participants, %v", len(participants), err)
+				}
+			} else if !errors.Is(err, ErrUnavailable) {
+				t.Fatalf("err = %v, want ErrUnavailable", err)
+			}
+			if _, err := c.ListParticipants(t.Context(), "conch-a"); !errors.Is(err, ErrUnavailable) {
+				t.Fatalf("channel list err = %v, want ErrUnavailable", err)
+			}
+		})
+	}
+}

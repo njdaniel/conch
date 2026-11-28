@@ -589,14 +589,15 @@ var reauthDecisions = map[string]reauthDecision{
 	"POST /v1/ws-tickets":                  {reauthNone, "a one-use socket ticket for the caller's own credential, no principal or link"},
 	"POST /v0/channels/{channel}/messages": {reauthNone, "a message"},
 	"POST /v1/channels/{channel}/messages": {reauthNone, "a message"},
-	// #2030: a member's own private call actions. None makes a principal,
-	// credential, link, permit or hook; the media grant is #2032's and is
-	// issued only to the accepting credential.
+	// A member's own private call actions make no principal, credential,
+	// link, permit or hook. The room grant is scoped to the caller's own
+	// selected endpoint.
 	"POST /v1/dms/{conversation}/calls":                               {reauthNone, "a member's own call invitation: no principal, credential, link, permit or hook, no grant"},
 	"POST /v1/calls/{call}/accept":                                    {reauthNone, "the callee's own answer: no principal, credential, link, permit or hook"},
 	"POST /v1/calls/{call}/decline":                                   {reauthNone, "the callee's own refusal"},
 	"POST /v1/calls/{call}/cancel":                                    {reauthNone, "the caller's own cancel"},
 	"POST /v1/calls/{call}/hangup":                                    {reauthNone, "either side ends its own call"},
+	"POST /v1/calls/{call}/session":                                   {reauthNone, "joins the call on the caller's selected credential"},
 	"POST /v2/channels/{channel}/messages":                            {reauthNone, "a message"},
 	"POST /v2/channels/{channel}/files":                               {reauthNone, "a file"},
 	"POST /v1/channels/{channel}/voice/session":                       {reauthNone, "joins voice"},

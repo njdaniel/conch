@@ -85,7 +85,9 @@ func TestCommunityMigrationApprovalChain(t *testing.T) {
 	for _, stmt := range []string{
 		// Undo migration 41's DDL (archived_at), then migration 40's: the
 		// database is as a server at 39 held it.
-		"DROP TABLE private_call_actions", // migration 55 (issue #2030); children before parents
+		"DROP TABLE call_room_holders", // migration 56 (issue #2032); children before parents
+		"DROP TABLE call_rooms",
+		"DROP TABLE private_call_actions", // migration 55 (issue #2030)
 		"DROP TABLE private_call_holders",
 		"DROP TABLE private_calls",
 		"DROP TABLE dm_contact_preferences",             // migration 54 (issue #2018)

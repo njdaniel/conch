@@ -176,6 +176,8 @@ type Server struct {
 	// lk is the LiveKit client; nil when voice is not configured. It is built
 	// without contacting LiveKit (design note §2).
 	lk *livekit.Client
+	// callMedia is an optional test replacement for the private call media client.
+	callMedia privateCallMediaService
 	// voice is voice presence and enforcement (issue #127). It exists on
 	// every server so presence can answer "not configured"; its goroutine
 	// runs only when lk is set, started by Serve.
