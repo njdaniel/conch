@@ -27,11 +27,11 @@ var ErrNotAPerson = errors.New("store: not a person")
 // so the route does not tell them apart), an agent is ErrNotAPerson, and
 // A caller who is not an owner gets ErrOwnerProtected for an owner target
 // (ADR-010); whether the caller is an owner is read here, under the write
-// lock, from callerID, never from the request's snapshot of them. It does not touch live media: the caller runs the
-// poller's immediate hook after it commits.
+// lock, from callerID, never from the request's snapshot of them. Losing voice
+// revokes the person's private call. The caller runs the media hook after commit.
 func (s *Store) SetVoiceAllowed(ctx context.Context, actor string, callerID, principalID int64, allowed bool) (changed bool, err error) {
 	now := time.Now().Truncate(time.Millisecond)
-	err = s.withImmediateTx(ctx, func(tx execer) error {
+	err = s.withPrivateCallTx(ctx, func(tx execer) error {
 		changed = false
 		forbidOwner := false // no caller (authentication off): no owner protection
 		// The caller's authority is asked again under the write lock, before
@@ -79,6 +79,11 @@ func (s *Store) SetVoiceAllowed(ctx context.Context, actor string, callerID, pri
 		}
 		if _, err := tx.ExecContext(ctx, "UPDATE principals SET voice_allowed = ? WHERE id = ?", boolInt(allowed), principalID); err != nil {
 			return fmt.Errorf("store: set voice_allowed: %w", err)
+		}
+		if !allowed {
+			if err := reconcileHeldPrivateCall(ctx, tx, principalID, now); err != nil {
+				return err
+			}
 		}
 		changed = true
 		return appendAuditEventTx(ctx, tx, actor, AuditVoicePermissionChanged, principalActor(principalID),

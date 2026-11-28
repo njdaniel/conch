@@ -127,8 +127,15 @@ func personSchemaOf(t *testing.T, raw []byte) string {
 	return head.Schema
 }
 
-// open reads the two frames every connection starts with and returns them.
+// open reads the initial snapshots and returns the hello and DM snapshot.
 func (c *personClient) open() (schema.PersonStreamHelloV1, schema.DMSnapshotV1) {
+	c.t.Helper()
+	hello, snap := c.openDM()
+	c.callSnapshot()
+	return hello, snap
+}
+
+func (c *personClient) openDM() (schema.PersonStreamHelloV1, schema.DMSnapshotV1) {
 	c.t.Helper()
 	var hello schema.PersonStreamHelloV1
 	raw := c.raw()

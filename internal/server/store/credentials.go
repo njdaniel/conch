@@ -316,7 +316,7 @@ func (s *Store) RotateCredential(ctx context.Context, actor string, credentialID
 	}
 	var out schema.CredentialV1
 	var runs []EndedRun
-	err = s.withImmediateTx(ctx, func(tx execer) error {
+	err = s.withPrivateCallTx(ctx, func(tx execer) error {
 		runs = nil
 		var (
 			principalID                   int64
@@ -380,6 +380,9 @@ func (s *Store) RotateCredential(ctx context.Context, actor string, credentialID
 			return fmt.Errorf("store: rotate credential: revoke old: %w", err)
 		} else if n != 1 {
 			return ErrCredentialRevoked
+		}
+		if err := revokeHeldPrivateCall(ctx, tx, principalID, 0, credentialID, now); err != nil {
+			return err
 		}
 		// The replacement is issued by whoever rotates it, not by the
 		// maker of the one it replaces (issue #1024).
@@ -469,7 +472,7 @@ func (s *Store) RevokeCredentialOf(ctx context.Context, actor string, principalI
 func (s *Store) revokeCredential(ctx context.Context, actor string, credentialID, owner int64, reason, linkReason string, forbidOwner bool) error {
 	var runs []EndedRun
 	var guests []EndedGuest
-	err := s.withImmediateTx(ctx, func(tx execer) error {
+	err := s.withPrivateCallTx(ctx, func(tx execer) error {
 		runs, guests = nil, nil
 		var (
 			principalID        int64
@@ -522,6 +525,9 @@ func (s *Store) revokeCredential(ctx context.Context, actor string, credentialID
 			return fmt.Errorf("store: revoke credential: %w", err)
 		} else if n != 1 {
 			return nil
+		}
+		if err := revokeHeldPrivateCall(ctx, tx, principalID, 0, credentialID, now); err != nil {
+			return err
 		}
 		detail := credentialDetail(credentialID, label)
 		if reason != "" {

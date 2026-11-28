@@ -90,6 +90,29 @@ func applyPrivateCallServerEvent(ctx context.Context, tx execer, c *privateCall,
 	return transitionPrivateCall(ctx, tx, c, row, 0, now)
 }
 
+// revokeHeldPrivateCall applies an authority change to the call it affects.
+// A nonzero peer or credential narrows revocation to the pair or selected
+// endpoint. The authority write and revocation share a lock.
+func revokeHeldPrivateCall(ctx context.Context, tx execer, principalID, peerID, credentialID int64, now time.Time) error {
+	c, err := privateCallHeldBy(ctx, tx, principalID)
+	if errors.Is(err, ErrPrivateCallNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if (peerID != 0 && c.peer(principalID) != peerID) ||
+		(credentialID != 0 && c.selectedCredential(principalID) != credentialID) {
+		return nil
+	}
+	return applyPrivateCallServerEvent(ctx, tx, &c, schema.PrivateCallEventRevoked, now)
+}
+
+func reconcileHeldPrivateCall(ctx context.Context, tx execer, principalID int64, now time.Time) error {
+	_, err := livePrivateCallHeldBy(ctx, tx, principalID, now)
+	return err
+}
+
 func heldPrivateCallIDs(ctx context.Context, tx execer) ([]string, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT call_id FROM private_call_holders`)
 	if err != nil {
@@ -128,20 +151,27 @@ func sweepPrivateCall(ctx context.Context, tx execer, id string, now time.Time) 
 // SweepPrivateCalls enforces persisted deadlines and current entitlements
 // even while clients make no requests. It also expires old retry receipts.
 func (s *Store) SweepPrivateCalls(ctx context.Context, clock func() time.Time) error {
-	return s.withImmediateTx(ctx, func(tx execer) error {
+	return s.withPrivateCallTx(ctx, func(tx execer) error {
 		now := clock().Truncate(time.Millisecond)
-		ids, err := heldPrivateCallIDs(ctx, tx)
-		if err != nil {
+		if err := reconcilePrivateCalls(ctx, tx, now); err != nil {
 			return err
 		}
-		for _, id := range ids {
-			if err := sweepPrivateCall(ctx, tx, id, now); err != nil {
-				return err
-			}
-		}
-		_, err = tx.ExecContext(ctx, `DELETE FROM private_call_actions WHERE expires_at <= ?`, now.UnixMilli())
+		_, err := tx.ExecContext(ctx, `DELETE FROM private_call_actions WHERE expires_at <= ?`, now.UnixMilli())
 		return err
 	})
+}
+
+func reconcilePrivateCalls(ctx context.Context, tx execer, now time.Time) error {
+	ids, err := heldPrivateCallIDs(ctx, tx)
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if err := sweepPrivateCall(ctx, tx, id, now); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // RestartPrivateCalls reconciles all live attempts before a server serves.
@@ -173,7 +203,7 @@ func resetPrivateCallsTx(ctx context.Context, tx execer, now time.Time, reason s
 // credential is the selected credential seen in the room, or zero when
 // absent. A late observation cannot resurrect an expired attempt.
 func (s *Store) ObservePrivateCallEndpoints(ctx context.Context, id string, revision, callerCredential, calleeCredential int64, clock func() time.Time) error {
-	return s.withImmediateTx(ctx, func(tx execer) error {
+	return s.withPrivateCallTx(ctx, func(tx execer) error {
 		c, err := privateCallByID(ctx, tx, id)
 		if err != nil {
 			return err

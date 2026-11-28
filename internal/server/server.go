@@ -382,6 +382,7 @@ func New(cfg Config, st *store.Store) *Server {
 	s.voice = newVoicePoller(s)
 	s.events = newEventsHub()
 	s.person = newPersonHub()
+	st.OnPrivateCallUpdate(s.person.publishPrivateCall)
 	s.metrics = newServerMetrics(s)
 	s.pushSender = s.newPushSender()
 	// Runs that end with their session change without SetRunState, so the

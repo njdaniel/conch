@@ -172,8 +172,6 @@ func writePrivateCallCommand(w http.ResponseWriter, out store.PrivateCallResult)
 		if out.Created && out.Call.State == schema.PrivateCallStateRinging {
 			status = http.StatusCreated
 		}
-		// #2031 can publish committed transitions, using attempt IDs and
-		// revisions to deduplicate. Replays must never ring the callee again.
 		writeJSON(w, status, out.PrivateCallResponseV1)
 	}
 }

@@ -101,7 +101,7 @@ func (s *Store) HidePrincipal(ctx context.Context, actor string, id int64, opts 
 		out  HideResult
 		runs []EndedRun
 	)
-	err := s.withImmediateTx(ctx, func(tx execer) error {
+	err := s.withPrivateCallTx(ctx, func(tx execer) error {
 		out, runs = HideResult{}, nil
 		p, err := principalByIDTx(ctx, tx, id)
 		if err != nil {

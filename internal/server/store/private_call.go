@@ -84,6 +84,24 @@ func (c privateCall) role(principalID int64) schema.PrivateCallRole {
 	return ""
 }
 
+func (c privateCall) peer(principalID int64) int64 {
+	if principalID == c.CallerID {
+		return c.CalleeID
+	}
+	return c.CallerID
+}
+
+func (c privateCall) selectedCredential(principalID int64) int64 {
+	switch principalID {
+	case c.CallerID:
+		return c.callerCredential
+	case c.CalleeID:
+		return c.calleeCredential
+	default:
+		return 0
+	}
+}
+
 func (c privateCall) view(actor PrivateCallActor) schema.PrivateCallV1 {
 	doc := c.PrivateCallV1
 	doc.Role = c.role(actor.PrincipalID)
@@ -94,10 +112,7 @@ func (c privateCall) view(actor PrivateCallActor) schema.PrivateCallV1 {
 		doc.EndedAt = privateCallTimestamp(c.endedAt.Int64)
 		return doc
 	}
-	credential := c.callerCredential
-	if doc.Role == schema.PrivateCallRoleCallee {
-		credential = c.calleeCredential
-	}
+	credential := c.selectedCredential(actor.PrincipalID)
 	doc.SelectedHere = credential != 0 && actor.CredentialID == credential
 	switch doc.State {
 	case schema.PrivateCallStateRinging:
@@ -156,11 +171,11 @@ func privateCallVoiceAllowed(ctx context.Context, tx execer, principalID int64) 
 const privateCallOwnCredential = `c.self_made = 1`
 
 // A zero credential asks whether the callee has any signed-in device of their
-// own. #2031 can additionally require a recipient reachable by the ring stream.
+// own, including one that can reconnect to the ring stream.
 func privateCallCredentialLive(ctx context.Context, tx execer, actor PrivateCallActor, now time.Time) (bool, error) {
 	var live bool
 	err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM credentials c JOIN principals p ON p.id = c.principal_id
-		WHERE p.id = ? AND p.disabled_at IS NULL AND p.kind = 'human' AND (? = 0 OR c.id = ?)
+		WHERE p.id = ? AND p.disabled_at IS NULL AND p.hidden_at IS NULL AND p.kind = 'human' AND (? = 0 OR c.id = ?)
 		AND NOT EXISTS (SELECT 1 FROM guest_visits g WHERE g.principal_id = p.id AND g.state <> 'converted')
 		AND `+privateCallOwnCredential+` AND `+
 		liveCredentialWhere(now)+`)`, actor.PrincipalID, actor.CredentialID, actor.CredentialID).Scan(&live) // #nosec G202 -- liveCredentialWhere builds SQL from a time integer.
@@ -208,6 +223,9 @@ func createPrivateCall(ctx context.Context, tx execer, conversationID int64, act
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO private_call_holders (principal_id, call_id) VALUES (?, ?), (?, ?)`,
 		c.CallerID, c.ID, c.CalleeID, c.ID)
+	if err == nil {
+		recordPrivateCallUpdate(tx, c)
+	}
 	return c, err
 }
 
@@ -253,6 +271,9 @@ func transitionPrivateCall(ctx context.Context, tx execer, c *privateCall, row s
 		// #2032 can retire its room in this same transaction. Terminal
 		// attempts stay available for its orphan sweep after a crash.
 		_, err = tx.ExecContext(ctx, `DELETE FROM private_call_holders WHERE call_id = ?`, c.ID)
+	}
+	if err == nil {
+		recordPrivateCallUpdate(tx, *c)
 	}
 	return err
 }
