@@ -220,6 +220,7 @@ func TestSelfMadeCredentialRoutesIncludeRequired(t *testing.T) {
 		"POST /v1/calls/{call}/decline",
 		"POST /v1/calls/{call}/cancel",
 		"POST /v1/calls/{call}/hangup",
+		"POST /v1/calls/{call}/session",
 	} {
 		if _, ok := selfMadeCredentialRoutes[pattern]; !ok {
 			t.Errorf("%s is not in selfMadeCredentialRoutes", pattern)

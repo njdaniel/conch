@@ -1185,6 +1185,9 @@ BEGIN SELECT RAISE(ABORT, 'message removals are permanent'); END`,
 	// 55 (privateCallMigration): private 1:1 calls (issue #2030, ADR-017).
 	// The statements are in private_call.go.
 	privateCallMigration,
+	// 56 and 57: private-call media rooms and the retired-room sweep (#2032).
+	privateCallMediaMigration,
+	privateCallMediaWatchMigration,
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction
